@@ -1,0 +1,15 @@
+.cache/
+.next/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.vercel/
+coverage/
+node_modules/
+dist/
+__pycache__/
+*.pyc
+tsconfig.tsbuildinfo
+.env
+.env.local
+.env.*.local
