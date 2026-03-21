@@ -60,7 +60,32 @@ public URL. Configure:
 - `R2_ENDPOINT_URL` (optional; defaults from `R2_ACCOUNT_ID`)
 - `R2_PUBLIC_BASE_URL` (optional; used for public object URLs)
 
+## Supabase Persistence
+
+The API now expects two Postgres tables:
+
+- `athlete_profiles`
+- `check_ins`
+
+An initial schema is included at `supabase/migrations/0001_initial_schema.sql`.
+
+Configure:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+Current backend behavior:
+
+- `POST /api/profile` reads the athlete profile from Supabase.
+- `PUT /api/profile` upserts the athlete profile in Supabase.
+- `POST /api/check-ins` persists a check-in row and returns the stored record.
+- `POST /api/plans/generate` reads the athlete profile from Supabase before composing a plan.
+
+If Supabase is not configured, those endpoints return `503`.
+If a profile is missing, profile and plan generation return `404`.
+
 ## Notes
 
-- The current implementation is a scaffold with typed route contracts, prompt composition, and a minimal plan-generation path.
-- Supabase persistence and OAuth consent flows are structured for production work, but still need provider secrets and database migrations before deployment.
+- The current implementation is still a scaffold in product terms, but profile reads and check-in writes now have a concrete persistence path.
+- OAuth consent flows still need durable grants, real user-session binding, and provider secrets before deployment.
+- GitHub issue filing is currently blocked locally until a remote is configured and `gh auth login` is refreshed.

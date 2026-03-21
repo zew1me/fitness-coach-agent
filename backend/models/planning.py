@@ -21,6 +21,11 @@ class CheckInInput(BaseModel):
     user_id: str
 
 
+class CheckInRecord(CheckInInput):
+    created_at: datetime
+    id: str
+
+
 class PlanDay(BaseModel):
     day_index: int
     focus: str
