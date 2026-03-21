@@ -89,3 +89,4 @@ If a profile is missing, profile and plan generation return `404`.
 - The current implementation is still a scaffold in product terms, but profile reads and check-in writes now have a concrete persistence path.
 - OAuth consent flows still need durable grants, real user-session binding, and provider secrets before deployment.
 - GitHub issue filing is currently blocked locally until a remote is configured and `gh auth login` is refreshed.
+- Once GitHub access is configured, run `scripts/create_github_issues.sh` to file the prepared issue set from `docs/github-issues/`.
