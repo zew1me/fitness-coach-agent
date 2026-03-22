@@ -73,6 +73,21 @@ Configure:
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+Recommended local setup:
+
+- Put app secrets in `.env`.
+- Put your Supabase personal access token in `.envrc` as `SUPABASE_ACCESS_TOKEN=...` if you want
+  to run Supabase CLI or management API commands locally.
+- Replace the placeholder `APP_JWT_SECRET` with a strong random value before any shared or deployed use.
+
+Apply the initial schema with:
+
+```bash
+SUPABASE_PROJECT_REF=dophynckrsokbmwwfsgd scripts/apply_supabase_migration.sh
+```
 
 Current backend behavior:
 
