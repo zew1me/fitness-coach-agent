@@ -83,6 +83,48 @@ Recommended local setup:
   to run Supabase CLI or management API commands locally.
 - Replace the placeholder `APP_JWT_SECRET` with a strong random value before any shared or deployed use.
 
+Environment contract:
+
+- Standardize on Vercel's built-in environment names: `development`, `preview`, and `production`.
+- Set `APP_ENV` to match the active deployment environment: `development`, `preview`, or `production`.
+- Use a separate Supabase project and database for each environment.
+- Never point `preview` or `development` at the production database.
+- Keep `.env` for local-only work. Shared and deployed environments should get values from Vercel and CI secrets.
+
+Required runtime variables for all three environments:
+
+- `APP_ENV`
+- `APP_BASE_URL`
+- `APP_JWT_SECRET`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `OPENAI_API_KEY` when plan generation is enabled
+- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` when uploads are enabled
+
+Ownership rules:
+
+- Local development: `.env` and optional `.envrc`
+- Vercel `Development`: points to the development Supabase project
+- Vercel `Preview`: points to the preview Supabase project
+- Vercel `Production`: points to the production Supabase project
+- GitHub Actions environments: `development`, `preview`, and `production` should each hold the matching CI secrets
+
+CI/CD promotion rules:
+
+- Commit schema changes as migration files in `supabase/migrations/`.
+- Validate migrations and integration tests against `development` first.
+- Promote the same migration set to `preview` before any production release.
+- Apply production migrations from CI/CD, not from a developer machine.
+- Deploy the app to each environment only with that environment's matching secrets and database.
+
+Suggested mapping:
+
+- `development`: integration testing and shared non-production validation
+- `preview`: pre-production validation with production-like configuration
+- `production`: live traffic only
+
 Apply the initial schema with:
 
 ```bash
