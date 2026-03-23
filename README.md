@@ -115,7 +115,6 @@ Vercel deployment checklist:
 8. Add `OPENAI_API_KEY` only if plan generation is enabled in that environment.
 9. Add the R2 variables only if upload support is enabled in that environment.
 10. Redeploy after secrets are added so both the Next.js app and the Python function receive the new values.
-
 Ownership rules:
 
 - Local development: `.env` and optional `.envrc`
