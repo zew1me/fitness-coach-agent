@@ -31,7 +31,6 @@ function ConsentPageContent(): JSX.Element {
   const { clientId, redirectUri, scope, state, codeChallenge, codeChallengeMethod } =
     readConsentParams(searchParams);
   const scopes = formatScopes(scope);
-
   return (
     <main>
       <h1>Connect ChatGPT</h1>

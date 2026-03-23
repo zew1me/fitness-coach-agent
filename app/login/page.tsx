@@ -43,7 +43,6 @@ function LoginPageContent(): JSX.Element {
       setSubmitting(false);
     }
   }
-
   return (
     <main>
       <h1>Login</h1>
