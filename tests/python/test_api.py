@@ -1,12 +1,21 @@
-from datetime import datetime
+import base64
+from datetime import UTC, datetime
+from hashlib import sha256
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 import api.index as api_index
-from backend.models.auth import UserContext
+from backend.models.auth import (
+    BrowserSessionContext,
+    OAuthRevokeRequest,
+    OAuthTokenRequest,
+    UserContext,
+)
 from backend.models.planning import AthleteProfile, CheckInInput, CheckInRecord
+from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
+from backend.services.auth import AuthService
 
 
 class FakeRepository:
@@ -48,12 +57,310 @@ class UnconfiguredRepository:
         raise RepositoryNotConfiguredError("Supabase is not configured.")
 
 
+class InMemoryOAuthRepository:
+    def __init__(self) -> None:
+        self.grants: dict[str, dict[str, object]] = {}
+        self.codes: dict[str, dict[str, object]] = {}
+        self.refresh_tokens: dict[str, dict[str, object]] = {}
+
+    def get_active_grant(self, *, user_id: str, client_id: str, redirect_uri: str):
+        for grant in self.grants.values():
+            if (
+                grant["user_id"] == user_id
+                and grant["client_id"] == client_id
+                and grant["redirect_uri"] == redirect_uri
+                and grant["revoked_at"] is None
+            ):
+                return type("Grant", (), grant)()
+        return None
+
+    def get_grant_by_id(self, grant_id: str):
+        grant = self.grants.get(grant_id)
+        if grant is None:
+            return None
+        return type("Grant", (), grant)()
+
+    def upsert_grant(self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]):
+        existing = self.get_active_grant(
+            user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
+        )
+        now = datetime.now().astimezone()
+        if existing is None:
+            grant_id = f"grant-{len(self.grants) + 1}"
+            self.grants[grant_id] = {
+                "id": grant_id,
+                "user_id": user_id,
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "scopes": scopes,
+                "created_at": now,
+                "updated_at": now,
+                "revoked_at": None,
+            }
+            return type("Grant", (), self.grants[grant_id])()
+
+        current = self.grants[existing.id]
+        current["scopes"] = sorted(set(current["scopes"]).union(scopes))
+        current["updated_at"] = now
+        return type("Grant", (), current)()
+
+    def create_authorization_code(
+        self,
+        *,
+        grant_id: str,
+        user_id: str,
+        client_id: str,
+        redirect_uri: str,
+        scopes: list[str],
+        code_challenge: str,
+        code_challenge_method: str,
+    ) -> str:
+        code = f"code-{len(self.codes) + 1}"
+        self.codes[code] = {
+            "id": code,
+            "grant_id": grant_id,
+            "user_id": user_id,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scopes": scopes,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "expires_at": datetime.max.replace(tzinfo=UTC),
+            "consumed_at": None,
+            "created_at": datetime.now(UTC),
+        }
+        return code
+
+    def consume_authorization_code(self, raw_code: str):
+        code = self.codes.get(raw_code)
+        if code is None:
+            raise ValueError("Invalid authorization code.")
+        if code["consumed_at"] is not None:
+            raise ValueError("Authorization code is no longer valid.")
+        code["consumed_at"] = datetime.now().astimezone()
+        return type("AuthorizationCode", (), code)()
+
+    def create_refresh_token(
+        self,
+        *,
+        grant_id: str,
+        user_id: str,
+        client_id: str,
+        scopes: list[str],
+        rotated_from_id: str | None = None,
+    ) -> str:
+        token = f"refresh-{len(self.refresh_tokens) + 1}"
+        self.refresh_tokens[token] = {
+            "id": token,
+            "grant_id": grant_id,
+            "user_id": user_id,
+            "client_id": client_id,
+            "scopes": scopes,
+            "expires_at": datetime.max.replace(tzinfo=UTC),
+            "revoked_at": None,
+            "created_at": datetime.now(UTC),
+            "rotated_from_id": rotated_from_id,
+        }
+        return token
+
+    def rotate_refresh_token(self, raw_token: str):
+        current = self.refresh_tokens.get(raw_token)
+        if current is None:
+            raise ValueError("Invalid refresh token.")
+        current["revoked_at"] = datetime.now().astimezone()
+        replacement = self.create_refresh_token(
+            grant_id=current["grant_id"],
+            user_id=current["user_id"],
+            client_id=current["client_id"],
+            scopes=current["scopes"],
+            rotated_from_id=current["id"],
+        )
+        return type("RefreshToken", (), current)(), replacement
+
+    def revoke_refresh_token(self, raw_token: str) -> bool:
+        current = self.refresh_tokens.get(raw_token)
+        if current is None or current["revoked_at"] is not None:
+            return False
+        current["revoked_at"] = datetime.now().astimezone()
+        return True
+
+    def revoke_grant(self, grant_id: str) -> bool:
+        grant = self.grants.get(grant_id)
+        if grant is None:
+            return False
+        grant["revoked_at"] = datetime.now().astimezone()
+        return True
+
+
+class TestAuthService(AuthService):
+    def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
+        if supabase_access_token != "supabase-access-token":
+            raise OAuthRepositoryNotConfiguredError("Unable to verify browser session.")
+        return BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+
+
 async def test_protected_profile_requires_bearer_token() -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post("/api/profile", json={"user_id": "athlete-1"})
 
     assert response.status_code == 401
+
+
+@pytest.fixture
+def auth_service_fixture():
+    original = api_index.auth_service
+    api_index.auth_service = TestAuthService(oauth_repo=InMemoryOAuthRepository())
+    try:
+        yield api_index.auth_service
+    finally:
+        api_index.auth_service = original
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_redirects_to_login_without_browser_session(
+    auth_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(
+            "/api/oauth/authorize",
+            params={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": "challenge-1",
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("http://localhost:3000/login?")
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_redirects_to_consent_when_grant_missing(
+    auth_service_fixture,
+) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(
+            "/api/oauth/authorize",
+            params={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": "challenge-1",
+                "code_challenge_method": "S256",
+            },
+            cookies={"coach_browser_session": browser_cookie},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("http://localhost:3000/consent?")
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_decision_exchanges_code_refresh_and_revokes(
+    auth_service_fixture,
+) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    verifier = "verifier"
+    challenge = base64.urlsafe_b64encode(sha256(verifier.encode("utf-8")).digest()).decode(
+        "utf-8"
+    ).rstrip("=")
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        decision_response = await client.post(
+            "/api/oauth/authorize/decision",
+            data={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "decision": "approve",
+            },
+            cookies={"coach_browser_session": browser_cookie},
+            follow_redirects=False,
+        )
+
+        assert decision_response.status_code == 302
+        redirected = decision_response.headers["location"]
+        assert redirected.startswith("https://chat.openai.com/callback?code=")
+        code = redirected.split("code=")[1].split("&", 1)[0]
+
+        token_response = await client.post(
+            "/api/oauth/token",
+            json=OAuthTokenRequest(
+                client_id="https://chat.openai.com",
+                code=code,
+                code_verifier=verifier,
+                grant_type="authorization_code",
+                redirect_uri="https://chat.openai.com/callback",
+            ).model_dump(mode="json"),
+        )
+
+        assert token_response.status_code == 200
+        token_body = token_response.json()
+        assert "access_token" in token_body
+        assert token_body["refresh_token"].startswith("refresh-")
+
+        protected_response = await client.post(
+            "/api/mcp",
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+        assert protected_response.status_code == 200
+
+        refresh_response = await client.post(
+            "/api/oauth/token",
+            json=OAuthTokenRequest(
+                client_id="https://chat.openai.com",
+                grant_type="refresh_token",
+                refresh_token=token_body["refresh_token"],
+            ).model_dump(mode="json"),
+        )
+
+        assert refresh_response.status_code == 200
+        refreshed_body = refresh_response.json()
+        assert refreshed_body["refresh_token"] != token_body["refresh_token"]
+
+        revoke_response = await client.post(
+            "/api/oauth/revoke",
+            json=OAuthRevokeRequest(token=refreshed_body["access_token"]).model_dump(mode="json"),
+        )
+
+        assert revoke_response.status_code == 200
+        assert revoke_response.json()["revoked"] is True
+
+        revoked_access_response = await client.post(
+            "/api/mcp",
+            headers={"Authorization": f"Bearer {refreshed_body['access_token']}"},
+        )
+        assert revoked_access_response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_oauth_browser_session_endpoint_sets_cookie(auth_service_fixture) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+
+    assert response.status_code == 200
+    assert "coach_browser_session=" in response.headers["set-cookie"]
 
 
 async def test_create_check_in_returns_persisted_record(monkeypatch) -> None:
