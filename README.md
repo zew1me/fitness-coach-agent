@@ -103,6 +103,19 @@ Required runtime variables for all three environments:
 - `OPENAI_API_KEY` when plan generation is enabled
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` when uploads are enabled
 
+Vercel deployment checklist:
+
+1. Create one Vercel project for this repo and leave the root directory at the repository root.
+2. Keep the default Next.js build settings for the frontend and keep `vercel.json` so `api/index.py` stays on the `python3.12` runtime.
+3. Add the required environment variables separately for Vercel `Development`, `Preview`, and `Production`.
+4. Set `APP_ENV=development` in Vercel Development, `APP_ENV=preview` in Preview, and `APP_ENV=production` in Production.
+5. Set `APP_BASE_URL` to the matching public origin for each environment.
+6. Point each environment at its own Supabase project by setting both the server-side and `NEXT_PUBLIC_` Supabase variables.
+7. Generate a strong `APP_JWT_SECRET` for each shared environment instead of reusing the local placeholder secret from `.env`.
+8. Add `OPENAI_API_KEY` only if plan generation is enabled in that environment.
+9. Add the R2 variables only if upload support is enabled in that environment.
+10. Redeploy after secrets are added so both the Next.js app and the Python function receive the new values.
+
 Ownership rules:
 
 - Local development: `.env` and optional `.envrc`
