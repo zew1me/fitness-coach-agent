@@ -2,6 +2,7 @@
 
 import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
+import { Suspense } from "react";
 
 function formatScopes(scope: string): string[] {
   return scope.split(" ").filter(Boolean);
@@ -25,7 +26,7 @@ function readConsentParams(searchParams: ReturnType<typeof useSearchParams>): {
   };
 }
 
-export default function ConsentPage(): JSX.Element {
+function ConsentPageContent(): JSX.Element {
   const searchParams = useSearchParams();
   const { clientId, redirectUri, scope, state, codeChallenge, codeChallengeMethod } =
     readConsentParams(searchParams);
@@ -57,5 +58,13 @@ export default function ConsentPage(): JSX.Element {
         </button>
       </form>
     </main>
+  );
+}
+
+export default function ConsentPage(): JSX.Element {
+  return (
+    <Suspense fallback={<main><p>Loading consent…</p></main>}>
+      <ConsentPageContent />
+    </Suspense>
   );
 }

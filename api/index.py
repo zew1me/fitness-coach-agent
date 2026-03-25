@@ -13,6 +13,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
+from backend.config import settings
 from backend.models.planning import AthleteProfile, CheckInInput
 from backend.models.storage import PresignUploadRequest
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
@@ -193,7 +194,7 @@ async def oauth_browser_session(
         max_age=12 * 60 * 60,
         path="/",
         samesite="lax",
-        secure=False,
+        secure=settings.app_base_url.startswith("https://"),
     )
     return {"ok": True}
 

@@ -2,11 +2,11 @@
 
 import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 import { getBrowserSupabaseClient } from "../../../lib/supabase-browser";
 
-export default function AuthCallbackPage(): JSX.Element {
+function AuthCallbackPageContent(): JSX.Element {
   const searchParams = useSearchParams();
   const [message, setMessage] = useState("Completing login...");
 
@@ -54,5 +54,13 @@ export default function AuthCallbackPage(): JSX.Element {
       <h1>Finishing sign-in</h1>
       <p>{message}</p>
     </main>
+  );
+}
+
+export default function AuthCallbackPage(): JSX.Element {
+  return (
+    <Suspense fallback={<main><p>Completing login...</p></main>}>
+      <AuthCallbackPageContent />
+    </Suspense>
   );
 }
