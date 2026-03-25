@@ -2,11 +2,11 @@
 
 import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
-import { FormEvent, useState } from "react";
+import { FormEvent, Suspense, useState } from "react";
 
 import { getBrowserSupabaseClient } from "../../lib/supabase-browser";
 
-export default function LoginPage(): JSX.Element {
+function LoginPageContent(): JSX.Element {
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -68,5 +68,13 @@ export default function LoginPage(): JSX.Element {
       </form>
       {status !== null ? <p>{status}</p> : null}
     </main>
+  );
+}
+
+export default function LoginPage(): JSX.Element {
+  return (
+    <Suspense fallback={<main><p>Loading login…</p></main>}>
+      <LoginPageContent />
+    </Suspense>
   );
 }
