@@ -1,6 +1,7 @@
 import base64
 from datetime import UTC, datetime
 from hashlib import sha256
+from typing import Any, TypedDict, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -16,6 +17,43 @@ from backend.models.planning import AthleteProfile, CheckInInput, CheckInRecord
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
 from backend.services.auth import AuthService
+
+
+class GrantRecord(TypedDict):
+    id: str
+    user_id: str
+    client_id: str
+    redirect_uri: str
+    scopes: list[str]
+    created_at: datetime
+    updated_at: datetime
+    revoked_at: datetime | None
+
+
+class AuthorizationCodeRecord(TypedDict):
+    id: str
+    grant_id: str
+    user_id: str
+    client_id: str
+    redirect_uri: str
+    scopes: list[str]
+    code_challenge: str
+    code_challenge_method: str
+    expires_at: datetime
+    consumed_at: datetime | None
+    created_at: datetime
+
+
+class RefreshTokenRecord(TypedDict):
+    id: str
+    grant_id: str
+    user_id: str
+    client_id: str
+    scopes: list[str]
+    expires_at: datetime
+    revoked_at: datetime | None
+    created_at: datetime
+    rotated_from_id: str | None
 
 
 class FakeRepository:
@@ -59,9 +97,9 @@ class UnconfiguredRepository:
 
 class InMemoryOAuthRepository:
     def __init__(self) -> None:
-        self.grants: dict[str, dict[str, object]] = {}
-        self.codes: dict[str, dict[str, object]] = {}
-        self.refresh_tokens: dict[str, dict[str, object]] = {}
+        self.grants: dict[str, GrantRecord] = {}
+        self.codes: dict[str, AuthorizationCodeRecord] = {}
+        self.refresh_tokens: dict[str, RefreshTokenRecord] = {}
 
     def get_active_grant(self, *, user_id: str, client_id: str, redirect_uri: str):
         for grant in self.grants.values():
@@ -210,7 +248,7 @@ async def test_protected_profile_requires_bearer_token() -> None:
 @pytest.fixture
 def auth_service_fixture():
     original = api_index.auth_service
-    api_index.auth_service = TestAuthService(oauth_repo=InMemoryOAuthRepository())
+    api_index.auth_service = TestAuthService(oauth_repo=cast(Any, InMemoryOAuthRepository()))
     try:
         yield api_index.auth_service
     finally:

@@ -178,6 +178,13 @@ class AuthService:
             or code_record.redirect_uri != request.redirect_uri
         ):
             raise OAuthInvalidGrantError("Authorization code client or redirect mismatch.")
+        if (
+            code_record.code_challenge is None
+            or code_record.code_challenge_method is None
+            or code_record.code_challenge == ""
+            or code_record.code_challenge_method == ""
+        ):
+            raise OAuthInvalidGrantError("Authorization code is missing PKCE challenge data.")
         self._verify_code_challenge(
             verifier=request.code_verifier,
             expected_challenge=code_record.code_challenge,
