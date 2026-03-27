@@ -30,7 +30,6 @@ ENV/
 env.bak/
 htmlcov/
 instance/
-lib/
 lib64/
 mnesia/
 node_modules/

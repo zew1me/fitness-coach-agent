@@ -6,6 +6,7 @@ from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Respo
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
+from backend.config import settings
 from backend.models.auth import (
     BrowserSessionRequest,
     OAuthAuthorizeRequest,
@@ -13,7 +14,6 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.config import settings
 from backend.models.planning import AthleteProfile, CheckInInput
 from backend.models.storage import PresignUploadRequest
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError

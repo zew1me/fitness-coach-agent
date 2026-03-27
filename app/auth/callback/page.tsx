@@ -4,7 +4,7 @@ import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
 import { Suspense, useEffect, useState } from "react";
 
-import { getBrowserSupabaseClient } from "../../../lib/supabase-browser";
+import { getBrowserSupabaseClient } from "../../../lib/supabase";
 
 function AuthCallbackPageContent(): JSX.Element {
   const searchParams = useSearchParams();

@@ -275,9 +275,11 @@ async def test_oauth_authorize_decision_exchanges_code_refresh_and_revokes(
         BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
     )
     verifier = "verifier"
-    challenge = base64.urlsafe_b64encode(sha256(verifier.encode("utf-8")).digest()).decode(
-        "utf-8"
-    ).rstrip("=")
+    challenge = (
+        base64.urlsafe_b64encode(sha256(verifier.encode("utf-8")).digest())
+        .decode("utf-8")
+        .rstrip("=")
+    )
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         decision_response = await client.post(
