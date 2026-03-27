@@ -120,8 +120,7 @@ class PlannerService:
                 day_index=13,
                 focus="Tempo run substitution",
                 notes=(
-                    "Travel constraint replaces bike-specific work with portable "
-                    "aerobic quality."
+                    "Travel constraint replaces bike-specific work with portable aerobic quality."
                 ),
             )
         return AdaptedPlan(

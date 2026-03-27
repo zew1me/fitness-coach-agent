@@ -32,10 +32,7 @@ class SupabaseRepository:
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         client = self._require_client()
         response = (
-            client.table(self._athlete_profiles_table)
-            .select("*")
-            .eq("user_id", user_id)
-            .execute()
+            client.table(self._athlete_profiles_table).select("*").eq("user_id", user_id).execute()
         )
         rows = response.data or []
         if not rows:
