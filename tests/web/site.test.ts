@@ -1,10 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { defaultReturnTo, normalizeReturnTo } from "../../lib/auth";
 import { siteConfig } from "../../lib/site";
 
 describe("siteConfig", () => {
   it("exposes the app name", () => {
     expect(siteConfig.appName).toContain("Exercise Training Plan GPT");
+  });
+});
+
+describe("normalizeReturnTo", () => {
+  it("keeps same-origin relative paths", () => {
+    expect(normalizeReturnTo("/api/oauth/authorize?state=test")).toBe(
+      "/api/oauth/authorize?state=test"
+    );
+  });
+
+  it("falls back for missing or unsafe destinations", () => {
+    expect(normalizeReturnTo(null)).toBe(defaultReturnTo);
+    expect(normalizeReturnTo("")).toBe(defaultReturnTo);
+    expect(normalizeReturnTo("https://example.com")).toBe(defaultReturnTo);
+    expect(normalizeReturnTo("//example.com")).toBe(defaultReturnTo);
   });
 });
 
