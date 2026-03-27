@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    app_env: str = "development"
     app_base_url: str = "http://localhost:3000"
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None

@@ -83,6 +83,61 @@ Recommended local setup:
   to run Supabase CLI or management API commands locally.
 - Replace the placeholder `APP_JWT_SECRET` with a strong random value before any shared or deployed use.
 
+Environment contract:
+
+- Standardize on Vercel's built-in environment names: `development`, `preview`, and `production`.
+- Set `APP_ENV` to match the active deployment environment: `development`, `preview`, or `production`.
+- Use a separate Supabase project and database for each environment.
+- Never point `preview` or `development` at the production database.
+- Keep `.env` for local-only work. Shared and deployed environments should get values from Vercel and CI secrets.
+
+Required runtime variables for all three environments:
+
+- `APP_ENV`
+- `APP_BASE_URL`
+- `APP_JWT_SECRET`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `OPENAI_API_KEY` when plan generation is enabled
+- `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET` when uploads are enabled
+
+Vercel deployment checklist:
+
+1. Create one Vercel project for this repo and leave the root directory at the repository root.
+2. Keep the default Next.js build settings for the frontend and keep `vercel.json` so `api/index.py` stays on the `python3.12` runtime.
+3. Add the required environment variables separately for Vercel `Development`, `Preview`, and `Production`.
+4. Set `APP_ENV=development` in Vercel Development, `APP_ENV=preview` in Preview, and `APP_ENV=production` in Production.
+5. Set `APP_BASE_URL` to the matching public origin for each environment.
+6. Point each environment at its own Supabase project by setting both the server-side and `NEXT_PUBLIC_` Supabase variables.
+7. Generate a strong `APP_JWT_SECRET` for each shared environment instead of reusing the local placeholder secret from `.env`.
+8. Add `OPENAI_API_KEY` only if plan generation is enabled in that environment.
+9. Add the R2 variables only if upload support is enabled in that environment.
+10. Redeploy after secrets are added so both the Next.js app and the Python function receive the new values.
+
+Ownership rules:
+
+- Local development: `.env` and optional `.envrc`
+- Vercel `Development`: points to the development Supabase project
+- Vercel `Preview`: points to the preview Supabase project
+- Vercel `Production`: points to the production Supabase project
+- GitHub Actions environments: `development`, `preview`, and `production` should each hold the matching CI secrets
+
+CI/CD promotion rules:
+
+- Commit schema changes as migration files in `supabase/migrations/`.
+- Validate migrations and integration tests against `development` first.
+- Promote the same migration set to `preview` before any production release.
+- Apply production migrations from CI/CD, not from a developer machine.
+- Deploy the app to each environment only with that environment's matching secrets and database.
+
+Suggested mapping:
+
+- `development`: integration testing and shared non-production validation
+- `preview`: pre-production validation with production-like configuration
+- `production`: live traffic only
+
 Apply the initial schema with:
 
 ```bash
@@ -102,6 +157,6 @@ If a profile is missing, profile and plan generation return `404`.
 ## Notes
 
 - The current implementation is still a scaffold in product terms, but profile reads and check-in writes now have a concrete persistence path.
-- OAuth consent flows still need durable grants, real user-session binding, and provider secrets before deployment.
+- OAuth consent now persists durable grants and binds authorization to a browser session; real provider secrets are still required before deployment.
 - GitHub issue filing is currently blocked locally until a remote is configured and `gh auth login` is refreshed.
 - Once GitHub access is configured, run `scripts/create_github_issues.sh` to file the prepared issue set from `docs/github-issues/`.

@@ -11,3 +11,11 @@ export const supabaseBrowserClient =
         }
       })
     : null;
+
+export function getBrowserSupabaseClient(): NonNullable<typeof supabaseBrowserClient> {
+  if (supabaseBrowserClient === null) {
+    throw new Error("Supabase browser client is not configured.");
+  }
+
+  return supabaseBrowserClient;
+}

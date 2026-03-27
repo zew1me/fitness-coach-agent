@@ -1,19 +1,34 @@
 from collections.abc import Mapping
 from datetime import date
+from urllib.parse import urlencode
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Response
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from backend.models.auth import OAuthAuthorizeRequest, OAuthTokenRequest, UserContext
+from backend.config import settings
+from backend.models.auth import (
+    BrowserSessionRequest,
+    OAuthAuthorizeRequest,
+    OAuthRevokeRequest,
+    OAuthTokenRequest,
+    UserContext,
+)
 from backend.models.planning import AthleteProfile, CheckInInput
 from backend.models.storage import PresignUploadRequest
+from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
     SupabaseRepository,
 )
-from backend.services.auth import AuthService
+from backend.services.auth import (
+    AuthService,
+    OAuthConsentRequiredError,
+    OAuthError,
+    OAuthInvalidGrantError,
+    OAuthLoginRequiredError,
+)
 from backend.services.planner import PlannerService
 from backend.services.r2 import R2Service
 
@@ -57,6 +72,8 @@ def require_user_context(authorization: str | None = Header(default=None)) -> Us
     token = authorization.removeprefix("Bearer ").strip()
     try:
         return auth_service.get_user_context_from_bearer(token)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid bearer token") from exc
 
@@ -85,27 +102,148 @@ async def oauth_protected_resource() -> Mapping[str, object]:
 
 
 @app.get("/api/oauth/authorize")
-async def oauth_authorize(
+async def oauth_authorize(  # noqa: PLR0913
     client_id: str,
     redirect_uri: str,
+    code_challenge: str | None = None,
+    code_challenge_method: str | None = None,
+    prompt: str | None = None,
     scope: str = "profile:read plans:write metrics:write",
     state: str | None = None,
-) -> Mapping[str, str]:
+    coach_browser_session: str | None = Cookie(default=None),
+) -> RedirectResponse:
     request = OAuthAuthorizeRequest(
-        client_id=client_id, redirect_uri=redirect_uri, scope=scope, state=state
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state,
+        code_challenge=code_challenge,
+        code_challenge_method=code_challenge_method,
+        prompt=prompt,
     )
-    return auth_service.build_authorize_response(request, user_id="demo-user")
+    try:
+        auth_service.parse_authorize_request(request)
+        browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
+    except OAuthLoginRequiredError:
+        authorize_url = "/api/oauth/authorize?" + urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": code_challenge or "",
+                "code_challenge_method": code_challenge_method or "",
+                "scope": scope,
+                "state": state or "",
+                "prompt": prompt or "",
+            }
+        )
+        return RedirectResponse(auth_service.build_login_redirect(authorize_url), status_code=302)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        redirect_target = auth_service.build_authorize_redirect(
+            request=request, browser_session=browser_session
+        )
+    except OAuthConsentRequiredError:
+        return RedirectResponse(auth_service.build_consent_redirect(request), status_code=302)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(redirect_target, status_code=302)
 
 
 @app.post("/api/oauth/token")
 async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
-    bundle = auth_service.exchange_code(payload)
+    try:
+        bundle = auth_service.exchange_token_request(payload)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthInvalidGrantError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(bundle.model_dump(mode="json"))
 
 
 @app.post("/api/oauth/revoke")
-async def oauth_revoke() -> Mapping[str, bool]:
-    return {"revoked": True}
+async def oauth_revoke(payload: OAuthRevokeRequest) -> Mapping[str, bool]:
+    try:
+        revoked = auth_service.revoke(payload)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"revoked": revoked}
+
+
+@app.post("/api/oauth/browser-session")
+async def oauth_browser_session(
+    payload: BrowserSessionRequest, response: Response
+) -> Mapping[str, bool]:
+    try:
+        session = auth_service.create_browser_session(payload.access_token)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Unable to verify browser session.") from exc
+    response.set_cookie(
+        key=auth_service.browser_session_cookie_name,
+        value=auth_service.create_browser_session_token(session),
+        httponly=True,
+        max_age=12 * 60 * 60,
+        path="/",
+        samesite="lax",
+        secure=settings.app_base_url.startswith("https://"),
+    )
+    return {"ok": True}
+
+
+@app.post("/api/oauth/authorize/decision")
+async def oauth_authorize_decision(  # noqa: PLR0913
+    client_id: str = Form(...),
+    redirect_uri: str = Form(...),
+    scope: str = Form(...),
+    code_challenge: str = Form(...),
+    code_challenge_method: str = Form(...),
+    state: str = Form(default=""),
+    decision: str = Form(...),
+    coach_browser_session: str | None = Cookie(default=None),
+) -> RedirectResponse:
+    request = OAuthAuthorizeRequest(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state or None,
+        code_challenge=code_challenge,
+        code_challenge_method=code_challenge_method,
+    )
+    try:
+        browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
+    except OAuthLoginRequiredError:
+        return RedirectResponse(
+            auth_service.build_login_redirect(auth_service.build_consent_redirect(request)),
+            status_code=302,
+        )
+    if decision != "approve":
+        denial_redirect = (
+            f"{redirect_uri}?error=access_denied&state={state}"
+            if state
+            else f"{redirect_uri}?error=access_denied"
+        )
+        return RedirectResponse(
+            denial_redirect,
+            status_code=302,
+        )
+    try:
+        redirect_target = auth_service.approve_consent(
+            request=request, browser_session=browser_session
+        )
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(redirect_target, status_code=302)
 
 
 @app.post("/api/profile")
