@@ -14,7 +14,6 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.config import settings
 from backend.models.planning import AthleteProfile, CheckInInput
 from backend.models.storage import PresignUploadRequest
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
