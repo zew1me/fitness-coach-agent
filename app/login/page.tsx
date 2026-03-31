@@ -4,6 +4,7 @@ import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
 import { FormEvent, Suspense, useState } from "react";
 
+import { normalizeReturnTo } from "../../lib/auth";
 import { getBrowserSupabaseClient } from "../../lib/supabase";
 
 function LoginPageContent(): JSX.Element {
@@ -11,7 +12,7 @@ function LoginPageContent(): JSX.Element {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const returnTo = searchParams.get("return_to") ?? "/consent";
+  const returnTo = normalizeReturnTo(searchParams.get("return_to"));
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
