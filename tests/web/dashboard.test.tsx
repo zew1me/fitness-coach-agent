@@ -22,6 +22,29 @@ describe("CoachingDashboard", () => {
 
     await screen.findByText(/same-origin bearer token/i);
     expect(screen.getByText(/No browser session cookie is present/i)).toBeTruthy();
+    expect(screen.getByText(/The coaching workspace unlocks after sign-in/i)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: /Athlete Profile/i })).toBeNull();
+  });
+
+  it("sanitizes html error payloads from the browser-token bootstrap", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response("<!DOCTYPE html><html><body><h1>404</h1></body></html>", {
+            status: 404,
+            headers: {
+              "Content-Type": "text/html"
+            }
+          })
+        )
+      )
+    );
+
+    render(<CoachingDashboard />);
+
+    await screen.findByText(/signed-in app shell is not available on this deployment yet/i);
+    expect(screen.queryByText(/DOCTYPE html/i)).toBeNull();
   });
 
   it("loads a profile through the browser-token bridge", async () => {
