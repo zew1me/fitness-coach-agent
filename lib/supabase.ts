@@ -1,22 +1,15 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"];
 const supabaseAnonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"];
 
-export const supabaseBrowserAuthConfig = {
-  persistSession: true,
-  flowType: "pkce"
-} as const;
-
-export function createBrowserSupabaseClient(url: string, anonKey: string): SupabaseClient {
-  return createClient(url, anonKey, {
-    auth: supabaseBrowserAuthConfig
-  });
-}
-
 export const supabaseBrowserClient =
   supabaseUrl && supabaseAnonKey
-    ? createBrowserSupabaseClient(supabaseUrl, supabaseAnonKey)
+    ? createClient(supabaseUrl, supabaseAnonKey, {
+        auth: {
+          persistSession: true
+        }
+      })
     : null;
 
 export function getBrowserSupabaseClient(): NonNullable<typeof supabaseBrowserClient> {

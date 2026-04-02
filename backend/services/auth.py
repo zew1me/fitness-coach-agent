@@ -172,7 +172,9 @@ class AuthService:
             )
         if request.code_verifier is None:
             raise OAuthInvalidGrantError("PKCE code_verifier is required.")
-        code_record = self._oauth_repo.consume_authorization_code(request.code)
+        code_record = self._oauth_repo.get_authorization_code(request.code)
+        if code_record is None:
+            raise OAuthInvalidGrantError("Invalid authorization code.")
         if (
             code_record.client_id != request.client_id
             or code_record.redirect_uri != request.redirect_uri
@@ -190,6 +192,10 @@ class AuthService:
             expected_challenge=code_record.code_challenge,
             method=code_record.code_challenge_method,
         )
+        try:
+            code_record = self._oauth_repo.consume_authorization_code(request.code)
+        except ValueError as exc:
+            raise OAuthInvalidGrantError(str(exc)) from exc
         grant = self._oauth_repo.get_grant_by_id(code_record.grant_id)
         if grant is None or grant.revoked_at is not None:
             raise OAuthInvalidGrantError("The associated OAuth grant is no longer active.")
@@ -212,9 +218,17 @@ class AuthService:
     def refresh_access_token(self, request: OAuthTokenRequest) -> TokenBundle:
         if request.refresh_token is None:
             raise OAuthInvalidGrantError("Refresh requests require a refresh_token.")
-        refresh_record, replacement = self._oauth_repo.rotate_refresh_token(request.refresh_token)
+        refresh_record = self._oauth_repo.get_refresh_token(request.refresh_token)
+        if refresh_record is None:
+            raise OAuthInvalidGrantError("Invalid refresh token.")
         if refresh_record.client_id != request.client_id:
             raise OAuthInvalidGrantError("Refresh token client mismatch.")
+        try:
+            refresh_record, replacement = self._oauth_repo.rotate_refresh_token(
+                request.refresh_token
+            )
+        except ValueError as exc:
+            raise OAuthInvalidGrantError(str(exc)) from exc
         grant = self._oauth_repo.get_grant_by_id(refresh_record.grant_id)
         if grant is None or grant.revoked_at is not None:
             raise OAuthInvalidGrantError("The associated OAuth grant is no longer active.")
@@ -263,7 +277,10 @@ class AuthService:
     def get_browser_session_from_cookie(self, token: str | None) -> BrowserSessionContext:
         if token is None:
             raise OAuthLoginRequiredError("No browser session cookie is present.")
-        claims = jwt.decode(token, settings.app_jwt_secret, algorithms=["HS256"])
+        try:
+            claims = jwt.decode(token, settings.app_jwt_secret, algorithms=["HS256"])
+        except jwt.PyJWTError as exc:
+            raise OAuthLoginRequiredError("Invalid browser session cookie.") from exc
         if claims.get("typ") != "browser_session":
             raise OAuthLoginRequiredError("Invalid browser session cookie.")
         return BrowserSessionContext(

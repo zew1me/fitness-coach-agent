@@ -169,6 +169,12 @@ class InMemoryOAuthRepository:
         }
         return code
 
+    def get_authorization_code(self, raw_code: str):
+        code = self.codes.get(raw_code)
+        if code is None:
+            return None
+        return type("AuthorizationCode", (), code)()
+
     def consume_authorization_code(self, raw_code: str):
         code = self.codes.get(raw_code)
         if code is None:
@@ -201,6 +207,12 @@ class InMemoryOAuthRepository:
         }
         return token
 
+    def get_refresh_token(self, raw_token: str):
+        token = self.refresh_tokens.get(raw_token)
+        if token is None:
+            return None
+        return type("RefreshToken", (), token)()
+
     def rotate_refresh_token(self, raw_token: str):
         current = self.refresh_tokens.get(raw_token)
         if current is None:
@@ -230,7 +242,7 @@ class InMemoryOAuthRepository:
         return True
 
 
-class TestAuthService(AuthService):
+class FakeAuthService(AuthService):
     def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
         if supabase_access_token != "supabase-access-token":
             raise OAuthRepositoryNotConfiguredError("Unable to verify browser session.")
@@ -248,7 +260,7 @@ async def test_protected_profile_requires_bearer_token() -> None:
 @pytest.fixture
 def auth_service_fixture():
     original = api_index.auth_service
-    api_index.auth_service = TestAuthService(oauth_repo=cast(Any, InMemoryOAuthRepository()))
+    api_index.auth_service = FakeAuthService(oauth_repo=cast(Any, InMemoryOAuthRepository()))
     try:
         yield api_index.auth_service
     finally:
@@ -303,6 +315,136 @@ async def test_oauth_authorize_redirects_to_consent_when_grant_missing(
 
     assert response.status_code == 302
     assert response.headers["location"].startswith("http://localhost:3000/consent?")
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_rejects_unsupported_scope(auth_service_fixture) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(
+            "/api/oauth/authorize",
+            params={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read admin:root",
+                "state": "state-1",
+                "code_challenge": "challenge-1",
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert "unsupported" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_rejects_invalid_redirect_uri(auth_service_fixture) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(
+            "/api/oauth/authorize",
+            params={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "javascript:alert(1)",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": "challenge-1",
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert "redirect URI" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_invalid_browser_cookie_redirects_to_login(
+    auth_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(
+            "/api/oauth/authorize",
+            params={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": "challenge-1",
+                "code_challenge_method": "S256",
+            },
+            cookies={"coach_browser_session": "not-a-jwt"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("http://localhost:3000/login?")
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_prompt_consent_forces_consent(
+    auth_service_fixture,
+) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    auth_service_fixture._oauth_repo.upsert_grant(
+        user_id="athlete-1",
+        client_id="https://chat.openai.com",
+        redirect_uri="https://chat.openai.com/callback",
+        scopes=["profile:read", "plans:write"],
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get(
+            "/api/oauth/authorize",
+            params={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "prompt": "consent",
+                "code_challenge": "challenge-1",
+                "code_challenge_method": "S256",
+            },
+            cookies={"coach_browser_session": browser_cookie},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("http://localhost:3000/consent?")
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorize_decision_denial_redirects_back_with_error(
+    auth_service_fixture,
+) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/oauth/authorize/decision",
+            data={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": "challenge-1",
+                "code_challenge_method": "S256",
+                "decision": "deny",
+            },
+            cookies={"coach_browser_session": browser_cookie},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == (
+        "https://chat.openai.com/callback?error=access_denied&state=state-1"
+    )
 
 
 @pytest.mark.asyncio
@@ -401,6 +543,179 @@ async def test_oauth_browser_session_endpoint_sets_cookie(auth_service_fixture) 
 
     assert response.status_code == 200
     assert "coach_browser_session=" in response.headers["set-cookie"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_rejects_bad_code_verifier(auth_service_fixture) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    verifier = "correct-verifier"
+    challenge = (
+        base64.urlsafe_b64encode(sha256(verifier.encode("utf-8")).digest())
+        .decode("utf-8")
+        .rstrip("=")
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        decision_response = await client.post(
+            "/api/oauth/authorize/decision",
+            data={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "decision": "approve",
+            },
+            cookies={"coach_browser_session": browser_cookie},
+            follow_redirects=False,
+        )
+        code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
+
+        token_response = await client.post(
+            "/api/oauth/token",
+            json=OAuthTokenRequest(
+                client_id="https://chat.openai.com",
+                code=code,
+                code_verifier="wrong-verifier",
+                grant_type="authorization_code",
+                redirect_uri="https://chat.openai.com/callback",
+            ).model_dump(mode="json"),
+        )
+
+    assert token_response.status_code == 400
+    assert "code_verifier" in token_response.json()["detail"]
+    assert auth_service_fixture._oauth_repo.codes[code]["consumed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_rejects_client_mismatch_without_consuming_code(
+    auth_service_fixture,
+) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    verifier = "verifier"
+    challenge = (
+        base64.urlsafe_b64encode(sha256(verifier.encode("utf-8")).digest())
+        .decode("utf-8")
+        .rstrip("=")
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        decision_response = await client.post(
+            "/api/oauth/authorize/decision",
+            data={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "decision": "approve",
+            },
+            cookies={"coach_browser_session": browser_cookie},
+            follow_redirects=False,
+        )
+        code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
+
+        response = await client.post(
+            "/api/oauth/token",
+            json=OAuthTokenRequest(
+                client_id="https://example.com",
+                code=code,
+                code_verifier=verifier,
+                grant_type="authorization_code",
+                redirect_uri="https://chat.openai.com/callback",
+            ).model_dump(mode="json"),
+        )
+
+    assert response.status_code == 400
+    assert "client or redirect mismatch" in response.json()["detail"]
+    assert auth_service_fixture._oauth_repo.codes[code]["consumed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_token_rejects_reused_authorization_code(auth_service_fixture) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    verifier = "verifier"
+    challenge = (
+        base64.urlsafe_b64encode(sha256(verifier.encode("utf-8")).digest())
+        .decode("utf-8")
+        .rstrip("=")
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        decision_response = await client.post(
+            "/api/oauth/authorize/decision",
+            data={
+                "client_id": "https://chat.openai.com",
+                "redirect_uri": "https://chat.openai.com/callback",
+                "scope": "profile:read plans:write",
+                "state": "state-1",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "decision": "approve",
+            },
+            cookies={"coach_browser_session": browser_cookie},
+            follow_redirects=False,
+        )
+        code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
+
+        first_response = await client.post(
+            "/api/oauth/token",
+            json=OAuthTokenRequest(
+                client_id="https://chat.openai.com",
+                code=code,
+                code_verifier=verifier,
+                grant_type="authorization_code",
+                redirect_uri="https://chat.openai.com/callback",
+            ).model_dump(mode="json"),
+        )
+        second_response = await client.post(
+            "/api/oauth/token",
+            json=OAuthTokenRequest(
+                client_id="https://chat.openai.com",
+                code=code,
+                code_verifier=verifier,
+                grant_type="authorization_code",
+                redirect_uri="https://chat.openai.com/callback",
+            ).model_dump(mode="json"),
+        )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 400
+    assert "no longer valid" in second_response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_refresh_rejects_client_mismatch_without_revoking_token(
+    auth_service_fixture,
+) -> None:
+    refresh_token = auth_service_fixture._oauth_repo.create_refresh_token(
+        grant_id="grant-1",
+        user_id="athlete-1",
+        client_id="https://chat.openai.com",
+        scopes=["profile:read"],
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/oauth/token",
+            json=OAuthTokenRequest(
+                client_id="https://example.com",
+                grant_type="refresh_token",
+                refresh_token=refresh_token,
+            ).model_dump(mode="json"),
+        )
+
+    assert response.status_code == 400
+    assert "client mismatch" in response.json()["detail"]
+    assert auth_service_fixture._oauth_repo.refresh_tokens[refresh_token]["revoked_at"] is None
 
 
 async def test_create_check_in_returns_persisted_record(monkeypatch) -> None:

@@ -82,6 +82,3 @@ Network Trash Folder
 Temporary Items
 tsconfig.tsbuildinfo
 .vercel
-.env*.local
-next-env.d.ts
-out/
