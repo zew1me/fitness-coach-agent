@@ -12,7 +12,7 @@ const testFiles = ["tests/web/**/*.{ts,tsx}"];
 
 export default [
   {
-    ignores: [".cache/**", ".next/**", ".uv-cache/**", ".venv/**", "node_modules/**"]
+    ignores: [".cache/**", ".next/**", ".uv-cache/**", ".venv/**", ".vercel/**", "node_modules/**"]
   },
   js.configs.recommended,
   {
