@@ -14,10 +14,32 @@ import type {
 
 type FetchLike = typeof fetch;
 
+function normalizeErrorDetail(response: Response, detail: string): string {
+  const contentType = response.headers.get("content-type") ?? "";
+  const trimmed = detail.trim();
+
+  if (trimmed === "") {
+    return `Request failed with status ${response.status}`;
+  }
+
+  if (
+    contentType.includes("text/html")
+    || /^<!doctype html/i.test(trimmed)
+    || /^<html/i.test(trimmed)
+  ) {
+    if (response.status === 404) {
+      return "The signed-in app shell is not available on this deployment yet.";
+    }
+    return `Request failed with status ${response.status}`;
+  }
+
+  return trimmed;
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(detail || `Request failed with status ${response.status}`);
+    throw new Error(normalizeErrorDetail(response, detail));
   }
   return (await response.json()) as T;
 }

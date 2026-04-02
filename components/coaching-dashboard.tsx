@@ -114,6 +114,8 @@ export function CoachingDashboard(): JSX.Element {
   const [checkInResult, setCheckInResult] = useState<CheckInResponse | null>(null);
   const [planResult, setPlanResult] = useState<GeneratedPlanResponse | null>(null);
   const [uploadResult, setUploadResult] = useState<PresignUploadResponse | null>(null);
+  const isAuthenticated = session.token !== null;
+  const authenticatedToken = session.token;
 
   useEffect(() => {
     async function bootstrap(): Promise<void> {
@@ -271,9 +273,9 @@ export function CoachingDashboard(): JSX.Element {
       <section style={sectionStyle}>
         <h2>Browser Session</h2>
         <p>{session.status ?? "No active browser session."}</p>
-        {session.token !== null ? (
+        {authenticatedToken !== null ? (
           <p>
-            Authenticated user: <strong>{session.token.user_id}</strong>
+            Authenticated user: <strong>{authenticatedToken.user_id}</strong>
           </p>
         ) : (
           <p>Sign in first so the app can mint a same-origin bearer token from the browser cookie.</p>
@@ -281,6 +283,22 @@ export function CoachingDashboard(): JSX.Element {
         {session.error !== null ? <p style={{ color: "#b91c1c" }}>{session.error}</p> : null}
       </section>
 
+      {!isAuthenticated ? (
+        <section style={sectionStyle}>
+          <h2>Get Started</h2>
+          <p>
+            The coaching workspace unlocks after sign-in. Start with the magic-link flow, then come back
+            here to load your athlete profile, submit a check-in, and generate the next plan.
+          </p>
+          <p style={{ marginBottom: 0 }}>
+            If this deployment is missing the signed-in API route or browser auth config, use the login
+            page first and then retry from the same browser session.
+          </p>
+        </section>
+      ) : null}
+
+      {isAuthenticated ? (
+        <>
       <section style={sectionStyle}>
         <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "0.75rem", justifyContent: "space-between" }}>
           <div>
@@ -510,6 +528,8 @@ export function CoachingDashboard(): JSX.Element {
           </div>
         )}
       </section>
+        </>
+      ) : null}
     </main>
   );
 }
