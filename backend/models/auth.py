@@ -12,6 +12,14 @@ class BrowserSessionContext(BaseModel):
     user_id: str
 
 
+class BrowserTokenResponse(BaseModel):
+    access_token: str
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + timedelta(minutes=15))
+    scopes: list[str] = Field(default_factory=list)
+    token_type: str = "Bearer"
+    user_id: str
+
+
 class UserContext(BaseModel):
     client_id: str | None = None
     grant_id: str | None = None
