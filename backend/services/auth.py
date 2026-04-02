@@ -12,6 +12,7 @@ import jwt
 from backend.config import settings
 from backend.models.auth import (
     BrowserSessionContext,
+    BrowserTokenResponse,
     OAuthAuthorizeRequest,
     OAuthRevokeRequest,
     OAuthTokenRequest,
@@ -272,6 +273,25 @@ class AuthService:
             },
             settings.app_jwt_secret,
             algorithm="HS256",
+        )
+
+    def create_browser_token(self, session: BrowserSessionContext) -> BrowserTokenResponse:
+        scopes = sorted(self._supported_scopes)
+        grant = self._oauth_repo.upsert_grant(
+            user_id=session.user_id,
+            client_id=settings.app_base_url,
+            redirect_uri=settings.app_base_url,
+            scopes=scopes,
+        )
+        return BrowserTokenResponse(
+            access_token=self._issue_access_token(
+                user_id=session.user_id,
+                client_id=settings.app_base_url,
+                scopes=scopes,
+                grant_id=grant.id,
+            ),
+            scopes=scopes,
+            user_id=session.user_id,
         )
 
     def get_browser_session_from_cookie(self, token: str | None) -> BrowserSessionContext:

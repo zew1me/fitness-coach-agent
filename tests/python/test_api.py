@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 import api.index as api_index
 from backend.models.auth import (
     BrowserSessionContext,
+    BrowserTokenResponse,
     OAuthRevokeRequest,
     OAuthTokenRequest,
     UserContext,
@@ -553,6 +554,33 @@ async def test_oauth_browser_session_endpoint_sets_cookie(auth_service_fixture) 
 
     assert response.status_code == 200
     assert "coach_browser_session=" in response.headers["set-cookie"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_browser_token_issues_same_origin_bearer(auth_service_fixture) -> None:
+    browser_cookie = auth_service_fixture.create_browser_session_token(
+        BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": browser_cookie},
+        )
+
+    assert response.status_code == 200
+    payload = BrowserTokenResponse.model_validate(response.json())
+    assert payload.user_id == "athlete-1"
+    assert "profile:write" in payload.scopes
+
+
+@pytest.mark.asyncio
+async def test_oauth_browser_token_requires_browser_cookie(auth_service_fixture) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/oauth/browser-token")
+
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

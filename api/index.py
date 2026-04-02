@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from backend.config import settings
 from backend.models.auth import (
     BrowserSessionRequest,
+    BrowserTokenResponse,
     OAuthAuthorizeRequest,
     OAuthRevokeRequest,
     OAuthTokenRequest,
@@ -197,6 +198,19 @@ async def oauth_browser_session(
         secure=settings.app_base_url.startswith("https://"),
     )
     return {"ok": True}
+
+
+@app.post("/api/oauth/browser-token")
+async def oauth_browser_token(
+    coach_browser_session: str | None = Cookie(default=None),
+) -> BrowserTokenResponse:
+    try:
+        browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
+        return auth_service.create_browser_token(browser_session)
+    except OAuthLoginRequiredError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/oauth/authorize/decision")
