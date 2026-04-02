@@ -4,7 +4,6 @@ import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
 import { Suspense, useEffect, useState } from "react";
 
-import { normalizeReturnTo } from "../../../lib/auth";
 import { getBrowserSupabaseClient } from "../../../lib/supabase";
 
 function AuthCallbackPageContent(): JSX.Element {
@@ -13,7 +12,7 @@ function AuthCallbackPageContent(): JSX.Element {
 
   useEffect(() => {
     const code = searchParams.get("code");
-    const returnTo = normalizeReturnTo(searchParams.get("return_to"));
+    const returnTo = searchParams.get("return_to") ?? "/consent";
 
     async function completeLogin(): Promise<void> {
       if (code === null) {

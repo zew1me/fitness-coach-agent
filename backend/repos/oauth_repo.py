@@ -130,6 +130,9 @@ class OAuthRepository:
             raise RuntimeError("Supabase did not return the OAuth authorization code row.")
         return raw_code
 
+    def get_authorization_code(self, raw_code: str) -> OAuthAuthorizationCodeRecord | None:
+        return self._find_authorization_code_by_hash(raw_code)
+
     def consume_authorization_code(self, raw_code: str) -> OAuthAuthorizationCodeRecord:
         client = self._require_client()
         record = self._find_authorization_code_by_hash(raw_code)
@@ -177,6 +180,9 @@ class OAuthRepository:
         if not rows:
             raise RuntimeError("Supabase did not return the OAuth refresh token row.")
         return raw_token
+
+    def get_refresh_token(self, raw_token: str) -> OAuthRefreshTokenRecord | None:
+        return self._find_refresh_token_by_hash(raw_token)
 
     def rotate_refresh_token(self, raw_token: str) -> tuple[OAuthRefreshTokenRecord, str]:
         client = self._require_client()
