@@ -137,6 +137,7 @@ class PlannerService:
                 "hamstring",
             ),
         )
+        image_signal = check_in.image_count > 0
 
         day_specs = self._build_day_specs(goal_theme)
         hours = 7.0
@@ -150,6 +151,9 @@ class PlannerService:
         if rehab:
             self._apply_rehab(day_specs, travel=travel)
             hours -= 0.5
+        if image_signal:
+            self._apply_image_recovery(day_specs)
+            hours -= 0.25
         self._apply_goal_emphasis(day_specs, goal_theme, travel=travel)
 
         if not fatigue and goal_theme == "endurance":
@@ -162,12 +166,14 @@ class PlannerService:
             fatigue=fatigue,
             travel=travel,
             rehab=rehab,
+            image_signal=image_signal,
         )
         trend = self._build_trend(
             goal_theme=goal_theme,
             fatigue=fatigue,
             travel=travel,
             rehab=rehab,
+            image_signal=image_signal,
         )
         days = [
             PlanDay(
@@ -284,6 +290,19 @@ class PlannerService:
             note="Choose skills or aerobic work that avoids flare-ups.",
         )
 
+    def _apply_image_recovery(self, day_specs: dict[int, dict[str, list[str] | str]]) -> None:
+        self._set_day(
+            day_specs,
+            2,
+            focus="Image-informed recovery day",
+            note="Uploaded evidence suggests preserving readiness before stacking more intensity.",
+        )
+        self._set_day(
+            day_specs,
+            8,
+            note="Use the second-week reset to respond to the visual recovery signal as well.",
+        )
+
     def _apply_goal_emphasis(
         self,
         day_specs: dict[int, dict[str, list[str] | str]],
@@ -356,6 +375,7 @@ class PlannerService:
         fatigue: bool,
         travel: bool,
         rehab: bool,
+        image_signal: bool,
     ) -> str:
         summary_parts = [
             "Adaptive 14-day plan built around cyclocross intensity and realistic recovery.",
@@ -369,6 +389,8 @@ class PlannerService:
             summary_parts.append("Midweek work is compressed so travel does not erase the block.")
         if rehab:
             summary_parts.append("Low-torque choices protect the rehab constraint.")
+        if image_signal:
+            summary_parts.append("Uploaded images push the block toward extra recovery protection.")
         return " ".join(summary_parts)
 
     def _build_trend(
@@ -378,6 +400,7 @@ class PlannerService:
         fatigue: bool,
         travel: bool,
         rehab: bool,
+        image_signal: bool,
     ) -> str:
         trend_parts: list[str] = []
         if fatigue or rehab:
@@ -387,6 +410,10 @@ class PlannerService:
         if travel:
             trend_parts.append(
                 "Portable sessions keep stimulus high even when the schedule compresses."
+            )
+        if image_signal:
+            trend_parts.append(
+                "Recovery signals from uploaded evidence temper the load progression."
             )
         trend_parts.append(self._goal_trend_fragment(goal_theme))
         return " ".join(trend_parts)

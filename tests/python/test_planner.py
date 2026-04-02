@@ -35,11 +35,12 @@ def test_create_plan_compresses_for_fatigue_and_travel() -> None:
 
     plan = service.create_plan(profile, check_in)
 
-    assert plan.hours == 5.0
+    assert plan.hours == 4.8
     assert "fatigued" in plan.summary.lower()
     assert "travel" in plan.summary.lower()
+    assert "images" in plan.summary.lower()
     assert "threshold" in plan.summary.lower()
-    assert plan.days[1].focus == "Recovery spin + mobility"
+    assert plan.days[1].focus == "Image-informed recovery day"
     assert plan.days[4].focus == "Portable tempo session"
     assert plan.days[12].focus == "Tempo run substitution"
 
@@ -63,3 +64,15 @@ def test_create_plan_protects_rehab_and_emphasizes_endurance_goal() -> None:
     assert plan.days[6].focus == "Long aerobic ride"
     assert plan.days[13].focus == "Aerobic endurance"
     assert any("flare-ups" in day.notes for day in plan.days)
+
+
+def test_create_plan_uses_image_signal_without_other_flags() -> None:
+    service = PlannerService()
+    profile = AthleteProfile(user_id="test-user", goals=["Race sharpness"])
+    check_in = CheckInInput(user_id="test-user", raw_text="Feeling decent.", image_count=2)
+
+    plan = service.create_plan(profile, check_in)
+
+    assert plan.hours == 7.0
+    assert plan.days[1].focus == "Image-informed recovery day"
+    assert "uploaded images" in plan.summary.lower()

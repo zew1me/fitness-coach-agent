@@ -240,7 +240,7 @@ class InMemoryOAuthRepository:
         return True
 
 
-class TestAuthService(AuthService):
+class FakeAuthService(AuthService):
     def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
         if supabase_access_token != "supabase-access-token":
             raise OAuthRepositoryNotConfiguredError("Unable to verify browser session.")
@@ -258,7 +258,7 @@ async def test_protected_profile_requires_bearer_token() -> None:
 @pytest.fixture
 def auth_service_fixture():
     original = api_index.auth_service
-    api_index.auth_service = TestAuthService(oauth_repo=cast(Any, InMemoryOAuthRepository()))
+    api_index.auth_service = FakeAuthService(oauth_repo=cast(Any, InMemoryOAuthRepository()))
     try:
         yield api_index.auth_service
     finally:
@@ -468,8 +468,8 @@ async def test_generate_plan_returns_adaptive_plan(monkeypatch) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["plan"]["hours"] == 5.0
-    assert body["plan"]["days"][1]["focus"] == "Recovery spin + mobility"
+    assert body["plan"]["hours"] == 4.8
+    assert body["plan"]["days"][1]["focus"] == "Image-informed recovery day"
     assert body["plan"]["days"][4]["focus"] == "Portable tempo session"
     assert body["plan"]["days"][12]["focus"] == "Tempo run substitution"
     assert body["prompt_preview"].startswith("You are a fitness expert")
