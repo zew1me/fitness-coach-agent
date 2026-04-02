@@ -14,7 +14,6 @@ export function createBrowserSupabaseClient(
     }
   });
 }
-
 export const supabaseBrowserClient =
   supabaseUrl && supabaseAnonKey
     ? createBrowserSupabaseClient(supabaseUrl, supabaseAnonKey)
