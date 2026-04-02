@@ -79,6 +79,16 @@ class FakeRepository:
         return profile
 
 
+class PlannerRepository(FakeRepository):
+    async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+        return AthleteProfile(
+            user_id=user_id,
+            cycling_ftp_watts=238,
+            goals=["Raise FTP for cyclocross"],
+            constraints=["Wednesday travel"],
+        )
+
+
 class MissingProfileRepository:
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
@@ -431,6 +441,38 @@ async def test_create_check_in_returns_persisted_record(monkeypatch) -> None:
     assert body["accepted"] is True
     assert body["check_in"]["id"] == "check-in-1"
     assert body["check_in"]["effective_date"] == "2026-03-21"
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_returns_adaptive_plan(monkeypatch) -> None:
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", PlannerRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/plans/generate",
+            json={
+                "user_id": "athlete-1",
+                "raw_text": "Feeling fatigued after travel with heavy legs.",
+                "image_count": 1,
+            },
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["plan"]["hours"] == 5.0
+    assert body["plan"]["days"][1]["focus"] == "Recovery spin + mobility"
+    assert body["plan"]["days"][4]["focus"] == "Portable tempo session"
+    assert body["plan"]["days"][12]["focus"] == "Tempo run substitution"
+    assert body["prompt_preview"].startswith("You are a fitness expert")
 
 
 @pytest.mark.asyncio
