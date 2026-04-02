@@ -1,4 +1,5 @@
 from textwrap import dedent
+from typing import TypedDict
 
 from backend.models.planning import AdaptedPlan, AthleteProfile, CheckInInput, PlanDay
 
@@ -78,6 +79,11 @@ RACE_PLAN = [
     ("CX practice or run-ups", "Choose skills over extra gym fatigue."),
     ("Aerobic endurance", "Close the block with sustainable volume."),
 ]
+
+
+class DaySpec(TypedDict):
+    focus: str
+    notes: list[str]
 
 
 class PlannerService:
@@ -191,7 +197,7 @@ class PlannerService:
             days=days,
         )
 
-    def _build_day_specs(self, goal_theme: str) -> dict[int, dict[str, list[str] | str]]:
+    def _build_day_specs(self, goal_theme: str) -> dict[int, DaySpec]:
         templates = {
             "threshold": THRESHOLD_PLAN,
             "endurance": ENDURANCE_PLAN,
@@ -202,7 +208,7 @@ class PlannerService:
             for index, (focus, notes) in enumerate(templates, start=1)
         }
 
-    def _apply_fatigue(self, day_specs: dict[int, dict[str, list[str] | str]]) -> None:
+    def _apply_fatigue(self, day_specs: dict[int, DaySpec]) -> None:
         self._set_day(
             day_specs,
             2,
@@ -233,7 +239,7 @@ class PlannerService:
 
     def _apply_travel(
         self,
-        day_specs: dict[int, dict[str, list[str] | str]],
+        day_specs: dict[int, DaySpec],
         *,
         rehab: bool,
     ) -> None:
@@ -258,7 +264,7 @@ class PlannerService:
 
     def _apply_rehab(
         self,
-        day_specs: dict[int, dict[str, list[str] | str]],
+        day_specs: dict[int, DaySpec],
         *,
         travel: bool,
     ) -> None:
@@ -290,7 +296,7 @@ class PlannerService:
             note="Choose skills or aerobic work that avoids flare-ups.",
         )
 
-    def _apply_image_recovery(self, day_specs: dict[int, dict[str, list[str] | str]]) -> None:
+    def _apply_image_recovery(self, day_specs: dict[int, DaySpec]) -> None:
         self._set_day(
             day_specs,
             2,
@@ -305,7 +311,7 @@ class PlannerService:
 
     def _apply_goal_emphasis(
         self,
-        day_specs: dict[int, dict[str, list[str] | str]],
+        day_specs: dict[int, DaySpec],
         goal_theme: str,
         *,
         travel: bool,
@@ -470,7 +476,7 @@ class PlannerService:
 
     @staticmethod
     def _set_day(
-        day_specs: dict[int, dict[str, list[str] | str]],
+        day_specs: dict[int, DaySpec],
         day_index: int,
         *,
         focus: str | None = None,
