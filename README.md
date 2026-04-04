@@ -116,6 +116,9 @@ Vercel deployment checklist:
 9. Add the R2 variables only if upload support is enabled in that environment.
 10. Redeploy after secrets are added so both the Next.js app and the Python function receive the new values.
 
+If the login page says the Supabase browser client is not configured, the current environment is
+missing `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, or both.
+
 Ownership rules:
 
 - Local development: `.env` and optional `.envrc`

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { defaultReturnTo, normalizeReturnTo } from "../../lib/auth";
+import { buildLoginRedirectPath, defaultReturnTo, normalizeReturnTo } from "../../lib/auth";
 import { siteConfig } from "../../lib/site";
 
 describe("siteConfig", () => {
@@ -24,29 +24,37 @@ describe("normalizeReturnTo", () => {
   });
 });
 
-describe("createBrowserSupabaseClient", () => {
-  it("uses PKCE auth flow for magic-link callbacks", async () => {
-    const createClient = vi.fn(() => ({ auth: {} }));
+describe("buildLoginRedirectPath", () => {
+  it("preserves the normalized destination and optional error message", () => {
+    expect(buildLoginRedirectPath("/profile", "Missing auth code from Supabase.")).toBe(
+      "/login?return_to=%2Fprofile&error=Missing+auth+code+from+Supabase."
+    );
+  });
 
-    vi.doMock("@supabase/supabase-js", () => ({
-      createClient
+  it("falls back to the default destination for unsafe values", () => {
+    expect(buildLoginRedirectPath("https://example.com", null)).toBe(
+      `/login?return_to=${encodeURIComponent(defaultReturnTo)}`
+    );
+  });
+});
+
+describe("createBrowserSupabaseClient", () => {
+  it("creates the browser client through the Supabase SSR helper", async () => {
+    const createBrowserClient = vi.fn(() => ({ auth: {} }));
+
+    vi.doMock("@supabase/ssr", () => ({
+      createBrowserClient
     }));
 
     const { createBrowserSupabaseClient } = await import("../../lib/supabase");
 
     createBrowserSupabaseClient("https://example.supabase.co", "anon-key");
 
-    expect(createClient).toHaveBeenCalledWith(
+    expect(createBrowserClient).toHaveBeenCalledWith(
       "https://example.supabase.co",
-      "anon-key",
-      expect.objectContaining({
-        auth: expect.objectContaining({
-          flowType: "pkce",
-          persistSession: true
-        })
-      })
+      "anon-key"
     );
 
-    vi.doUnmock("@supabase/supabase-js");
+    vi.doUnmock("@supabase/ssr");
   });
 });
