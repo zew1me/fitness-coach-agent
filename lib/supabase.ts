@@ -15,7 +15,9 @@ export const supabaseBrowserClient =
 
 export function getBrowserSupabaseClient(): NonNullable<typeof supabaseBrowserClient> {
   if (supabaseBrowserClient === null) {
-    throw new Error("Supabase browser client is not configured.");
+    throw new Error(
+      "Supabase browser client is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY before using login."
+    );
   }
 
   return supabaseBrowserClient;
