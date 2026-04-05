@@ -55,6 +55,7 @@ max-complexity = 8
 
 [tool.ruff.lint.per-file-ignores]
 "api/**/*.py" = ["B008"]
+"api/[...route].py" = ["F401", "N999"]
 "tests/python/**/*.py" = [
   "PLR2004",
   "PLR0913",
