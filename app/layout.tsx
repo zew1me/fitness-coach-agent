@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import type { JSX, ReactNode } from "react";
 
+import "./globals.css";
+
 import { AppShell } from "../components/app-shell";
 import { siteConfig } from "../lib/site";
 

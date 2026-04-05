@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { buildLoginRedirectPath, defaultReturnTo, normalizeReturnTo } from "../../lib/auth";
 import { siteConfig } from "../../lib/site";
@@ -35,26 +35,5 @@ describe("buildLoginRedirectPath", () => {
     expect(buildLoginRedirectPath("https://example.com", null)).toBe(
       `/login?return_to=${encodeURIComponent(defaultReturnTo)}`
     );
-  });
-});
-
-describe("createBrowserSupabaseClient", () => {
-  it("creates the browser client through the Supabase SSR helper", async () => {
-    const createBrowserClient = vi.fn(() => ({ auth: {} }));
-
-    vi.doMock("@supabase/ssr", () => ({
-      createBrowserClient
-    }));
-
-    const { createBrowserSupabaseClient } = await import("../../lib/supabase");
-
-    createBrowserSupabaseClient("https://example.supabase.co", "anon-key");
-
-    expect(createBrowserClient).toHaveBeenCalledWith(
-      "https://example.supabase.co",
-      "anon-key"
-    );
-
-    vi.doUnmock("@supabase/ssr");
   });
 });

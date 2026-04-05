@@ -4,27 +4,28 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CoachingDashboard } from "../../components/coaching-dashboard";
+import { CoachChat } from "../../components/coach-chat";
+
+const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   cleanup();
-  vi.unstubAllGlobals();
+  globalThis.fetch = originalFetch;
 });
 
-describe("CoachingDashboard", () => {
+describe("CoachChat", () => {
   it("shows a login prompt when the browser session cannot mint a token", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(() => Promise.resolve(new Response("No browser session cookie is present.", { status: 401 })))
-    );
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response("No browser session cookie is present.", { status: 401 }))
+    ) as unknown as typeof fetch;
 
-    render(<CoachingDashboard />);
+    render(<CoachChat />);
 
-    await screen.findByText(/same-origin bearer token/i);
+    await screen.findByText(/Continue with magic link/i);
     expect(screen.getByText(/No browser session cookie is present/i)).toBeTruthy();
   });
 
-  it("loads a profile through the browser-token bridge", async () => {
+  it("loads the persisted coach thread after the browser-token bridge succeeds", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/oauth/browser-token") {
@@ -42,18 +43,33 @@ describe("CoachingDashboard", () => {
         );
       }
 
-      if (url === "/api/profile") {
+      if (url === "/api/chat/thread") {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              user_id: "athlete-1",
-              age: 34,
-              cycling_ftp_watts: 250,
-              goals: ["Improve repeatability"],
-              constraints: ["Friday travel"],
-              injuries_rehab: ["Achilles rehab"],
-              notes: "Needs portable sessions.",
-              weight_kg: 70.5
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
             }),
             { status: 200 }
           )
@@ -63,24 +79,86 @@ describe("CoachingDashboard", () => {
       return Promise.reject(new Error(`Unexpected fetch to ${url}`));
     });
 
-    vi.stubGlobal("fetch", fetchMock);
-    render(<CoachingDashboard />);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
 
-    await screen.findByText(/Browser session connected/i);
-    const [loadProfileButton] = screen.getAllByRole("button", { name: /load profile/i });
-    expect(loadProfileButton).toBeTruthy();
-    fireEvent.click(loadProfileButton as HTMLElement);
-
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("250")).toBeTruthy();
-    });
-    expect(screen.getByDisplayValue("Friday travel")).toBeTruthy();
+    await screen.findByText(/What should we work on next/i);
+    expect(screen.getByText(/Welcome back coach-side/i)).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/profile",
+      "/api/chat/thread",
       expect.objectContaining({
-        method: "POST",
+        method: "GET",
         credentials: "include"
       })
     );
+  });
+
+  it("prefills the composer when a starter prompt is chosen", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: false,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {
+                  pending_profile_field: "goals"
+                },
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "What are your main goals for the next training block?",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const starter = await screen.findByRole("button", { name: /Generate next plan/i });
+    fireEvent.click(starter);
+
+    await waitFor(() => {
+      expect(
+        (screen.getByPlaceholderText(/Ask anything about your training/i) as HTMLTextAreaElement).value
+      ).toBe("Build my next 14-day training plan.");
+    });
   });
 });

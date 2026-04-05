@@ -1,7 +1,7 @@
 import type { JSX } from "react";
 
-import { CoachingDashboard } from "../components/coaching-dashboard";
+import { CoachChat } from "../components/coach-chat";
 
 export default function HomePage(): JSX.Element {
-  return <CoachingDashboard />;
+  return <CoachChat />;
 }

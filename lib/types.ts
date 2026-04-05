@@ -72,3 +72,44 @@ export type PresignUploadResponse = {
   public_url: string | null;
   upload_url: string;
 };
+
+export type ChatAttachment = {
+  content_type: string;
+  created_at?: string;
+  filename: string;
+  id?: string;
+  message_id?: string;
+  object_key: string;
+  public_url: string | null;
+  user_id?: string;
+};
+
+export type ChatMessage = {
+  attachments: ChatAttachment[];
+  content: string;
+  created_at: string;
+  id: string;
+  metadata: {
+    message_kind?: string;
+    pending_profile_field?: string | null;
+    plan?: AdaptedPlan;
+  } & Record<string, unknown>;
+  role: "user" | "assistant";
+  thread_id: string;
+  user_id: string;
+};
+
+export type ChatThread = {
+  created_at: string;
+  id: string;
+  messages: ChatMessage[];
+  state: Record<string, unknown>;
+  updated_at: string;
+  user_id: string;
+};
+
+export type ChatThreadResponse = {
+  attachments_enabled: boolean;
+  profile_complete: boolean;
+  thread: ChatThread;
+};
