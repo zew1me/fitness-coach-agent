@@ -41,3 +41,18 @@ Status: partially started
 Completed:
 - Added API tests for protected-route auth enforcement.
 - Added repository and check-in API coverage around persistence.
+
+## Establish product branding, paired theme system, and icon direction
+
+Status: drafted and implemented locally
+
+Completed:
+- Drafted the GitHub issue body in `docs/github-issues/06-branding-theme-system.md`.
+- Added paired light and dark theme tokens with persisted `Light / Dark / System` selection.
+- Updated the app shell, homepage, login, consent, and profile surfaces to the new brand palette.
+- Added three simple mountain-based brand mark candidates under `public/brand/`.
+- Installed the missing `@supabase/ssr` package so lint, typecheck, and tests run cleanly in this worktree.
+
+Remaining:
+- Create the upstream GitHub issue once `gh auth login -h github.com` has been refreshed.
+- Choose one of the three initial icon directions and iterate on stroke / snow accent details.

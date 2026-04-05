@@ -46,36 +46,47 @@ function LoginPageContent(): JSX.Element {
   }
 
   return (
-    <main>
-      <h1>Login</h1>
-      <p>Sign in with a Supabase magic link so ChatGPT consent can bind to your athlete account.</p>
-      <form
-        onSubmit={(event) => {
-          void handleSubmit(event);
-        }}
-      >
-        <label htmlFor="email">Email</label>
-        <input
-          autoComplete="email"
-          id="email"
-          onChange={(event) => setEmail(event.target.value)}
-          placeholder="athlete@example.com"
-          required
-          type="email"
-          value={email}
-        />
-        <button disabled={submitting} type="submit">
-          {submitting ? "Sending..." : "Send magic link"}
-        </button>
-      </form>
-      {status !== null || authError !== null ? <p>{status ?? authError}</p> : null}
+    <main className="page">
+      <section className="page-card">
+        <h1>Login</h1>
+        <p>Sign in with a Supabase magic link so ChatGPT consent can bind to your athlete account.</p>
+        <form
+          onSubmit={(event) => {
+            void handleSubmit(event);
+          }}
+        >
+          <label htmlFor="email">Email</label>
+          <input
+            autoComplete="email"
+            className="input"
+            id="email"
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="athlete@example.com"
+            required
+            type="email"
+            value={email}
+          />
+          <button className="button" disabled={submitting} type="submit">
+            {submitting ? "Sending..." : "Send magic link"}
+          </button>
+        </form>
+        {status !== null || authError !== null ? <p>{status ?? authError}</p> : null}
+      </section>
     </main>
   );
 }
 
 export default function LoginPage(): JSX.Element {
   return (
-    <Suspense fallback={<main><p>Loading login…</p></main>}>
+    <Suspense
+      fallback={
+        <main className="page">
+          <section className="page-card">
+            <p>Loading login…</p>
+          </section>
+        </main>
+      }
+    >
       <LoginPageContent />
     </Suspense>
   );
