@@ -33,37 +33,47 @@ function ConsentPageContent(): JSX.Element {
   const scopes = formatScopes(scope);
 
   return (
-    <main>
-      <h1>Connect ChatGPT</h1>
-      <p>Approve ChatGPT to read and update training data for the athlete account in this browser.</p>
-      <p>Client: {clientId || "Unknown client"}</p>
-      <p>Redirect URI: {redirectUri || "Missing redirect URI"}</p>
-      <ul>
-        {scopes.map((entry) => (
-          <li key={entry}>{entry}</li>
-        ))}
-      </ul>
-      <form action="/api/oauth/authorize/decision" method="post">
-        <input name="client_id" type="hidden" value={clientId} />
-        <input name="redirect_uri" type="hidden" value={redirectUri} />
-        <input name="scope" type="hidden" value={scope} />
-        <input name="state" type="hidden" value={state} />
-        <input name="code_challenge" type="hidden" value={codeChallenge} />
-        <input name="code_challenge_method" type="hidden" value={codeChallengeMethod} />
-        <button name="decision" type="submit" value="approve">
-          Approve access
-        </button>
-        <button name="decision" type="submit" value="deny">
-          Deny
-        </button>
-      </form>
+    <main className="page">
+      <section className="page-card">
+        <h1>Connect ChatGPT</h1>
+        <p>Approve ChatGPT to read and update training data for the athlete account in this browser.</p>
+        <p>Client: {clientId || "Unknown client"}</p>
+        <p>Redirect URI: {redirectUri || "Missing redirect URI"}</p>
+        <ul className="scope-list">
+          {scopes.map((entry) => (
+            <li key={entry}>{entry}</li>
+          ))}
+        </ul>
+        <form action="/api/oauth/authorize/decision" method="post">
+          <input name="client_id" type="hidden" value={clientId} />
+          <input name="redirect_uri" type="hidden" value={redirectUri} />
+          <input name="scope" type="hidden" value={scope} />
+          <input name="state" type="hidden" value={state} />
+          <input name="code_challenge" type="hidden" value={codeChallenge} />
+          <input name="code_challenge_method" type="hidden" value={codeChallengeMethod} />
+          <button className="button button-secondary" name="decision" type="submit" value="approve">
+            Approve access
+          </button>
+          <button className="button button-ghost" name="decision" type="submit" value="deny">
+            Deny
+          </button>
+        </form>
+      </section>
     </main>
   );
 }
 
 export default function ConsentPage(): JSX.Element {
   return (
-    <Suspense fallback={<main><p>Loading consent…</p></main>}>
+    <Suspense
+      fallback={
+        <main className="page">
+          <section className="page-card">
+            <p>Loading consent…</p>
+          </section>
+        </main>
+      }
+    >
       <ConsentPageContent />
     </Suspense>
   );
