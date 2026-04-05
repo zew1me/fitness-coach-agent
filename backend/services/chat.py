@@ -113,8 +113,7 @@ class ChatService:
                 },
             )
             await self._repo.update_chat_thread_state(thread.id, state_update)
-        elif self._next_missing_profile_field(profile) is not None:
-            next_field = self._next_missing_profile_field(profile)
+        elif (next_field := self._next_missing_profile_field(profile)) is not None:
             await self._repo.create_chat_message(
                 thread_id=thread.id,
                 user_id=user_id,
