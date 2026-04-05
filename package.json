@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "bun@1.2.4",
   "engines": {
-    "node": ">=20.11.0"
+    "node": "20.x"
   },
   "scripts": {
     "dev": "next dev",
@@ -26,6 +26,7 @@
   "devDependencies": {
     "@eslint/js": "^9.22.0",
     "@next/eslint-plugin-next": "^15.2.2",
+    "eslint-config-next": "^15.2.2",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",
     "@types/node": "^22.13.14",
