@@ -9,28 +9,27 @@ export function BrandMark(): JSX.Element {
       xmlns="http://www.w3.org/2000/svg"
     >
       <path
-        d="M10 110 72 48c10-10 18-15 24-15 7 0 15 5 24 15l42 42 20 20"
+        d="M16 106H176"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="square"
+        strokeWidth="10"
+      />
+      <path
+        d="M30 106 74 62c9-9 15-13 20-13 6 0 12 4 18 11l24 25"
         fill="none"
         stroke="currentColor"
         strokeLinecap="square"
         strokeLinejoin="round"
-        strokeWidth="11"
+        strokeWidth="10"
       />
       <path
-        d="m82 48 18-18c7-7 12-10 17-10 5 0 11 3 18 10l47 48"
+        d="m108 106 28-28c7-7 12-10 16-10 5 0 10 3 17 10l12 12"
         fill="none"
         stroke="currentColor"
         strokeLinecap="square"
         strokeLinejoin="round"
-        strokeWidth="11"
-      />
-      <path
-        d="m97 33 8-7 8 7"
-        fill="none"
-        stroke="var(--action)"
-        strokeLinecap="square"
-        strokeLinejoin="round"
-        strokeWidth="8"
+        strokeWidth="10"
       />
     </svg>
   );

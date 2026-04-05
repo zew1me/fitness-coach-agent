@@ -16,7 +16,7 @@ const iconOptions = [
   {
     file: "/brand/peak-mark-horizon.svg",
     name: "Horizon",
-    note: "Lowest visual noise. More landscape than peak badge, good if you want the calmest feel."
+    note: "Lowest visual noise. More landscape than peak badge, and now the cleanest no-accent direction."
   }
 ] as const;
 
