@@ -1,0 +1,101 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What This App Is
+
+A ChatGPT-first endurance coaching app. Athletes log in via magic link, manage their fitness profiles, and submit check-ins. ChatGPT (or any OAuth client) connects via a durable OAuth 2.0 PKCE consent flow to read athlete data and request adaptive 14-day training plans.
+
+Two runtimes:
+- **Next.js 15 frontend** (TypeScript, Supabase Auth, App Router)
+- **Python FastAPI backend** running on Vercel Functions (`api/index.py` entrypoint)
+
+## Commands
+
+**Package manager: Bun**
+
+```bash
+# Frontend
+bun dev          # Next.js dev server
+bun run build    # Production build
+bun run lint     # ESLint (zero warnings)
+bun run typecheck  # tsc + Next.js typegen
+bun run test     # Vitest unit tests (tests/web/)
+bun run check    # lint + typecheck + test
+
+# Python backend
+uv run pytest tests/python/          # all Python tests
+uv run pytest tests/python/test_api.py  # single test file
+uv run pytest -k "test_name"         # single test
+uv run ruff check .                  # lint
+uv run ruff format .                 # format
+```
+
+## Architecture
+
+### Frontend (`app/`, `components/`, `lib/`)
+
+Next.js 15 App Router. Key pages:
+- `app/login/page.tsx` — magic link OTP via Supabase
+- `app/auth/callback/page.tsx` — Supabase auth callback
+- `app/consent/page.tsx` — OAuth consent UI (POSTs to `/api/oauth/authorize/decision`)
+- `app/profile/page.tsx` — athlete profile management
+
+`lib/` contains shared TS utilities: Supabase browser client (`supabase.ts`), Zod schemas (`schemas.ts`), TypeScript types (`types.ts`), and site config (`site.ts`).
+
+### Python Backend (`api/`, `backend/`)
+
+`api/index.py` is the Vercel Functions entrypoint (FastAPI app). Domain logic lives in `backend/`:
+
+- `backend/config.py` — Pydantic Settings (reads env vars)
+- `backend/models/` — Pydantic models: `auth.py` (OAuth + JWT), `planning.py` (plans), `storage.py` (R2)
+- `backend/repos/` — Supabase persistence: `oauth_repo.py` (grants/codes/refresh tokens), `supabase_repo.py` (athlete profiles + check-ins)
+- `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `planner.py` (14-day plan composition), `r2.py` (Cloudflare R2 presigned URLs)
+
+### OAuth Flow
+
+The app implements OAuth 2.0 PKCE as a provider (not consumer). ChatGPT is the OAuth client. Key endpoints:
+- `GET /.well-known/oauth-authorization-server` — discovery
+- `GET /api/oauth/authorize` — start flow (redirects to login if unauthenticated)
+- `POST /api/oauth/authorize/decision` — user approves/denies consent
+- `POST /api/oauth/token` — exchange code for tokens
+- `POST /api/oauth/revoke` — revoke grant
+
+Consent grants are durable (persisted to `oauth_grants` table). The `require_user_context()` FastAPI dependency validates bearer JWTs on protected endpoints.
+
+### Database (Supabase + Postgres)
+
+Migrations in `supabase/migrations/`:
+- `0001_initial_schema.sql` — `athlete_profiles`, `check_ins`
+- `0002_oauth_durable_consent.sql` — `oauth_grants`, `oauth_authorization_codes`, `oauth_refresh_tokens`
+
+Use separate Supabase projects per environment (development / preview / production).
+
+### Storage
+
+Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` returns a presigned URL; the client uploads directly to R2.
+
+## Environment Variables
+
+See `.env.example`. Required:
+- `APP_ENV`, `APP_BASE_URL`, `APP_JWT_SECRET`
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+Optional (features degrade gracefully without):
+- `OPENAI_API_KEY` — plan generation
+- `R2_*` — file uploads
+
+## Tests
+
+- Web tests: `tests/web/` — Vitest, `environment: "node"`
+- Python tests: `tests/python/` — pytest with `asyncio_mode = "auto"`
+- Python test config: `conftest.py` for fixtures
+
+## Code Conventions
+
+- TypeScript strict mode; ESLint zero-warnings policy
+- Python: Ruff linting + formatting, 100-char line length, `ty` for type checking
+- Zod schemas in `lib/schemas.ts` for all API validation boundaries
+- All Python async handlers use `async def`
+- Bearer token auth: clients pass `Authorization: Bearer <jwt>`; server validates via `require_user_context()`

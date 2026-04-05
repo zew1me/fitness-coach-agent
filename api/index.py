@@ -15,6 +15,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
+from backend.models.chat import ChatSendRequest
 from backend.models.planning import AthleteProfile, CheckInInput
 from backend.models.storage import PresignUploadRequest
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
@@ -30,11 +31,13 @@ from backend.services.auth import (
     OAuthInvalidGrantError,
     OAuthLoginRequiredError,
 )
+from backend.services.chat import ChatService, ChatUnavailableError
 from backend.services.planner import PlannerService
 from backend.services.r2 import R2Service
 
 app = FastAPI(title="Exercise Training Plan GPT")
 auth_service = AuthService()
+chat_service = ChatService()
 planner_service = PlannerService()
 repo = SupabaseRepository()
 r2_service = R2Service()
@@ -325,6 +328,49 @@ async def generate_plan(
     plan = planner_service.create_plan(profile, check_in)
     prompt = planner_service.compose_prompt(profile, check_in)
     return {"plan": plan.model_dump(mode="json"), "prompt_preview": prompt}
+
+
+@app.get("/api/chat/thread")
+async def get_chat_thread(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        bootstrap = await chat_service.bootstrap_thread(user_context.user_id)
+    except ChatUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return bootstrap.model_dump(mode="json")
+
+
+@app.post("/api/chat/messages")
+async def create_chat_message(
+    payload: ChatSendRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        response = await chat_service.send_message(
+            user_context.user_id,
+            payload.content,
+            payload.attachments,
+        )
+    except ChatUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response.model_dump(mode="json")
+
+
+@app.post("/api/chat/attachments/presign")
+async def presign_chat_upload(
+    payload: PresignUploadRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    presigned_upload = r2_service.create_presigned_upload(
+        user_id=user_context.user_id,
+        request=payload,
+    )
+    return presigned_upload.model_dump(mode="json")
 
 
 @app.post("/api/files/presign-upload")

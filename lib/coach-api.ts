@@ -1,11 +1,14 @@
 import {
   athleteProfileSchema,
+  chatMessageSchema,
   planRequestSchema,
   uploadRequestSchema
 } from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
+  ChatAttachment,
+  ChatThreadResponse,
   CheckInResponse,
   GeneratedPlanResponse,
   PresignUploadRequest,
@@ -121,6 +124,52 @@ export async function createUploadIntent(
   const body = uploadRequestSchema.parse(payload);
   return authorizedFetch<PresignUploadResponse>(
     "/api/files/presign-upload",
+    {
+      method: "POST",
+      body: JSON.stringify(body)
+    },
+    fetchImpl
+  );
+}
+
+export async function loadChatThread(fetchImpl: FetchLike = fetch): Promise<ChatThreadResponse> {
+  return authorizedFetch<ChatThreadResponse>(
+    "/api/chat/thread",
+    {
+      method: "GET"
+    },
+    fetchImpl
+  );
+}
+
+export async function sendChatMessage(
+  payload: {
+    attachments?: ChatAttachment[];
+    content: string;
+  },
+  fetchImpl: FetchLike = fetch
+): Promise<ChatThreadResponse> {
+  const body = chatMessageSchema.parse({
+    content: payload.content,
+    attachments: payload.attachments ?? []
+  });
+  return authorizedFetch<ChatThreadResponse>(
+    "/api/chat/messages",
+    {
+      method: "POST",
+      body: JSON.stringify(body)
+    },
+    fetchImpl
+  );
+}
+
+export async function createChatUploadIntent(
+  payload: PresignUploadRequest,
+  fetchImpl: FetchLike = fetch
+): Promise<PresignUploadResponse> {
+  const body = uploadRequestSchema.parse(payload);
+  return authorizedFetch<PresignUploadResponse>(
+    "/api/chat/attachments/presign",
     {
       method: "POST",
       body: JSON.stringify(body)
