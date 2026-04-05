@@ -108,7 +108,12 @@ function LoggedOutLanding({ error }: Readonly<{ error: string | null }>): JSX.El
           and photo-backed coaching updates. The forms are gone from the main surface so the
           experience feels closer to a modern chat assistant than a dashboard.
         </p>
-        {error ? <p className={styles.errorTextInline}>{error}</p> : null}
+        {error ? (
+          <p className={styles.landingHint}>
+            Sign in to start your coaching chat. If the app feels slow to wake up, give it a
+            moment and try again.
+          </p>
+        ) : null}
         <div className={styles.actionRow}>
           <Link className={styles.primaryButton} href="/login?return_to=/">
             Continue with magic link
@@ -122,16 +127,75 @@ function LoggedOutLanding({ error }: Readonly<{ error: string | null }>): JSX.El
   );
 }
 
+function OutRunningIllustration(): JSX.Element {
+  return (
+    <div aria-hidden="true" className={styles.errorIllustration}>
+      <svg className={styles.errorArt} viewBox="0 0 240 180">
+        <defs>
+          <linearGradient id="skyWash" x1="0%" x2="100%" y1="0%" y2="100%">
+            <stop offset="0%" stopColor="#f8fafc" />
+            <stop offset="100%" stopColor="#dbeafe" />
+          </linearGradient>
+        </defs>
+        <rect fill="url(#skyWash)" height="180" rx="28" width="240" />
+        <circle cx="182" cy="44" fill="#f59e0b" opacity="0.18" r="18" />
+        <path
+          d="M24 130C53 98 76 84 96 84C118 84 131 107 154 107C174 107 192 92 216 66"
+          fill="none"
+          stroke="#0f766e"
+          strokeLinecap="round"
+          strokeWidth="8"
+        />
+        <path
+          d="M28 128L72 94L102 111L150 78L210 113"
+          fill="none"
+          opacity="0.85"
+          stroke="#1d4ed8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="6"
+        />
+        <path
+          d="M92 56L120 34L147 56"
+          fill="none"
+          stroke="#0f172a"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="7"
+        />
+        <path
+          d="M80 82C96 68 109 61 121 61C138 61 149 74 166 74"
+          fill="none"
+          opacity="0.35"
+          stroke="#0f172a"
+          strokeLinecap="round"
+          strokeWidth="6"
+        />
+        <circle cx="112" cy="109" fill="#ea580c" r="6" />
+        <path
+          d="M112 116L104 130M112 116L123 125M104 130L95 145M123 125L133 140M103 121L90 126"
+          fill="none"
+          stroke="#ea580c"
+          strokeLinecap="round"
+          strokeWidth="5"
+        />
+      </svg>
+    </div>
+  );
+}
+
 function ChatErrorState({ error }: Readonly<{ error: string | null }>): JSX.Element {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.errorCard}>
+        <OutRunningIllustration />
         <p className={styles.eyebrow}>Coach unavailable</p>
-        <h1 className={styles.errorTitle}>The coach chat could not start.</h1>
+        <h1 className={styles.errorTitle}>Sorry, we&apos;re out running.</h1>
         <p className={styles.errorText}>
-          {error ??
-            "The post-login assistant needs the chat backend and model key configured before it can respond."}
+          We&apos;ll be back soon. You&apos;ve got this. In the meantime, hang onto the thread and
+          try again in a minute or two.
         </p>
+        {error ? <p className={styles.errorDetail}>{error}</p> : null}
         <div className={styles.actionRow}>
           <button className={styles.primaryButton} onClick={() => window.location.reload()} type="button">
             Retry

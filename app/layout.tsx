@@ -9,7 +9,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: siteConfig.appName,
-  description: siteConfig.description
+  description: siteConfig.description,
+  icons: {
+    icon: "/brand/peak-mark-horizon.svg"
+  }
 };
 
 type RootLayoutProps = Readonly<{

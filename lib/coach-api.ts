@@ -17,9 +17,46 @@ import type {
 
 type FetchLike = typeof fetch;
 
+function normalizeErrorText(detail: string): string {
+  const trimmed = detail.trim();
+  if (trimmed.length === 0) {
+    return "The coaching backend is unavailable right now. Please try again in a moment.";
+  }
+
+  if (trimmed.startsWith("<") || trimmed.toLowerCase().includes("<!doctype html")) {
+    return "The coaching backend is unavailable right now. Please try again in a moment.";
+  }
+
+  const collapsed = trimmed.replace(/\s+/g, " ");
+  return collapsed.length > 200 ? `${collapsed.slice(0, 197)}...` : collapsed;
+}
+
+async function readErrorDetail(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = (await response.json()) as Record<string, unknown>;
+      const detail =
+        typeof payload["detail"] === "string"
+          ? payload["detail"]
+          : typeof payload["message"] === "string"
+            ? payload["message"]
+            : typeof payload["error"] === "string"
+              ? payload["error"]
+              : "";
+      return normalizeErrorText(detail);
+    } catch {
+      return "The coaching backend is unavailable right now. Please try again in a moment.";
+    }
+  }
+
+  return normalizeErrorText(await response.text());
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const detail = await response.text();
+    const detail = await readErrorDetail(response);
     throw new Error(detail || `Request failed with status ${response.status}`);
   }
   return (await response.json()) as T;
