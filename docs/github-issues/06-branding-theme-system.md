@@ -2,7 +2,7 @@
 
 ## Summary
 
-Create a disciplined brand system for the product and adapt the app UI to reflect it. The core direction is an off-white default theme for long chat-heavy sessions, a true paired deep-navy dark theme for early-morning and late-night use, and a simple sport-agnostic mountain symbol with a restrained orange snow flash.
+Create a disciplined brand system for the product and adapt the app UI to reflect it. The core direction is an off-white default theme for long chat-heavy sessions, a true paired deep-navy dark theme for early-morning and late-night use, and a simple sport-agnostic mountain symbol. The chosen default direction is the `Horizon` mark: a calm mountain-and-horizon silhouette with no letterforms and no orange accent in the final icon.
 
 ## Goals
 
@@ -56,7 +56,7 @@ Create a disciplined brand system for the product and adapt the app UI to reflec
 - Use mountain / ridge imagery inspired by the simple line sketch direction.
 - Keep it symbolic rather than literal or illustrative.
 - Avoid body-shape, physique, or single-sport imagery.
-- Add a restrained orange snow line / summit accent if it helps the mark feel distinctive.
+- Keep the final selected mark neutral and monochrome; do not rely on an orange summit accent in the icon itself.
 - Do not use letters as the main identity.
 
 ## Deliverables
@@ -64,4 +64,4 @@ Create a disciplined brand system for the product and adapt the app UI to reflec
 - Shared theme tokens and paired light/dark mode support in the app shell.
 - Theme selector wired into the UI with persisted preference and system fallback.
 - Updated homepage/dashboard styling that reflects the new brand direction.
-- Multiple simple mountain mark options for review and iteration.
+- Multiple simple mountain mark options for review and iteration, with `Horizon` selected as the default.
