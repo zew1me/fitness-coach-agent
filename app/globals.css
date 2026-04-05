@@ -279,7 +279,7 @@ textarea {
   cursor: pointer;
   font-weight: 700;
   text-decoration: none;
-  color: #fff;
+  color: var(--bg);
   background: var(--text);
   transition:
     transform 180ms ease,

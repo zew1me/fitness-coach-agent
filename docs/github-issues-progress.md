@@ -1,8 +1,7 @@
 # GitHub Issues Progress
 
-GitHub issue filing is currently blocked locally because this repo has no configured remote and
-`gh auth status` reports an invalid token. The issue titles and bodies were drafted in the working
-session, and this file tracks implementation progress until those issues can be created upstream.
+This file tracks implementation progress for the drafted and filed GitHub issues backing the current
+workstream.
 
 ## Wire Supabase persistence for athlete profiles and check-ins
 
@@ -44,15 +43,12 @@ Completed:
 
 ## Establish product branding, paired theme system, and icon direction
 
-Status: drafted and implemented locally
+Status: completed in issue `#23` and merged via PR `#25`
 
 Completed:
-- Drafted the GitHub issue body in `docs/github-issues/06-branding-theme-system.md`.
+- Filed the GitHub issue as `#23` using `docs/github-issues/06-branding-theme-system.md`.
 - Added paired light and dark theme tokens with persisted `Light / Dark / System` selection.
 - Updated the app shell, homepage, login, consent, and profile surfaces to the new brand palette.
 - Added three simple mountain-based brand mark candidates under `public/brand/`.
+- Chose the `Horizon` direction as the default brand mark and removed the orange accent from the final icon.
 - Installed the missing `@supabase/ssr` package so lint, typecheck, and tests run cleanly in this worktree.
-
-Remaining:
-- Create the upstream GitHub issue once `gh auth login -h github.com` has been refreshed.
-- Choose one of the three initial icon directions and iterate on stroke / snow accent details.
