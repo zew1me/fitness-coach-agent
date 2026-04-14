@@ -55,19 +55,24 @@ function LoginPageContent(): JSX.Element {
 
     try {
       const supabase = getBrowserSupabaseClient();
-      const { data, error } = await supabase.auth.verifyOtp({ email, token: otp, type: "magiclink" });
+      const { data, error } = await supabase.auth.verifyOtp({ email, token: otp, type: "email" });
 
       if (error !== null) {
         throw error;
       }
 
       const accessToken = data.session?.access_token;
-      if (accessToken !== undefined) {
-        await fetch("/api/oauth/browser-session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ access_token: accessToken }),
-        });
+      if (accessToken === undefined) {
+        throw new Error("No session returned after OTP verification.");
+      }
+
+      const sessionRes = await fetch("/api/oauth/browser-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: accessToken }),
+      });
+      if (!sessionRes.ok) {
+        throw new Error("Failed to establish browser session.");
       }
 
       window.location.href = returnTo;
