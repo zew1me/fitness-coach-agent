@@ -15,7 +15,13 @@ Two runtimes:
 **Package manager: Bun**
 
 ```bash
-# Frontend
+# Local dev (local Supabase + Next.js in one command)
+bun run dev:local   # starts local Supabase if needed, then next dev against it
+bun run db:start    # start local Supabase stack only
+bun run db:stop     # stop local Supabase stack
+bun run db:reset    # wipe + replay all migrations locally
+
+# Remote dev (uses .env.local which points to the hosted Supabase project)
 bun dev          # Next.js dev server
 bun run build    # Production build
 bun run lint     # ESLint (zero warnings)
