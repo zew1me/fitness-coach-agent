@@ -118,9 +118,6 @@ function LoggedOutLanding({ error }: Readonly<{ error: string | null }>): JSX.El
           <Link className={styles.primaryButton} href="/login?return_to=/">
             Continue with magic link
           </Link>
-          <Link className={styles.secondaryButton} href="/consent">
-            OAuth consent
-          </Link>
         </div>
       </section>
     </main>
