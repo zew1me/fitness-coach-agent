@@ -20,4 +20,4 @@ SUPABASE_SERVICE_ROLE_KEY="$LOCAL_SERVICE_ROLE_KEY" \
 APP_BASE_URL="http://localhost:3000" \
 APP_ENV="development" \
 APP_JWT_SECRET="super-secret-jwt-token-with-at-least-32-characters-long" \
-exec next dev --port 3000
+exec next dev
