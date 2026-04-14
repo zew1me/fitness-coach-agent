@@ -1,19 +1,31 @@
+import { defineConfig, globalIgnores } from "eslint/config";
+import { FlatCompat } from "@eslint/eslintrc";
 import js from "@eslint/js";
-import nextPlugin from "@next/eslint-plugin-next";
 import importPlugin from "eslint-plugin-import";
 import jsxA11y from "eslint-plugin-jsx-a11y";
 import tseslint from "@typescript-eslint/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 import unusedImports from "eslint-plugin-unused-imports";
 import globals from "globals";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const productionFiles = ["app/**/*.{ts,tsx}", "components/**/*.{ts,tsx}", "lib/**/*.{ts,tsx}"];
 const testFiles = ["tests/web/**/*.{ts,tsx}"];
+const compat = new FlatCompat({
+  baseDirectory: path.dirname(fileURLToPath(import.meta.url))
+});
 
-export default [
-  {
-    ignores: [".cache/**", ".next/**", ".uv-cache/**", ".venv/**", ".vercel/**", "node_modules/**"]
-  },
+export default defineConfig([
+  ...compat.extends("next/core-web-vitals"),
+  globalIgnores([
+    ".cache/**",
+    ".next/**",
+    ".uv-cache/**",
+    ".venv/**",
+    ".vercel/**",
+    "node_modules/**"
+  ]),
   js.configs.recommended,
   {
     files: ["**/*.{ts,tsx}"],
@@ -28,7 +40,6 @@ export default [
       }
     },
     plugins: {
-      "@next/next": nextPlugin,
       "@typescript-eslint": tseslint,
       import: importPlugin,
       "jsx-a11y": jsxA11y,
@@ -40,7 +51,6 @@ export default [
       }
     },
     rules: {
-      ...nextPlugin.configs.recommended.rules,
       "complexity": ["error", 8],
       "import/no-default-export": "error",
       "import/order": [
@@ -96,4 +106,4 @@ export default [
       "@typescript-eslint/no-non-null-assertion": "off"
     }
   }
-];
+]);

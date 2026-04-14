@@ -25,7 +25,10 @@ declare const styles: {
   readonly emptyState: string;
   readonly emptyText: string;
   readonly emptyTitle: string;
+  readonly errorArt: string;
   readonly errorCard: string;
+  readonly errorDetail: string;
+  readonly errorIllustration: string;
   readonly errorText: string;
   readonly errorTextInline: string;
   readonly errorTitle: string;
@@ -37,6 +40,7 @@ declare const styles: {
   readonly ghostButton: string;
   readonly hiddenInput: string;
   readonly landingCard: string;
+  readonly landingHint: string;
   readonly landingText: string;
   readonly landingTitle: string;
   readonly landingWrap: string;
