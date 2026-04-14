@@ -55,10 +55,19 @@ function LoginPageContent(): JSX.Element {
 
     try {
       const supabase = getBrowserSupabaseClient();
-      const { error } = await supabase.auth.verifyOtp({ email, token: otp, type: "magiclink" });
+      const { data, error } = await supabase.auth.verifyOtp({ email, token: otp, type: "magiclink" });
 
       if (error !== null) {
         throw error;
+      }
+
+      const accessToken = data.session?.access_token;
+      if (accessToken !== undefined) {
+        await fetch("/api/oauth/browser-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ access_token: accessToken }),
+        });
       }
 
       window.location.href = returnTo;
