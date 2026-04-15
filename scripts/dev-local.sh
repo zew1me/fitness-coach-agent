@@ -2,6 +2,15 @@
 set -e
 source "$(dirname "$0")/colima-docker-host.sh"
 
+# Load optional keys (OPENAI_API_KEY, R2_*, etc.) from .env.local if present.
+# Local Supabase vars set below take precedence.
+if [ -f .env.local ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env.local
+  set +a
+fi
+
 # Start Supabase if not already running
 if ! supabase status > /dev/null 2>&1; then
   echo "Starting local Supabase..."
@@ -20,6 +29,7 @@ SUPABASE_SERVICE_ROLE_KEY="$LOCAL_SERVICE_ROLE_KEY" \
 APP_BASE_URL="http://localhost:3000" \
 APP_ENV="development" \
 APP_JWT_SECRET="super-secret-jwt-token-with-at-least-32-characters-long" \
+OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
 uv run uvicorn api.index:app --host 127.0.0.1 --port "$PYTHON_API_PORT" &
 UVICORN_PID=$!
 trap "kill $UVICORN_PID 2>/dev/null" EXIT
