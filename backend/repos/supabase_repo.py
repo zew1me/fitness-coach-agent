@@ -1,15 +1,16 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import uuid4
 
 from backend.config import settings
+from backend.models.athlete import AthleteProfile, RecoveryLog, ScheduleAvailability, ScheduleOverride, SportThreshold
 from backend.models.chat import (
     ChatAttachmentInput,
     ChatAttachmentRecord,
     ChatMessage,
     ChatThread,
 )
-from backend.models.planning import AthleteProfile, CheckInInput, CheckInRecord
+from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
 from supabase import Client, create_client
 
 
@@ -22,71 +23,287 @@ class RecordNotFoundError(LookupError):
 
 
 class SupabaseRepository:
-    """Supabase-backed adapter for athlete profile and check-in persistence."""
+    """Supabase-backed adapter for all domain persistence."""
 
-    def __init__(  # noqa: PLR0913
-        self,
-        client: Any | None = None,
-        *,
-        athlete_profiles_table: str = "athlete_profiles",
-        chat_attachments_table: str = "chat_attachments",
-        chat_messages_table: str = "chat_messages",
-        chat_threads_table: str = "chat_threads",
-        check_ins_table: str = "check_ins",
-    ) -> None:
+    def __init__(self, client: Any | None = None) -> None:
         self._client = client or self._build_client()
-        self._athlete_profiles_table = athlete_profiles_table
-        self._chat_attachments_table = chat_attachments_table
-        self._chat_messages_table = chat_messages_table
-        self._chat_threads_table = chat_threads_table
-        self._check_ins_table = check_ins_table
+
+    # ── Athlete Profiles ──────────────────────────────────────
 
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         client = self._require_client()
-        response = (
-            client.table(self._athlete_profiles_table).select("*").eq("user_id", user_id).execute()
-        )
+        response = client.table("athlete_profiles").select("*").eq("user_id", user_id).execute()
         rows = response.data or []
         if not rows:
             raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
-        return self._parse_athlete_profile(rows[0])
+        return AthleteProfile.model_validate(rows[0])
 
     async def upsert_athlete_profile(self, profile: AthleteProfile) -> AthleteProfile:
         client = self._require_client()
-        payload = profile.model_dump(mode="python")
+        payload = profile.model_dump(mode="json", exclude={"created_at", "updated_at"})
         response = (
-            client.table(self._athlete_profiles_table)
+            client.table("athlete_profiles").upsert(payload, on_conflict="user_id").execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the upserted athlete profile row.")
+        return AthleteProfile.model_validate(rows[0])
+
+    # ── Sport Thresholds ──────────────────────────────────────
+
+    async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+        client = self._require_client()
+        response = (
+            client.table("sport_thresholds")
+            .select("*")
+            .eq("user_id", user_id)
+            .is_("superseded_at", "null")
+            .order("effective_from", desc=True)
+            .execute()
+        )
+        return [SportThreshold.model_validate(r) for r in (response.data or [])]
+
+    async def upsert_sport_threshold(self, threshold: SportThreshold) -> SportThreshold:
+        client = self._require_client()
+        # Supersede existing active threshold for this sport
+        client.table("sport_thresholds").update(
+            {"superseded_at": datetime.now(UTC).isoformat()}
+        ).eq("user_id", threshold.user_id).eq("sport", threshold.sport).is_(
+            "superseded_at", "null"
+        ).execute()
+
+        payload = threshold.model_dump(mode="json", exclude={"created_at", "updated_at", "superseded_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = client.table("sport_thresholds").insert(payload).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the inserted sport threshold row.")
+        return SportThreshold.model_validate(rows[0])
+
+    # ── Activities ────────────────────────────────────────────
+
+    async def create_activity(self, activity: Activity) -> Activity:
+        client = self._require_client()
+        payload = activity.model_dump(mode="json", exclude={"created_at", "updated_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = client.table("activities").insert(payload).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the inserted activity row.")
+        return Activity.model_validate(rows[0])
+
+    async def list_activities(
+        self,
+        user_id: str,
+        *,
+        sport: str | None = None,
+        since: date | None = None,
+        limit: int = 50,
+    ) -> list[Activity]:
+        client = self._require_client()
+        query = client.table("activities").select("*").eq("user_id", user_id)
+        if sport:
+            query = query.eq("sport", sport)
+        if since:
+            query = query.gte("activity_date", since.isoformat())
+        response = query.order("activity_date", desc=True).limit(limit).execute()
+        return [Activity.model_validate(r) for r in (response.data or [])]
+
+    # ── Daily Load Snapshots ──────────────────────────────────
+
+    async def upsert_load_snapshots(
+        self, user_id: str, snapshots: list[dict], sport: str | None = None
+    ) -> None:
+        client = self._require_client()
+        for s in snapshots:
+            s["user_id"] = user_id
+            s["sport"] = sport
+            if "id" not in s:
+                s["id"] = str(uuid4())
+            s["snapshot_date"] = (
+                s["snapshot_date"].isoformat()
+                if isinstance(s["snapshot_date"], date)
+                else s["snapshot_date"]
+            )
+        client.table("daily_load_snapshots").upsert(
+            snapshots, on_conflict="user_id,snapshot_date,sport"
+        ).execute()
+
+    async def get_latest_load(
+        self, user_id: str, sport: str | None = None
+    ) -> DailyLoadSnapshot | None:
+        client = self._require_client()
+        query = client.table("daily_load_snapshots").select("*").eq("user_id", user_id)
+        if sport is None:
+            query = query.is_("sport", "null")
+        else:
+            query = query.eq("sport", sport)
+        response = query.order("snapshot_date", desc=True).limit(1).execute()
+        rows = response.data or []
+        if not rows:
+            return None
+        return DailyLoadSnapshot.model_validate(rows[0])
+
+    # ── Goals ─────────────────────────────────────────────────
+
+    async def create_goal(self, goal: Goal) -> Goal:
+        client = self._require_client()
+        payload = goal.model_dump(mode="json", exclude={"created_at", "updated_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = client.table("goals").insert(payload).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the inserted goal row.")
+        return Goal.model_validate(rows[0])
+
+    async def list_active_goals(self, user_id: str) -> list[Goal]:
+        client = self._require_client()
+        response = (
+            client.table("goals")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("status", "active")
+            .order("priority")
+            .execute()
+        )
+        return [Goal.model_validate(r) for r in (response.data or [])]
+
+    async def update_goal(self, goal_id: str, updates: dict) -> Goal:
+        client = self._require_client()
+        response = client.table("goals").update(updates).eq("id", goal_id).execute()
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(f"Goal '{goal_id}' not found.")
+        return Goal.model_validate(rows[0])
+
+    # ── Recovery Logs ─────────────────────────────────────────
+
+    async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+        client = self._require_client()
+        payload = log.model_dump(mode="json", exclude={"created_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = (
+            client.table("recovery_logs")
+            .upsert(payload, on_conflict="user_id,log_date")
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the upserted recovery log row.")
+        return RecoveryLog.model_validate(rows[0])
+
+    async def list_recovery_logs(
+        self, user_id: str, *, since: date | None = None, limit: int = 14
+    ) -> list[RecoveryLog]:
+        client = self._require_client()
+        query = client.table("recovery_logs").select("*").eq("user_id", user_id)
+        if since:
+            query = query.gte("log_date", since.isoformat())
+        response = query.order("log_date", desc=True).limit(limit).execute()
+        return [RecoveryLog.model_validate(r) for r in (response.data or [])]
+
+    # ── Schedule ──────────────────────────────────────────────
+
+    async def upsert_schedule(self, schedule: ScheduleAvailability) -> ScheduleAvailability:
+        client = self._require_client()
+        payload = schedule.model_dump(mode="json", exclude={"created_at", "updated_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = (
+            client.table("schedule_availability")
             .upsert(payload, on_conflict="user_id")
             .execute()
         )
         rows = response.data or []
         if not rows:
-            raise RuntimeError("Supabase did not return the upserted athlete profile row.")
-        return self._parse_athlete_profile(rows[0])
+            raise RuntimeError("Supabase did not return the upserted schedule row.")
+        return ScheduleAvailability.model_validate(rows[0])
 
-    async def create_check_in(self, check_in: CheckInInput) -> CheckInRecord:
+    async def get_schedule(self, user_id: str) -> ScheduleAvailability | None:
         client = self._require_client()
-        payload: dict[str, Any] = {
-            "id": str(uuid4()),
-            "user_id": check_in.user_id,
-            "raw_text": check_in.raw_text,
-            "image_count": check_in.image_count,
-            "effective_date": (
-                check_in.effective_date.isoformat() if check_in.effective_date is not None else None
-            ),
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-        response = client.table(self._check_ins_table).insert(payload).execute()
+        response = (
+            client.table("schedule_availability").select("*").eq("user_id", user_id).execute()
+        )
+        rows = response.data or []
+        return ScheduleAvailability.model_validate(rows[0]) if rows else None
+
+    async def upsert_schedule_override(self, override: ScheduleOverride) -> ScheduleOverride:
+        client = self._require_client()
+        payload = override.model_dump(mode="json", exclude={"created_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = (
+            client.table("schedule_overrides")
+            .upsert(payload, on_conflict="user_id,override_date")
+            .execute()
+        )
         rows = response.data or []
         if not rows:
-            raise RuntimeError("Supabase did not return the inserted check-in row.")
-        return self._parse_check_in_record(rows[0])
+            raise RuntimeError("Supabase did not return the upserted schedule override row.")
+        return ScheduleOverride.model_validate(rows[0])
+
+    # ── Training Plans ────────────────────────────────────────
+
+    async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+        client = self._require_client()
+        # Supersede existing active plan
+        client.table("training_plans").update(
+            {"status": "superseded"}
+        ).eq("user_id", plan.user_id).eq("status", "active").execute()
+
+        payload = plan.model_dump(mode="json", exclude={"created_at", "updated_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = client.table("training_plans").insert(payload).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the inserted training plan row.")
+        return TrainingPlan.model_validate(rows[0])
+
+    async def get_active_plan(self, user_id: str) -> TrainingPlan | None:
+        client = self._require_client()
+        response = (
+            client.table("training_plans")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return TrainingPlan.model_validate(rows[0]) if rows else None
+
+    async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+        client = self._require_client()
+        payloads = []
+        for w in workouts:
+            p = w.model_dump(mode="json", exclude={"created_at", "updated_at"})
+            if not p.get("id"):
+                p["id"] = str(uuid4())
+            payloads.append(p)
+        response = client.table("plan_workouts").insert(payloads).execute()
+        return [PlanWorkout.model_validate(r) for r in (response.data or [])]
+
+    async def list_plan_workouts(
+        self, plan_id: str, *, since: date | None = None
+    ) -> list[PlanWorkout]:
+        client = self._require_client()
+        query = client.table("plan_workouts").select("*").eq("plan_id", plan_id)
+        if since:
+            query = query.gte("workout_date", since.isoformat())
+        response = query.order("workout_date").execute()
+        return [PlanWorkout.model_validate(r) for r in (response.data or [])]
+
+    # ── Chat (unchanged from original) ────────────────────────
 
     async def get_or_create_chat_thread(self, user_id: str) -> ChatThread:
         client = self._require_client()
-        response = (
-            client.table(self._chat_threads_table).select("*").eq("user_id", user_id).execute()
-        )
+        response = client.table("chat_threads").select("*").eq("user_id", user_id).execute()
         rows = response.data or []
         if rows:
             thread = self._parse_chat_thread(rows[0])
@@ -98,7 +315,7 @@ class SupabaseRepository:
                 "created_at": datetime.now(UTC).isoformat(),
                 "updated_at": datetime.now(UTC).isoformat(),
             }
-            created = client.table(self._chat_threads_table).insert(payload).execute()
+            created = client.table("chat_threads").insert(payload).execute()
             created_rows = created.data or []
             if not created_rows:
                 raise RuntimeError("Supabase did not return the inserted chat thread row.")
@@ -109,10 +326,7 @@ class SupabaseRepository:
     async def update_chat_thread_state(self, thread_id: str, state: dict[str, Any]) -> ChatThread:
         client = self._require_client()
         response = (
-            client.table(self._chat_threads_table)
-            .update({"state": state})
-            .eq("id", thread_id)
-            .execute()
+            client.table("chat_threads").update({"state": state}).eq("id", thread_id).execute()
         )
         rows = response.data or []
         if not rows:
@@ -124,7 +338,7 @@ class SupabaseRepository:
     async def list_chat_messages(self, thread_id: str) -> list[ChatMessage]:
         client = self._require_client()
         response = (
-            client.table(self._chat_messages_table)
+            client.table("chat_messages")
             .select("*")
             .eq("thread_id", thread_id)
             .order("created_at")
@@ -135,7 +349,7 @@ class SupabaseRepository:
         if not messages:
             return []
         attachments_response = (
-            client.table(self._chat_attachments_table)
+            client.table("chat_attachments")
             .select("*")
             .in_("message_id", [message.id for message in messages])
             .order("created_at")
@@ -172,7 +386,7 @@ class SupabaseRepository:
             "metadata": metadata or {},
             "created_at": datetime.now(UTC).isoformat(),
         }
-        response = client.table(self._chat_messages_table).insert(payload).execute()
+        response = client.table("chat_messages").insert(payload).execute()
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted chat message row.")
@@ -191,12 +405,14 @@ class SupabaseRepository:
                 }
                 for attachment in attachments
             ]
-            client.table(self._chat_attachments_table).insert(attachment_payloads).execute()
+            client.table("chat_attachments").insert(attachment_payloads).execute()
         messages = await self.list_chat_messages(thread_id)
         for existing in messages:
             if existing.id == message.id:
                 return existing
         return message
+
+    # ── Internal helpers ──────────────────────────────────────
 
     def _build_client(self) -> Client | None:
         if not settings.supabase_url or not settings.supabase_service_role_key:
@@ -209,18 +425,6 @@ class SupabaseRepository:
                 "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
             )
         return self._client
-
-    @staticmethod
-    def _parse_athlete_profile(row: object) -> AthleteProfile:
-        if not isinstance(row, dict):
-            raise TypeError("Supabase athlete profile rows must be objects.")
-        return AthleteProfile.model_validate(row)
-
-    @staticmethod
-    def _parse_check_in_record(row: object) -> CheckInRecord:
-        if not isinstance(row, dict):
-            raise TypeError("Supabase check-in rows must be objects.")
-        return CheckInRecord.model_validate(row)
 
     @staticmethod
     def _parse_chat_thread(row: object) -> ChatThread:
