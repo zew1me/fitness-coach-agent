@@ -130,4 +130,43 @@ describe("app/api/chat route", () => {
       })
     );
   });
+
+  it("executes generate_training_plan by calling the engine plan structure endpoint", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ phases: [{ name: "Base" }], total_weeks: 8 }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const generateTrainingPlan = tools["generate_training_plan"] as {
+      // eslint-disable-next-line no-unused-vars
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    await expect(
+      generateTrainingPlan.execute({
+        goal_id: "goal-1",
+        user_id: "athlete-1"
+      })
+    ).resolves.toEqual({ phases: [{ name: "Base" }], total_weeks: 8 });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/generate-plan-structure",
+      expect.objectContaining({
+        body: JSON.stringify({
+          goal_id: "goal-1",
+          user_id: "athlete-1"
+        }),
+        method: "POST"
+      })
+    );
+  });
 });

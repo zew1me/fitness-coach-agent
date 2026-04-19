@@ -83,6 +83,13 @@ export function createCoachTools(context: CoachToolContext): ToolSet {
             return postEngine(context, "/api/engine/estimate-thresholds", engineInput(input));
           }
 
+          if (name === "generate_training_plan") {
+            return postEngine(context, "/api/engine/generate-plan-structure", {
+              ...engineInput(input),
+              user_id: context.userId,
+            });
+          }
+
           return {
             input,
             status: "pending_implementation",
