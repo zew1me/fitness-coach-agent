@@ -308,6 +308,83 @@ async def test_protected_profile_requires_bearer_token() -> None:
     assert response.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_chat_attachments_presign_requires_bearer_token() -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/chat/attachments/presign",
+            json={
+                "filename": "garage-test.txt",
+                "content_type": "text/plain",
+                "content_length": 1,
+                "purpose": "chat-attachment",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing bearer token"
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_upload_requires_bearer_token() -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/chat/attachments/upload")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing bearer token"
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_upload_validates_object_key_scope(
+    auth_service_fixture, monkeypatch
+) -> None:
+    # Mock R2 service to avoid actual S3 calls
+    from backend.models.storage import PresignUploadResponse
+
+    async def mock_upload_file(*args, **kwargs):
+        return PresignUploadResponse(
+            upload_url="",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/file.png",
+            public_url="https://cdn.example.com/file.png",
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        # First set up browser session
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        assert session_response.status_code == 200
+
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+
+        # Then get a valid token
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        # Try to upload with object_key that doesn't belong to the authenticated user
+        response = await client.post(
+            "/api/chat/attachments/upload",
+            data={"object_key": "users/different-user/chat-attachment/2024/01/01/file.png"},
+            files={"file": ("test.png", b"fake image data", "image/png")},
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 403
+    assert "does not belong to authenticated user" in response.json()["detail"]
+
+
 @pytest.fixture
 def auth_service_fixture():
     original = api_index.auth_service

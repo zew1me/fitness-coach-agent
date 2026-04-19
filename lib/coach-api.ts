@@ -75,7 +75,7 @@ async function authorizedFetch<T>(
   const token = await fetchBrowserToken(fetchImpl);
   const headers = new Headers(init.headers ?? {});
   headers.set("Authorization", `Bearer ${token.access_token}`);
-  if (init.body !== undefined && !headers.has("Content-Type")) {
+  if (init.body !== undefined && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -179,6 +179,25 @@ export async function createChatUploadIntent(
     {
       method: "POST",
       body: JSON.stringify(body)
+    },
+    fetchImpl
+  );
+}
+
+export async function uploadFile(
+  objectKey: string,
+  file: File,
+  fetchImpl: FetchLike = fetch
+): Promise<PresignUploadResponse> {
+  const formData = new FormData();
+  formData.append("object_key", objectKey);
+  formData.append("file", file);
+
+  return authorizedFetch<PresignUploadResponse>(
+    "/api/chat/attachments/upload",
+    {
+      method: "POST",
+      body: formData
     },
     fetchImpl
   );

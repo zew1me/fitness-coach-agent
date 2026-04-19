@@ -12,6 +12,7 @@ import {
   loadChatThread,
   loadProfile,
   saveProfile,
+  uploadFile,
 } from "../lib/coach-api";
 import { siteConfig } from "../lib/site";
 import type {
@@ -477,11 +478,7 @@ export function CoachChat(): JSX.Element {
           purpose: "chat-attachment",
         });
 
-        await fetch(intent.upload_url, {
-          method: intent.method,
-          headers: intent.headers,
-          body: file,
-        });
+        await uploadFile(intent.object_key, file);
 
         setAttachments((current) =>
           current.map((attachment) =>

@@ -694,8 +694,19 @@ describe("CoachChat", () => {
         );
       }
 
-      if (url === "https://upload.example/activity.png") {
-        return Promise.resolve(new Response(null, { status: 200 }));
+      if (url === "/api/chat/attachments/upload") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "Content-Type": "image/png" },
+              method: "POST",
+              object_key: "uploads/activity.png",
+              public_url: "https://example.com/activity.png",
+              upload_url: ""
+            }),
+            { status: 201 }
+          )
+        );
       }
 
       return Promise.reject(new Error(`Unexpected fetch to ${url}`));
@@ -710,6 +721,11 @@ describe("CoachChat", () => {
       target: { files: [new File(["activity-image"], "activity.png", { type: "image/png" })] }
     });
     await screen.findByText(/Ready/i);
+
+    const presignCall = fetchMock.mock.calls.find(
+      ([url]) => String(url) === "/api/chat/attachments/presign"
+    );
+    expect(presignCall).toBeDefined();
 
     const input = screen.getByPlaceholderText(/Ask anything about your training/i);
     fireEvent.change(input, { target: { value: "Please analyze this workout." } });
@@ -802,8 +818,19 @@ describe("CoachChat", () => {
         );
       }
 
-      if (url === "https://upload.example/screenshot.png") {
-        return Promise.resolve(new Response(null, { status: 200 }));
+      if (url === "/api/chat/attachments/upload") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "Content-Type": "image/png" },
+              method: "POST",
+              object_key: "uploads/screenshot.png",
+              public_url: "https://example.com/screenshot.png",
+              upload_url: ""
+            }),
+            { status: 201 }
+          )
+        );
       }
 
       return Promise.reject(new Error(`Unexpected fetch to ${url}`));
@@ -824,6 +851,10 @@ describe("CoachChat", () => {
     await screen.findByText("Ready");
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/chat/attachments/presign",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat/attachments/upload",
       expect.objectContaining({ method: "POST" })
     );
   });

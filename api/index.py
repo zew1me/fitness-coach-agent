@@ -2,7 +2,17 @@ from collections.abc import Mapping
 from datetime import date
 from urllib.parse import urlencode
 
-from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Response
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -296,6 +306,27 @@ async def presign_upload(
         user_id=user_context.user_id, request=payload
     )
     return presigned_upload.model_dump(mode="json")
+
+
+@app.post("/api/chat/attachments/upload")
+async def upload_chat_attachment(
+    object_key: str = Form(...),
+    file: UploadFile = File(...),
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Upload a file directly to R2 storage via backend proxy."""
+    expected_prefix = f"users/{user_context.user_id}/"
+    if not object_key.startswith(expected_prefix):
+        raise HTTPException(
+            status_code=403, detail="object_key does not belong to authenticated user"
+        )
+    upload_result = await r2_service.upload_file(
+        user_id=user_context.user_id,
+        object_key=object_key,
+        file_stream=file.file,
+        content_type=file.content_type or "application/octet-stream",
+    )
+    return upload_result.model_dump(mode="json")
 
 
 # ── Engine endpoints ──────────────────────────────────────────
