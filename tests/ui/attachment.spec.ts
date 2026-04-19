@@ -9,7 +9,6 @@
  * Requires the dev server to be running on http://localhost:3000 (or BASE_URL).
  */
 import { test, expect } from "@playwright/test";
-import path from "path";
 
 // ── API mocks ─────────────────────────────────────────────────────────────────
 
@@ -62,10 +61,17 @@ async function mockAuthenticatedSession(
       contentType: "application/json",
       body: JSON.stringify({
         upload_url: "https://example.com/upload",
-        file_key: "test-file-key",
+        object_key: "test-file-key",
         public_url: "https://example.com/test-image.png",
+        method: "PUT",
+        headers: {},
       }),
     }),
+  );
+
+  // Intercept the actual file upload so tests are hermetic
+  await page.route("https://example.com/upload", (route) =>
+    route.fulfill({ status: 200 }),
   );
 }
 
