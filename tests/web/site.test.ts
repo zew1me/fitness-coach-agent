@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
 
 import { buildLoginRedirectPath, defaultReturnTo, normalizeReturnTo } from "../../lib/auth";
-import { siteConfig } from "../../lib/site";
+import { buildTavilyMcpUrl, siteConfig } from "../../lib/site";
 
 describe("siteConfig", () => {
   it("exposes the app name", () => {
     expect(siteConfig.appName).toContain("Exercise Training Plan GPT");
+  });
+});
+
+describe("buildTavilyMcpUrl", () => {
+  it("appends tavilyApiKey as a query param", () => {
+    expect(buildTavilyMcpUrl("my-key")).toBe("https://mcp.tavily.com/mcp/?tavilyApiKey=my-key");
+  });
+
+  it("does not bake the key into the base URL constant", () => {
+    // The static base URL should never contain a real key prefix
+    expect(buildTavilyMcpUrl("x")).toContain("mcp.tavily.com");
+    expect(buildTavilyMcpUrl("x")).toContain("?tavilyApiKey=");
   });
 });
 

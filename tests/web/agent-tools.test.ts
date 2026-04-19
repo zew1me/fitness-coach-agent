@@ -19,8 +19,7 @@ describe("coachToolDefinitions", () => {
       "estimate_thresholds",
       "generate_training_plan",
       "adjust_plan",
-      "recalibrate_thresholds",
-      "web_search"
+      "recalibrate_thresholds"
     ]);
   });
 
