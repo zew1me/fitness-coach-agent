@@ -67,6 +67,20 @@ function processUploadedFile(input: unknown, context: CoachToolContext): unknown
   return null;
 }
 
+function updateAthleteProfile(input: unknown, context: CoachToolContext): unknown {
+  const payload = engineInput(input);
+  const inputFields = payload["fields"];
+  const fields =
+    inputFields !== null && typeof inputFields === "object" && !Array.isArray(inputFields)
+      ? (inputFields as Record<string, unknown>)
+      : payload;
+
+  return postEngine(context, "/api/engine/update-athlete-profile", {
+    fields,
+    user_id: context.userId,
+  });
+}
+
 function executeDeterministicEngineTool(
   name: string,
   input: unknown,
@@ -106,6 +120,10 @@ function executeCoachTool(name: string, input: unknown, context: CoachToolContex
       ...engineInput(input),
       user_id: context.userId,
     });
+  }
+
+  if (name === "update_athlete_profile") {
+    return updateAthleteProfile(input, context);
   }
 
   if (name === "process_uploaded_file") {

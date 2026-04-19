@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { createCoachTools } from "../../lib/agent/coach-tools";
 import { coachToolDefinitions } from "../../lib/agent/tools";
 
 describe("coachToolDefinitions", () => {
@@ -38,5 +39,53 @@ describe("coachToolDefinitions", () => {
 
     expect(parsed.goal.title).toBe("Hill climb");
     expect(parsed.goal.course_elevation_gain_meters).toBe(700);
+  });
+
+  it("routes athlete profile updates to the engine with nutrition fields", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ status: "ok" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        })
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+      userId: "athlete-1",
+    });
+
+    await (
+      tools["update_athlete_profile"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      fields: {
+        dietary_restrictions: ["vegetarian"],
+        onboarding_collected: { nutrition: true },
+      },
+      user_id: "ignored-client-user",
+    });
+
+    expect(requests).toEqual([
+      {
+        body: {
+          fields: {
+            dietary_restrictions: ["vegetarian"],
+            onboarding_collected: { nutrition: true },
+          },
+          user_id: "athlete-1",
+        },
+        url: "https://coach.test/api/engine/update-athlete-profile",
+      },
+    ]);
   });
 });

@@ -200,6 +200,7 @@ async def test_create_activity_persists_structured_activity() -> None:
             duration_seconds=3600,
             distance_meters=10_000,
             tss=75.5,
+            fueling_notes="Took one gel at 30 minutes",
             source="manual",
         )
     )
@@ -207,6 +208,7 @@ async def test_create_activity_persists_structured_activity() -> None:
     assert activity.user_id == "athlete-1"
     assert activity.sport == "running"
     assert activity.tss == 75.5
+    assert activity.fueling_notes == "Took one gel at 30 minutes"
     assert activity.id is not None
 
 
