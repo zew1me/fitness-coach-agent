@@ -8,7 +8,9 @@ export type BrowserTokenResponse = {
 
 export type AthleteProfile = {
   coaching_state: string;
+  dietary_restrictions?: string[];
   display_name?: string | null;
+  nutrition_notes?: string | null;
   primary_sports: string[];
   user_id: string;
   weekly_available_hours?: number | null;

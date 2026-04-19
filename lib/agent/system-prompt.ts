@@ -1,5 +1,16 @@
 import type { AthleteContextBundle, GoalContext } from "./types";
 
+const NUTRITION_PRINCIPLES = [
+  "Evidence-based fueling principles:",
+  "- Sessions <90 min: water or 20–30 g carbs/hr optional. 2–3 hrs: ~60 g/hr. >3 hrs: 80–120 g/hr (mixed glucose+fructose ~1:0.8 ratio).",
+  "- Hydration: 400–800 mL/hr + 300–800 mg/hr sodium (higher for heavy sweaters).",
+  "- Carb periodization: match intake to load (3–5 g/kg on light days → 7–10+ g/kg on heavy days).",
+  "- Protein: 1.6–2.2 g/kg/day; higher end (~2.2) in perimenopause or during body recomposition.",
+  "- 'Fuel the work, cut elsewhere': restrict calories at rest/easy days, never during key sessions.",
+  "- Low Energy Availability (LEA) risk is higher for women with high training load — flag if subjective_energy is consistently ≤ 2/5 or fatigue is unexplained.",
+  "- Hormonal context: follicular phase → better carb utilization; luteal phase → slightly higher carb and hydration needs, more perceived effort; menopause → prioritize protein and strength work; HRT shifts metabolism toward its hormone profile.",
+].join(" ");
+
 function listOrFallback(values: string[], fallback: string): string {
   return values.length > 0 ? values.join(", ") : fallback;
 }
@@ -24,6 +35,9 @@ function stateInstructions(state: string): string {
       "Be conversational and extract multiple fields from each user turn.",
       "Minimum to advance: at least one sport, at least one goal, and a fitness signal.",
       "Collect age or birth date early so CTL guidance is realistic.",
+      "Also ask one optional nutrition question: dietary approach (e.g. omnivore, vegetarian, vegan, gluten-free) or known intolerances.",
+      "Frame it as optional — if the athlete deflects or skips, move on.",
+      "Once answered, call update_athlete_profile with dietary_restrictions and mark onboarding_collected.nutrition = true.",
     ].join(" ");
   }
 
@@ -48,13 +62,37 @@ function stateInstructions(state: string): string {
   ].join(" ");
 }
 
+function nutritionContext(context: AthleteContextBundle): string {
+  const parts: string[] = [];
+  if (context.profile.dietary_restrictions?.length) {
+    parts.push(`Dietary restrictions: ${context.profile.dietary_restrictions.join(", ")}.`);
+  }
+  if (context.profile.nutrition_notes) {
+    parts.push(`Nutrition notes: ${context.profile.nutrition_notes}`);
+  }
+  return parts.join(" ");
+}
+
+function hormoneStatusWarrantsPrinciples(status: string | null | undefined): boolean {
+  return status != null && status !== "endogenous" && status !== "not_specified";
+}
+
+function loadLine(context: AthleteContextBundle): string {
+  return context.current_load
+    ? `CTL ${context.current_load.ctl}, ATL ${context.current_load.atl}, TSB ${context.current_load.tsb}`
+    : "no current load snapshot";
+}
+
 export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
   const sports = listOrFallback(context.profile.primary_sports, "unknown");
   const goals = context.goals.map(goalSummary).join("; ") || "none recorded";
-  const load = context.current_load
-    ? `CTL ${context.current_load.ctl}, ATL ${context.current_load.atl}, TSB ${context.current_load.tsb}`
-    : "no current load snapshot";
+  const load = loadLine(context);
   const age = context.computed_age === null ? "unknown" : String(context.computed_age);
+  const nutritionCtx = nutritionContext(context);
+  const showPrinciples =
+    nutritionCtx.length > 0 ||
+    context.profile.biological_sex === "female" ||
+    hormoneStatusWarrantsPrinciples(context.profile.hormone_status);
 
   return [
     "You are a sport-agnostic endurance coach.",
@@ -64,6 +102,8 @@ export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
     `Goals: ${goals}.`,
     `Current load: ${load}.`,
     `CTL ceiling guidance: ${context.ctl_ceiling_guidance.age_bracket}; committed amateur CTL ${context.ctl_ceiling_guidance.committed_amateur_ctl}; ${context.ctl_ceiling_guidance.notes}`,
+    ...(nutritionCtx ? [`Athlete nutrition context: ${nutritionCtx}`] : []),
+    ...(showPrinciples ? [NUTRITION_PRINCIPLES] : []),
     stateInstructions(context.profile.coaching_state),
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",

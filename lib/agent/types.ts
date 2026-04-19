@@ -1,7 +1,10 @@
 export type AthleteProfileContext = {
   biological_sex?: string | null;
   coaching_state: "active" | "calibrating" | "onboarding" | "paused" | string;
+  dietary_restrictions?: string[];
   display_name?: string | null;
+  hormone_status?: string | null;
+  nutrition_notes?: string | null;
   primary_sports: string[];
   user_id: string;
   weekly_available_hours?: number | null;

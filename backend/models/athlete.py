@@ -23,6 +23,8 @@ class AthleteProfile(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     injuries_rehab: list[str] = Field(default_factory=list)
     notes: str | None = None
+    dietary_restrictions: list[str] = Field(default_factory=list)
+    nutrition_notes: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

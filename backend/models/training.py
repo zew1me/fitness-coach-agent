@@ -28,6 +28,7 @@ class Activity(BaseModel):
     rpe: int | None = None
     athlete_notes: str | None = None
     fatigue_notes: str | None = None
+    fueling_notes: str | None = None
 
     source: str = "manual"
     source_file_key: str | None = None

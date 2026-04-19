@@ -59,4 +59,49 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("30-39");
     expect(prompt).toContain("extract multiple fields");
   });
+
+  it("includes nutrition context when dietary_restrictions are set", () => {
+    const nutritionContext: AthleteContextBundle = {
+      ...context,
+      profile: {
+        ...context.profile,
+        dietary_restrictions: ["vegetarian", "lactose intolerant"],
+        nutrition_notes: "Prefers gels over real food during races"
+      }
+    };
+    const prompt = buildCoachSystemPrompt(nutritionContext);
+
+    expect(prompt).toContain("vegetarian");
+    expect(prompt).toContain("lactose intolerant");
+    expect(prompt).toContain("Prefers gels over real food");
+  });
+
+  it("omits nutrition context lines when fields are absent", () => {
+    const prompt = buildCoachSystemPrompt(context);
+
+    expect(prompt).not.toContain("Dietary restrictions:");
+    expect(prompt).not.toContain("Nutrition notes:");
+    expect(prompt).not.toContain("Athlete nutrition context:");
+  });
+
+  it("includes nutrition principles for female athletes without explicit nutrition context", () => {
+    const femaleContext: AthleteContextBundle = {
+      ...context,
+      profile: { ...context.profile, biological_sex: "female" }
+    };
+    const prompt = buildCoachSystemPrompt(femaleContext);
+
+    expect(prompt).toContain("LEA");
+    expect(prompt).toContain("Fuel the work");
+  });
+
+  it("does not include nutrition principles for male athletes without nutrition context", () => {
+    const maleContext: AthleteContextBundle = {
+      ...context,
+      profile: { ...context.profile, biological_sex: "male" }
+    };
+    const prompt = buildCoachSystemPrompt(maleContext);
+
+    expect(prompt).not.toContain("LEA");
+  });
 });
