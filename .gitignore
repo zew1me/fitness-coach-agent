@@ -84,3 +84,9 @@ tsconfig.tsbuildinfo
 .vercel
 .worktrees/
 test-results/
+
+
+## garage S3 Emulation
+
+.dev/garage/data/*
+.dev/garage/meta/*
