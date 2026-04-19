@@ -759,25 +759,24 @@ export function CoachChat(): JSX.Element {
               ) : null}
 
               <div className={styles.composerRow}>
-                <input
-                  accept="image/*"
-                  className={styles.hiddenInput}
-                  multiple
-                  onChange={(event) => {
-                    void handleFileSelect(event);
-                  }}
-                  ref={fileInputRef}
-                  type="file"
-                />
-                <button
-                  className={styles.attachButton}
-                  disabled={sending}
-                  onClick={() => fileInputRef.current?.click()}
+                <label
+                  aria-label="Add photo"
+                  className={sending ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}
                   title="Add photo"
-                  type="button"
                 >
+                  <input
+                    accept="image/*"
+                    className={styles.hiddenInput}
+                    disabled={sending}
+                    multiple
+                    onChange={(event) => {
+                      void handleFileSelect(event);
+                    }}
+                    ref={fileInputRef}
+                    type="file"
+                  />
                   +
-                </button>
+                </label>
                 <textarea
                   className={styles.composerInput}
                   onChange={(event) => setComposer(event.target.value)}

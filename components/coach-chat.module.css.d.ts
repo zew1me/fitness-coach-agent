@@ -7,6 +7,7 @@ declare const styles: {
   readonly accountSummary: string;
   readonly assistantBubble: string;
   readonly attachButton: string;
+  readonly attachDisabled: string;
   readonly attachmentGrid: string;
   readonly attachmentName: string;
   readonly attachmentThumb: string;
