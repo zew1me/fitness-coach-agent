@@ -31,14 +31,16 @@ export default defineConfig({
   ],
   // Auto-start the dev server when running locally.
   // Skipped when BASE_URL is set (targeting a deployed preview).
-  webServer: process.env["BASE_URL"]
-    ? undefined
+  ...(process.env["BASE_URL"]
+    ? {}
     : {
-        command: "bun dev",
-        url: "http://localhost:3000",
-        reuseExistingServer: true,
-        timeout: 60_000,
-        stdout: "pipe",
-        stderr: "pipe",
-      },
+        webServer: {
+          command: "bun dev",
+          url: "http://localhost:3000",
+          reuseExistingServer: true,
+          timeout: 60_000,
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      }),
 });
