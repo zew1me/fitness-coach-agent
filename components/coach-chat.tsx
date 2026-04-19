@@ -79,10 +79,27 @@ function toUiMessage(message: ChatMessage): UIMessage {
   };
 }
 
+function uiPartText(part: UIMessage["parts"][number]): string | null {
+  if (part.type === "text") {
+    return part.text;
+  }
+
+  if (part.type === "dynamic-tool") {
+    return `Using ${part.toolName}`;
+  }
+
+  if (part.type.startsWith("tool-")) {
+    return `Using ${part.type.slice("tool-".length)}`;
+  }
+
+  return null;
+}
+
 function uiMessageText(message: UIMessage): string {
-  return message.parts
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("");
+  return message.parts.flatMap((part) => {
+    const text = uiPartText(part);
+    return text === null ? [] : [text];
+  }).join("\n");
 }
 
 function toLiveChatMessage(message: UIMessage, threadId: string, userId: string): ChatMessage | null {
