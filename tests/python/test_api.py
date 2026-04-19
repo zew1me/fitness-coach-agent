@@ -1210,3 +1210,39 @@ async def test_update_athlete_profile_persists_fields(monkeypatch) -> None:
     assert repo.saved is not None
     assert repo.saved["display_name"] == "Alex"
     assert repo.saved["primary_sports"] == ["running", "cycling"]
+
+
+@pytest.mark.asyncio
+async def test_get_athlete_summary_includes_nutrition_fields(monkeypatch) -> None:
+    """Athlete summary returns dietary_restrictions and nutrition_notes."""
+
+    class NutritionRepository(EngineRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            return AthleteProfile(
+                user_id=user_id,
+                coaching_state="active",
+                dietary_restrictions=["vegetarian"],
+                nutrition_notes="Avoid dairy on race morning",
+            )
+
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", NutritionRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/get-athlete-summary",
+            json={"user_id": "athlete-1"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"]["dietary_restrictions"] == ["vegetarian"]
+    assert body["profile"]["nutrition_notes"] == "Avoid dairy on race morning"

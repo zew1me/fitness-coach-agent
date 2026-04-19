@@ -70,6 +70,8 @@ class SupabaseRepository:
             "coaching_state",
             "specialization_pct",
             "onboarding_collected",
+            "dietary_restrictions",
+            "nutrition_notes",
         }
         safe_fields = {k: v for k, v in fields.items() if k in allowed}
         safe_fields["user_id"] = user_id

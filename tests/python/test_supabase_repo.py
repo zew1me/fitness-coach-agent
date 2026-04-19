@@ -211,6 +211,38 @@ async def test_create_activity_persists_structured_activity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_athlete_profile_persists_dietary_restrictions() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    profile = await repo.upsert_athlete_profile(
+        AthleteProfile(
+            user_id="athlete-2",
+            dietary_restrictions=["vegetarian", "lactose intolerant"],
+            nutrition_notes="Prefers gels over real food during races",
+        )
+    )
+
+    assert profile.dietary_restrictions == ["vegetarian", "lactose intolerant"]
+    assert profile.nutrition_notes == "Prefers gels over real food during races"
+
+
+@pytest.mark.asyncio
+async def test_update_athlete_profile_fields_allows_nutrition_fields() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    profile = await repo.update_athlete_profile_fields(
+        "athlete-3",
+        {
+            "dietary_restrictions": ["vegan"],
+            "nutrition_notes": "Whole food plant-based",
+        },
+    )
+
+    assert profile.dietary_restrictions == ["vegan"]
+    assert profile.nutrition_notes == "Whole food plant-based"
+
+
+@pytest.mark.asyncio
 async def test_repository_requires_supabase_configuration() -> None:
     repo = SupabaseRepository(client=None)
     repo._client = None
