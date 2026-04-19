@@ -207,6 +207,14 @@
   line-height: 1.6;
 }
 
+.assistantBubble .messageText {
+  color: var(--text);
+}
+
+.assistantBubble .attachmentName {
+  color: var(--text-muted);
+}
+
 /* ── Attachment thumbnails ───────────────────────────────── */
 
 .attachmentGrid {
