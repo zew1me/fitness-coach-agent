@@ -75,6 +75,11 @@ function coachingStatusLabel(profileComplete: boolean): string {
   return profileComplete ? "Coaching ready" : "Building your athlete profile";
 }
 
+function accountLabel(profile: AthleteProfile | null): string {
+  const displayName = profile?.display_name?.trim();
+  return displayName ? displayName : "Athlete profile";
+}
+
 function toUiMessage(message: ChatMessage): UIMessage {
   return {
     id: message.id,
@@ -281,6 +286,7 @@ export function CoachChat(): JSX.Element {
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerStatus, setDrawerStatus] = useState<string | null>(null);
   const [profile, setProfile] = useState<AthleteProfile | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const { mode: themeMode, setTheme } = useTheme();
   const chatMessages = useMemo<UIMessage[]>(
     () => threadState.data?.thread.messages.map(toUiMessage) ?? [],
@@ -654,12 +660,41 @@ export function CoachChat(): JSX.Element {
               <span className={styles.meta}>{coachingStatusLabel(threadState.data.profile_complete)}</span>
             </div>
             <div className={styles.topbarActions}>
-              <button className={styles.settingsButton} onClick={() => void openDrawer()} type="button">
-                Settings
-              </button>
-              <Link className={styles.ghostButton} href="/login?return_to=/">
-                Switch login
-              </Link>
+              <div className={styles.accountMenuWrap}>
+                <button
+                  aria-expanded={userMenuOpen}
+                  aria-haspopup="menu"
+                  aria-label="Account menu"
+                  className={styles.accountButton}
+                  onClick={() => setUserMenuOpen((open) => !open)}
+                  type="button"
+                >
+                  Account
+                  <span aria-hidden="true">⌄</span>
+                </button>
+                {userMenuOpen ? (
+                  <div aria-label="Account" className={styles.accountMenu} role="menu">
+                    <div className={styles.accountSummary}>
+                      <span>Signed in</span>
+                      <strong>{accountLabel(profile)}</strong>
+                    </div>
+                    <button
+                      className={styles.menuItem}
+                      onClick={() => {
+                        setUserMenuOpen(false);
+                        void openDrawer();
+                      }}
+                      role="menuitem"
+                      type="button"
+                    >
+                      Profile & preferences
+                    </button>
+                    <Link className={styles.menuItem} href="/login?return_to=/" role="menuitem">
+                      Sign out or change account
+                    </Link>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </header>
 
