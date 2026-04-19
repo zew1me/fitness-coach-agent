@@ -746,6 +746,125 @@ describe("CoachChat", () => {
     });
   });
 
+  it("uploads GPX attachments through the chat attachment endpoint and shows a file badge", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: true,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: []
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/attachments/presign") {
+        expect(init?.body).toBe(
+          JSON.stringify({
+            content_length: 19,
+            content_type: "application/gpx+xml",
+            filename: "morning-run.gpx",
+            purpose: "chat-attachment"
+          })
+        );
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "x-upload": "1" },
+              method: "PUT",
+              object_key: "uploads/morning-run.gpx",
+              public_url: "https://example.com/morning-run.gpx",
+              upload_url: "https://upload.example/morning-run.gpx"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/attachments/upload") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "Content-Type": "application/gpx+xml" },
+              method: "POST",
+              object_key: "uploads/morning-run.gpx",
+              public_url: "https://example.com/morning-run.gpx",
+              upload_url: ""
+            }),
+            { status: 201 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const { container } = render(<CoachChat />);
+
+    await screen.findByPlaceholderText(/Ask anything about your training/i);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput.accept).toBe("image/*,application/gpx+xml,.gpx,.fit,.tcx");
+
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["<gpx>activity</gpx>"], "morning-run.gpx", { type: "application/gpx+xml" })] }
+    });
+
+    await screen.findByText("morning-run.gpx");
+    expect(screen.getByText("GPX")).toBeTruthy();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/chat/attachments/upload",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+    await screen.findByText("Ready");
+
+    const input = screen.getByPlaceholderText(/Ask anything about your training/i);
+    fireEvent.change(input, { target: { value: "Please parse this activity." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        parts: [
+          { text: "Please parse this activity.", type: "text" },
+          {
+            filename: "morning-run.gpx",
+            mediaType: "application/gpx+xml",
+            type: "file",
+            url: "https://example.com/morning-run.gpx"
+          }
+        ]
+      });
+    });
+  });
+
   it("pasting an image from the clipboard attaches it via the presign upload flow", async () => {
     Object.defineProperty(URL, "createObjectURL", {
       configurable: true,

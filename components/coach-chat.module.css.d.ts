@@ -9,6 +9,7 @@ declare const styles: {
   readonly attachButton: string;
   readonly attachDisabled: string;
   readonly attachmentGrid: string;
+  readonly attachmentFileCard: string;
   readonly attachmentName: string;
   readonly attachmentThumb: string;
   readonly brand: string;
@@ -74,6 +75,7 @@ declare const styles: {
   readonly statusBanner: string;
   readonly topbar: string;
   readonly topbarActions: string;
+  readonly uploadBadge: string;
   readonly uploadChip: string;
   readonly uploadRow: string;
   readonly uploadStatus: string;

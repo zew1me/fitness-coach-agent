@@ -1,5 +1,7 @@
 from collections.abc import Mapping
 from datetime import date
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
 
 from fastapi import (
@@ -27,6 +29,7 @@ from backend.models.auth import (
 )
 from backend.models.chat import ChatSendRequest
 from backend.models.storage import PresignUploadRequest
+from backend.models.training import Activity
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -489,6 +492,14 @@ class AnalyzeScreenshotRequest(BaseModel):
     image_url: str
 
 
+class ProcessUploadedFileRequest(BaseModel):
+    content_type: str
+    filename: str
+    object_key: str
+    public_url: str | None = None
+    user_id: str
+
+
 @app.post("/api/engine/analyze-screenshot")
 async def analyze_screenshot_endpoint(
     payload: AnalyzeScreenshotRequest,
@@ -502,6 +513,69 @@ async def analyze_screenshot_endpoint(
         "data": result.data,
         "raw_response": result.raw_response,
     }
+
+
+def _activity_source_for_filename(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".fit":
+        return "fit_upload"
+    if suffix == ".gpx":
+        return "gpx_upload"
+    if suffix == ".tcx":
+        return "tcx_upload"
+    return "file_upload"
+
+
+def _parse_uploaded_activity_file(filename: str, content_type: str, file_bytes: bytes):
+    from backend.engine.gpx_parser import parse_fit, parse_gpx
+
+    suffix = Path(filename).suffix.lower()
+    if content_type == "application/gpx+xml" or suffix == ".gpx":
+        parser = parse_gpx
+        suffix = ".gpx"
+    elif content_type == "application/vnd.garmin.fit" or suffix == ".fit":
+        parser = parse_fit
+        suffix = ".fit"
+    else:
+        raise HTTPException(status_code=415, detail="Unsupported activity file type.")
+
+    with NamedTemporaryFile(suffix=suffix) as tmp:
+        tmp.write(file_bytes)
+        tmp.flush()
+        return parser(tmp.name)
+
+
+@app.post("/api/engine/process-uploaded-file")
+async def process_uploaded_file_endpoint(
+    payload: ProcessUploadedFileRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    file_bytes = await r2_service.download_file_bytes(
+        user_id=user_context.user_id,
+        object_key=payload.object_key,
+    )
+    parsed = _parse_uploaded_activity_file(payload.filename, payload.content_type, file_bytes)
+    activity = Activity(
+        user_id=user_context.user_id,
+        sport=parsed.sport,
+        activity_date=parsed.activity_date,
+        started_at=parsed.started_at,
+        duration_seconds=parsed.duration_seconds,
+        distance_meters=parsed.distance_meters,
+        elevation_gain_meters=parsed.elevation_gain_meters,
+        avg_hr_bpm=parsed.avg_hr_bpm,
+        max_hr_bpm=parsed.max_hr_bpm,
+        avg_power_watts=parsed.avg_power_watts,
+        avg_cadence_rpm=parsed.avg_cadence_rpm,
+        source=_activity_source_for_filename(payload.filename),
+        source_file_key=payload.object_key,
+        raw_extraction={
+            "content_type": payload.content_type,
+            "filename": payload.filename,
+            "public_url": payload.public_url,
+        },
+    )
+    return {"activity": activity.model_dump(mode="json")}
 
 
 class GetAthleteSummaryRequest(BaseModel):

@@ -278,4 +278,50 @@ describe("app/api/chat route", () => {
     );
   });
 
+  it("executes process_uploaded_file for activity files by calling the activity parser", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ activity: { sport: "running", distance_meters: 5000 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = processUploadedFile.execute({
+        content_type: "application/gpx+xml",
+        filename: "morning-run.gpx",
+        object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+        public_url: "https://example.com/morning-run.gpx",
+        user_id: "attacker-controlled-user"
+      });
+
+    await expect(Promise.resolve(result)).resolves.toEqual({
+      activity: { sport: "running", distance_meters: 5000 }
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/process-uploaded-file",
+      expect.objectContaining({
+        body: JSON.stringify({
+          content_type: "application/gpx+xml",
+          filename: "morning-run.gpx",
+          object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+          public_url: "https://example.com/morning-run.gpx",
+          user_id: "athlete-1"
+        }),
+        method: "POST"
+      })
+    );
+  });
+
 });

@@ -312,6 +312,19 @@
   background: var(--surface);
 }
 
+.attachmentFileCard {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 104px;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--surface), var(--accent-soft));
+  color: var(--text);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
 .attachmentName {
   color: var(--text-muted);
   font-size: 0.78rem;
@@ -408,6 +421,16 @@
 .uploadStatus {
   color: var(--text-muted);
   font-size: 0.8rem;
+}
+
+.uploadBadge {
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
 }
 
 .composerRow {

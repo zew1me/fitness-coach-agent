@@ -40,6 +40,8 @@ type LocalAttachment = ChatAttachment & {
   status: "error" | "uploaded" | "uploading";
 };
 
+const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
+
 function emptyProfile(userId: string): AthleteProfile {
   return {
     user_id: userId,
@@ -149,6 +151,37 @@ function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
       },
     ];
   });
+}
+
+function isImageAttachment(attachment: { content_type: string; filename: string }): boolean {
+  return attachment.content_type.startsWith("image/");
+}
+
+function activityContentType(file: File): string {
+  if (file.type) {
+    return file.type;
+  }
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".gpx")) return "application/gpx+xml";
+  if (name.endsWith(".fit")) return "application/vnd.garmin.fit";
+  if (name.endsWith(".tcx")) return "application/vnd.garmin.tcx+xml";
+  return "application/octet-stream";
+}
+
+function isSupportedAttachment(file: File): boolean {
+  if (file.type.startsWith("image/")) {
+    return true;
+  }
+  const name = file.name.toLowerCase();
+  return name.endsWith(".gpx") || name.endsWith(".fit") || name.endsWith(".tcx");
+}
+
+function fileTypeBadge(attachment: { content_type: string; filename: string }): string | null {
+  if (attachment.content_type.startsWith("image/")) {
+    return null;
+  }
+  const suffix = attachment.filename.split(".").pop()?.toUpperCase();
+  return suffix && ["GPX", "FIT", "TCX"].includes(suffix) ? suffix : "FILE";
 }
 
 function ChatLoading(): JSX.Element {
@@ -454,48 +487,51 @@ export function CoachChat(): JSX.Element {
     if (files.length === 0) return;
 
     const nextLocalAttachments = files
-      .filter((file) => file.type.startsWith("image/"))
+      .filter(isSupportedAttachment)
       .map<LocalAttachment>((file) => ({
-        content_type: file.type,
+        content_type: activityContentType(file),
         dataUrl: null,
         filename: file.name,
         object_key: "",
-        previewUrl: URL.createObjectURL(file),
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
         public_url: null,
         status: "uploading",
       }));
     setAttachments((current) => [...current, ...nextLocalAttachments]);
 
     for (const file of files) {
-      if (!file.type.startsWith("image/")) {
+      if (!isSupportedAttachment(file)) {
         setThreadState((current) => ({
           ...current,
-          error: "Only image attachments are supported in the coach chat.",
+          error: "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
         }));
         continue;
       }
+      const contentType = activityContentType(file);
 
       try {
         const intent = await createChatUploadIntent({
           content_length: file.size,
-          content_type: file.type,
+          content_type: contentType,
           filename: file.name,
           purpose: "chat-attachment",
         });
 
-        await uploadFile(intent.object_key, file);
+        const uploaded = await uploadFile(intent.object_key, file);
 
         let dataUrl: string | null = null;
-        try {
-          const buffer = await file.arrayBuffer();
-          const bytes = new Uint8Array(buffer);
-          let binary = "";
-          for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i] as number);
+        if (contentType.startsWith("image/")) {
+          try {
+            const buffer = await file.arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) {
+              binary += String.fromCharCode(bytes[i] as number);
+            }
+            dataUrl = `data:${contentType};base64,${btoa(binary)}`;
+          } catch {
+            // Non-critical: data URL is only a fallback when public_url is unavailable
           }
-          dataUrl = `data:${file.type};base64,${btoa(binary)}`;
-        } catch {
-          // Non-critical: data URL is only a fallback when public_url is unavailable
         }
 
         setAttachments((current) =>
@@ -504,8 +540,8 @@ export function CoachChat(): JSX.Element {
               ? {
                   ...attachment,
                   dataUrl,
-                  object_key: intent.object_key,
-                  public_url: intent.public_url,
+                  object_key: uploaded.object_key,
+                  public_url: uploaded.public_url,
                   status: "uploaded",
                 }
               : attachment,
@@ -627,11 +663,13 @@ export function CoachChat(): JSX.Element {
                   <div className={styles.attachmentGrid}>
                     {message.attachments.map((attachment) => (
                       <div className={styles.attachmentThumb} key={attachment.id ?? attachment.object_key}>
-                        {attachment.public_url ? (
+                        {attachment.public_url && isImageAttachment(attachment) ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img alt={attachment.filename} src={attachment.public_url} />
                         ) : (
-                          <div className={styles.attachmentThumb} />
+                          <div className={styles.attachmentFileCard}>
+                            <span>{fileTypeBadge(attachment) ?? "FILE"}</span>
+                          </div>
                         )}
                         <span className={styles.attachmentName}>{attachment.filename}</span>
                       </div>
@@ -775,6 +813,9 @@ export function CoachChat(): JSX.Element {
                 <div className={styles.uploadRow}>
                   {attachments.map((attachment) => (
                     <div className={styles.uploadChip} key={`${attachment.filename}-${attachment.previewUrl ?? ""}`}>
+                      {fileTypeBadge(attachment) ? (
+                        <span className={styles.uploadBadge}>{fileTypeBadge(attachment)}</span>
+                      ) : null}
                       <span>{attachment.filename}</span>
                       <span className={styles.uploadStatus}>
                         {attachment.status === "uploading"
@@ -789,13 +830,13 @@ export function CoachChat(): JSX.Element {
               ) : null}
 
               <div className={styles.composerRow}>
-                <label
-                  aria-label="Add photo"
-                  className={sending ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}
-                  title="Add photo"
-                >
-                  <input
-                    accept="image/*"
+	                <label
+	                  aria-label="Add photo"
+	                  className={sending ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}
+	                  title="Add photo or activity file"
+	                >
+	                  <input
+	                    accept={CHAT_ATTACHMENT_ACCEPT}
                     className={styles.hiddenInput}
                     disabled={sending}
                     multiple

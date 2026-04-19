@@ -433,6 +433,63 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
     assert body["public_url"] == public_url
 
 
+@pytest.mark.asyncio
+async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
+    auth_service_fixture, monkeypatch
+) -> None:
+    object_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
+    captured: dict[str, str] = {}
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        captured["user_id"] = user_id
+        captured["object_key"] = object_key
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        assert session_response.status_code == 200
+
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/gpx+xml",
+                "filename": "run.gpx",
+                "object_key": object_key,
+                "public_url": "https://cdn.example.com/run.gpx",
+                "user_id": "payload-user-is-ignored",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["activity"]["sport"] == "running"
+    assert body["activity"]["source_file_key"] == object_key
+    assert body["activity"]["source"] == "gpx_upload"
+    assert captured == {"user_id": "athlete-1", "object_key": object_key}
+
+
 @pytest.fixture
 def auth_service_fixture():
     original = api_index.auth_service
