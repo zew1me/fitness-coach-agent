@@ -385,6 +385,54 @@ async def test_chat_attachments_upload_validates_object_key_scope(
     assert "does not belong to authenticated user" in response.json()["detail"]
 
 
+@pytest.mark.asyncio
+async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch) -> None:
+    from backend.models.storage import PresignUploadResponse
+
+    object_key = "users/athlete-1/chat-attachment/2024/01/01/file.png"
+    public_url = "https://cdn.example.com/file.png"
+
+    async def mock_upload_file(*args, **kwargs):
+        return PresignUploadResponse(
+            upload_url="",
+            object_key=object_key,
+            public_url=public_url,
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        assert session_response.status_code == 200
+
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        response = await client.post(
+            "/api/chat/attachments/upload",
+            data={"object_key": object_key},
+            files={"file": ("file.png", b"fake image data", "image/png")},
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object_key"] == object_key
+    assert body["public_url"] == public_url
+
+
 @pytest.fixture
 def auth_service_fixture():
     original = api_index.auth_service
