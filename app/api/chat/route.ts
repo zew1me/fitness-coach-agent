@@ -1,9 +1,11 @@
+import { createMCPClient } from "@ai-sdk/mcp";
 import { openai } from "@ai-sdk/openai";
-import { convertToModelMessages, streamText, type UIMessage } from "ai";
+import { convertToModelMessages, streamText, type ToolSet, type UIMessage } from "ai";
 
 import { createCoachTools } from "../../../lib/agent/coach-tools";
 import { buildCoachSystemPrompt } from "../../../lib/agent/system-prompt";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
+import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
 
@@ -71,16 +73,25 @@ export async function POST(request: Request): Promise<Response> {
   const messages = body.messages ?? [];
   const context = await loadAthleteContext(request, token);
 
+  const tavilyApiKey = process.env["TAVILY_API_KEY"];
+  const tavilyTools: ToolSet = tavilyApiKey
+    ? await createMCPClient({
+        transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
+      }).then((c) => c.tools())
+    : {};
+
   const result = streamText({
     model: openai("gpt-4.1-mini"),
     system: buildCoachSystemPrompt(context),
     messages: await convertToModelMessages(messages),
-    tools: createCoachTools({
-      accessToken: token.access_token,
-      baseUrl: requestOrigin(request),
-      ...(process.env["TAVILY_API_KEY"] !== undefined && { tavilyApiKey: process.env["TAVILY_API_KEY"] }),
-      userId: token.user_id,
-    }),
+    tools: {
+      ...createCoachTools({
+        accessToken: token.access_token,
+        baseUrl: requestOrigin(request),
+        userId: token.user_id,
+      }),
+      ...tavilyTools,
+    },
   });
 
   return result.toUIMessageStreamResponse();
