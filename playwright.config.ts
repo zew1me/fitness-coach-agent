@@ -4,13 +4,13 @@ import { defineConfig, devices } from "@playwright/test";
  * UI tests — run explicitly with `bun run test:ui`.
  * NOT included in `bun run check` or CI.
  *
- * Requires the dev server to be running:
- *   bun run dev        (remote Supabase)
- *   bun run dev:local  (local Supabase)
- *
- * Or pass BASE_URL to point at a deployed preview:
+ * The dev server starts automatically unless BASE_URL is set.
+ * Point at a deployed preview with:
  *   BASE_URL=https://my-preview.vercel.app bun run test:ui
  */
+
+const baseURL = process.env["BASE_URL"] ?? "http://localhost:3000";
+
 export default defineConfig({
   testDir: "./tests/ui",
   fullyParallel: true,
@@ -19,7 +19,7 @@ export default defineConfig({
   workers: 1,
   reporter: "list",
   use: {
-    baseURL: process.env["BASE_URL"] ?? "http://localhost:3000",
+    baseURL,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },
@@ -29,6 +29,16 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  // webServer is optional — omitted so tests can also target deployed previews.
-  // Start the server manually before running: `bun dev` or `bun run dev:local`
+  // Auto-start the dev server when running locally.
+  // Skipped when BASE_URL is set (targeting a deployed preview).
+  webServer: process.env["BASE_URL"]
+    ? undefined
+    : {
+        command: "bun dev",
+        url: "http://localhost:3000",
+        reuseExistingServer: true,
+        timeout: 60_000,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
 });
