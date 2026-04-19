@@ -490,6 +490,76 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     assert captured == {"user_id": "athlete-1", "object_key": object_key}
 
 
+@pytest.mark.asyncio
+async def test_process_uploaded_file_parses_tcx_with_hrv_metadata(
+    auth_service_fixture, monkeypatch
+) -> None:
+    object_key = "users/athlete-1/chat-attachment/2024/01/01/run.tcx"
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Activities>
+    <Activity Sport="Running">
+      <Id>2026-04-19T10:00:00Z</Id>
+      <Lap StartTime="2026-04-19T10:00:00Z">
+        <TotalTimeSeconds>60</TotalTimeSeconds>
+        <DistanceMeters>200</DistanceMeters>
+        <Track>
+          <Trackpoint>
+            <Time>2026-04-19T10:00:00Z</Time>
+            <DistanceMeters>0</DistanceMeters>
+            <HeartRateBpm><Value>140</Value></HeartRateBpm>
+            <Extensions><rr>820</rr><rr>830</rr></Extensions>
+          </Trackpoint>
+          <Trackpoint>
+            <Time>2026-04-19T10:01:00Z</Time>
+            <DistanceMeters>200</DistanceMeters>
+            <HeartRateBpm><Value>145</Value></HeartRateBpm>
+            <Extensions><rr>815</rr><rr>825</rr></Extensions>
+          </Trackpoint>
+        </Track>
+      </Lap>
+    </Activity>
+  </Activities>
+</TrainingCenterDatabase>"""
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/vnd.garmin.tcx+xml",
+                "filename": "run.tcx",
+                "object_key": object_key,
+                "public_url": "https://cdn.example.com/run.tcx",
+                "user_id": "payload-user-is-ignored",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["activity"]["source"] == "tcx_upload"
+    assert body["activity"]["avg_hr_bpm"] == 142
+    assert body["activity"]["raw_extraction"]["rr_interval_count"] == 4
+    assert body["activity"]["raw_extraction"]["hrv"]["quality"] == "insufficient_rr_intervals"
+
+
 @pytest.fixture
 def auth_service_fixture():
     original = api_index.auth_service

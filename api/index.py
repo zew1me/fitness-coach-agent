@@ -527,7 +527,7 @@ def _activity_source_for_filename(filename: str) -> str:
 
 
 def _parse_uploaded_activity_file(filename: str, content_type: str, file_bytes: bytes):
-    from backend.engine.gpx_parser import parse_fit, parse_gpx
+    from backend.engine.gpx_parser import parse_fit, parse_gpx, parse_tcx
 
     suffix = Path(filename).suffix.lower()
     if content_type == "application/gpx+xml" or suffix == ".gpx":
@@ -536,6 +536,9 @@ def _parse_uploaded_activity_file(filename: str, content_type: str, file_bytes: 
     elif content_type == "application/vnd.garmin.fit" or suffix == ".fit":
         parser = parse_fit
         suffix = ".fit"
+    elif content_type == "application/vnd.garmin.tcx+xml" or suffix == ".tcx":
+        parser = parse_tcx
+        suffix = ".tcx"
     else:
         raise HTTPException(status_code=415, detail="Unsupported activity file type.")
 
@@ -572,7 +575,9 @@ async def process_uploaded_file_endpoint(
         raw_extraction={
             "content_type": payload.content_type,
             "filename": payload.filename,
+            "hrv": parsed.hrv_summary,
             "public_url": payload.public_url,
+            "rr_interval_count": len(parsed.rr_intervals_ms or []),
         },
     )
     return {"activity": activity.model_dump(mode="json")}
