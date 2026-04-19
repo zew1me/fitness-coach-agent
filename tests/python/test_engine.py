@@ -87,7 +87,9 @@ def test_hrv_summary_reports_basic_metrics_and_dfa_alpha() -> None:
 
     assert summary["sample_count"] == 160
     assert summary["quality"] == "usable"
+    assert summary["rmssd_ms"] is not None
     assert summary["rmssd_ms"] > 0
+    assert summary["sdnn_ms"] is not None
     assert summary["sdnn_ms"] > 0
     assert summary["dfa_alpha1"] is not None
 

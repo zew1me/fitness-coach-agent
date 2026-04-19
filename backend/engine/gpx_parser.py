@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from backend.engine.hrv import summarize_hrv
+from backend.engine.hrv import HRVSummary, summarize_hrv
 
 CYCLING_INFERRED_PACE_SEC_KM = 180
 MIN_RR_INTERVAL_MS = 300
@@ -32,7 +32,7 @@ class ParsedActivity:
     avg_cadence_rpm: int | None = None
     power_stream: list[int] | None = None  # for NP calculation
     rr_intervals_ms: list[int] | None = None
-    hrv_summary: dict[str, object] | None = None
+    hrv_summary: HRVSummary | None = None
 
 
 def parse_gpx(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912

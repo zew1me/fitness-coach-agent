@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from itertools import pairwise
 from statistics import mean, stdev
+from typing import TypedDict
 
 MIN_USABLE_RR_INTERVALS = 60
 MIN_DFA_RR_INTERVALS = 64
@@ -14,7 +15,16 @@ SECONDS_TO_MS_THRESHOLD = 10
 MIN_SUCCESSIVE_INTERVALS = 2
 
 
-def summarize_hrv(rr_intervals_ms: list[int]) -> dict[str, object]:
+class HRVSummary(TypedDict, total=True):
+    sample_count: int
+    quality: str
+    artifact_pct: float
+    rmssd_ms: float | None
+    sdnn_ms: float | None
+    dfa_alpha1: float | None
+
+
+def summarize_hrv(rr_intervals_ms: list[int]) -> HRVSummary:
     """Summarize RR intervals into common time-domain metrics and DFA alpha1."""
     cleaned = [_normalize_rr_interval(value) for value in rr_intervals_ms]
     cleaned = [value for value in cleaned if value is not None]
