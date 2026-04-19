@@ -53,6 +53,14 @@ async function postEngine<TInput extends object>(
   return response.json();
 }
 
+function engineInput(input: unknown): Record<string, unknown> {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+
+  return Object.fromEntries(Object.entries(input).filter(([key]) => key !== "user_id"));
+}
+
 export function createCoachTools(context: CoachToolContext): ToolSet {
   return Object.fromEntries(
     Object.entries(coachToolDefinitions).map(([name, definition]) => [
@@ -65,6 +73,10 @@ export function createCoachTools(context: CoachToolContext): ToolSet {
             return postEngine(context, "/api/engine/get-athlete-summary", {
               user_id: context.userId,
             });
+          }
+
+          if (name === "calculate_zones") {
+            return postEngine(context, "/api/engine/calculate-zones", engineInput(input));
           }
 
           return {

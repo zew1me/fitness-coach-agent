@@ -48,4 +48,44 @@ describe("app/api/chat route", () => {
       })
     );
   });
+
+  it("executes calculate_zones by calling the engine zones endpoint", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ zones: [{ name: "Endurance", zone: 2 }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const calculateZones = tools["calculate_zones"] as {
+      // eslint-disable-next-line no-unused-vars
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    await expect(
+      calculateZones.execute({
+        ftp_watts: 300,
+        sport: "cycling",
+        user_id: "athlete-1"
+      })
+    ).resolves.toEqual({ zones: [{ name: "Endurance", zone: 2 }] });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/calculate-zones",
+      expect.objectContaining({
+        body: JSON.stringify({
+          ftp_watts: 300,
+          sport: "cycling"
+        }),
+        method: "POST"
+      })
+    );
+  });
 });
