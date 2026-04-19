@@ -79,6 +79,29 @@ function toUiMessage(message: ChatMessage): UIMessage {
   };
 }
 
+function uiMessageText(message: UIMessage): string {
+  return message.parts
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("");
+}
+
+function toLiveChatMessage(message: UIMessage, threadId: string, userId: string): ChatMessage | null {
+  if (message.role !== "assistant" && message.role !== "user") {
+    return null;
+  }
+
+  return {
+    attachments: [],
+    content: uiMessageText(message),
+    created_at: new Date().toISOString(),
+    id: message.id,
+    metadata: { message_kind: "streaming" },
+    role: message.role,
+    thread_id: threadId,
+    user_id: userId,
+  };
+}
+
 function withOptionalNumber(
   profile: AthleteProfile,
   field: "age" | "cycling_ftp_watts" | "weight_kg",
@@ -246,7 +269,7 @@ export function CoachChat(): JSX.Element {
     () => threadState.data?.thread.messages.map(toUiMessage) ?? [],
     [threadState.data?.thread.messages],
   );
-  const { sendMessage } = useChat({
+  const { messages: liveMessages, sendMessage } = useChat({
     id: threadState.data?.thread.id ?? "coach-chat",
     messages: chatMessages,
     transport: new DefaultChatTransport({
@@ -254,6 +277,22 @@ export function CoachChat(): JSX.Element {
       credentials: "include",
     }),
   });
+  const displayedMessages = useMemo<ChatMessage[]>(() => {
+    if (threadState.data === null || session.token === null) {
+      return [];
+    }
+
+    const thread = threadState.data.thread;
+    const token = session.token;
+    const persistedMessages = thread.messages;
+    const persistedIds = new Set(persistedMessages.map((message) => message.id));
+    const additionalMessages = liveMessages
+      .filter((message) => !persistedIds.has(message.id))
+      .map((message) => toLiveChatMessage(message, thread.id, token.user_id))
+      .filter((message): message is ChatMessage => message !== null && message.content.length > 0);
+
+    return [...persistedMessages, ...additionalMessages];
+  }, [liveMessages, session.token, threadState.data]);
 
   useEffect(() => {
     async function bootstrap(): Promise<void> {
@@ -593,7 +632,7 @@ export function CoachChat(): JSX.Element {
     return <ChatErrorState error={threadState.error} />;
   }
 
-  const messages = threadState.data.thread.messages;
+  const messages = displayedMessages;
 
   return (
     <main className={styles.page}>
