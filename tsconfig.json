@@ -31,6 +31,7 @@
     "next-env.d.ts",
     "next.config.ts",
     "playwright.config.ts",
+    "tests/ui",
     "tests/web",
     "vitest.config.ts",
     ".next/types/**/*.ts"
