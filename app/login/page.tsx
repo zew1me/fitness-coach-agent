@@ -2,10 +2,41 @@
 
 import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
-import { FormEvent, Suspense, useState } from "react";
+import { FormEvent, Suspense, useEffect, useState } from "react";
 
 import { normalizeReturnTo } from "../../lib/auth";
 import { getBrowserSupabaseClient } from "../../lib/supabase";
+
+function classifySupabaseErrorCode(code: string): string {
+  switch (code) {
+    case "otp_expired":
+      return "Your sign-in link has expired. Enter your email to get a new one.";
+    case "bad_otp":
+      return "That sign-in link is not valid. Request a new one.";
+    case "email_not_confirmed":
+      return "Please confirm your email address first, then try signing in.";
+    case "access_denied":
+      return "Access was denied. Try signing in again.";
+    default:
+      return "There was a problem signing you in. Try requesting a new link.";
+  }
+}
+
+function classifyQueryError(raw: string): string {
+  const lower = raw.toLowerCase();
+  if (lower.includes("missing auth code") || lower.includes("already been used")) {
+    return "Your sign-in link is missing or has already been used. Enter your email to get a new one.";
+  }
+  if (lower.includes("unable to finish login") || lower.includes("unable to finish")) {
+    return "Something went wrong completing your sign-in. Try again.";
+  }
+  return "There was a problem signing you in. Try requesting a new link.";
+}
+
+/** Returns true for error codes that indicate an expired / invalid link. */
+function isLinkError(code: string): boolean {
+  return code === "otp_expired" || code === "bad_otp" || code === "access_denied";
+}
 
 function LoginPageContent(): JSX.Element {
   const searchParams = useSearchParams();
@@ -13,14 +44,42 @@ function LoginPageContent(): JSX.Element {
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [isError, setIsError] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const returnTo = normalizeReturnTo(searchParams.get("return_to"));
-  const authError = searchParams.get("error");
+
+  // Parse query-string error set by the auth callback route.
+  useEffect(() => {
+    const queryError = searchParams.get("error");
+    if (queryError) {
+      setStatus(classifyQueryError(queryError));
+      setIsError(true);
+      setOtpSent(false);
+    }
+  }, [searchParams]);
+
+  // Parse hash-fragment errors set by Supabase (not visible to server).
+  useEffect(() => {
+    const hash = window.location.hash.slice(1);
+    if (!hash) return;
+    const params = new URLSearchParams(hash);
+    const errorCode = params.get("error_code");
+    if (errorCode) {
+      setStatus(classifySupabaseErrorCode(errorCode));
+      setIsError(true);
+      if (isLinkError(errorCode)) {
+        setOtpSent(false);
+      }
+      // Remove the hash so it doesn't persist on refresh.
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  }, []);
 
   async function handleSendLink(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setSubmitting(true);
     setStatus(null);
+    setIsError(false);
 
     try {
       const supabase = getBrowserSupabaseClient();
@@ -43,6 +102,7 @@ function LoginPageContent(): JSX.Element {
       setStatus("Check your email for a magic link or 6-digit code.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unable to start login.");
+      setIsError(true);
     } finally {
       setSubmitting(false);
     }
@@ -52,6 +112,7 @@ function LoginPageContent(): JSX.Element {
     event.preventDefault();
     setSubmitting(true);
     setStatus(null);
+    setIsError(false);
 
     try {
       const supabase = getBrowserSupabaseClient();
@@ -78,6 +139,7 @@ function LoginPageContent(): JSX.Element {
       window.location.href = returnTo;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Invalid code. Try again.");
+      setIsError(true);
     } finally {
       setSubmitting(false);
     }
@@ -137,6 +199,7 @@ function LoginPageContent(): JSX.Element {
               onClick={() => {
                 setOtpSent(false);
                 setStatus(null);
+                setIsError(false);
               }}
               type="button"
             >
@@ -144,7 +207,9 @@ function LoginPageContent(): JSX.Element {
             </button>
           </form>
         )}
-        {status !== null || authError !== null ? <p>{status ?? authError}</p> : null}
+        {status !== null ? (
+          <p className={isError ? "error" : undefined}>{status}</p>
+        ) : null}
       </section>
     </main>
   );
