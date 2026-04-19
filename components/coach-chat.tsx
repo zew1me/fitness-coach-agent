@@ -794,7 +794,7 @@ export function CoachChat(): JSX.Element {
               <div>
                 <h2 className={styles.drawerTitle}>Profile & preferences</h2>
                 <p className={styles.drawerText}>
-                  Review the profile details your coach uses for sport-agnostic training guidance.
+                  Review the profile details your coach uses for training guidance.
                 </p>
               </div>
               <button className={styles.drawerClose} onClick={() => setDrawerOpen(false)} type="button">
