@@ -49,6 +49,38 @@ describe("app/api/chat route", () => {
     );
   });
 
+  it("executes get_active_plan by reading it from the athlete summary", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ active_plan: { id: "plan-1", title: "Base build" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const getActivePlan = tools["get_active_plan"] as {
+      // eslint-disable-next-line no-unused-vars
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    await expect(getActivePlan.execute({ user_id: "athlete-1" })).resolves.toEqual({
+      active_plan: { id: "plan-1", title: "Base build" }
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/get-athlete-summary",
+      expect.objectContaining({
+        method: "POST"
+      })
+    );
+  });
+
   it("executes calculate_zones by calling the engine zones endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(

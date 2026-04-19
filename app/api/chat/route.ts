@@ -53,6 +53,16 @@ async function postEngine<TInput extends object>(
   return response.json();
 }
 
+async function getAthleteSummary(context: CoachToolContext): Promise<Record<string, unknown>> {
+  const summary = await postEngine(context, "/api/engine/get-athlete-summary", {
+    user_id: context.userId,
+  });
+
+  return summary !== null && typeof summary === "object" && !Array.isArray(summary)
+    ? (summary as Record<string, unknown>)
+    : {};
+}
+
 function engineInput(input: unknown): Record<string, unknown> {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     return {};
@@ -105,9 +115,13 @@ function executeDeterministicEngineTool(
 
 function executeCoachTool(name: string, input: unknown, context: CoachToolContext): unknown {
   if (name === "get_athlete_context") {
-    return postEngine(context, "/api/engine/get-athlete-summary", {
-      user_id: context.userId,
-    });
+    return getAthleteSummary(context);
+  }
+
+  if (name === "get_active_plan") {
+    return getAthleteSummary(context).then((summary) => ({
+      active_plan: summary["active_plan"] ?? null,
+    }));
   }
 
   if (name === "process_uploaded_file") {
