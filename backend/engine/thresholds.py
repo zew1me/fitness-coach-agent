@@ -26,19 +26,29 @@ _VDOT_TABLE: list[tuple[int, int, int, int]] = [
     (48, 1110, 327, 291),  # 18:30
     (50, 1056, 318, 282),  # 17:36
     (52, 1008, 309, 276),  # 16:48
-    (54, 960, 300, 270),   # 16:00
-    (56, 918, 294, 264),   # 15:18
-    (58, 876, 285, 258),   # 14:36
-    (60, 840, 279, 252),   # 14:00
-    (62, 804, 273, 246),   # 13:24
-    (64, 774, 267, 240),   # 12:54
-    (66, 744, 261, 237),   # 12:24
-    (68, 714, 255, 231),   # 11:54
-    (70, 690, 249, 225),   # 11:30
-    (75, 630, 237, 213),   # 10:30
-    (80, 576, 225, 201),   # 9:36
-    (85, 528, 213, 192),   # 8:48
+    (54, 960, 300, 270),  # 16:00
+    (56, 918, 294, 264),  # 15:18
+    (58, 876, 285, 258),  # 14:36
+    (60, 840, 279, 252),  # 14:00
+    (62, 804, 273, 246),  # 13:24
+    (64, 774, 267, 240),  # 12:54
+    (66, 744, 261, 237),  # 12:24
+    (68, 714, 255, 231),  # 11:54
+    (70, 690, 249, 225),  # 11:30
+    (75, 630, 237, 213),  # 10:30
+    (80, 576, 225, 201),  # 9:36
+    (85, 528, 213, 192),  # 8:48
 ]
+
+FIVE_K_METERS = 5000
+FULL_FTP_TEST_MINUTES = 55
+TWENTY_MINUTE_TEST_MINUTES = 18
+TWELVE_MINUTE_TEST_MINUTES = 10
+EIGHT_MINUTE_TEST_MINUTES = 7
+YOUTH_AGE_CUTOFF = 18
+UNDER_30_AGE_CUTOFF = 30
+UNDER_40_AGE_CUTOFF = 40
+UNDER_50_AGE_CUTOFF = 50
 
 
 @dataclass(frozen=True)
@@ -59,8 +69,8 @@ def estimate_running_thresholds(
     Uses Daniels' VDOT equivalence and Riegel's formula for distance conversion.
     """
     # Normalize to equivalent 5K time using Riegel's formula: T2 = T1 * (D2/D1)^1.06
-    if race_distance_meters != 5000:
-        ratio = (5000 / race_distance_meters) ** 1.06
+    if race_distance_meters != FIVE_K_METERS:
+        ratio = (FIVE_K_METERS / race_distance_meters) ** 1.06
         race_time_seconds = round(race_time_seconds * ratio)
 
     # Find closest VDOT from 5K time
@@ -96,18 +106,18 @@ def estimate_cycling_thresholds(
 
     Standard Coggan adjustments:
     - 60 min: direct FTP
-    - 20 min: × 0.95
-    - 8 min: × 0.90
-    - 12 min: × 0.925 (interpolated)
-    - 5 min: × 0.85
+    - 20 min: x 0.95
+    - 8 min: x 0.90
+    - 12 min: x 0.925 (interpolated)
+    - 5 min: x 0.85
     """
-    if test_duration_minutes >= 55:
+    if test_duration_minutes >= FULL_FTP_TEST_MINUTES:
         factor = 1.0
-    elif test_duration_minutes >= 18:
+    elif test_duration_minutes >= TWENTY_MINUTE_TEST_MINUTES:
         factor = 0.95
-    elif test_duration_minutes >= 10:
+    elif test_duration_minutes >= TWELVE_MINUTE_TEST_MINUTES:
         factor = 0.925
-    elif test_duration_minutes >= 7:
+    elif test_duration_minutes >= EIGHT_MINUTE_TEST_MINUTES:
         factor = 0.90
     else:
         factor = 0.85
@@ -129,9 +139,11 @@ class CTLCeilingEstimate:
     notes: str
 
 
-def estimate_ctl_ceiling(age: int | None, biological_sex: str = "not_specified") -> CTLCeilingEstimate:
+def estimate_ctl_ceiling(
+    age: int | None, biological_sex: str = "not_specified"
+) -> CTLCeilingEstimate:
     """Return age-appropriate CTL ceiling guidance. These are soft guides, not hard caps."""
-    if age is None or age < 18:
+    if age is None or age < YOUTH_AGE_CUTOFF:
         return CTLCeilingEstimate(
             age_bracket="unknown/youth",
             elite_ctl=80,
@@ -141,7 +153,7 @@ def estimate_ctl_ceiling(age: int | None, biological_sex: str = "not_specified")
             notes="Limited data. Prioritize development over load.",
         )
 
-    if age < 30:
+    if age < UNDER_30_AGE_CUTOFF:
         return CTLCeilingEstimate(
             age_bracket="under 30",
             elite_ctl=150,
@@ -151,7 +163,7 @@ def estimate_ctl_ceiling(age: int | None, biological_sex: str = "not_specified")
             notes="Peak recovery capacity. Can tolerate higher ramp rates.",
         )
 
-    if age < 40:
+    if age < UNDER_40_AGE_CUTOFF:
         return CTLCeilingEstimate(
             age_bracket="30-39",
             elite_ctl=130,
@@ -161,7 +173,7 @@ def estimate_ctl_ceiling(age: int | None, biological_sex: str = "not_specified")
             notes="Still strong capacity. Recovery starts to matter more.",
         )
 
-    if age < 50:
+    if age < UNDER_50_AGE_CUTOFF:
         return CTLCeilingEstimate(
             age_bracket="40-49",
             elite_ctl=110,

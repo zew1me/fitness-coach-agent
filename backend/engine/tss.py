@@ -37,7 +37,7 @@ def running_tss(
     hours = duration_seconds / 3600
     # IF for running: threshold / actual (faster = lower number = higher ratio)
     intensity_factor = threshold_pace_sec_km / avg_pace_sec_km
-    return hours * (intensity_factor ** 2) * 100
+    return hours * (intensity_factor**2) * 100
 
 
 def hr_tss(
@@ -59,10 +59,7 @@ def hr_tss(
     hr_reserve_fraction = max(0.0, min(1.0, hr_reserve_fraction))
 
     # Sex-specific exponential coefficient (Banister 1991)
-    if biological_sex == "female" or biological_sex == "hrt_estrogen":
-        sex_coeff = 1.67
-    else:
-        sex_coeff = 1.92
+    sex_coeff = 1.67 if biological_sex in {"female", "hrt_estrogen"} else 1.92
 
     trimp = duration_min * hr_reserve_fraction * 0.64 * math.exp(sex_coeff * hr_reserve_fraction)
     # Scale TRIMP to approximate TSS: 1 hour at threshold ≈ TRIMP ~100, TSS ~60
@@ -80,7 +77,7 @@ def rpe_tss(duration_seconds: int, rpe: int) -> float:
     return hours * (rpe / 10) ** 2 * 100
 
 
-def compute_tss(
+def compute_tss(  # noqa: PLR0913
     duration_seconds: int,
     *,
     sport: str = "general",
@@ -100,11 +97,7 @@ def compute_tss(
         return cycling_tss(duration_seconds, normalized_power, ftp)
 
     # Pace-based (running)
-    if (
-        sport == "running"
-        and avg_pace_sec_km is not None
-        and threshold_pace_sec_km is not None
-    ):
+    if sport == "running" and avg_pace_sec_km is not None and threshold_pace_sec_km is not None:
         return running_tss(duration_seconds, avg_pace_sec_km, threshold_pace_sec_km)
 
     # Heart rate based
@@ -135,12 +128,12 @@ def compute_normalized_power(power_stream: list[int], sample_rate_seconds: int =
 
     for i in range(window_samples, len(power_stream)):
         avg = rolling_sum / window_samples
-        fourth_powers.append(avg ** 4)
+        fourth_powers.append(avg**4)
         rolling_sum += power_stream[i] - power_stream[i - window_samples]
 
     # Include the last window
     avg = rolling_sum / window_samples
-    fourth_powers.append(avg ** 4)
+    fourth_powers.append(avg**4)
 
     if not fourth_powers:
         return 0

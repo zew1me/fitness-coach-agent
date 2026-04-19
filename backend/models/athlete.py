@@ -7,7 +7,9 @@ class AthleteProfile(BaseModel):
     user_id: str
     display_name: str | None = None
     biological_sex: str | None = None  # male | female | not_specified
-    hormone_status: str | None = None  # endogenous | hrt_estrogen | hrt_testosterone | not_specified
+    hormone_status: str | None = (
+        None  # endogenous | hrt_estrogen | hrt_testosterone | not_specified
+    )
     birth_date: date | None = None
     weight_kg: float | None = None
     height_cm: float | None = None

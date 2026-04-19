@@ -45,13 +45,15 @@ def recompute_load_series(
     while current <= end_date:
         tss = daily_tss_map.get(current, 0.0)
         ctl, atl, tsb = compute_next_load(ctl, atl, tss)
-        results.append({
-            "snapshot_date": current,
-            "daily_tss": round(tss, 1),
-            "ctl": round(ctl, 1),
-            "atl": round(atl, 1),
-            "tsb": round(tsb, 1),
-        })
+        results.append(
+            {
+                "snapshot_date": current,
+                "daily_tss": round(tss, 1),
+                "ctl": round(ctl, 1),
+                "atl": round(atl, 1),
+                "tsb": round(tsb, 1),
+            }
+        )
         current += timedelta(days=1)
 
     return results

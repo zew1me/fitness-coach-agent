@@ -62,8 +62,18 @@ def running_pace_zones(
         Zone(1, "Easy", pace_low_sec_km=lt1 + 30, pace_high_sec_km=lt1 + 60),
         Zone(2, "Aerobic", pace_low_sec_km=lt1 - 15, pace_high_sec_km=lt1 + 29),
         Zone(3, "Tempo", pace_low_sec_km=lt2_pace_sec_km + 10, pace_high_sec_km=lt1 - 16),
-        Zone(4, "Threshold", pace_low_sec_km=lt2_pace_sec_km - 10, pace_high_sec_km=lt2_pace_sec_km + 9),
-        Zone(5, "VO2max", pace_low_sec_km=lt2_pace_sec_km - 30, pace_high_sec_km=lt2_pace_sec_km - 11),
+        Zone(
+            4,
+            "Threshold",
+            pace_low_sec_km=lt2_pace_sec_km - 10,
+            pace_high_sec_km=lt2_pace_sec_km + 9,
+        ),
+        Zone(
+            5,
+            "VO2max",
+            pace_low_sec_km=lt2_pace_sec_km - 30,
+            pace_high_sec_km=lt2_pace_sec_km - 11,
+        ),
     ]
 
 
@@ -84,7 +94,7 @@ def hr_zones(
     ]
 
 
-def compute_zones(
+def compute_zones(  # noqa: PLR0913
     sport: str,
     *,
     ftp_watts: int | None = None,

@@ -6,8 +6,7 @@ Works backward from target event date to allocate Base → Build → Peak → Ta
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 
@@ -70,6 +69,8 @@ PHASE_TEMPLATES = {
     ),
 }
 
+SHORT_EVENT_MAX_WEEKS = 8
+
 
 @dataclass
 class PhasePlan:
@@ -108,7 +109,7 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def build_plan_skeleton(
+def build_plan_skeleton(  # noqa: PLR0913
     *,
     current_ctl: float,
     target_date: date | None,
@@ -155,7 +156,7 @@ def _event_periodization(
     total_weeks = max(4, total_days // 7)
 
     # Allocate phases backward
-    taper_weeks = 1 if total_weeks <= 8 else 2
+    taper_weeks = 1 if total_weeks <= SHORT_EVENT_MAX_WEEKS else 2
     peak_weeks = min(3, max(2, total_weeks // 6))
     build_weeks = min(6, max(4, total_weeks // 3))
     base_weeks = max(0, total_weeks - taper_weeks - peak_weeks - build_weeks)
@@ -180,27 +181,31 @@ def _event_periodization(
                 and w > 0
                 and (actual_week - 1) % recovery_week_frequency == 0
             ):
-                phases.append(PhasePlan(
-                    name="Recovery",
-                    start_week=actual_week,
-                    end_week=actual_week,
-                    focus="recovery",
-                    target_weekly_tss=current_tss * 0.6,
-                    z1_z2_pct=90,
-                    max_hiit_per_week=0,
-                    description=PHASE_TEMPLATES["recovery"].description,
-                ))
+                phases.append(
+                    PhasePlan(
+                        name="Recovery",
+                        start_week=actual_week,
+                        end_week=actual_week,
+                        focus="recovery",
+                        target_weekly_tss=current_tss * 0.6,
+                        z1_z2_pct=90,
+                        max_hiit_per_week=0,
+                        description=PHASE_TEMPLATES["recovery"].description,
+                    )
+                )
             else:
-                phases.append(PhasePlan(
-                    name=tmpl.name,
-                    start_week=actual_week,
-                    end_week=actual_week,
-                    focus=name.lower(),
-                    target_weekly_tss=current_tss,
-                    z1_z2_pct=tmpl.z1_z2_pct,
-                    max_hiit_per_week=tmpl.max_hiit_per_week,
-                    description=tmpl.description,
-                ))
+                phases.append(
+                    PhasePlan(
+                        name=tmpl.name,
+                        start_week=actual_week,
+                        end_week=actual_week,
+                        focus=name.lower(),
+                        target_weekly_tss=current_tss,
+                        z1_z2_pct=tmpl.z1_z2_pct,
+                        max_hiit_per_week=tmpl.max_hiit_per_week,
+                        description=tmpl.description,
+                    )
+                )
                 # Ramp TSS (max 10% per week)
                 ramp = min(0.10, tmpl.weekly_tss_ramp_pct)
                 current_tss = current_tss * (1 + ramp)
@@ -242,27 +247,31 @@ def _rolling_periodization(
 
     for w in range(1, total_weeks + 1):
         if w > 1 and (w - 1) % recovery_week_frequency == 0:
-            phases.append(PhasePlan(
-                name="Recovery",
-                start_week=w,
-                end_week=w,
-                focus="recovery",
-                target_weekly_tss=tss * 0.6,
-                z1_z2_pct=90,
-                max_hiit_per_week=0,
-                description=PHASE_TEMPLATES["recovery"].description,
-            ))
+            phases.append(
+                PhasePlan(
+                    name="Recovery",
+                    start_week=w,
+                    end_week=w,
+                    focus="recovery",
+                    target_weekly_tss=tss * 0.6,
+                    z1_z2_pct=90,
+                    max_hiit_per_week=0,
+                    description=PHASE_TEMPLATES["recovery"].description,
+                )
+            )
         else:
-            phases.append(PhasePlan(
-                name=tmpl.name,
-                start_week=w,
-                end_week=w,
-                focus=focus,
-                target_weekly_tss=tss,
-                z1_z2_pct=tmpl.z1_z2_pct,
-                max_hiit_per_week=tmpl.max_hiit_per_week,
-                description=tmpl.description,
-            ))
+            phases.append(
+                PhasePlan(
+                    name=tmpl.name,
+                    start_week=w,
+                    end_week=w,
+                    focus=focus,
+                    target_weekly_tss=tss,
+                    z1_z2_pct=tmpl.z1_z2_pct,
+                    max_hiit_per_week=tmpl.max_hiit_per_week,
+                    description=tmpl.description,
+                )
+            )
             ramp = min(0.10, tmpl.weekly_tss_ramp_pct)
             tss = tss * (1 + ramp)
 

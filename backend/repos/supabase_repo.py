@@ -3,7 +3,13 @@ from typing import Any
 from uuid import uuid4
 
 from backend.config import settings
-from backend.models.athlete import AthleteProfile, RecoveryLog, ScheduleAvailability, ScheduleOverride, SportThreshold
+from backend.models.athlete import (
+    AthleteProfile,
+    RecoveryLog,
+    ScheduleAvailability,
+    ScheduleOverride,
+    SportThreshold,
+)
 from backend.models.chat import (
     ChatAttachmentInput,
     ChatAttachmentRecord,
@@ -41,9 +47,7 @@ class SupabaseRepository:
     async def upsert_athlete_profile(self, profile: AthleteProfile) -> AthleteProfile:
         client = self._require_client()
         payload = profile.model_dump(mode="json", exclude={"created_at", "updated_at"})
-        response = (
-            client.table("athlete_profiles").upsert(payload, on_conflict="user_id").execute()
-        )
+        response = client.table("athlete_profiles").upsert(payload, on_conflict="user_id").execute()
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the upserted athlete profile row.")
@@ -72,7 +76,9 @@ class SupabaseRepository:
             "superseded_at", "null"
         ).execute()
 
-        payload = threshold.model_dump(mode="json", exclude={"created_at", "updated_at", "superseded_at"})
+        payload = threshold.model_dump(
+            mode="json", exclude={"created_at", "updated_at", "superseded_at"}
+        )
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = client.table("sport_thresholds").insert(payload).execute()
@@ -136,10 +142,7 @@ class SupabaseRepository:
     ) -> DailyLoadSnapshot | None:
         client = self._require_client()
         query = client.table("daily_load_snapshots").select("*").eq("user_id", user_id)
-        if sport is None:
-            query = query.is_("sport", "null")
-        else:
-            query = query.eq("sport", sport)
+        query = query.is_("sport", "null") if sport is None else query.eq("sport", sport)
         response = query.order("snapshot_date", desc=True).limit(1).execute()
         rows = response.data or []
         if not rows:
@@ -187,9 +190,7 @@ class SupabaseRepository:
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = (
-            client.table("recovery_logs")
-            .upsert(payload, on_conflict="user_id,log_date")
-            .execute()
+            client.table("recovery_logs").upsert(payload, on_conflict="user_id,log_date").execute()
         )
         rows = response.data or []
         if not rows:
@@ -214,9 +215,7 @@ class SupabaseRepository:
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = (
-            client.table("schedule_availability")
-            .upsert(payload, on_conflict="user_id")
-            .execute()
+            client.table("schedule_availability").upsert(payload, on_conflict="user_id").execute()
         )
         rows = response.data or []
         if not rows:
@@ -251,9 +250,9 @@ class SupabaseRepository:
     async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
         client = self._require_client()
         # Supersede existing active plan
-        client.table("training_plans").update(
-            {"status": "superseded"}
-        ).eq("user_id", plan.user_id).eq("status", "active").execute()
+        client.table("training_plans").update({"status": "superseded"}).eq(
+            "user_id", plan.user_id
+        ).eq("status", "active").execute()
 
         payload = plan.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):

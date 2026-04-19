@@ -2,12 +2,11 @@ from collections.abc import Mapping
 from datetime import date
 from urllib.parse import urlencode
 
-from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Response, UploadFile
+from fastapi import Cookie, Depends, FastAPI, Form, Header, HTTPException, Response
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from backend.config import settings
-from backend.models.athlete import AthleteProfile, RecoveryLog, ScheduleAvailability, ScheduleOverride, SportThreshold
 from backend.models.auth import (
     BrowserSessionRequest,
     BrowserTokenResponse,
@@ -17,7 +16,7 @@ from backend.models.auth import (
     UserContext,
 )
 from backend.models.chat import ChatSendRequest
-from backend.models.training import Activity, Goal
+from backend.models.storage import PresignUploadRequest
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -33,13 +32,14 @@ from backend.services.auth import (
 )
 from backend.services.chat import ChatService, ChatUnavailableError
 from backend.services.r2 import R2Service
-from backend.models.storage import PresignUploadRequest
 
 app = FastAPI(title="Endurance Coaching Agent")
 auth_service = AuthService()
 chat_service = ChatService()
 repo = SupabaseRepository()
 r2_service = R2Service()
+
+RECOVERY_WEEK_AGE_BREAKPOINT = 40
 
 
 def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
@@ -69,12 +69,14 @@ def enforce_user_access(requested_user_id: str, user_context: UserContext) -> No
 
 # ── Health ────────────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health() -> Mapping[str, str]:
     return {"status": "ok"}
 
 
 # ── OAuth (unchanged) ────────────────────────────────────────
+
 
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_authorization_server() -> Mapping[str, object]:
@@ -242,6 +244,7 @@ async def oauth_authorize_decision(  # noqa: PLR0913
 
 
 # ── Chat ──────────────────────────────────────────────────────
+
 
 @app.get("/api/chat/thread")
 async def get_chat_thread(
@@ -438,9 +441,7 @@ async def recompute_load_endpoint(
     initial_ctl = prev.ctl if prev else 0.0
     initial_atl = prev.atl if prev else 0.0
 
-    snapshots = recompute_load_series(
-        daily_tss, since, date.today(), initial_ctl, initial_atl
-    )
+    snapshots = recompute_load_series(daily_tss, since, date.today(), initial_ctl, initial_atl)
 
     await repo.upsert_load_snapshots(payload.user_id, snapshots, sport=payload.sport)
 
@@ -550,7 +551,7 @@ async def generate_plan_structure(
 
     age = profile.age
     ceiling = estimate_ctl_ceiling(age, profile.biological_sex or "not_specified")
-    recovery_freq = 4 if age is None or age < 40 else 3
+    recovery_freq = 4 if age is None or age < RECOVERY_WEEK_AGE_BREAKPOINT else 3
 
     skeleton = build_plan_skeleton(
         current_ctl=current_ctl,

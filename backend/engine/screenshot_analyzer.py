@@ -14,20 +14,32 @@ import httpx
 
 from backend.config import get_settings
 
+MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE = 0.3
+
 CLASSIFY_PROMPT = """Analyze this screenshot and classify it into exactly one category:
 
-- activity_single: A single workout/activity summary (Strava, Garmin, Runalyze, intervals.icu, Apple Fitness, etc.)
-- wellness_multi_day: Multiple days of sleep/recovery/wellness data (sleep history, body battery trend, HRV trend)
-- wellness_single_day: A single day's recovery/wellness summary (today's body battery, sleep score, HRV)
-- training_load_chart: A fitness/fatigue chart showing CTL/ATL/TSB or similar training load over time
+- activity_single: A single workout/activity summary
+  (Strava, Garmin, Runalyze, intervals.icu, Apple Fitness, etc.)
+- wellness_multi_day: Multiple days of sleep/recovery/wellness data
+  (sleep history, body battery trend, HRV trend)
+- wellness_single_day: A single day's recovery/wellness summary
+  (today's body battery, sleep score, HRV)
+- training_load_chart: A fitness/fatigue chart showing CTL/ATL/TSB or similar
+  training load over time
 - plan_or_calendar: A training plan or workout calendar view
 - unknown: Cannot determine what this screenshot shows
 
 Respond with ONLY a JSON object:
-{"screenshot_type": "<category>", "source_app_hint": "<app name or null>", "date_range_hint": "<date or range or null>", "confidence": <0.0-1.0>}
+{
+  "screenshot_type": "<category>",
+  "source_app_hint": "<app name or null>",
+  "date_range_hint": "<date or range or null>",
+  "confidence": <0.0-1.0>
+}
 """
 
-EXTRACT_ACTIVITY_PROMPT = """Extract workout data from this activity screenshot. Return a JSON object with these fields (use null for any field not visible):
+EXTRACT_ACTIVITY_PROMPT = """Extract workout data from this activity screenshot.
+Return a JSON object with these fields (use null for any field not visible):
 
 {
   "sport": "running|cycling|swimming|rowing|hiking|general",
@@ -47,7 +59,8 @@ EXTRACT_ACTIVITY_PROMPT = """Extract workout data from this activity screenshot.
 
 Only include fields you can clearly read from the screenshot. Do not guess values."""
 
-EXTRACT_WELLNESS_MULTI_PROMPT = """Extract daily wellness/recovery data from this screenshot. It may show multiple days.
+EXTRACT_WELLNESS_MULTI_PROMPT = """Extract daily wellness/recovery data from this screenshot.
+It may show multiple days.
 
 Return a JSON object:
 {
@@ -162,7 +175,10 @@ async def analyze_screenshot(image_url: str) -> ExtractionResult:
     """Full pipeline: classify then extract."""
     classification = await classify_screenshot(image_url)
 
-    if classification.screenshot_type == "unknown" or classification.confidence < 0.3:
+    if (
+        classification.screenshot_type == "unknown"
+        or classification.confidence < MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE
+    ):
         return ExtractionResult(
             screenshot_type="unknown",
             data={"classification": classification.__dict__},

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+HIGH_ALTITUDE_GAIN_METERS = 2500
+
 
 @dataclass(frozen=True)
 class CourseAnalysis:
@@ -119,7 +121,7 @@ def analyze_mountain_objective(
     # Rough CTL target for mountain objectives
     # Rainier-class (3000m+ gain): CTL ~60-80
     # Moderate peak (1500m gain): CTL ~40-50
-    if elevation_gain_meters > 2500:
+    if elevation_gain_meters > HIGH_ALTITUDE_GAIN_METERS:
         emphasis = "high_altitude_endurance"
         notes = (
             "High-altitude mountaineering objective. "

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+CYCLING_INFERRED_PACE_SEC_KM = 180
+
 
 @dataclass
 class ParsedActivity:
@@ -24,11 +26,11 @@ class ParsedActivity:
     power_stream: list[int] | None = None  # for NP calculation
 
 
-def parse_gpx(file_path: str | Path) -> ParsedActivity:
+def parse_gpx(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
     """Parse a GPX file into structured activity data."""
     import gpxpy
 
-    with open(file_path) as f:
+    with Path(file_path).open() as f:
         gpx = gpxpy.parse(f)
 
     total_distance = 0.0
@@ -72,7 +74,7 @@ def parse_gpx(file_path: str | Path) -> ParsedActivity:
     sport = "running"
     if duration and total_distance > 0:
         pace_sec_km = duration / (total_distance / 1000)
-        if pace_sec_km < 180:  # faster than 3:00/km → likely cycling
+        if pace_sec_km < CYCLING_INFERRED_PACE_SEC_KM:  # faster than 3:00/km -> likely cycling
             sport = "cycling"
 
     return ParsedActivity(
@@ -85,13 +87,15 @@ def parse_gpx(file_path: str | Path) -> ParsedActivity:
         avg_hr_bpm=round(sum(hr_values) / len(hr_values)) if hr_values else None,
         max_hr_bpm=max(hr_values) if hr_values else None,
         avg_power_watts=round(sum(power_values) / len(power_values)) if power_values else None,
-        avg_cadence_rpm=round(sum(cadence_values) / len(cadence_values)) if cadence_values else None,
+        avg_cadence_rpm=round(sum(cadence_values) / len(cadence_values))
+        if cadence_values
+        else None,
         power_stream=power_values if power_values else None,
     )
 
 
 def _extract_gpx_extension(
-    ext,  # noqa: ANN001 — lxml Element
+    ext,
     hr_values: list[int],
     power_values: list[int],
     cadence_values: list[int],
@@ -112,7 +116,7 @@ def _extract_gpx_extension(
         hr_values.append(int(ext.text))
 
 
-def parse_fit(file_path: str | Path) -> ParsedActivity:
+def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
     """Parse a Garmin .FIT file into structured activity data."""
     from fitparse import FitFile
 
@@ -156,9 +160,11 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:
 
     # Collect power stream from records for NP calculation
     for record in fit.get_messages("record"):
-        for field in record.fields:
-            if field.name == "power" and field.value is not None:
-                power_stream.append(int(field.value))
+        power_stream.extend(
+            int(field.value)
+            for field in record.fields
+            if field.name == "power" and field.value is not None
+        )
 
     activity_date = start_time.date() if start_time else date.today()
 
