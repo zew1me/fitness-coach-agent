@@ -16,6 +16,13 @@ type ChatRequestBody = {
   messages?: UIMessage[];
 };
 
+type CoachToolContext = {
+  accessToken: string;
+  baseUrl: string;
+  fetchImpl?: typeof fetch;
+  userId: string;
+};
+
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
 }
@@ -25,18 +32,47 @@ function requestOrigin(request: Request): string {
   return `${url.protocol}//${url.host}`;
 }
 
-function createCoachTools(): ToolSet {
+async function postEngine<TInput extends object>(
+  context: CoachToolContext,
+  path: string,
+  input: TInput
+): Promise<unknown> {
+  const response = await (context.fetchImpl ?? fetch)(`${context.baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${context.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Engine request failed for ${path}.`);
+  }
+
+  return response.json();
+}
+
+export function createCoachTools(context: CoachToolContext): ToolSet {
   return Object.fromEntries(
     Object.entries(coachToolDefinitions).map(([name, definition]) => [
       name,
       {
         description: definition.description,
         inputSchema: definition.inputSchema,
-        execute: (input: unknown) => ({
-          input,
-          status: "pending_implementation",
-          tool: name
-        })
+        execute: (input: unknown): unknown => {
+          if (name === "get_athlete_context") {
+            return postEngine(context, "/api/engine/get-athlete-summary", {
+              user_id: context.userId,
+            });
+          }
+
+          return {
+            input,
+            status: "pending_implementation",
+            tool: name,
+          };
+        },
       }
     ])
   ) as ToolSet;
@@ -92,7 +128,11 @@ export async function POST(request: Request): Promise<Response> {
     model: openai("gpt-4.1-mini"),
     system: buildCoachSystemPrompt(context),
     messages: await convertToModelMessages(messages),
-    tools: createCoachTools()
+    tools: createCoachTools({
+      accessToken: token.access_token,
+      baseUrl: requestOrigin(request),
+      userId: token.user_id,
+    }),
   });
 
   return result.toUIMessageStreamResponse();
