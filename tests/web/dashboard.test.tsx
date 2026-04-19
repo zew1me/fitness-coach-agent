@@ -320,7 +320,7 @@ describe("CoachChat", () => {
     });
   });
 
-  it("uses an account menu instead of raw ids or switch-login copy", async () => {
+  it("opens profile preferences from the account menu without raw id editing", async () => {
     const userId = "aa687ce1-5189-4c28-bf24-e8b1574ebc5b";
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -372,6 +372,21 @@ describe("CoachChat", () => {
         );
       }
 
+      if (url === "/api/profile") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              coaching_state: "active",
+              display_name: "Riley",
+              primary_sports: ["running", "cycling"],
+              user_id: userId,
+              weekly_available_hours: 7.5
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
       return Promise.reject(new Error(`Unexpected fetch to ${url}`));
     });
 
@@ -385,8 +400,15 @@ describe("CoachChat", () => {
     fireEvent.click(screen.getByRole("button", { name: /Account menu/i }));
 
     await screen.findByRole("menu", { name: /Account/i });
-    expect(screen.getByRole("menuitem", { name: /Profile & preferences/i })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /Sign out or change account/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Profile & preferences/i }));
+
+    await screen.findByRole("heading", { name: /Profile & preferences/i });
+    expect(screen.getByLabelText(/Display name/i)).toBeTruthy();
+    expect(screen.getByLabelText(/Sports/i)).toBeTruthy();
+    expect(screen.getByLabelText(/Weekly training hours/i)).toBeTruthy();
+    expect(screen.queryByLabelText(/User ID/i)).toBeNull();
+    expect(screen.queryByLabelText(/FTP/i)).toBeNull();
   });
 
   it("sends composer messages through the AI SDK useChat hook", async () => {
