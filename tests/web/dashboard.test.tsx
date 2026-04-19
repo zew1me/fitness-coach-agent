@@ -576,4 +576,169 @@ describe("CoachChat", () => {
       });
     });
   });
+
+  it("pasting an image from the clipboard attaches it via the presign upload flow", async () => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:paste-preview")
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn()
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: true,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: { message_kind: "welcome" },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/attachments/presign") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "x-upload": "1" },
+              method: "PUT",
+              object_key: "uploads/screenshot.png",
+              public_url: "https://example.com/screenshot.png",
+              upload_url: "https://upload.example/screenshot.png"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "https://upload.example/screenshot.png") {
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const textarea = await screen.findByPlaceholderText(/Ask anything about your training/i);
+
+    const imageFile = new File(["png-data"], "screenshot.png", { type: "image/png" });
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        items: [{ kind: "file", type: "image/png", getAsFile: (): File => imageFile }]
+      }
+    });
+
+    await screen.findByText("Ready");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/chat/attachments/presign",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("pasting plain text into the composer does not intercept normal text entry", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: true,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: { message_kind: "welcome" },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const textarea = await screen.findByPlaceholderText(/Ask anything about your training/i);
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        items: [{ kind: "string", type: "text/plain", getAsFile: (): null => null }]
+      }
+    });
+
+    // No upload chip should appear — text paste doesn't trigger attachment flow
+    expect(screen.queryByText("Ready")).toBeNull();
+    expect(screen.queryByText("Uploading")).toBeNull();
+  });
 });

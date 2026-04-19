@@ -421,13 +421,10 @@ export function CoachChat(): JSX.Element {
     }
   }
 
-  async function handleFileSelect(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const selectedFiles = Array.from(event.target.files ?? []);
-    if (selectedFiles.length === 0) {
-      return;
-    }
+  async function handleFilesAdded(files: File[]): Promise<void> {
+    if (files.length === 0) return;
 
-    const nextLocalAttachments = selectedFiles
+    const nextLocalAttachments = files
       .filter((file) => file.type.startsWith("image/"))
       .map<LocalAttachment>((file) => ({
         content_type: file.type,
@@ -439,7 +436,7 @@ export function CoachChat(): JSX.Element {
       }));
     setAttachments((current) => [...current, ...nextLocalAttachments]);
 
-    for (const file of selectedFiles) {
+    for (const file of files) {
       if (!file.type.startsWith("image/")) {
         setThreadState((current) => ({
           ...current,
@@ -478,10 +475,7 @@ export function CoachChat(): JSX.Element {
         setAttachments((current) =>
           current.map((attachment) =>
             attachment.filename === file.name && attachment.object_key === ""
-              ? {
-                  ...attachment,
-                  status: "error",
-                }
+              ? { ...attachment, status: "error" }
               : attachment,
           ),
         );
@@ -491,8 +485,23 @@ export function CoachChat(): JSX.Element {
         }));
       }
     }
+  }
 
+  async function handleFileSelect(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    await handleFilesAdded(Array.from(event.target.files ?? []));
     event.target.value = "";
+  }
+
+  function handlePaste(event: React.ClipboardEvent): void {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      void handleFilesAdded(imageFiles);
+    }
   }
 
   async function openDrawer(): Promise<void> {
@@ -726,13 +735,9 @@ export function CoachChat(): JSX.Element {
                 />
                 <button
                   className={styles.attachButton}
-                  disabled={!threadState.data.attachments_enabled || sending}
+                  disabled={sending}
                   onClick={() => fileInputRef.current?.click()}
-                  title={
-                    threadState.data.attachments_enabled
-                      ? "Add photo"
-                      : "Photo uploads are not configured in this environment"
-                  }
+                  title="Add photo"
                   type="button"
                 >
                   +
@@ -746,6 +751,7 @@ export function CoachChat(): JSX.Element {
                       void handleSend();
                     }
                   }}
+                  onPaste={handlePaste}
                   placeholder="Ask anything about your training..."
                   rows={1}
                   value={composer}
