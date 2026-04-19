@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from asyncio import to_thread
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from uuid import uuid4
@@ -39,6 +40,31 @@ class R2Service:
             object_key=object_key,
             public_url=self._build_public_url(object_key),
             headers={"Content-Type": request.content_type},
+        )
+
+    async def upload_file(
+        self, *, user_id: str, object_key: str, file_stream, content_type: str
+    ) -> PresignUploadResponse:
+        """Upload a file directly to R2 and return upload metadata."""
+        self._ensure_configured()
+        self._validate_object_key_scope(user_id=user_id, object_key=object_key)
+
+        client = self._build_client()
+        # Run blocking boto3 operation in thread pool
+        await to_thread(
+            client.put_object,
+            Bucket=settings.r2_bucket,
+            Key=object_key,
+            Body=file_stream,
+            ContentType=content_type,
+        )
+
+        return PresignUploadResponse(
+            upload_url="",  # Not used for direct uploads
+            object_key=object_key,
+            public_url=self._build_public_url(object_key),
+            headers={"Content-Type": content_type},
+            method="POST",  # Indicate this was a direct upload
         )
 
     def _build_client(self) -> BaseClient:
@@ -107,6 +133,15 @@ class R2Service:
         if not normalized:
             return "upload"
         return normalized[:64]
+
+    def _validate_object_key_scope(self, *, user_id: str, object_key: str) -> None:
+        """Validate that the object_key belongs to the authenticated user."""
+        expected_prefix = f"users/{user_id}/"
+        if not object_key.startswith(expected_prefix):
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: object key does not belong to authenticated user",
+            )
 
     def _configured_value(self, value: str | None) -> str | None:
         if value is None:

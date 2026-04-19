@@ -13,6 +13,6 @@ class PresignUploadResponse(BaseModel):
     method: str = "PUT"
     object_key: str
     public_url: str | None = None
-    upload_url: str
+    upload_url: str = ""  # Empty for direct uploads
 
     model_config = ConfigDict(frozen=True)
