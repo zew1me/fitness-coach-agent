@@ -400,10 +400,10 @@ describe("CoachChat", () => {
     fireEvent.click(screen.getByRole("button", { name: /Account menu/i }));
 
     await screen.findByRole("menu", { name: /Account/i });
-    expect(screen.getByRole("menuitem", { name: /Sign out or change account/i })).toBeTruthy();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Profile & preferences/i }));
+    expect(screen.getByRole("menuitem", { name: /Sign out/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Profile/i }));
 
-    await screen.findByRole("heading", { name: /Profile & preferences/i });
+    await screen.findByRole("heading", { name: /Profile/i });
     expect(screen.getByLabelText(/Display name/i)).toBeTruthy();
     expect(screen.getByLabelText(/Sports/i)).toBeTruthy();
     expect(screen.getByLabelText(/Weekly training hours/i)).toBeTruthy();

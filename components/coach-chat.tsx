@@ -701,10 +701,10 @@ export function CoachChat(): JSX.Element {
                       role="menuitem"
                       type="button"
                     >
-                      Profile & preferences
+                      Profile
                     </button>
                     <Link className={styles.menuItem} href="/login?return_to=/" role="menuitem">
-                      Sign out or change account
+                      Sign out
                     </Link>
                   </div>
                 ) : null}
@@ -842,7 +842,7 @@ export function CoachChat(): JSX.Element {
           >
             <div className={styles.drawerHeader}>
               <div>
-                <h2 className={styles.drawerTitle}>Profile & preferences</h2>
+                <h2 className={styles.drawerTitle}>Profile</h2>
                 <p className={styles.drawerText}>
                   Review the profile details your coach uses for training guidance.
                 </p>
