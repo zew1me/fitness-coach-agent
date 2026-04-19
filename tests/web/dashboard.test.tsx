@@ -258,6 +258,75 @@ describe("CoachChat", () => {
     });
   });
 
+  it("uses an account menu instead of raw ids or switch-login copy", async () => {
+    const userId = "aa687ce1-5189-4c28-bf24-e8b1574ebc5b";
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: userId
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: false,
+              thread: {
+                id: "thread-1",
+                user_id: userId,
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: userId
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText(/Building your athlete profile/i);
+    expect(screen.queryByText(new RegExp(userId))).toBeNull();
+    expect(screen.queryByRole("link", { name: /Switch login/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/i }));
+
+    await screen.findByRole("menu", { name: /Account/i });
+    expect(screen.getByRole("menuitem", { name: /Profile & preferences/i })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /Sign out or change account/i })).toBeTruthy();
+  });
+
   it("sends composer messages through the AI SDK useChat hook", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
