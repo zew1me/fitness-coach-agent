@@ -1,17 +1,24 @@
-"""GPX and FIT file parsing to structured activity data."""
+"""GPX, FIT, and TCX file parsing to structured activity data."""
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
+
+from backend.engine.hrv import HRVSummary, summarize_hrv
 
 CYCLING_INFERRED_PACE_SEC_KM = 180
+MIN_RR_INTERVAL_MS = 300
+MAX_RR_INTERVAL_MS = 2000
+SECONDS_TO_MS_THRESHOLD = 10
 
 
 @dataclass
 class ParsedActivity:
-    """Structured activity data extracted from a GPX or FIT file."""
+    """Structured activity data extracted from a workout activity file."""
 
     sport: str
     activity_date: date
@@ -24,6 +31,8 @@ class ParsedActivity:
     avg_power_watts: int | None = None
     avg_cadence_rpm: int | None = None
     power_stream: list[int] | None = None  # for NP calculation
+    rr_intervals_ms: list[int] | None = None
+    hrv_summary: HRVSummary | None = None
 
 
 def parse_gpx(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
@@ -38,6 +47,7 @@ def parse_gpx(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
     hr_values: list[int] = []
     power_values: list[int] = []
     cadence_values: list[int] = []
+    rr_intervals: list[int] = []
     start_time: datetime | None = None
     end_time: datetime | None = None
 
@@ -62,7 +72,13 @@ def parse_gpx(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
                 # Extract HR, power, cadence from extensions
                 if point.extensions:
                     for ext in point.extensions:
-                        _extract_gpx_extension(ext, hr_values, power_values, cadence_values)
+                        _extract_gpx_extension(
+                            ext,
+                            hr_values,
+                            power_values,
+                            cadence_values,
+                            rr_intervals,
+                        )
 
     duration = None
     if start_time and end_time:
@@ -91,29 +107,40 @@ def parse_gpx(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
         if cadence_values
         else None,
         power_stream=power_values if power_values else None,
+        rr_intervals_ms=rr_intervals if rr_intervals else None,
+        hrv_summary=summarize_hrv(rr_intervals) if rr_intervals else None,
     )
 
 
-def _extract_gpx_extension(
-    ext,
+def _extract_gpx_extension(  # noqa: C901
+    ext: Any,
     hr_values: list[int],
     power_values: list[int],
     cadence_values: list[int],
+    rr_intervals: list[int],
 ) -> None:
-    """Extract HR, power, cadence from GPX extension elements."""
-    tag = ext.tag.split("}")[-1] if "}" in ext.tag else ext.tag
+    """Extract HR, power, cadence, and RR intervals from GPX extension elements."""
+    tag = _local_name(ext.tag)
 
     if tag == "TrackPointExtension":
         for child in ext:
-            child_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            child_tag = _local_name(child.tag)
             if child_tag == "hr" and child.text:
                 hr_values.append(int(child.text))
             elif child_tag == "cad" and child.text:
                 cadence_values.append(int(child.text))
+            elif _is_rr_tag(child_tag) and child.text:
+                _append_rr_interval(rr_intervals, child.text)
     elif tag == "power" and ext.text:
         power_values.append(int(ext.text))
     elif tag == "hr" and ext.text:
         hr_values.append(int(ext.text))
+    elif _is_rr_tag(tag) and ext.text:
+        _append_rr_interval(rr_intervals, ext.text)
+
+    for child in ext:
+        if _local_name(child.tag) != "TrackPointExtension":
+            _extract_gpx_extension(child, hr_values, power_values, cadence_values, rr_intervals)
 
 
 def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
@@ -132,6 +159,7 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
     avg_power: int | None = None
     avg_cadence: int | None = None
     power_stream: list[int] = []
+    rr_intervals: list[int] = []
 
     for record in fit.get_messages("session"):
         for field in record.fields:
@@ -166,6 +194,14 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
             if field.name == "power" and field.value is not None
         )
 
+    for record in fit.get_messages("hrv"):
+        for field in record.fields:
+            if field.name != "time" or field.value is None:
+                continue
+            values = field.value if isinstance(field.value, list) else [field.value]
+            for value in values:
+                _append_rr_interval(rr_intervals, value)
+
     activity_date = start_time.date() if start_time else date.today()
 
     return ParsedActivity(
@@ -180,4 +216,103 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
         avg_power_watts=avg_power,
         avg_cadence_rpm=avg_cadence,
         power_stream=power_stream if power_stream else None,
+        rr_intervals_ms=rr_intervals if rr_intervals else None,
+        hrv_summary=summarize_hrv(rr_intervals) if rr_intervals else None,
     )
+
+
+def parse_tcx(file_path: str | Path) -> ParsedActivity:  # noqa: C901
+    """Parse a Garmin TCX file into structured activity data."""
+    root = ET.parse(file_path).getroot()
+    activity = next(
+        (element for element in root.iter() if _local_name(element.tag) == "Activity"),
+        None,
+    )
+    if activity is None:
+        raise ValueError("TCX file does not contain an Activity.")
+
+    sport = _normalize_tcx_sport(activity.attrib.get("Sport"))
+    start_time = _parse_datetime(_first_text(activity, "Id"))
+    duration: int | None = None
+    distance: float | None = None
+    hr_values: list[int] = []
+    rr_intervals: list[int] = []
+
+    total_duration = 0.0
+    max_distance = 0.0
+    for element in activity.iter():
+        tag = _local_name(element.tag)
+        if tag == "TotalTimeSeconds" and element.text:
+            total_duration += float(element.text)
+        elif tag == "DistanceMeters" and element.text:
+            max_distance = max(max_distance, float(element.text))
+        elif tag == "Time" and start_time is None:
+            start_time = _parse_datetime(element.text)
+        elif tag == "HeartRateBpm":
+            value = _first_text(element, "Value")
+            if value:
+                hr_values.append(int(value))
+        elif _is_rr_tag(tag) and element.text:
+            _append_rr_interval(rr_intervals, element.text)
+
+    if total_duration > 0:
+        duration = round(total_duration)
+    if max_distance > 0:
+        distance = max_distance
+
+    activity_date = start_time.date() if start_time else date.today()
+    return ParsedActivity(
+        sport=sport,
+        activity_date=activity_date,
+        started_at=start_time,
+        duration_seconds=duration,
+        distance_meters=distance,
+        avg_hr_bpm=round(sum(hr_values) / len(hr_values)) if hr_values else None,
+        max_hr_bpm=max(hr_values) if hr_values else None,
+        rr_intervals_ms=rr_intervals if rr_intervals else None,
+        hrv_summary=summarize_hrv(rr_intervals) if rr_intervals else None,
+    )
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _is_rr_tag(tag: str) -> bool:
+    return tag.lower() in {"rr", "rri", "rrinterval", "rr_interval"}
+
+
+def _append_rr_interval(rr_intervals: list[int], value: int | float | str) -> None:
+    try:
+        interval = float(value)
+    except (TypeError, ValueError):
+        return
+
+    if interval < SECONDS_TO_MS_THRESHOLD:
+        interval *= 1000
+    if MIN_RR_INTERVAL_MS <= interval <= MAX_RR_INTERVAL_MS:
+        rr_intervals.append(round(interval))
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _first_text(element: ET.Element, tag_name: str) -> str | None:
+    for child in element.iter():
+        if _local_name(child.tag) == tag_name and child.text:
+            return child.text
+    return None
+
+
+def _normalize_tcx_sport(sport: str | None) -> str:
+    if not sport:
+        return "general"
+    normalized = sport.lower()
+    if normalized in {"biking", "cycling"}:
+        return "cycling"
+    if normalized in {"snowboarding", "downhillskiing"}:
+        return "downhillskiing"
+    return normalized

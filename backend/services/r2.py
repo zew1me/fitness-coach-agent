@@ -67,6 +67,19 @@ class R2Service:
             method="POST",  # Indicate this was a direct upload
         )
 
+    async def download_file_bytes(self, *, user_id: str, object_key: str) -> bytes:
+        """Download a user-scoped object from R2."""
+        self._ensure_configured()
+        self._validate_object_key_scope(user_id=user_id, object_key=object_key)
+        client = self._build_client()
+        response = await to_thread(
+            client.get_object,
+            Bucket=settings.r2_bucket,
+            Key=object_key,
+        )
+        body = response["Body"]
+        return await to_thread(body.read)
+
     def _build_client(self) -> BaseClient:
         return boto3.client(
             "s3",

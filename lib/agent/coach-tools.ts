@@ -53,14 +53,38 @@ function stringField(input: Record<string, unknown>, key: string): string | null
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function isActivityFile(contentType: string | null, filename: string | null): boolean {
+  const lowerFilename = filename?.toLowerCase() ?? "";
+  return (
+    contentType === "application/gpx+xml" ||
+    contentType === "application/vnd.garmin.fit" ||
+    contentType === "application/vnd.garmin.tcx+xml" ||
+    lowerFilename.endsWith(".gpx") ||
+    lowerFilename.endsWith(".fit") ||
+    lowerFilename.endsWith(".tcx")
+  );
+}
+
 function processUploadedFile(input: unknown, context: CoachToolContext): unknown {
   const payload = engineInput(input);
   const contentType = stringField(payload, "content_type");
+  const filename = stringField(payload, "filename");
+  const objectKey = stringField(payload, "object_key");
   const publicUrl = stringField(payload, "public_url");
 
   if (contentType?.startsWith("image/") && publicUrl !== null) {
     return postEngine(context, "/api/engine/analyze-screenshot", {
       image_url: publicUrl,
+    });
+  }
+
+  if (isActivityFile(contentType, filename) && contentType !== null && filename !== null && objectKey !== null) {
+    return postEngine(context, "/api/engine/process-uploaded-file", {
+      content_type: contentType,
+      filename,
+      object_key: objectKey,
+      public_url: publicUrl,
+      user_id: context.userId,
     });
   }
 
