@@ -35,6 +35,7 @@ type SessionState = {
 };
 
 type LocalAttachment = ChatAttachment & {
+  dataUrl: string | null;
   previewUrl: string | null;
   status: "error" | "uploaded" | "uploading";
 };
@@ -132,16 +133,19 @@ function toLiveChatMessage(message: UIMessage, threadId: string, userId: string)
 
 function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
   return attachments.flatMap((attachment) => {
-    if (attachment.status !== "uploaded" || attachment.public_url === null) {
+    if (attachment.status !== "uploaded") {
       return [];
     }
-
+    const url = attachment.public_url ?? attachment.dataUrl;
+    if (url === null) {
+      return [];
+    }
     return [
       {
         filename: attachment.filename,
         mediaType: attachment.content_type,
         type: "file",
-        url: attachment.public_url,
+        url,
       },
     ];
   });
@@ -453,6 +457,7 @@ export function CoachChat(): JSX.Element {
       .filter((file) => file.type.startsWith("image/"))
       .map<LocalAttachment>((file) => ({
         content_type: file.type,
+        dataUrl: null,
         filename: file.name,
         object_key: "",
         previewUrl: URL.createObjectURL(file),
@@ -480,11 +485,25 @@ export function CoachChat(): JSX.Element {
 
         await uploadFile(intent.object_key, file);
 
+        let dataUrl: string | null = null;
+        try {
+          const buffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(buffer);
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i] as number);
+          }
+          dataUrl = `data:${file.type};base64,${btoa(binary)}`;
+        } catch {
+          // Non-critical: data URL is only a fallback when public_url is unavailable
+        }
+
         setAttachments((current) =>
           current.map((attachment) =>
             attachment.filename === file.name && attachment.object_key === ""
               ? {
                   ...attachment,
+                  dataUrl,
                   object_key: intent.object_key,
                   public_url: intent.public_url,
                   status: "uploaded",

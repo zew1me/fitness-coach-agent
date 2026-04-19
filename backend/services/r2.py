@@ -85,9 +85,10 @@ class R2Service:
         return str(PurePosixPath("users", user_id, purpose, date_prefix, object_name))
 
     def _build_public_url(self, object_key: str) -> str | None:
-        if settings.r2_public_base_url is None:
+        base = self._configured_value(settings.r2_public_base_url)
+        if base is None:
             return None
-        return f"{settings.r2_public_base_url.rstrip('/')}/{object_key}"
+        return f"{base.rstrip('/')}/{object_key}"
 
     def _ensure_configured(self) -> None:
         missing = [
