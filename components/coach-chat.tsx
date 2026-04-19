@@ -76,8 +76,9 @@ function coachingStatusLabel(profileComplete: boolean): string {
 }
 
 function accountLabel(profile: AthleteProfile | null): string {
-  const displayName = profile?.display_name?.trim();
-  return displayName ? displayName : "Athlete profile";
+  if (profile === null) return "Account";
+  const displayName = profile.display_name?.trim();
+  return displayName ? displayName : "Account";
 }
 
 function toUiMessage(message: ChatMessage): UIMessage {
@@ -353,7 +354,17 @@ export function CoachChat(): JSX.Element {
       }
     }
 
+    async function prefetchProfile(userId: string): Promise<void> {
+      try {
+        const loaded = await loadProfile(userId);
+        setProfile(loaded);
+      } catch {
+        setProfile(emptyProfile(userId));
+      }
+    }
+
     void loadThread();
+    void prefetchProfile(session.token.user_id);
   }, [session.token]);
 
   useEffect(() => {
@@ -711,10 +722,10 @@ export function CoachChat(): JSX.Element {
                   <div className={styles.starterRow}>
                     <button
                       className={styles.starterButton}
-                      onClick={() => setComposer("I just finished my ride and want to log how it felt.")}
+                      onClick={() => setComposer("I just finished a training session and want to log how it felt.")}
                       type="button"
                     >
-                      Log today’s ride
+                      Log a training session
                     </button>
                     <button
                       className={styles.starterButton}

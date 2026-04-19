@@ -130,6 +130,10 @@
   margin-bottom: 4px;
   padding: 10px 12px 12px;
   border-bottom: 1px solid var(--border);
+  border-radius: 8px 8px 0 0;
+  background: var(--surface);
+  cursor: default;
+  user-select: text;
 }
 
 .accountSummary span {
