@@ -258,6 +258,88 @@ describe("CoachChat", () => {
     });
   });
 
+  it("opens a sport-agnostic profile and preferences drawer without raw id editing", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/profile") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              coaching_state: "active",
+              display_name: "Riley",
+              primary_sports: ["running", "cycling"],
+              user_id: "athlete-1",
+              weekly_available_hours: 7.5
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Settings/i }));
+
+    await screen.findByRole("heading", { name: /Profile & preferences/i });
+    expect(screen.getByLabelText(/Display name/i)).toBeTruthy();
+    expect(screen.getByLabelText(/Sports/i)).toBeTruthy();
+    expect(screen.getByLabelText(/Weekly training hours/i)).toBeTruthy();
+    expect(screen.queryByLabelText(/User ID/i)).toBeNull();
+    expect(screen.queryByLabelText(/FTP/i)).toBeNull();
+  });
+
   it("sends composer messages through the AI SDK useChat hook", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);

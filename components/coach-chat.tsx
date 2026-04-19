@@ -786,15 +786,15 @@ export function CoachChat(): JSX.Element {
           role="presentation"
         >
           <aside
-            aria-label="Athlete settings"
+            aria-label="Profile and preferences"
             className={styles.drawer}
             onClick={(event) => event.stopPropagation()}
           >
             <div className={styles.drawerHeader}>
               <div>
-                <h2 className={styles.drawerTitle}>Athlete settings</h2>
+                <h2 className={styles.drawerTitle}>Profile & preferences</h2>
                 <p className={styles.drawerText}>
-                  The main experience stays chat-first, but you can still review or edit the profile the coach uses.
+                  Review the profile details your coach uses for sport-agnostic training guidance.
                 </p>
               </div>
               <button className={styles.drawerClose} onClick={() => setDrawerOpen(false)} type="button">
@@ -822,14 +822,6 @@ export function CoachChat(): JSX.Element {
             ) : profile ? (
               <div className={styles.fieldGrid}>
                 <label className={styles.fieldLabel}>
-                  User ID
-                  <input
-                    className={styles.fieldInput}
-                    readOnly
-                    value={profile.user_id}
-                  />
-                </label>
-                <label className={styles.fieldLabel}>
                   Display name
                   <input
                     className={styles.fieldInput}
@@ -851,7 +843,7 @@ export function CoachChat(): JSX.Element {
                           .filter((s) => s.length > 0),
                       })
                     }
-                    placeholder="e.g. running, cycling"
+                    placeholder="e.g. running, cycling, strength"
                     value={profile.primary_sports.join(", ")}
                   />
                 </label>
@@ -880,7 +872,7 @@ export function CoachChat(): JSX.Element {
                     }}
                     type="button"
                   >
-                    {drawerLoading ? "Saving..." : "Save settings"}
+                    {drawerLoading ? "Saving..." : "Save profile"}
                   </button>
                 </div>
                 {drawerStatus ? <p className={styles.drawerStatus}>{drawerStatus}</p> : null}
