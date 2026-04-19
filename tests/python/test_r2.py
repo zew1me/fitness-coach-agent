@@ -1,3 +1,6 @@
+import pytest
+from fastapi import HTTPException
+
 from backend.models.storage import PresignUploadRequest
 from backend.services.r2 import R2Service
 
@@ -27,3 +30,28 @@ def test_public_url_uses_configured_base(monkeypatch) -> None:
     public_url = service._build_public_url("users/u/check-in-image/file.png")
 
     assert public_url == "https://cdn.example.com/training/users/u/check-in-image/file.png"
+
+
+def test_blank_endpoint_url_without_account_id_is_missing_config(monkeypatch) -> None:
+    service = R2Service()
+    monkeypatch.setattr("backend.services.r2.settings.r2_endpoint_url", "")
+    monkeypatch.setattr("backend.services.r2.settings.r2_account_id", None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        service._resolve_endpoint_url()
+
+    assert exc_info.value.status_code == 500
+    assert (
+        exc_info.value.detail
+        == "R2 endpoint is not configured. Set R2_ENDPOINT_URL or R2_ACCOUNT_ID."
+    )
+
+
+def test_blank_endpoint_url_falls_back_to_account_id(monkeypatch) -> None:
+    service = R2Service()
+    monkeypatch.setattr("backend.services.r2.settings.r2_endpoint_url", "")
+    monkeypatch.setattr("backend.services.r2.settings.r2_account_id", "account-123")
+
+    endpoint_url = service._resolve_endpoint_url()
+
+    assert endpoint_url == "https://account-123.r2.cloudflarestorage.com"

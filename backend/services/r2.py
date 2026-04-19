@@ -71,7 +71,7 @@ class R2Service:
                 "R2_SECRET_ACCESS_KEY": settings.r2_secret_access_key,
                 "R2_BUCKET": settings.r2_bucket,
             }.items()
-            if value is None
+            if self._configured_value(value) is None
         ]
         if missing:
             missing_names = ", ".join(sorted(missing))
@@ -87,14 +87,17 @@ class R2Service:
         return suffix[:16]
 
     def _resolve_endpoint_url(self) -> str:
-        if settings.r2_endpoint_url is not None:
-            return settings.r2_endpoint_url
-        if settings.r2_account_id is None:
+        endpoint_url = self._configured_value(settings.r2_endpoint_url)
+        if endpoint_url is not None:
+            return endpoint_url
+
+        account_id = self._configured_value(settings.r2_account_id)
+        if account_id is None:
             raise HTTPException(
                 status_code=500,
                 detail="R2 endpoint is not configured. Set R2_ENDPOINT_URL or R2_ACCOUNT_ID.",
             )
-        return f"https://{settings.r2_account_id}.r2.cloudflarestorage.com"
+        return f"https://{account_id}.r2.cloudflarestorage.com"
 
     def _sanitize_segment(self, value: str) -> str:
         normalized = "".join(
@@ -104,3 +107,11 @@ class R2Service:
         if not normalized:
             return "upload"
         return normalized[:64]
+
+    def _configured_value(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return stripped
