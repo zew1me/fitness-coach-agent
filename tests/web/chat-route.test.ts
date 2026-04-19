@@ -88,4 +88,46 @@ describe("app/api/chat route", () => {
       })
     );
   });
+
+  it("executes estimate_thresholds by calling the engine thresholds endpoint", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ ftp_watts: 285, lt1_watts: 214, sport: "cycling" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const estimateThresholds = tools["estimate_thresholds"] as {
+      // eslint-disable-next-line no-unused-vars
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    await expect(
+      estimateThresholds.execute({
+        sport: "cycling",
+        test_duration_minutes: 20,
+        test_power_watts: 300,
+        user_id: "athlete-1"
+      })
+    ).resolves.toEqual({ ftp_watts: 285, lt1_watts: 214, sport: "cycling" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/estimate-thresholds",
+      expect.objectContaining({
+        body: JSON.stringify({
+          sport: "cycling",
+          test_duration_minutes: 20,
+          test_power_watts: 300
+        }),
+        method: "POST"
+      })
+    );
+  });
 });

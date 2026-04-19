@@ -79,6 +79,10 @@ export function createCoachTools(context: CoachToolContext): ToolSet {
             return postEngine(context, "/api/engine/calculate-zones", engineInput(input));
           }
 
+          if (name === "estimate_thresholds") {
+            return postEngine(context, "/api/engine/estimate-thresholds", engineInput(input));
+          }
+
           return {
             input,
             status: "pending_implementation",
