@@ -7,27 +7,11 @@ export type BrowserTokenResponse = {
 };
 
 export type AthleteProfile = {
-  age?: number;
-  constraints: string[];
-  cycling_ftp_watts?: number;
-  goals: string[];
-  injuries_rehab: string[];
-  notes?: string;
+  coaching_state: string;
+  display_name?: string | null;
+  primary_sports: string[];
   user_id: string;
-  weight_kg?: number;
-};
-
-export type CheckInInput = {
-  effective_date?: string;
-  image_count: number;
-  raw_text: string;
-  user_id: string;
-};
-
-export type PlanDay = {
-  day_index: number;
-  focus: string;
-  notes: string;
+  weekly_available_hours?: number | null;
 };
 
 export type AdaptedPlan = {
@@ -36,26 +20,7 @@ export type AdaptedPlan = {
   summary: string;
   trend: string;
   user_id: string;
-  days: PlanDay[];
-};
-
-export type GeneratedPlanResponse = {
-  plan: AdaptedPlan;
-  prompt_preview: string;
-};
-
-export type CheckInRecord = {
-  created_at: string;
-  effective_date?: string;
-  id: string;
-  image_count: number;
-  raw_text: string;
-  user_id: string;
-};
-
-export type CheckInResponse = {
-  accepted: boolean;
-  check_in: CheckInRecord;
+  days: { day_index: number; focus: string; notes: string }[];
 };
 
 export type PresignUploadRequest = {

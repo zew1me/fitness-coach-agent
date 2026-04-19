@@ -1,7 +1,6 @@
 import {
   athleteProfileSchema,
   chatMessageSchema,
-  planRequestSchema,
   uploadRequestSchema
 } from "./schemas";
 import type {
@@ -9,8 +8,6 @@ import type {
   BrowserTokenResponse,
   ChatAttachment,
   ChatThreadResponse,
-  CheckInResponse,
-  GeneratedPlanResponse,
   PresignUploadRequest,
   PresignUploadResponse
 } from "./types";
@@ -99,56 +96,28 @@ export function parseListInput(value: string): string[] {
 }
 
 export async function loadProfile(userId: string, fetchImpl: FetchLike = fetch): Promise<AthleteProfile> {
-  return authorizedFetch<AthleteProfile>(
-    "/api/profile",
+  type SummaryResponse = { profile: AthleteProfile };
+  const summary = await authorizedFetch<SummaryResponse>(
+    "/api/engine/get-athlete-summary",
     {
       method: "POST",
       body: JSON.stringify({ user_id: userId })
     },
     fetchImpl
   );
+  return summary.profile;
 }
 
 export async function saveProfile(
   profile: AthleteProfile,
   fetchImpl: FetchLike = fetch
 ): Promise<AthleteProfile> {
-  const payload = athleteProfileSchema.parse(profile);
+  const { user_id, ...fields } = athleteProfileSchema.parse(profile);
   return authorizedFetch<AthleteProfile>(
-    "/api/profile",
-    {
-      method: "PUT",
-      body: JSON.stringify(payload)
-    },
-    fetchImpl
-  );
-}
-
-export async function submitCheckIn(
-  payload: Parameters<typeof planRequestSchema.parse>[0],
-  fetchImpl: FetchLike = fetch
-): Promise<CheckInResponse> {
-  const body = planRequestSchema.parse(payload);
-  return authorizedFetch<CheckInResponse>(
-    "/api/check-ins",
+    "/api/engine/update-athlete-profile",
     {
       method: "POST",
-      body: JSON.stringify(body)
-    },
-    fetchImpl
-  );
-}
-
-export async function generatePlan(
-  payload: Parameters<typeof planRequestSchema.parse>[0],
-  fetchImpl: FetchLike = fetch
-): Promise<GeneratedPlanResponse> {
-  const body = planRequestSchema.parse(payload);
-  return authorizedFetch<GeneratedPlanResponse>(
-    "/api/plans/generate",
-    {
-      method: "POST",
-      body: JSON.stringify(body)
+      body: JSON.stringify({ user_id, fields })
     },
     fetchImpl
   );

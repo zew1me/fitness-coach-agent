@@ -489,7 +489,9 @@ async def get_athlete_summary(
     try:
         profile = await repo.get_athlete_profile(payload.user_id)
     except RecordNotFoundError:
-        return {"error": "Profile not found", "user_id": payload.user_id}
+        from backend.models.athlete import AthleteProfile as _AthleteProfile
+
+        profile = _AthleteProfile(user_id=payload.user_id, coaching_state="onboarding")
 
     thresholds = await repo.get_active_thresholds(payload.user_id)
     goals = await repo.list_active_goals(payload.user_id)
@@ -519,6 +521,21 @@ async def get_athlete_summary(
             "notes": ctl_ceiling.notes,
         },
     }
+
+
+class UpdateAthleteProfileRequest(BaseModel):
+    user_id: str
+    fields: dict[str, object]
+
+
+@app.post("/api/engine/update-athlete-profile")
+async def update_athlete_profile(
+    payload: UpdateAthleteProfileRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    enforce_user_access(payload.user_id, user_context)
+    profile = await repo.update_athlete_profile_fields(payload.user_id, payload.fields)
+    return profile.model_dump(mode="json")
 
 
 class GetRecentActivitiesRequest(BaseModel):

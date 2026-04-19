@@ -11,7 +11,6 @@ import {
   fetchBrowserToken,
   loadChatThread,
   loadProfile,
-  parseListInput,
   saveProfile,
 } from "../lib/coach-api";
 import { siteConfig } from "../lib/site";
@@ -40,9 +39,8 @@ type LocalAttachment = ChatAttachment & {
 function emptyProfile(userId: string): AthleteProfile {
   return {
     user_id: userId,
-    constraints: [],
-    goals: [],
-    injuries_rehab: [],
+    coaching_state: "onboarding",
+    primary_sports: [],
   };
 }
 
@@ -134,23 +132,6 @@ function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
       },
     ];
   });
-}
-
-function withOptionalNumber(
-  profile: AthleteProfile,
-  field: "age" | "cycling_ftp_watts" | "weight_kg",
-  rawValue: string,
-): AthleteProfile {
-  if (rawValue === "") {
-    const nextProfile = { ...profile };
-    delete nextProfile[field];
-    return nextProfile;
-  }
-
-  return {
-    ...profile,
-    [field]: Number(rawValue),
-  };
 }
 
 function ChatLoading(): JSX.Element {
@@ -294,11 +275,6 @@ export function CoachChat(): JSX.Element {
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerStatus, setDrawerStatus] = useState<string | null>(null);
   const [profile, setProfile] = useState<AthleteProfile | null>(null);
-  const [profileLists, setProfileLists] = useState({
-    constraints: "",
-    goals: "",
-    injuries_rehab: "",
-  });
   const chatMessages = useMemo<UIMessage[]>(
     () => threadState.data?.thread.messages.map(toUiMessage) ?? [],
     [threadState.data?.thread.messages],
@@ -529,19 +505,8 @@ export function CoachChat(): JSX.Element {
     try {
       const loaded = await loadProfile(session.token.user_id);
       setProfile(loaded);
-      setProfileLists({
-        constraints: loaded.constraints.join("\n"),
-        goals: loaded.goals.join("\n"),
-        injuries_rehab: loaded.injuries_rehab.join("\n"),
-      });
     } catch {
-      const freshProfile = emptyProfile(session.token.user_id);
-      setProfile(freshProfile);
-      setProfileLists({
-        constraints: "",
-        goals: "",
-        injuries_rehab: "",
-      });
+      setProfile(emptyProfile(session.token.user_id));
     } finally {
       setDrawerLoading(false);
     }
@@ -554,12 +519,7 @@ export function CoachChat(): JSX.Element {
     setDrawerLoading(true);
     setDrawerStatus(null);
     try {
-      const saved = await saveProfile({
-        ...profile,
-        constraints: parseListInput(profileLists.constraints),
-        goals: parseListInput(profileLists.goals),
-        injuries_rehab: parseListInput(profileLists.injuries_rehab),
-      });
+      const saved = await saveProfile(profile);
       setProfile(saved);
       setDrawerStatus("Saved your athlete settings.");
       if (session.token !== null) {
@@ -841,87 +801,50 @@ export function CoachChat(): JSX.Element {
                   User ID
                   <input
                     className={styles.fieldInput}
-                    onChange={(event) => setProfile({ ...profile, user_id: event.target.value })}
+                    readOnly
                     value={profile.user_id}
                   />
                 </label>
                 <label className={styles.fieldLabel}>
-                  Goals
-                  <textarea
+                  Display name
+                  <input
                     className={styles.fieldInput}
-                    onChange={(event) =>
-                      setProfileLists((current) => ({ ...current, goals: event.target.value }))
-                    }
-                    rows={4}
-                    value={profileLists.goals}
+                    onChange={(event) => setProfile({ ...profile, display_name: event.target.value || null })}
+                    placeholder="Your name (optional)"
+                    value={profile.display_name ?? ""}
                   />
                 </label>
                 <label className={styles.fieldLabel}>
-                  FTP (watts)
+                  Sports (comma-separated)
                   <input
                     className={styles.fieldInput}
                     onChange={(event) =>
-                      setProfile(withOptionalNumber(profile, "cycling_ftp_watts", event.target.value))
+                      setProfile({
+                        ...profile,
+                        primary_sports: event.target.value
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter((s) => s.length > 0),
+                      })
                     }
-                    type="number"
-                    value={profile.cycling_ftp_watts ?? ""}
+                    placeholder="e.g. running, cycling"
+                    value={profile.primary_sports.join(", ")}
                   />
                 </label>
                 <label className={styles.fieldLabel}>
-                  Weight (kg)
+                  Weekly training hours
                   <input
                     className={styles.fieldInput}
+                    min="0"
                     onChange={(event) =>
-                      setProfile(withOptionalNumber(profile, "weight_kg", event.target.value))
+                      setProfile({
+                        ...profile,
+                        weekly_available_hours: event.target.value === "" ? null : Number(event.target.value),
+                      })
                     }
-                    step="0.1"
+                    step="0.5"
                     type="number"
-                    value={profile.weight_kg ?? ""}
-                  />
-                </label>
-                <label className={styles.fieldLabel}>
-                  Age
-                  <input
-                    className={styles.fieldInput}
-                    onChange={(event) =>
-                      setProfile(withOptionalNumber(profile, "age", event.target.value))
-                    }
-                    type="number"
-                    value={profile.age ?? ""}
-                  />
-                </label>
-                <label className={styles.fieldLabel}>
-                  Constraints
-                  <textarea
-                    className={styles.fieldInput}
-                    onChange={(event) =>
-                      setProfileLists((current) => ({ ...current, constraints: event.target.value }))
-                    }
-                    rows={4}
-                    value={profileLists.constraints}
-                  />
-                </label>
-                <label className={styles.fieldLabel}>
-                  Injuries / rehab
-                  <textarea
-                    className={styles.fieldInput}
-                    onChange={(event) =>
-                      setProfileLists((current) => ({
-                        ...current,
-                        injuries_rehab: event.target.value,
-                      }))
-                    }
-                    rows={3}
-                    value={profileLists.injuries_rehab}
-                  />
-                </label>
-                <label className={styles.fieldLabel}>
-                  Notes
-                  <textarea
-                    className={styles.fieldInput}
-                    onChange={(event) => setProfile({ ...profile, notes: event.target.value })}
-                    rows={4}
-                    value={profile.notes ?? ""}
+                    value={profile.weekly_available_hours ?? ""}
                   />
                 </label>
                 <div className={styles.actionRow}>

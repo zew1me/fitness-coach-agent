@@ -53,6 +53,34 @@ class SupabaseRepository:
             raise RuntimeError("Supabase did not return the upserted athlete profile row.")
         return AthleteProfile.model_validate(rows[0])
 
+    async def update_athlete_profile_fields(self, user_id: str, fields: dict) -> AthleteProfile:
+        """Merge a partial dict of fields into the existing profile row (upsert on user_id)."""
+        client = self._require_client()
+        allowed = {
+            "display_name",
+            "biological_sex",
+            "hormone_status",
+            "birth_date",
+            "weight_kg",
+            "height_cm",
+            "resting_hr_bpm",
+            "max_hr_bpm",
+            "primary_sports",
+            "weekly_available_hours",
+            "coaching_state",
+            "specialization_pct",
+            "onboarding_collected",
+        }
+        safe_fields = {k: v for k, v in fields.items() if k in allowed}
+        safe_fields["user_id"] = user_id
+        response = (
+            client.table("athlete_profiles").upsert(safe_fields, on_conflict="user_id").execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the updated athlete profile row.")
+        return AthleteProfile.model_validate(rows[0])
+
     # ── Sport Thresholds ──────────────────────────────────────
 
     async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:

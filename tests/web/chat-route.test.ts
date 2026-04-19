@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createCoachTools, POST } from "../../app/api/chat/route";
+import { POST } from "../../app/api/chat/route";
+import { createCoachTools } from "../../lib/agent/coach-tools";
 
 describe("app/api/chat route", () => {
   it("returns 401 when the browser session cookie is absent", async () => {

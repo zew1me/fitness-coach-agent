@@ -1002,3 +1002,86 @@ async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
     assert body["target_goal"]["title"] == "Hill climb race"
     assert body["starting_weekly_tss"] == 294
     assert body["phases"]
+
+
+@pytest.mark.asyncio
+async def test_get_athlete_summary_new_user_returns_onboarding_stub(monkeypatch) -> None:
+    """New users without a profile row get a stub with coaching_state=onboarding."""
+    from backend.repos.supabase_repo import RecordNotFoundError
+
+    class NewUserRepository(EngineRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
+
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-new",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", NewUserRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/get-athlete-summary",
+            json={"user_id": "athlete-new"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"]["user_id"] == "athlete-new"
+    assert body["profile"]["coaching_state"] == "onboarding"
+    assert body["ctl_ceiling_guidance"]["committed_amateur_ctl"] > 0
+
+
+@pytest.mark.asyncio
+async def test_update_athlete_profile_persists_fields(monkeypatch) -> None:
+    """update-athlete-profile saves display_name, primary_sports, and weekly_available_hours."""
+
+    class MutableRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.saved: dict | None = None
+
+        async def update_athlete_profile_fields(self, user_id: str, fields: dict) -> AthleteProfile:
+            self.saved = {"user_id": user_id, **fields}
+            return AthleteProfile(
+                user_id=user_id,
+                display_name=fields.get("display_name"),
+                primary_sports=fields.get("primary_sports", []),
+                coaching_state="onboarding",
+            )
+
+    repo = MutableRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/update-athlete-profile",
+            json={
+                "user_id": "athlete-1",
+                "fields": {
+                    "display_name": "Alex",
+                    "primary_sports": ["running", "cycling"],
+                    "weekly_available_hours": 8.0,
+                },
+            },
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["display_name"] == "Alex"
+    assert repo.saved is not None
+    assert repo.saved["display_name"] == "Alex"
+    assert repo.saved["primary_sports"] == ["running", "cycling"]
