@@ -169,4 +169,45 @@ describe("app/api/chat route", () => {
       })
     );
   });
+
+  it("executes process_uploaded_file for screenshots by calling the screenshot analyzer", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ data: { sport: "running" }, screenshot_type: "activity_single" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      // eslint-disable-next-line no-unused-vars
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    await expect(
+      processUploadedFile.execute({
+        content_type: "image/png",
+        filename: "activity.png",
+        object_key: "uploads/activity.png",
+        public_url: "https://example.com/activity.png",
+        user_id: "athlete-1"
+      })
+    ).resolves.toEqual({ data: { sport: "running" }, screenshot_type: "activity_single" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/analyze-screenshot",
+      expect.objectContaining({
+        body: JSON.stringify({
+          image_url: "https://example.com/activity.png"
+        }),
+        method: "POST"
+      })
+    );
+  });
 });

@@ -61,6 +61,74 @@ function engineInput(input: unknown): Record<string, unknown> {
   return Object.fromEntries(Object.entries(input).filter(([key]) => key !== "user_id"));
 }
 
+function stringField(input: Record<string, unknown>, key: string): string | null {
+  const value = input[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function processUploadedFile(input: unknown, context: CoachToolContext): unknown {
+  const payload = engineInput(input);
+  const contentType = stringField(payload, "content_type");
+  const publicUrl = stringField(payload, "public_url");
+
+  if (contentType?.startsWith("image/") && publicUrl !== null) {
+    return postEngine(context, "/api/engine/analyze-screenshot", {
+      image_url: publicUrl,
+    });
+  }
+
+  return null;
+}
+
+function executeDeterministicEngineTool(
+  name: string,
+  input: unknown,
+  context: CoachToolContext
+): unknown {
+  if (name === "calculate_zones") {
+    return postEngine(context, "/api/engine/calculate-zones", engineInput(input));
+  }
+
+  if (name === "estimate_thresholds") {
+    return postEngine(context, "/api/engine/estimate-thresholds", engineInput(input));
+  }
+
+  if (name === "generate_training_plan") {
+    return postEngine(context, "/api/engine/generate-plan-structure", {
+      ...engineInput(input),
+      user_id: context.userId,
+    });
+  }
+
+  return null;
+}
+
+function executeCoachTool(name: string, input: unknown, context: CoachToolContext): unknown {
+  if (name === "get_athlete_context") {
+    return postEngine(context, "/api/engine/get-athlete-summary", {
+      user_id: context.userId,
+    });
+  }
+
+  if (name === "process_uploaded_file") {
+    const result = processUploadedFile(input, context);
+    if (result !== null) {
+      return result;
+    }
+  }
+
+  const engineResult = executeDeterministicEngineTool(name, input, context);
+  if (engineResult !== null) {
+    return engineResult;
+  }
+
+  return {
+    input,
+    status: "pending_implementation",
+    tool: name,
+  };
+}
+
 export function createCoachTools(context: CoachToolContext): ToolSet {
   return Object.fromEntries(
     Object.entries(coachToolDefinitions).map(([name, definition]) => [
@@ -68,34 +136,7 @@ export function createCoachTools(context: CoachToolContext): ToolSet {
       {
         description: definition.description,
         inputSchema: definition.inputSchema,
-        execute: (input: unknown): unknown => {
-          if (name === "get_athlete_context") {
-            return postEngine(context, "/api/engine/get-athlete-summary", {
-              user_id: context.userId,
-            });
-          }
-
-          if (name === "calculate_zones") {
-            return postEngine(context, "/api/engine/calculate-zones", engineInput(input));
-          }
-
-          if (name === "estimate_thresholds") {
-            return postEngine(context, "/api/engine/estimate-thresholds", engineInput(input));
-          }
-
-          if (name === "generate_training_plan") {
-            return postEngine(context, "/api/engine/generate-plan-structure", {
-              ...engineInput(input),
-              user_id: context.userId,
-            });
-          }
-
-          return {
-            input,
-            status: "pending_implementation",
-            tool: name,
-          };
-        },
+        execute: (input: unknown): unknown => executeCoachTool(name, input, context),
       }
     ])
   ) as ToolSet;
