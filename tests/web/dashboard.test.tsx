@@ -258,7 +258,8 @@ describe("CoachChat", () => {
     });
   });
 
-  it("opens a sport-agnostic profile and preferences drawer without raw id editing", async () => {
+  it("opens profile preferences from the account menu without raw id editing", async () => {
+    const userId = "aa687ce1-5189-4c28-bf24-e8b1574ebc5b";
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/oauth/browser-token") {
@@ -269,7 +270,7 @@ describe("CoachChat", () => {
               expires_at: "2026-04-02T08:00:00Z",
               scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
               token_type: "Bearer",
-              user_id: "athlete-1"
+              user_id: userId
             }),
             { status: 200 }
           )
@@ -281,10 +282,10 @@ describe("CoachChat", () => {
           new Response(
             JSON.stringify({
               attachments_enabled: false,
-              profile_complete: true,
+              profile_complete: false,
               thread: {
                 id: "thread-1",
-                user_id: "athlete-1",
+                user_id: userId,
                 state: {},
                 created_at: "2026-04-04T09:00:00Z",
                 updated_at: "2026-04-04T09:00:00Z",
@@ -299,7 +300,7 @@ describe("CoachChat", () => {
                     },
                     role: "assistant",
                     thread_id: "thread-1",
-                    user_id: "athlete-1"
+                    user_id: userId
                   }
                 ]
               }
@@ -316,7 +317,7 @@ describe("CoachChat", () => {
               coaching_state: "active",
               display_name: "Riley",
               primary_sports: ["running", "cycling"],
-              user_id: "athlete-1",
+              user_id: userId,
               weekly_available_hours: 7.5
             }),
             { status: 200 }
@@ -330,7 +331,15 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     render(<CoachChat />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /Settings/i }));
+    await screen.findByText(/Building your athlete profile/i);
+    expect(screen.queryByText(new RegExp(userId))).toBeNull();
+    expect(screen.queryByRole("link", { name: /Switch login/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/i }));
+
+    await screen.findByRole("menu", { name: /Account/i });
+    expect(screen.getByRole("menuitem", { name: /Sign out or change account/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Profile & preferences/i }));
 
     await screen.findByRole("heading", { name: /Profile & preferences/i });
     expect(screen.getByLabelText(/Display name/i)).toBeTruthy();

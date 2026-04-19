@@ -1,6 +1,10 @@
 /* eslint-disable import/no-default-export */
 declare const styles: {
   readonly actionRow: string;
+  readonly accountButton: string;
+  readonly accountMenu: string;
+  readonly accountMenuWrap: string;
+  readonly accountSummary: string;
   readonly assistantBubble: string;
   readonly attachButton: string;
   readonly attachmentGrid: string;
@@ -47,6 +51,7 @@ declare const styles: {
   readonly messageStack: string;
   readonly messageText: string;
   readonly messagesPane: string;
+  readonly menuItem: string;
   readonly meta: string;
   readonly page: string;
   readonly planCard: string;
