@@ -71,6 +71,10 @@ function removePreviewUrls(attachments: LocalAttachment[]): void {
   }
 }
 
+function coachingStatusLabel(profileComplete: boolean): string {
+  return profileComplete ? "Coaching ready" : "Building your athlete profile";
+}
+
 function toUiMessage(message: ChatMessage): UIMessage {
   return {
     id: message.id,
@@ -647,10 +651,7 @@ export function CoachChat(): JSX.Element {
           <header className={styles.topbar}>
             <div className={styles.brandBlock}>
               <p className={styles.brand}>{siteConfig.appName}</p>
-              <span className={styles.meta}>
-                Coaching {threadState.data.profile_complete ? "ready" : "collecting your setup"} for{" "}
-                {session.token.user_id}
-              </span>
+              <span className={styles.meta}>{coachingStatusLabel(threadState.data.profile_complete)}</span>
             </div>
             <div className={styles.topbarActions}>
               <button className={styles.settingsButton} onClick={() => void openDrawer()} type="button">
