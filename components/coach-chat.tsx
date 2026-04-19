@@ -11,7 +11,6 @@ import {
   loadProfile,
   parseListInput,
   saveProfile,
-  sendChatMessage,
 } from "../lib/coach-api";
 import { siteConfig } from "../lib/site";
 import type {
@@ -297,21 +296,66 @@ export function CoachChat(): JSX.Element {
     setSending(true);
     setThreadState((current) => ({ ...current, error: null }));
     try {
-      const nextThread = await sendChatMessage({
-        content: composer,
+      const token = session.token;
+      if (token === null) {
+        throw new Error("Unable to send without an active browser session.");
+      }
+      const thread = threadState.data.thread;
+      const optimisticMessage: ChatMessage = {
+        id: `local-${Date.now()}`,
         attachments: attachments
           .filter((attachment) => attachment.status === "uploaded")
           .map(({ content_type, filename, object_key, public_url }) => ({
             content_type,
+            created_at: new Date().toISOString(),
             filename,
             object_key,
             public_url,
+            user_id: token.user_id,
           })),
+        content: composer,
+        created_at: new Date().toISOString(),
+        metadata: { message_kind: "user_turn" },
+        role: "user",
+        thread_id: thread.id,
+        user_id: token.user_id,
+      };
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            ...thread.messages.map((message) => ({
+              id: message.id,
+              role: message.role,
+              parts: [{ type: "text", text: message.content }],
+            })),
+            {
+              id: optimisticMessage.id,
+              role: "user",
+              parts: [{ type: "text", text: optimisticMessage.content }],
+            },
+          ],
+        }),
       });
+      if (!response.ok) {
+        throw new Error("Unable to send your message.");
+      }
       removePreviewUrls(attachments);
       setAttachments([]);
       setComposer("");
-      setThreadState({ data: nextThread, error: null, loading: false });
+      setThreadState({
+        data: {
+          ...threadState.data,
+          thread: {
+            ...thread,
+            messages: [...thread.messages, optimisticMessage],
+          },
+        },
+        error: null,
+        loading: false,
+      });
     } catch (error) {
       setThreadState((current) => ({
         ...current,

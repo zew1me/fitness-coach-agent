@@ -218,4 +218,84 @@ describe("CoachChat", () => {
       ).toBe("Build my next 14-day training plan.");
     });
   });
+
+  it("sends composer messages through the AI SDK chat route", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat") {
+        return Promise.resolve(
+          new Response("", {
+            status: 200,
+            headers: { "content-type": "text/event-stream" }
+          })
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const input = await screen.findByPlaceholderText(/Ask anything about your training/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/chat",
+        expect.objectContaining({
+          method: "POST"
+        })
+      );
+    });
+  });
 });
