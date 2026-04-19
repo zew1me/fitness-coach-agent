@@ -2,11 +2,43 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const chatMocks = vi.hoisted(() => {
+  const sendMessage = vi.fn(() => Promise.resolve());
+  const setMessages = vi.fn();
+  const useChat = vi.fn(() => ({
+    addToolApprovalResponse: vi.fn(),
+    addToolOutput: vi.fn(),
+    addToolResult: vi.fn(),
+    clearError: vi.fn(),
+    error: undefined,
+    id: "test-chat",
+    messages: [],
+    regenerate: vi.fn(),
+    resumeStream: vi.fn(),
+    sendMessage,
+    setMessages,
+    status: "ready",
+    stop: vi.fn()
+  }));
+
+  return { sendMessage, setMessages, useChat };
+});
+
+vi.mock("@ai-sdk/react", () => ({
+  useChat: chatMocks.useChat
+}));
 
 import { CoachChat } from "../../components/coach-chat";
 
 const originalFetch = globalThis.fetch;
+
+beforeEach(() => {
+  chatMocks.sendMessage.mockClear();
+  chatMocks.setMessages.mockClear();
+  chatMocks.useChat.mockClear();
+});
 
 afterEach(() => {
   cleanup();
@@ -219,7 +251,7 @@ describe("CoachChat", () => {
     });
   });
 
-  it("sends composer messages through the AI SDK chat route", async () => {
+  it("sends composer messages through the AI SDK useChat hook", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/oauth/browser-token") {
@@ -270,15 +302,6 @@ describe("CoachChat", () => {
         );
       }
 
-      if (url === "/api/chat") {
-        return Promise.resolve(
-          new Response("", {
-            status: 200,
-            headers: { "content-type": "text/event-stream" }
-          })
-        );
-      }
-
       return Promise.reject(new Error(`Unexpected fetch to ${url}`));
     });
 
@@ -290,12 +313,10 @@ describe("CoachChat", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/chat",
-        expect.objectContaining({
-          method: "POST"
-        })
-      );
+      expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        parts: [{ text: "I ran easy today.", type: "text" }]
+      });
     });
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/chat", expect.anything());
   });
 });

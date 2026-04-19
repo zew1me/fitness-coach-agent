@@ -1,7 +1,9 @@
 "use client";
 
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport, type UIMessage } from "ai";
 import Link from "next/link";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, JSX } from "react";
 
 import {
@@ -67,6 +69,14 @@ function removePreviewUrls(attachments: LocalAttachment[]): void {
       URL.revokeObjectURL(attachment.previewUrl);
     }
   }
+}
+
+function toUiMessage(message: ChatMessage): UIMessage {
+  return {
+    id: message.id,
+    parts: [{ type: "text", text: message.content }],
+    role: message.role,
+  };
 }
 
 function withOptionalNumber(
@@ -232,6 +242,18 @@ export function CoachChat(): JSX.Element {
     goals: "",
     injuries_rehab: "",
   });
+  const chatMessages = useMemo<UIMessage[]>(
+    () => threadState.data?.thread.messages.map(toUiMessage) ?? [],
+    [threadState.data?.thread.messages],
+  );
+  const { sendMessage } = useChat({
+    id: threadState.data?.thread.id ?? "coach-chat",
+    messages: chatMessages,
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      credentials: "include",
+    }),
+  });
 
   useEffect(() => {
     async function bootstrap(): Promise<void> {
@@ -320,28 +342,9 @@ export function CoachChat(): JSX.Element {
         thread_id: thread.id,
         user_id: token.user_id,
       };
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [
-            ...thread.messages.map((message) => ({
-              id: message.id,
-              role: message.role,
-              parts: [{ type: "text", text: message.content }],
-            })),
-            {
-              id: optimisticMessage.id,
-              role: "user",
-              parts: [{ type: "text", text: optimisticMessage.content }],
-            },
-          ],
-        }),
+      await sendMessage({
+        parts: [{ type: "text", text: optimisticMessage.content }],
       });
-      if (!response.ok) {
-        throw new Error("Unable to send your message.");
-      }
       removePreviewUrls(attachments);
       setAttachments([]);
       setComposer("");
