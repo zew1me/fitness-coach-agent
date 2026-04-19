@@ -7,6 +7,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import api.index as api_index
+from backend.models.athlete import (
+    AthleteProfile,
+    RecoveryLog,
+    ScheduleAvailability,
+    SportThreshold,
+)
 from backend.models.auth import (
     BrowserSessionContext,
     BrowserTokenResponse,
@@ -14,9 +20,8 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.planning import AthleteProfile, CheckInInput, CheckInRecord
+from backend.models.training import DailyLoadSnapshot, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
-from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
 from backend.services.auth import AuthService
 
 
@@ -57,53 +62,86 @@ class RefreshTokenRecord(TypedDict):
     rotated_from_id: str | None
 
 
-class FakeRepository:
+class EngineRepository:
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         return AthleteProfile(
             user_id=user_id,
-            cycling_ftp_watts=238,
-            goals=["Prepare for CX season"],
-            constraints=["Friday childcare"],
+            display_name="Athlete One",
+            birth_date=datetime.fromisoformat("1990-04-01T00:00:00+00:00").date(),
+            biological_sex="not_specified",
+            primary_sports=["running", "cycling"],
+            weekly_available_hours=7.5,
+            coaching_state="active",
         )
 
-    async def create_check_in(self, check_in: CheckInInput) -> CheckInRecord:
-        return CheckInRecord(
-            id="check-in-1",
-            user_id=check_in.user_id,
-            raw_text=check_in.raw_text,
-            image_count=check_in.image_count,
-            effective_date=check_in.effective_date,
-            created_at=datetime.fromisoformat("2026-03-21T10:00:00+00:00"),
-        )
+    async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+        return [
+            SportThreshold(
+                id="threshold-1",
+                user_id=user_id,
+                sport="cycling",
+                lt2_power_watts=250,
+                lt1_power_watts=188,
+                confidence="medium",
+            )
+        ]
 
-    async def upsert_athlete_profile(self, profile: AthleteProfile) -> AthleteProfile:
-        return profile
+    async def list_active_goals(self, user_id: str) -> list[Goal]:
+        return [
+            Goal(
+                id="goal-1",
+                user_id=user_id,
+                goal_type="event",
+                sport="running",
+                title="Hill climb race",
+                target_date=datetime.fromisoformat("2026-07-01T00:00:00+00:00").date(),
+                course_distance_meters=14_000,
+                course_elevation_gain_meters=700,
+                priority=1,
+            )
+        ]
 
-
-class PlannerRepository(FakeRepository):
-    async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-        return AthleteProfile(
+    async def get_latest_load(
+        self, user_id: str, sport: str | None = None
+    ) -> DailyLoadSnapshot | None:
+        return DailyLoadSnapshot(
             user_id=user_id,
-            cycling_ftp_watts=238,
-            goals=["Raise FTP for cyclocross"],
-            constraints=["Wednesday travel"],
+            snapshot_date=datetime.fromisoformat("2026-04-01T00:00:00+00:00").date(),
+            sport=sport,
+            daily_tss=60,
+            ctl=42,
+            atl=50,
+            tsb=-8,
         )
 
+    async def list_recovery_logs(
+        self, user_id: str, *, since=None, limit: int = 14
+    ) -> list[RecoveryLog]:
+        return [
+            RecoveryLog(
+                id="recovery-1",
+                user_id=user_id,
+                log_date=datetime.fromisoformat("2026-04-01T00:00:00+00:00").date(),
+                sleep_score=82,
+                hrv_ms=55,
+            )
+        ][:limit]
 
-class MissingProfileRepository:
-    async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-        raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
+    async def get_schedule(self, user_id: str) -> ScheduleAvailability:
+        return ScheduleAvailability(
+            id="schedule-1",
+            user_id=user_id,
+            weekly_pattern={"monday": {"available": True, "max_hours": 1.0}},
+        )
 
+    async def get_active_plan(self, user_id: str):
+        return None
 
-class UnconfiguredRepository:
-    async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-        raise RepositoryNotConfiguredError("Supabase is not configured.")
+    async def list_activities(self, user_id: str, *, sport=None, since=None, limit: int = 50):
+        return []
 
-    async def upsert_athlete_profile(self, profile: AthleteProfile) -> AthleteProfile:
-        raise RepositoryNotConfiguredError("Supabase is not configured.")
-
-    async def create_check_in(self, check_in: CheckInInput) -> CheckInRecord:
-        raise RepositoryNotConfiguredError("Supabase is not configured.")
+    async def upsert_load_snapshots(self, user_id: str, snapshots: list[dict], sport=None) -> None:
+        self.snapshots = snapshots
 
 
 class InMemoryOAuthRepository:
@@ -263,7 +301,9 @@ class FakeAuthService(AuthService):
 async def test_protected_profile_requires_bearer_token() -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post("/api/profile", json={"user_id": "athlete-1"})
+        response = await client.post(
+            "/api/engine/get-athlete-summary", json={"user_id": "athlete-1"}
+        )
 
     assert response.status_code == 401
 
@@ -756,185 +796,82 @@ async def test_oauth_refresh_rejects_client_mismatch_without_revoking_token(
     assert auth_service_fixture._oauth_repo.refresh_tokens[refresh_token]["revoked_at"] is None
 
 
-async def test_create_check_in_returns_persisted_record(monkeypatch) -> None:
-    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
-        user_id="athlete-1",
-        scopes=["plans:write"],
-        client_id="test-client",
-        grant_id="grant-1",
-    )
-    monkeypatch.setattr(api_index, "repo", FakeRepository())
-
+async def test_engine_endpoint_requires_bearer_token() -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/api/check-ins",
-            json={
-                "user_id": "athlete-1",
-                "raw_text": "Travel week, low energy.",
-                "image_count": 1,
-                "effective_date": "2026-03-21",
-            },
-        )
+        response = await client.post("/api/engine/calculate-zones", json={"sport": "cycling"})
 
-    api_index.app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["accepted"] is True
-    assert body["check_in"]["id"] == "check-in-1"
-    assert body["check_in"]["effective_date"] == "2026-03-21"
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_generate_plan_returns_adaptive_plan(monkeypatch) -> None:
-    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
-        user_id="athlete-1",
-        scopes=["plans:read"],
-        client_id="test-client",
-        grant_id="grant-1",
-    )
-    monkeypatch.setattr(api_index, "repo", PlannerRepository())
-
-    transport = ASGITransport(app=api_index.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/api/plans/generate",
-            json={
-                "user_id": "athlete-1",
-                "raw_text": "Feeling fatigued after travel with heavy legs.",
-                "image_count": 1,
-            },
-        )
-
-    api_index.app.dependency_overrides.clear()
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["plan"]["hours"] == 4.8
-    assert body["plan"]["days"][1]["focus"] == "Image-informed recovery day"
-    assert body["plan"]["days"][4]["focus"] == "Portable tempo session"
-    assert body["plan"]["days"][12]["focus"] == "Tempo run substitution"
-    assert body["prompt_preview"].startswith("You are a fitness expert")
-
-
-@pytest.mark.asyncio
-async def test_profile_returns_404_when_profile_is_missing(monkeypatch) -> None:
+async def test_calculate_zones_returns_power_boundaries() -> None:
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
         user_id="athlete-1",
         scopes=["profile:read"],
         client_id="test-client",
         grant_id="grant-1",
     )
-    monkeypatch.setattr(api_index, "repo", MissingProfileRepository())
-
-    transport = ASGITransport(app=api_index.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post("/api/profile", json={"user_id": "athlete-1"})
-
-    api_index.app.dependency_overrides.clear()
-
-    assert response.status_code == 404
-    assert "No athlete profile found" in response.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_check_in_returns_503_when_supabase_is_unconfigured(monkeypatch) -> None:
-    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
-        user_id="athlete-1",
-        scopes=["plans:write"],
-        client_id="test-client",
-        grant_id="grant-1",
-    )
-    monkeypatch.setattr(api_index, "repo", UnconfiguredRepository())
 
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
-            "/api/check-ins",
-            json={
-                "user_id": "athlete-1",
-                "raw_text": "Travel week, low energy.",
-                "image_count": 1,
-            },
+            "/api/engine/calculate-zones",
+            json={"sport": "cycling", "ftp_watts": 300},
         )
 
     api_index.app.dependency_overrides.clear()
 
-    assert response.status_code == 503
-    assert "Supabase is not configured" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["zones"][0]["name"] == "Recovery"
+    assert body["zones"][1]["power_high"] == 225
 
 
 @pytest.mark.asyncio
-async def test_profile_rejects_cross_user_access(monkeypatch) -> None:
+async def test_compute_tss_returns_power_based_score() -> None:
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
         user_id="athlete-1",
         scopes=["profile:read"],
         client_id="test-client",
         grant_id="grant-1",
     )
-    monkeypatch.setattr(api_index, "repo", FakeRepository())
-
-    transport = ASGITransport(app=api_index.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post("/api/profile", json={"user_id": "athlete-2"})
-
-    api_index.app.dependency_overrides.clear()
-
-    assert response.status_code == 403
-    assert "cannot access this resource" in response.json()["detail"]
-
-
-@pytest.mark.asyncio
-async def test_check_in_rejects_cross_user_access(monkeypatch) -> None:
-    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
-        user_id="athlete-1",
-        scopes=["plans:write"],
-        client_id="test-client",
-        grant_id="grant-1",
-    )
-    monkeypatch.setattr(api_index, "repo", FakeRepository())
 
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
-            "/api/check-ins",
+            "/api/engine/compute-tss",
             json={
-                "user_id": "athlete-2",
-                "raw_text": "Travel week, low energy.",
-                "image_count": 1,
+                "duration_seconds": 3600,
+                "sport": "cycling",
+                "normalized_power": 250,
+                "ftp": 250,
             },
         )
 
     api_index.app.dependency_overrides.clear()
 
-    assert response.status_code == 403
-    assert "cannot access this resource" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["tss"] == 100
 
 
 @pytest.mark.asyncio
-async def test_profile_upsert_returns_saved_profile(monkeypatch) -> None:
+async def test_estimate_thresholds_returns_running_paces() -> None:
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
         user_id="athlete-1",
-        scopes=["profile:write"],
+        scopes=["profile:read"],
         client_id="test-client",
         grant_id="grant-1",
     )
-    monkeypatch.setattr(api_index, "repo", FakeRepository())
 
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.put(
-            "/api/profile",
+        response = await client.post(
+            "/api/engine/estimate-thresholds",
             json={
-                "user_id": "athlete-1",
-                "cycling_ftp_watts": 245,
-                "goals": ["Improve repeatability"],
-                "constraints": ["Thursday travel"],
-                "injuries_rehab": ["Achilles rehab"],
-                "notes": "Prefers long endurance outdoors.",
-                "age": 35,
-                "weight_kg": 70.2,
+                "sport": "running",
+                "race_time_seconds": 20 * 60,
+                "race_distance_meters": 5000,
             },
         )
 
@@ -942,28 +879,81 @@ async def test_profile_upsert_returns_saved_profile(monkeypatch) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["user_id"] == "athlete-1"
-    assert body["cycling_ftp_watts"] == 245
+    assert body["sport"] == "running"
+    assert body["lt1_pace_sec_km"] > body["lt2_pace_sec_km"]
 
 
 @pytest.mark.asyncio
-async def test_profile_upsert_rejects_cross_user_access(monkeypatch) -> None:
+async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
         user_id="athlete-1",
-        scopes=["profile:write"],
+        scopes=["profile:read"],
         client_id="test-client",
         grant_id="grant-1",
     )
-    monkeypatch.setattr(api_index, "repo", FakeRepository())
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
 
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.put(
-            "/api/profile",
-            json={"user_id": "athlete-2", "goals": ["Not allowed"]},
+        response = await client.post(
+            "/api/engine/get-athlete-summary",
+            json={"user_id": "athlete-1"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"]["primary_sports"] == ["running", "cycling"]
+    assert body["current_load"]["ctl"] == 42
+    assert body["goals"][0]["course_distance_meters"] == 14_000
+    assert body["ctl_ceiling_guidance"]["committed_amateur_ctl"] > 0
+
+
+@pytest.mark.asyncio
+async def test_get_athlete_summary_rejects_cross_user_access(monkeypatch) -> None:
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/get-athlete-summary",
+            json={"user_id": "athlete-2"},
         )
 
     api_index.app.dependency_overrides.clear()
 
     assert response.status_code == 403
     assert "cannot access this resource" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={"user_id": "athlete-1"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["target_goal"]["title"] == "Hill climb race"
+    assert body["starting_weekly_tss"] == 294
+    assert body["phases"]

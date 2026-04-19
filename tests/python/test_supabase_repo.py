@@ -1,8 +1,9 @@
-from datetime import UTC, datetime
+from datetime import date
 
 import pytest
 
-from backend.models.planning import AthleteProfile, CheckInInput
+from backend.models.athlete import AthleteProfile, SportThreshold
+from backend.models.training import Activity
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
@@ -19,8 +20,11 @@ class FakeTableQuery:
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self._rows = rows
         self._filters: dict[str, object] = {}
-        self.inserted_payload: dict[str, object] | None = None
-        self.upserted_payload: dict[str, object] | None = None
+        self._is_null: set[str] = set()
+        self._inserted_payload: dict[str, object] | None = None
+        self._upserted_payload: dict[str, object] | None = None
+        self._update_payload: dict[str, object] | None = None
+        self._limit: int | None = None
 
     def select(self, *_columns: str) -> "FakeTableQuery":
         return self
@@ -29,26 +33,57 @@ class FakeTableQuery:
         self._filters[column] = value
         return self
 
+    def is_(self, column: str, value: object) -> "FakeTableQuery":
+        assert value == "null"
+        self._is_null.add(column)
+        return self
+
+    def order(self, *_args: object, **_kwargs: object) -> "FakeTableQuery":
+        return self
+
+    def limit(self, count: int) -> "FakeTableQuery":
+        self._limit = count
+        return self
+
     def insert(self, payload: dict[str, object]) -> "FakeTableQuery":
-        self.inserted_payload = payload
+        self._inserted_payload = payload
         return self
 
     def upsert(self, payload: dict[str, object], on_conflict: str) -> "FakeTableQuery":
-        assert on_conflict == "user_id"
-        self.upserted_payload = payload
+        assert on_conflict
+        self._upserted_payload = payload
+        return self
+
+    def update(self, payload: dict[str, object]) -> "FakeTableQuery":
+        self._update_payload = payload
         return self
 
     def execute(self) -> FakeResponse:
-        if self.inserted_payload is not None:
-            return FakeResponse([self.inserted_payload])
-        if self.upserted_payload is not None:
-            return FakeResponse([self.upserted_payload])
-        filtered_rows = [
+        if self._inserted_payload is not None:
+            self._rows.append(self._inserted_payload)
+            return FakeResponse([self._inserted_payload])
+        if self._upserted_payload is not None:
+            self._rows.append(self._upserted_payload)
+            return FakeResponse([self._upserted_payload])
+        if self._update_payload is not None:
+            updated = []
+            for row in self._matching_rows():
+                row.update(self._update_payload)
+                updated.append(row)
+            return FakeResponse(updated)
+
+        rows = self._matching_rows()
+        if self._limit is not None:
+            rows = rows[: self._limit]
+        return FakeResponse(rows)
+
+    def _matching_rows(self) -> list[dict[str, object]]:
+        return [
             row
             for row in self._rows
             if all(row.get(column) == value for column, value in self._filters.items())
+            and all(row.get(column) is None for column in self._is_null)
         ]
-        return FakeResponse(filtered_rows)
 
 
 class FakeSupabaseClient:
@@ -56,11 +91,13 @@ class FakeSupabaseClient:
         self,
         *,
         athlete_rows: list[dict[str, object]] | None = None,
-        check_in_rows: list[dict[str, object]] | None = None,
+        threshold_rows: list[dict[str, object]] | None = None,
+        activity_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._tables = {
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
-            "check_ins": FakeTableQuery(check_in_rows or []),
+            "sport_thresholds": FakeTableQuery(threshold_rows or []),
+            "activities": FakeTableQuery(activity_rows or []),
         }
 
     def table(self, table_name: str) -> FakeTableQuery:
@@ -74,13 +111,10 @@ async def test_get_athlete_profile_reads_supabase_row() -> None:
             athlete_rows=[
                 {
                     "user_id": "athlete-1",
-                    "cycling_ftp_watts": 250,
-                    "goals": ["Raise threshold"],
-                    "constraints": ["Tuesday travel"],
-                    "injuries_rehab": ["Low-back rehab"],
-                    "notes": "Build toward fall CX block.",
-                    "age": 37,
-                    "weight_kg": 72.5,
+                    "display_name": "Athlete One",
+                    "primary_sports": ["running"],
+                    "weekly_available_hours": 6.5,
+                    "coaching_state": "active",
                 }
             ]
         )
@@ -89,8 +123,8 @@ async def test_get_athlete_profile_reads_supabase_row() -> None:
     profile = await repo.get_athlete_profile("athlete-1")
 
     assert profile.user_id == "athlete-1"
-    assert profile.cycling_ftp_watts == 250
-    assert profile.constraints == ["Tuesday travel"]
+    assert profile.primary_sports == ["running"]
+    assert profile.weekly_available_hours == 6.5
 
 
 @pytest.mark.asyncio
@@ -102,41 +136,78 @@ async def test_get_athlete_profile_raises_for_missing_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_check_in_persists_payload() -> None:
-    client = FakeSupabaseClient()
-    repo = SupabaseRepository(client=client)
-    check_in = CheckInInput(user_id="athlete-1", raw_text="Fatigued after travel.", image_count=2)
-
-    record = await repo.create_check_in(check_in)
-
-    assert record.user_id == "athlete-1"
-    assert record.raw_text == "Fatigued after travel."
-    assert record.image_count == 2
-    assert record.id
-    assert record.created_at <= datetime.now(UTC)
-
-
-@pytest.mark.asyncio
-async def test_upsert_athlete_profile_persists_profile_payload() -> None:
-    client = FakeSupabaseClient()
-    repo = SupabaseRepository(client=client)
+async def test_upsert_athlete_profile_persists_new_profile_shape() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
 
     profile = await repo.upsert_athlete_profile(
         AthleteProfile(
             user_id="athlete-1",
-            cycling_ftp_watts=245,
-            goals=["Improve repeatability"],
-            constraints=["Thursday travel"],
-            injuries_rehab=["Achilles rehab"],
-            notes="Prefers long endurance outdoors.",
-            age=35,
-            weight_kg=70.2,
+            display_name="Athlete One",
+            birth_date=date(1990, 4, 1),
+            primary_sports=["cycling", "running"],
+            constraints=["No Wednesdays"],
         )
     )
 
     assert profile.user_id == "athlete-1"
-    assert profile.cycling_ftp_watts == 245
-    assert profile.injuries_rehab == ["Achilles rehab"]
+    assert profile.birth_date == date(1990, 4, 1)
+    assert profile.primary_sports == ["cycling", "running"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_sport_threshold_supersedes_active_threshold() -> None:
+    client = FakeSupabaseClient(
+        threshold_rows=[
+            {
+                "id": "old-threshold",
+                "user_id": "athlete-1",
+                "sport": "cycling",
+                "lt2_power_watts": 240,
+                "zones": [],
+                "estimation_method": "manual",
+                "confidence": "medium",
+                "effective_from": "2026-01-01",
+                "superseded_at": None,
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    threshold = await repo.upsert_sport_threshold(
+        SportThreshold(
+            user_id="athlete-1",
+            sport="cycling",
+            lt2_power_watts=260,
+            zones=[{"zone": 4, "power_low": 237}],
+            confidence="high",
+        )
+    )
+
+    assert threshold.user_id == "athlete-1"
+    assert threshold.lt2_power_watts == 260
+    assert threshold.id is not None
+
+
+@pytest.mark.asyncio
+async def test_create_activity_persists_structured_activity() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    activity = await repo.create_activity(
+        Activity(
+            user_id="athlete-1",
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            duration_seconds=3600,
+            distance_meters=10_000,
+            tss=75.5,
+            source="manual",
+        )
+    )
+
+    assert activity.user_id == "athlete-1"
+    assert activity.sport == "running"
+    assert activity.tss == 75.5
+    assert activity.id is not None
 
 
 @pytest.mark.asyncio
