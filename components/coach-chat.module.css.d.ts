@@ -71,6 +71,8 @@ declare const styles: {
   readonly uploadChip: string;
   readonly uploadRow: string;
   readonly uploadStatus: string;
+  readonly themeOption: string;
+  readonly themeRow: string;
   readonly userBubble: string;
 };
 

@@ -567,6 +567,41 @@
   line-height: 1.6;
 }
 
+/* ── Theme picker ────────────────────────────────────────── */
+
+.themeRow {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 18px;
+}
+
+.themeOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: center;
+  padding: 10px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.themeOption:has(input:checked) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.themeOption input[type="radio"] {
+  display: none;
+}
+
 /* ── Hidden file input ───────────────────────────────────── */
 
 .hiddenInput {

@@ -22,6 +22,8 @@ import type {
   ChatMessage,
   ChatThreadResponse,
 } from "../lib/types";
+import { useTheme } from "../lib/use-theme";
+import type { ThemeMode } from "../lib/use-theme";
 
 import styles from "./coach-chat.module.css";
 
@@ -275,6 +277,7 @@ export function CoachChat(): JSX.Element {
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerStatus, setDrawerStatus] = useState<string | null>(null);
   const [profile, setProfile] = useState<AthleteProfile | null>(null);
+  const { mode: themeMode, setTheme } = useTheme();
   const chatMessages = useMemo<UIMessage[]>(
     () => threadState.data?.thread.messages.map(toUiMessage) ?? [],
     [threadState.data?.thread.messages],
@@ -791,6 +794,21 @@ export function CoachChat(): JSX.Element {
               <button className={styles.drawerClose} onClick={() => setDrawerOpen(false)} type="button">
                 Close
               </button>
+            </div>
+
+            <div className={styles.themeRow}>
+              {(["light", "system", "dark"] as ThemeMode[]).map((option) => (
+                <label className={styles.themeOption} key={option}>
+                  <input
+                    checked={themeMode === option}
+                    name="theme"
+                    onChange={() => setTheme(option)}
+                    type="radio"
+                    value={option}
+                  />
+                  {option.charAt(0).toUpperCase() + option.slice(1)}
+                </label>
+              ))}
             </div>
 
             {drawerLoading && profile === null ? (

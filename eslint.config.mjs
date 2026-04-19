@@ -75,6 +75,7 @@ export default defineConfig([
       "@typescript-eslint/no-misused-promises": "error",
       "@typescript-eslint/no-unnecessary-condition": "error",
       "@typescript-eslint/no-unused-vars": "off",
+      "no-unused-vars": ["error", { "args": "none" }],
       "@typescript-eslint/require-await": "error",
       "@next/next/no-html-link-for-pages": "off",
       "unused-imports/no-unused-imports": "error"

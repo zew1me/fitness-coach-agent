@@ -40,6 +40,11 @@ beforeEach(() => {
   chatMocks.sendMessage.mockClear();
   chatMocks.setMessages.mockClear();
   chatMocks.useChat.mockClear();
+  vi.spyOn(window, "matchMedia").mockReturnValue({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  } as unknown as MediaQueryList);
 });
 
 afterEach(() => {

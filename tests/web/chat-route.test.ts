@@ -35,7 +35,6 @@ describe("app/api/chat route", () => {
     });
 
     const getAthleteContext = tools["get_athlete_context"] as {
-      // eslint-disable-next-line no-unused-vars
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
@@ -67,7 +66,6 @@ describe("app/api/chat route", () => {
     });
 
     const getActivePlan = tools["get_active_plan"] as {
-      // eslint-disable-next-line no-unused-vars
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
@@ -99,7 +97,6 @@ describe("app/api/chat route", () => {
     });
 
     const getRecentActivities = tools["get_recent_activities"] as {
-      // eslint-disable-next-line no-unused-vars
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
@@ -140,7 +137,6 @@ describe("app/api/chat route", () => {
     });
 
     const calculateZones = tools["calculate_zones"] as {
-      // eslint-disable-next-line no-unused-vars
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
@@ -180,7 +176,6 @@ describe("app/api/chat route", () => {
     });
 
     const estimateThresholds = tools["estimate_thresholds"] as {
-      // eslint-disable-next-line no-unused-vars
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
@@ -222,7 +217,6 @@ describe("app/api/chat route", () => {
     });
 
     const generateTrainingPlan = tools["generate_training_plan"] as {
-      // eslint-disable-next-line no-unused-vars
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
@@ -261,7 +255,6 @@ describe("app/api/chat route", () => {
     });
 
     const processUploadedFile = tools["process_uploaded_file"] as {
-      // eslint-disable-next-line no-unused-vars
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
