@@ -91,17 +91,30 @@ function toUiMessage(message: ChatMessage): UIMessage {
   };
 }
 
+function friendlyToolStatus(toolName: string): string {
+  const statuses: Record<string, string> = {
+    analyze_screenshot: "Reviewing your uploaded image...",
+    calculate_zones: "Calculating your training zones...",
+    get_athlete_context: "Looking up your info...",
+    process_uploaded_file: "Reading your activity file...",
+    save_check_in: "Saving your check-in...",
+    update_athlete_profile: "Updating your profile..."
+  };
+
+  return statuses[toolName] ?? "Working on that...";
+}
+
 function uiPartText(part: UIMessage["parts"][number]): string | null {
   if (part.type === "text") {
     return part.text;
   }
 
   if (part.type === "dynamic-tool") {
-    return `Using ${part.toolName}`;
+    return friendlyToolStatus(part.toolName);
   }
 
   if (part.type.startsWith("tool-")) {
-    return `Using ${part.type.slice("tool-".length)}`;
+    return friendlyToolStatus(part.type.slice("tool-".length));
   }
 
   return null;

@@ -546,16 +546,15 @@ describe("CoachChat", () => {
     expect(screen.getByText(/Keep this one easy while I shape the plan/i)).toBeTruthy();
   });
 
-  it("renders live tool calls from the AI SDK useChat hook", async () => {
+  it("renders friendly live tool status from the AI SDK useChat hook", async () => {
     chatMocks.messages.push({
       id: "tool-message-1",
       parts: [
         {
-          input: { ftp_watts: 300, sport: "cycling" },
-          output: { zones: [] },
+          input: { user_id: "athlete-1" },
           state: "output-available",
           toolCallId: "call-1",
-          type: "tool-calculate_zones"
+          type: "tool-get_athlete_context"
         }
       ],
       role: "assistant"
@@ -617,7 +616,8 @@ describe("CoachChat", () => {
     render(<CoachChat />);
 
     await screen.findByText(/Welcome back coach-side/i);
-    expect(screen.getByText(/calculate_zones/i)).toBeTruthy();
+    expect(screen.getByText(/Looking up your info/i)).toBeTruthy();
+    expect(screen.queryByText(/Using get_athlete_context/i)).toBeNull();
   });
 
   it("passes uploaded image attachments to the AI SDK message", async () => {
