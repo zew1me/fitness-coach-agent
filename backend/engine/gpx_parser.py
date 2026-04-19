@@ -313,4 +313,6 @@ def _normalize_tcx_sport(sport: str | None) -> str:
     normalized = sport.lower()
     if normalized in {"biking", "cycling"}:
         return "cycling"
+    if normalized in {"snowboarding", "downhillskiing"}:
+        return "downhillskiing"
     return normalized
