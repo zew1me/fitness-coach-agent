@@ -1,3 +1,5 @@
+/* ── Layout ─────────────────────────────────────────────── */
+
 .page {
   min-height: 100vh;
 }
@@ -13,12 +15,14 @@
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: calc(100vh - 56px);
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--border);
   border-radius: 28px;
-  background: rgba(255, 255, 255, 0.82);
-  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.08);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
   backdrop-filter: blur(18px);
 }
+
+/* ── Topbar ──────────────────────────────────────────────── */
 
 .topbar {
   display: flex;
@@ -26,7 +30,7 @@
   justify-content: space-between;
   gap: 16px;
   padding: 18px 22px 14px;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  border-bottom: 1px solid var(--border);
 }
 
 .brandBlock {
@@ -39,10 +43,11 @@
   font-size: 0.95rem;
   font-weight: 700;
   letter-spacing: -0.02em;
+  color: var(--text);
 }
 
 .meta {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.88rem;
 }
 
@@ -51,6 +56,8 @@
   align-items: center;
   gap: 10px;
 }
+
+/* ── Shared button base ──────────────────────────────────── */
 
 .ghostButton,
 .settingsButton,
@@ -73,10 +80,10 @@
 .settingsButton,
 .secondaryButton,
 .drawerClose {
-  border: 1px solid rgba(148, 163, 184, 0.3);
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  color: #0f172a;
+  background: var(--surface-strong);
+  color: var(--text);
   padding: 10px 14px;
 }
 
@@ -84,8 +91,10 @@
 .settingsButton:hover,
 .secondaryButton:hover,
 .drawerClose:hover {
-  background: rgba(241, 245, 249, 0.92);
+  background: var(--accent-soft);
 }
+
+/* ── Messages area ───────────────────────────────────────── */
 
 .messagesPane {
   min-height: 0;
@@ -97,6 +106,8 @@
   display: grid;
   gap: 14px;
 }
+
+/* ── Empty / onboarding state ────────────────────────────── */
 
 .emptyState {
   display: grid;
@@ -113,7 +124,7 @@
 }
 
 .eyebrow {
-  color: #2563eb;
+  color: var(--accent-strong);
   font-size: 0.83rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -122,6 +133,7 @@
 
 .emptyTitle {
   margin: 0;
+  color: var(--text);
   font-size: clamp(2.1rem, 5vw, 3.9rem);
   letter-spacing: -0.05em;
   line-height: 1;
@@ -130,7 +142,7 @@
 .emptyText {
   margin: 0 auto;
   max-width: 56ch;
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 1.02rem;
   line-height: 1.6;
 }
@@ -143,16 +155,19 @@
 }
 
 .starterButton {
-  border: 1px solid rgba(148, 163, 184, 0.26);
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.86);
-  color: #0f172a;
+  background: var(--surface-strong);
+  color: var(--text);
   padding: 11px 16px;
 }
 
 .starterButton:hover {
-  background: rgba(241, 245, 249, 0.95);
+  background: var(--accent-soft);
+  transform: translateY(-1px);
 }
+
+/* ── Chat bubbles ────────────────────────────────────────── */
 
 .rowAssistant,
 .rowUser {
@@ -171,24 +186,28 @@
   max-width: min(720px, 92%);
   border-radius: 24px;
   padding: 14px 16px;
-  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
 }
 
 .assistantBubble {
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(226, 232, 240, 0.88);
+  background: var(--coach-bubble);
+  border: 1px solid var(--border);
+  color: var(--text);
 }
 
 .userBubble {
-  background: linear-gradient(135deg, #2563eb, #1d4ed8);
-  color: white;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #ffffff;
 }
 
 .messageText {
   margin: 0;
+  color: inherit;
   white-space: pre-wrap;
   line-height: 1.6;
 }
+
+/* ── Attachment thumbnails ───────────────────────────────── */
 
 .attachmentGrid {
   display: flex;
@@ -209,25 +228,27 @@
   height: 104px;
   object-fit: cover;
   border-radius: 16px;
-  border: 1px solid rgba(203, 213, 225, 0.8);
-  background: rgba(248, 250, 252, 0.95);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
 }
 
 .attachmentName {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.78rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* ── Plan card (legacy renderer) ─────────────────────────── */
+
 .planCard {
   display: grid;
   gap: 16px;
   margin-top: 14px;
-  border: 1px solid rgba(191, 219, 254, 0.8);
+  border: 1px solid var(--border-strong);
   border-radius: 20px;
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.95), rgba(255, 255, 255, 0.98));
+  background: var(--surface);
   padding: 16px;
 }
 
@@ -239,8 +260,8 @@
 
 .planPill {
   border-radius: 999px;
-  background: rgba(37, 99, 235, 0.08);
-  color: #1d4ed8;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
   font-size: 0.82rem;
   font-weight: 600;
   padding: 7px 11px;
@@ -253,23 +274,26 @@
 
 .planDay {
   border-radius: 18px;
-  border: 1px solid rgba(191, 219, 254, 0.75);
-  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
   padding: 12px 14px;
 }
 
 .planDayTitle {
   margin: 0 0 6px;
+  color: var(--text);
   font-size: 0.96rem;
   font-weight: 700;
 }
 
 .planDayNote {
   margin: 0;
-  color: #475569;
+  color: var(--text-muted);
   font-size: 0.92rem;
   line-height: 1.5;
 }
+
+/* ── Composer ────────────────────────────────────────────── */
 
 .composerWrap {
   padding: 10px 18px 18px;
@@ -278,10 +302,10 @@
 .composerCard {
   display: grid;
   gap: 10px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--border-strong);
   border-radius: 28px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.07);
+  background: var(--surface-strong);
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
   padding: 12px 14px 14px;
 }
 
@@ -296,13 +320,13 @@
   align-items: center;
   gap: 8px;
   border-radius: 999px;
-  background: rgba(241, 245, 249, 0.92);
-  color: #0f172a;
+  background: var(--accent-soft);
+  color: var(--text);
   padding: 8px 12px;
 }
 
 .uploadStatus {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.8rem;
 }
 
@@ -320,17 +344,21 @@
   width: 44px;
   height: 44px;
   border-radius: 999px;
-  background: #ffffff;
-  border: 1px solid rgba(203, 213, 225, 0.92);
-  color: #0f172a;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
   font-size: 1.35rem;
+}
+
+.attachButton:hover:not(:disabled) {
+  background: var(--accent-soft);
 }
 
 .attachButton:disabled,
 .sendButton:disabled,
 .primaryButton:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.45;
 }
 
 .composerInput {
@@ -341,40 +369,47 @@
   border: none;
   outline: none;
   background: transparent;
-  color: #0f172a;
+  color: var(--text);
   font-size: 1.03rem;
   line-height: 1.5;
   padding: 8px 2px 2px;
 }
 
+.composerInput::placeholder {
+  color: var(--text-muted);
+}
+
 .sendButton,
 .primaryButton {
   border-radius: 999px;
-  background: linear-gradient(135deg, #2563eb, #1d4ed8);
-  color: white;
+  background: var(--accent);
+  color: #ffffff;
   font-weight: 700;
   padding: 11px 16px;
 }
 
-.sendButton:hover,
+.sendButton:hover:not(:disabled),
 .starterButton:hover,
-.primaryButton:hover {
+.primaryButton:hover:not(:disabled) {
   transform: translateY(-1px);
+  background: var(--accent-strong);
 }
 
 .composerHint {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.86rem;
   padding-left: 4px;
 }
 
+/* ── Logged-out / error states ───────────────────────────── */
+
 .statusBanner,
 .landingCard,
 .errorCard {
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--border);
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 16px 50px rgba(15, 23, 42, 0.08);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
   padding: 24px;
 }
 
@@ -395,6 +430,7 @@
 .landingTitle,
 .errorTitle {
   margin: 0;
+  color: var(--text);
   font-size: clamp(2rem, 5vw, 3.3rem);
   letter-spacing: -0.05em;
   line-height: 1.02;
@@ -403,13 +439,13 @@
 .landingText,
 .errorText {
   margin: 0;
-  color: #64748b;
+  color: var(--text-muted);
   line-height: 1.7;
 }
 
 .landingHint {
   margin: 0;
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.95rem;
   line-height: 1.6;
 }
@@ -420,12 +456,14 @@
   gap: 12px;
 }
 
+/* ── Settings drawer ─────────────────────────────────────── */
+
 .drawerBackdrop {
   position: fixed;
   inset: 0;
   display: flex;
   justify-content: flex-end;
-  background: rgba(15, 23, 42, 0.24);
+  background: rgba(15, 23, 42, 0.34);
   z-index: 20;
 }
 
@@ -433,9 +471,9 @@
   width: min(460px, 100vw);
   height: 100vh;
   overflow-y: auto;
-  background: rgba(255, 255, 255, 0.98);
-  border-left: 1px solid rgba(226, 232, 240, 0.92);
-  box-shadow: -10px 0 42px rgba(15, 23, 42, 0.12);
+  background: var(--surface-strong);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -10px 0 42px rgba(15, 23, 42, 0.14);
   padding: 22px 20px 30px;
 }
 
@@ -449,13 +487,14 @@
 
 .drawerTitle {
   margin: 0;
+  color: var(--text);
   font-size: 1.4rem;
   letter-spacing: -0.03em;
 }
 
 .drawerText {
   margin: 8px 0 0;
-  color: #64748b;
+  color: var(--text-muted);
   line-height: 1.6;
 }
 
@@ -467,39 +506,47 @@
 .fieldLabel {
   display: grid;
   gap: 7px;
-  color: #334155;
+  color: var(--text);
   font-size: 0.94rem;
   font-weight: 600;
 }
 
 .fieldInput {
   width: 100%;
-  border: 1px solid rgba(203, 213, 225, 0.94);
+  border: 1px solid var(--border-strong);
   border-radius: 16px;
-  background: white;
-  color: #0f172a;
+  background: var(--surface);
+  color: var(--text);
   padding: 12px 14px;
 }
 
-.fieldInput:focus,
-.drawer textarea:focus {
-  outline: 2px solid rgba(37, 99, 235, 0.16);
+.fieldInput:focus {
+  outline: 2px solid var(--accent-soft);
   outline-offset: 1px;
 }
 
+.fieldInput:read-only {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .drawerStatus {
-  color: #475569;
+  color: var(--text-muted);
   font-size: 0.92rem;
 }
 
+/* ── Inline error ────────────────────────────────────────── */
+
 .errorTextInline {
-  color: #b91c1c;
+  color: var(--danger);
 }
+
+/* ── Error card ──────────────────────────────────────────── */
 
 .errorCard {
   background:
-    radial-gradient(circle at top right, rgba(245, 158, 11, 0.18), transparent 32%),
-    rgba(255, 255, 255, 0.92);
+    radial-gradient(circle at top right, var(--action-soft), transparent 32%),
+    var(--surface-strong);
 }
 
 .errorIllustration {
@@ -515,14 +562,18 @@
 
 .errorDetail {
   margin: 0;
-  color: #92400e;
+  color: var(--text-muted);
   font-size: 0.92rem;
   line-height: 1.6;
 }
 
+/* ── Hidden file input ───────────────────────────────────── */
+
 .hiddenInput {
   display: none;
 }
+
+/* ── Mobile ──────────────────────────────────────────────── */
 
 @media (max-width: 760px) {
   .shell {
