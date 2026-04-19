@@ -81,6 +81,47 @@ describe("app/api/chat route", () => {
     );
   });
 
+  it("executes get_recent_activities by calling the engine activities endpoint", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ activities: [{ id: "activity-1", sport: "running" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const getRecentActivities = tools["get_recent_activities"] as {
+      // eslint-disable-next-line no-unused-vars
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    await expect(
+      getRecentActivities.execute({
+        limit: 3,
+        sport: "running",
+        user_id: "athlete-1"
+      })
+    ).resolves.toEqual({ activities: [{ id: "activity-1", sport: "running" }] });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/get-recent-activities",
+      expect.objectContaining({
+        body: JSON.stringify({
+          limit: 3,
+          sport: "running",
+          user_id: "athlete-1"
+        }),
+        method: "POST"
+      })
+    );
+  });
+
   it("executes calculate_zones by calling the engine zones endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(

@@ -521,6 +521,28 @@ async def get_athlete_summary(
     }
 
 
+class GetRecentActivitiesRequest(BaseModel):
+    user_id: str
+    sport: str | None = None
+    limit: int = 20
+
+
+@app.post("/api/engine/get-recent-activities")
+async def get_recent_activities(
+    payload: GetRecentActivitiesRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    enforce_user_access(payload.user_id, user_context)
+
+    activities = await repo.list_activities(
+        payload.user_id,
+        sport=payload.sport,
+        limit=min(max(payload.limit, 1), 100),
+    )
+
+    return {"activities": [activity.model_dump(mode="json") for activity in activities]}
+
+
 class GeneratePlanStructureRequest(BaseModel):
     user_id: str
     goal_id: str | None = None

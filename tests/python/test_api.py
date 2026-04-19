@@ -20,7 +20,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.training import DailyLoadSnapshot, Goal
+from backend.models.training import Activity, DailyLoadSnapshot, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.services.auth import AuthService
 
@@ -931,6 +931,51 @@ async def test_get_athlete_summary_rejects_cross_user_access(monkeypatch) -> Non
 
     assert response.status_code == 403
     assert "cannot access this resource" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_recent_activities_returns_normalized_activity_list(monkeypatch) -> None:
+    class ActivityRepository(EngineRepository):
+        async def list_activities(self, user_id: str, *, sport=None, since=None, limit: int = 50):
+            assert user_id == "athlete-1"
+            assert sport == "running"
+            assert limit == 2
+            return [
+                Activity(
+                    id="activity-1",
+                    user_id=user_id,
+                    sport="running",
+                    activity_date=datetime.fromisoformat("2026-04-10T00:00:00+00:00").date(),
+                    duration_seconds=2700,
+                    distance_meters=8000,
+                    tss=55,
+                )
+            ]
+
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/get-recent-activities",
+            json={"limit": 2, "sport": "running", "user_id": "athlete-1"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    activities = response.json()["activities"]
+    assert activities[0]["id"] == "activity-1"
+    assert activities[0]["sport"] == "running"
+    assert activities[0]["activity_date"] == "2026-04-10"
+    assert activities[0]["distance_meters"] == 8000
+    assert activities[0]["tss"] == 55
 
 
 @pytest.mark.asyncio

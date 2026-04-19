@@ -124,6 +124,13 @@ function executeCoachTool(name: string, input: unknown, context: CoachToolContex
     }));
   }
 
+  if (name === "get_recent_activities") {
+    return postEngine(context, "/api/engine/get-recent-activities", {
+      ...engineInput(input),
+      user_id: context.userId,
+    });
+  }
+
   if (name === "process_uploaded_file") {
     const result = processUploadedFile(input, context);
     if (result !== null) {
