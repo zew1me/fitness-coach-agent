@@ -78,6 +78,7 @@ export async function POST(request: Request): Promise<Response> {
     tools: createCoachTools({
       accessToken: token.access_token,
       baseUrl: requestOrigin(request),
+      ...(process.env["TAVILY_API_KEY"] !== undefined && { tavilyApiKey: process.env["TAVILY_API_KEY"] }),
       userId: token.user_id,
     }),
   });

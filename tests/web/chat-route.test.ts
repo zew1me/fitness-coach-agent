@@ -277,4 +277,61 @@ describe("app/api/chat route", () => {
       })
     );
   });
+
+  it("web_search calls the Tavily API with correct headers and returns results", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            answer: "Polarized training involves spending ~80% of volume at low intensity.",
+            results: [{ title: "Seiler 80/20", url: "https://example.com/seiler", content: "Snippet." }]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      )
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      tavilyApiKey: "tvly-test-key",
+      userId: "athlete-1"
+    });
+
+    const webSearch = tools["web_search"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = await webSearch.execute({ query: "polarized training masters athletes", max_results: 3 });
+    expect(result).toEqual({
+      answer: "Polarized training involves spending ~80% of volume at low intensity.",
+      results: [{ title: "Seiler 80/20", url: "https://example.com/seiler", content: "Snippet." }]
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.tavily.com/search",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer tvly-test-key"
+        })
+      })
+    );
+  });
+
+  it("web_search returns empty results when TAVILY_API_KEY is absent", async () => {
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+      userId: "athlete-1"
+    });
+
+    const webSearch = tools["web_search"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    await expect(
+      webSearch.execute({ query: "polarized training" })
+    ).resolves.toEqual({ results: [] });
+  });
 });
