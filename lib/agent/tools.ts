@@ -82,11 +82,6 @@ const adjustPlanInputSchema = z.object({
   user_id: z.string().min(1)
 });
 
-const webSearchInputSchema = z.object({
-  max_results: z.number().int().min(1).max(10).default(5),
-  query: z.string().min(1)
-});
-
 type ToolDefinition<TSchema extends z.ZodTypeAny> = {
   description: string;
   inputSchema: TSchema;
@@ -134,10 +129,6 @@ export const coachToolDefinitions = {
   recalibrate_thresholds: defineTool(
     "Re-estimate thresholds from recent performance evidence.",
     userInputSchema
-  ),
-  web_search: defineTool(
-    "Search the web for exercise science research, training protocols, physiology, sports nutrition, or race information. Use only for topics directly relevant to coaching and endurance training.",
-    webSearchInputSchema
   )
 } as const;
 

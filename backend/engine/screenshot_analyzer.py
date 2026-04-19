@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from backend.config import get_settings
+from backend.config import settings
 
 MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE = 0.3
 
@@ -192,7 +192,6 @@ async def analyze_screenshot(image_url: str) -> ExtractionResult:
 
 async def _call_vision(prompt: str, image_url: str) -> str:
     """Call OpenAI vision API with an image URL."""
-    settings = get_settings()
     if not settings.openai_api_key:
         return "{}"
 

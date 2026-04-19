@@ -24,6 +24,7 @@ export default defineConfig([
     ".uv-cache/**",
     ".venv/**",
     ".vercel/**",
+    ".worktrees/**",
     "node_modules/**"
   ]),
   js.configs.recommended,
