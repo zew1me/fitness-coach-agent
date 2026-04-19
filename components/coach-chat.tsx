@@ -1,7 +1,7 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, type UIMessage } from "ai";
+import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
 import Link from "next/link";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, JSX } from "react";
@@ -117,6 +117,23 @@ function toLiveChatMessage(message: UIMessage, threadId: string, userId: string)
     thread_id: threadId,
     user_id: userId,
   };
+}
+
+function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
+  return attachments.flatMap((attachment) => {
+    if (attachment.status !== "uploaded" || attachment.public_url === null) {
+      return [];
+    }
+
+    return [
+      {
+        filename: attachment.filename,
+        mediaType: attachment.content_type,
+        type: "file",
+        url: attachment.public_url,
+      },
+    ];
+  });
 }
 
 function withOptionalNumber(
@@ -399,7 +416,7 @@ export function CoachChat(): JSX.Element {
         user_id: token.user_id,
       };
       await sendMessage({
-        parts: [{ type: "text", text: optimisticMessage.content }],
+        parts: [{ type: "text", text: optimisticMessage.content }, ...uploadedFileParts(attachments)],
       });
       removePreviewUrls(attachments);
       setAttachments([]);

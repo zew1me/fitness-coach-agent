@@ -461,4 +461,114 @@ describe("CoachChat", () => {
     await screen.findByText(/Welcome back coach-side/i);
     expect(screen.getByText(/calculate_zones/i)).toBeTruthy();
   });
+
+  it("passes uploaded image attachments to the AI SDK message", async () => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn(() => "blob:activity-preview")
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn()
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: true,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/attachments/presign") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "x-upload": "1" },
+              method: "PUT",
+              object_key: "uploads/activity.png",
+              public_url: "https://example.com/activity.png",
+              upload_url: "https://upload.example/activity.png"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "https://upload.example/activity.png") {
+        return Promise.resolve(new Response(null, { status: 200 }));
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const { container } = render(<CoachChat />);
+
+    await screen.findByPlaceholderText(/Ask anything about your training/i);
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["activity-image"], "activity.png", { type: "image/png" })] }
+    });
+    await screen.findByText(/Ready/i);
+
+    const input = screen.getByPlaceholderText(/Ask anything about your training/i);
+    fireEvent.change(input, { target: { value: "Please analyze this workout." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        parts: [
+          { text: "Please analyze this workout.", type: "text" },
+          {
+            filename: "activity.png",
+            mediaType: "image/png",
+            type: "file",
+            url: "https://example.com/activity.png"
+          }
+        ]
+      });
+    });
+  });
 });
