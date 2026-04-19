@@ -6,7 +6,6 @@ export type CoachToolContext = {
   accessToken: string;
   baseUrl: string;
   fetchImpl?: typeof fetch;
-  tavilyApiKey?: string;
   userId: string;
 };
 
@@ -91,39 +90,7 @@ function executeDeterministicEngineTool(
   return null;
 }
 
-type TavilyResult = { content: string; title: string; url: string };
-type TavilyResponse = { answer?: string; results: TavilyResult[] };
-
-async function webSearch(input: unknown, context: CoachToolContext): Promise<TavilyResponse> {
-  if (!context.tavilyApiKey) {
-    return { results: [] };
-  }
-
-  const parsed = input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {};
-  const query = typeof parsed["query"] === "string" ? parsed["query"] : "";
-  const maxResults = typeof parsed["max_results"] === "number" ? parsed["max_results"] : 5;
-
-  const response = await (context.fetchImpl ?? fetch)("https://api.tavily.com/search", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${context.tavilyApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ include_answer: true, max_results: maxResults, query, search_depth: "basic" }),
-  });
-
-  if (!response.ok) {
-    return { results: [] };
-  }
-
-  return response.json() as Promise<TavilyResponse>;
-}
-
 function executeCoachTool(name: string, input: unknown, context: CoachToolContext): unknown {
-  if (name === "web_search") {
-    return webSearch(input, context);
-  }
-
   if (name === "get_athlete_context") {
     return getAthleteSummary(context);
   }
