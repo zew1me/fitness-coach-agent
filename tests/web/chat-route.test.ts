@@ -1,9 +1,44 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { POST } from "../../app/api/chat/route";
+import { POST, selectMessagesForModel } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
 
 describe("app/api/chat route", () => {
+  it("keeps short conversations intact for model context", () => {
+    const messages = Array.from({ length: 4 }, (_, index) => ({
+      id: `message-${index}`,
+      parts: [{ text: `Message ${index}`, type: "text" as const }],
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const)
+    }));
+
+    expect(selectMessagesForModel(messages)).toEqual(messages);
+  });
+
+  it("compacts long conversations to a recent model context window", () => {
+    const messages = Array.from({ length: 40 }, (_, index) => ({
+      id: `message-${index}`,
+      parts: [{ text: `Message ${index}`, type: "text" as const }],
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const)
+    }));
+
+    const selected = selectMessagesForModel(messages);
+
+    expect(selected).toHaveLength(25);
+    expect(selected[0]).toMatchObject({
+      id: "context-window-notice",
+      role: "system",
+      parts: [
+        {
+          text: expect.stringContaining("previous 16 chat messages"),
+          type: "text"
+        }
+      ]
+    });
+    expect(selected.slice(1).map((message) => message.id)).toEqual(
+      messages.slice(16).map((message) => message.id)
+    );
+  });
+
   it("returns 401 when the browser session cookie is absent", async () => {
     const response = await POST(
       new Request("http://localhost/api/chat", {

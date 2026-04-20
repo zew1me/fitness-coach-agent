@@ -18,8 +18,34 @@ type ChatRequestBody = {
   messages?: UIMessage[];
 };
 
+const MODEL_RECENT_MESSAGE_LIMIT = 24;
+
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
+}
+
+export function selectMessagesForModel(messages: UIMessage[]): UIMessage[] {
+  if (messages.length <= MODEL_RECENT_MESSAGE_LIMIT) {
+    return messages;
+  }
+
+  const omittedCount = messages.length - MODEL_RECENT_MESSAGE_LIMIT;
+  return [
+    {
+      id: "context-window-notice",
+      parts: [
+        {
+          type: "text",
+          text:
+            `The previous ${omittedCount} chat messages are persisted in the coaching history ` +
+            "but omitted from this model turn to keep context focused. Continue from the recent " +
+            "messages and use athlete data tools when older details are needed.",
+        },
+      ],
+      role: "system",
+    },
+    ...messages.slice(-MODEL_RECENT_MESSAGE_LIMIT),
+  ];
 }
 
 function requestOrigin(request: Request): string {
@@ -71,6 +97,7 @@ export async function POST(request: Request): Promise<Response> {
 
   const body = (await request.json()) as ChatRequestBody;
   const messages = body.messages ?? [];
+  const modelMessages = selectMessagesForModel(messages);
   const context = await loadAthleteContext(request, token);
 
   const tavilyApiKey = process.env["TAVILY_API_KEY"];
@@ -83,7 +110,7 @@ export async function POST(request: Request): Promise<Response> {
   const result = streamText({
     model: openai("gpt-4.1-mini"),
     system: buildCoachSystemPrompt(context),
-    messages: await convertToModelMessages(messages),
+    messages: await convertToModelMessages(modelMessages),
     tools: {
       ...createCoachTools({
         accessToken: token.access_token,
