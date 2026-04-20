@@ -18,6 +18,9 @@ type ChatRequestBody = {
   messages?: UIMessage[];
 };
 
+const LOCAL_AUTH_UNAVAILABLE_MESSAGE =
+  "Unable to reach the local auth service. Please make sure the backend is running and try again.";
+
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
 }
@@ -64,7 +67,13 @@ async function loadAthleteContext(
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const token = await loadBrowserToken(request);
+  let token: BrowserTokenResponse | null;
+  try {
+    token = await loadBrowserToken(request);
+  } catch {
+    return jsonError(LOCAL_AUTH_UNAVAILABLE_MESSAGE, 503);
+  }
+
   if (token === null) {
     return jsonError("Missing browser session cookie.", 401);
   }
