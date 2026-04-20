@@ -203,7 +203,7 @@ async def _call_vision(prompt: str, image_url: str) -> str:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "gpt-4.1-mini",
+                "model": "gpt-5-mini",
                 "input": [
                     {
                         "role": "user",
