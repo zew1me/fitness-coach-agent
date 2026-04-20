@@ -87,6 +87,40 @@ function nutritionContext(context: AthleteContextBundle): string {
   return parts.join(" ");
 }
 
+function goalSignalsLongevity(goal: GoalContext): boolean {
+  const text = `${goal.goal_type} ${goal.title} ${goal.sport ?? ""}`.toLowerCase();
+  return [
+    "aging",
+    "general",
+    "health",
+    "longevity",
+    "maintenance",
+    "walk",
+    "wellness",
+  ].some((signal) => text.includes(signal));
+}
+
+function trainingModelInstructions(context: AthleteContextBundle): string {
+  if (context.goals.some(goalSignalsLongevity)) {
+    const balanceGuidance =
+      context.computed_age !== null && context.computed_age >= 65
+        ? " Include balance work because the athlete is 65+."
+        : "";
+    return [
+      "Use a longevity-focused endurance model, not a race-peaking model.",
+      "Start from the public-health floor: 150-300 min/week moderate aerobic or 75-150 min/week vigorous, plus 2x/week strength.",
+      "Layer masters-athlete principles on top: aerobic base as the anchor, controlled VO2max maintenance, strength as equal priority, and recovery as a limiter.",
+      "Favor stable repeatable weeks over aggressive progression; do not stack hard days.",
+      `Do not default to Seiler unless the athlete also has a clear performance or race goal.${balanceGuidance}`,
+    ].join(" ");
+  }
+
+  return (
+    "Use Seiler-informed training principles for performance goals: mostly Z1-Z2 volume, " +
+    "carefully dosed intensity, recovery weeks, and honest but encouraging nudges."
+  );
+}
+
 function hormoneStatusWarrantsPrinciples(status: string | null | undefined): boolean {
   return status != null && status !== "endogenous" && status !== "not_specified";
 }
@@ -121,7 +155,7 @@ export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
 
   return [
     "You are a sport-agnostic endurance coach.",
-    "Use Seiler-informed training principles: mostly Z1-Z2 volume, carefully dosed intensity, recovery weeks, and honest but encouraging nudges.",
+    trainingModelInstructions(context),
     "Be inclusive and ask about sex or hormone context only when it improves training-load guidance.",
     `Athlete: ${context.profile.display_name ?? context.profile.user_id}. Age: ${age}. Sports: ${sports}.`,
     `Goals: ${goals}.`,

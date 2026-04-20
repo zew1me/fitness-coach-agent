@@ -60,6 +60,38 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("extract multiple fields");
   });
 
+  it("selects a longevity model instead of defaulting to Seiler for health goals", () => {
+    const longevityContext: AthleteContextBundle = {
+      ...context,
+      computed_age: 67,
+      profile: {
+        ...context.profile,
+        coaching_state: "active",
+        primary_sports: ["walking", "strength"]
+      },
+      goals: [
+        {
+          id: "goal-longevity",
+          user_id: "athlete-1",
+          goal_type: "maintenance",
+          sport: "general",
+          title: "Longevity and aging well",
+          priority: 1,
+          status: "active"
+        }
+      ]
+    };
+
+    const prompt = buildCoachSystemPrompt(longevityContext);
+
+    expect(prompt).toContain("longevity-focused endurance model");
+    expect(prompt).toContain("150-300 min/week");
+    expect(prompt).toContain("2x/week strength");
+    expect(prompt).toContain("balance work");
+    expect(prompt).toContain("VO2max maintenance");
+    expect(prompt).toContain("Do not default to Seiler");
+  });
+
   it("includes nutrition context when dietary_restrictions are set", () => {
     const nutritionContext: AthleteContextBundle = {
       ...context,
