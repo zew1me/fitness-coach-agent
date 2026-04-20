@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { POST, selectMessagesForModel } from "../../app/api/chat/route";
+import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
+import { selectMessagesForModel } from "../../lib/agent/message-context";
 
 describe("app/api/chat route", () => {
   it("keeps short conversations intact for model context", () => {
