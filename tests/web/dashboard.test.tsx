@@ -401,6 +401,12 @@ describe("CoachChat", () => {
 
     await screen.findByRole("menu", { name: /Account/i });
     expect(screen.getByRole("menuitem", { name: /Sign out/i })).toBeTruthy();
+    const signOutButton = screen.getByRole("menuitem", { name: /Sign out/i });
+    expect(signOutButton.getAttribute("type")).toBe("submit");
+    expect(signOutButton.closest("form")?.getAttribute("action")).toBe(
+      "/api/oauth/browser-session/logout"
+    );
+    expect(signOutButton.closest("form")?.getAttribute("method")).toBe("post");
     fireEvent.click(screen.getByRole("menuitem", { name: /Profile/i }));
 
     await screen.findByRole("heading", { name: /Profile/i });

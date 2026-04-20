@@ -199,6 +199,19 @@ async def oauth_browser_session(
     return {"ok": True}
 
 
+@app.post("/api/oauth/browser-session/logout")
+async def oauth_browser_session_logout() -> Response:
+    response = RedirectResponse("/login?return_to=/", status_code=303)
+    response.delete_cookie(
+        key=auth_service.browser_session_cookie_name,
+        httponly=True,
+        path="/",
+        samesite="lax",
+        secure=settings.app_base_url.startswith("https://"),
+    )
+    return response
+
+
 @app.post("/api/oauth/browser-token")
 async def oauth_browser_token(
     coach_browser_session: str | None = Cookie(default=None),

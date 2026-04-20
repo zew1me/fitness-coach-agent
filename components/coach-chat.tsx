@@ -770,9 +770,15 @@ export function CoachChat(): JSX.Element {
                     >
                       Profile
                     </button>
-                    <Link className={styles.menuItem} href="/login?return_to=/" role="menuitem">
-                      Sign out
-                    </Link>
+                    <form
+                      action="/api/oauth/browser-session/logout"
+                      className={styles.menuForm}
+                      method="post"
+                    >
+                      <button className={styles.menuItem} role="menuitem" type="submit">
+                        Sign out
+                      </button>
+                    </form>
                   </div>
                 ) : null}
               </div>
