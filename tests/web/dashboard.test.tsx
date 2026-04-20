@@ -189,6 +189,70 @@ describe("CoachChat", () => {
     );
   });
 
+  it("renders a bounded recent message buffer until older history is requested", async () => {
+    const threadMessages = Array.from({ length: 70 }, (_, index) => ({
+      id: `message-${index}`,
+      attachments: [],
+      content: `History message ${index}`,
+      created_at: `2026-04-04T09:${String(index % 60).padStart(2, "0")}:00Z`,
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1"
+    }));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: threadMessages
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText("History message 69");
+    expect(screen.queryByText("History message 0")).toBeNull();
+    expect(screen.getByRole("button", { name: /Show 10 older messages/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /Show 10 older messages/i }));
+
+    expect(screen.getByText("History message 0")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Show older messages/i })).toBeNull();
+  });
+
   it("uses friendly signed-in copy instead of showing a raw user id", async () => {
     const userId = "aa687ce1-5189-4c28-bf24-e8b1574ebc5b";
     const fetchMock = vi.fn((input: RequestInfo | URL) => {

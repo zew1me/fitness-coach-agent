@@ -41,6 +41,7 @@ type LocalAttachment = ChatAttachment & {
 };
 
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
+const MESSAGE_RENDER_BATCH_SIZE = 60;
 
 function emptyProfile(userId: string): AthleteProfile {
   return {
@@ -332,6 +333,7 @@ export function CoachChat(): JSX.Element {
     loading: false,
   });
   const [composer, setComposer] = useState("");
+  const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_RENDER_BATCH_SIZE);
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -424,6 +426,10 @@ export function CoachChat(): JSX.Element {
       scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [threadState.data?.thread.messages.length, sending]);
+
+  useEffect(() => {
+    setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
+  }, [threadState.data?.thread.id]);
 
   useEffect((): (() => void) => {
     return () => {
@@ -656,9 +662,18 @@ export function CoachChat(): JSX.Element {
     );
   }
 
-  function renderMessages(messages: ChatMessage[]): JSX.Element {
+  function renderMessages(messages: ChatMessage[], hiddenMessageCount = 0): JSX.Element {
     return (
       <div className={styles.messageStack}>
+        {hiddenMessageCount > 0 ? (
+          <button
+            className={styles.historyLoadButton}
+            onClick={() => setVisibleMessageCount((current) => current + MESSAGE_RENDER_BATCH_SIZE)}
+            type="button"
+          >
+            Show {Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older messages
+          </button>
+        ) : null}
         {messages.map((message) => {
           const rowClass =
             message.role === "assistant" ? styles.rowAssistant : styles.rowUser;
@@ -730,6 +745,9 @@ export function CoachChat(): JSX.Element {
   }
 
   const messages = displayedMessages;
+  const hiddenMessageCount = Math.max(0, messages.length - visibleMessageCount);
+  const visibleMessages =
+    hiddenMessageCount > 0 ? messages.slice(hiddenMessageCount) : messages;
 
   return (
     <main className={styles.page}>
@@ -812,11 +830,11 @@ export function CoachChat(): JSX.Element {
                       Adapt around fatigue
                     </button>
                   </div>
-                  {renderMessages(messages)}
+                  {renderMessages(visibleMessages, hiddenMessageCount)}
                 </div>
               </div>
             ) : (
-              renderMessages(messages)
+              renderMessages(visibleMessages, hiddenMessageCount)
             )}
           </section>
 
