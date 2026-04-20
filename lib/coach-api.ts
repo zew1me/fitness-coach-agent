@@ -8,6 +8,7 @@ import type {
   BrowserTokenResponse,
   ChatAttachment,
   ChatThreadResponse,
+  FitnessMetrics,
   PresignUploadRequest,
   PresignUploadResponse
 } from "./types";
@@ -106,6 +107,52 @@ export async function loadProfile(userId: string, fetchImpl: FetchLike = fetch):
     fetchImpl
   );
   return summary.profile;
+}
+
+export async function loadFitnessMetrics(
+  userId: string,
+  fetchImpl: FetchLike = fetch
+): Promise<FitnessMetrics> {
+  type SummaryResponse = { fitness_metrics: FitnessMetrics };
+  const summary = await authorizedFetch<SummaryResponse>(
+    "/api/engine/get-athlete-summary",
+    {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId })
+    },
+    fetchImpl
+  );
+  return summary.fitness_metrics;
+}
+
+export async function confirmSportThreshold(
+  userId: string,
+  sport: string,
+  fetchImpl: FetchLike = fetch
+): Promise<void> {
+  await authorizedFetch<unknown>(
+    "/api/engine/confirm-threshold",
+    {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, sport })
+    },
+    fetchImpl
+  );
+}
+
+export async function confirmProfileMetric(
+  userId: string,
+  metric: "max_hr" | "weight",
+  fetchImpl: FetchLike = fetch
+): Promise<void> {
+  await authorizedFetch<unknown>(
+    "/api/engine/confirm-profile-metric",
+    {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, metric })
+    },
+    fetchImpl
+  );
 }
 
 export async function saveProfile(

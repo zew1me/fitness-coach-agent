@@ -1,3 +1,28 @@
+export type ThresholdSource = "user" | "file" | "estimated";
+
+export type ThresholdValue = {
+  value: number;
+  unit: string;
+  source: ThresholdSource;
+  measured_at: string | null;
+  notes: string | null;
+};
+
+export type BestTime = {
+  distance_label: string;
+  time_seconds: number;
+  measured_at: string | null;
+};
+
+export type FitnessMetrics = {
+  cycling_ftp?: ThresholdValue;
+  max_hr?: ThresholdValue;
+  run_threshold_pace?: ThresholdValue;
+  swim_css?: ThresholdValue;
+  weight?: ThresholdValue;
+  best_times: BestTime[];
+};
+
 export type BrowserTokenResponse = {
   access_token: string;
   expires_at: string;
