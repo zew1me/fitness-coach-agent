@@ -34,12 +34,34 @@ vi.mock("@ai-sdk/react", () => ({
 import { CoachChat } from "../../components/coach-chat";
 
 const originalFetch = globalThis.fetch;
+const localStorageStore = new Map<string, string>();
+const localStorageMock = {
+  clear: (): void => {
+    localStorageStore.clear();
+  },
+  getItem: (key: string): string | null => localStorageStore.get(key) ?? null,
+  key: (index: number): string | null => Array.from(localStorageStore.keys())[index] ?? null,
+  get length(): number {
+    return localStorageStore.size;
+  },
+  removeItem: (key: string): void => {
+    localStorageStore.delete(key);
+  },
+  setItem: (key: string, value: string): void => {
+    localStorageStore.set(key, value);
+  }
+};
 
 beforeEach(() => {
   chatMocks.messages.splice(0);
   chatMocks.sendMessage.mockClear();
   chatMocks.setMessages.mockClear();
   chatMocks.useChat.mockClear();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: localStorageMock
+  });
+  vi.stubGlobal("localStorage", localStorageMock);
   vi.spyOn(window, "matchMedia").mockReturnValue({
     matches: false,
     addEventListener: vi.fn(),
@@ -50,6 +72,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  localStorageMock.clear();
 });
 
 describe("CoachChat", () => {
@@ -251,6 +274,69 @@ describe("CoachChat", () => {
 
     expect(screen.getByText("History message 0")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Show older messages/i })).toBeNull();
+  });
+
+  it("restores locally persisted chat history when the local thread endpoint is unavailable", async () => {
+    localStorage.setItem(
+      "fitness-coach.local-chat-thread.athlete-1",
+      JSON.stringify({
+        attachments_enabled: false,
+        profile_complete: true,
+        thread: {
+          id: "thread-1",
+          user_id: "athlete-1",
+          state: {},
+          created_at: "2026-04-04T09:00:00Z",
+          updated_at: "2026-04-04T09:00:00Z",
+          messages: [
+            {
+              id: "local-message-1",
+              attachments: [],
+              content: "Saved local training note.",
+              created_at: "2026-04-04T09:00:00Z",
+              metadata: {},
+              role: "user",
+              thread_id: "thread-1",
+              user_id: "athlete-1"
+            }
+          ]
+        }
+      })
+    );
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: "Local backend is restarting." }), {
+            status: 503,
+            headers: { "content-type": "application/json" }
+          })
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText("Saved local training note.");
+    expect(screen.queryByText(/Sorry, we're out running/i)).toBeNull();
   });
 
   it("uses friendly signed-in copy instead of showing a raw user id", async () => {

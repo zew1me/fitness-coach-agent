@@ -42,6 +42,7 @@ type LocalAttachment = ChatAttachment & {
 
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
 const MESSAGE_RENDER_BATCH_SIZE = 60;
+const LOCAL_CHAT_THREAD_STORAGE_PREFIX = "fitness-coach.local-chat-thread";
 
 function emptyProfile(userId: string): AthleteProfile {
   return {
@@ -59,6 +60,69 @@ function onlyWelcomeMessage(messages: ChatMessage[]): boolean {
     firstMessage.role === "assistant" &&
     firstMessage.metadata.message_kind === "welcome"
   );
+}
+
+function canUseLocalChatHistory(): boolean {
+  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+}
+
+function localChatThreadStorageKey(userId: string): string {
+  return `${LOCAL_CHAT_THREAD_STORAGE_PREFIX}.${userId}`;
+}
+
+function readLocalChatThread(userId: string): ChatThreadResponse | null {
+  if (!canUseLocalChatHistory()) {
+    return null;
+  }
+
+  try {
+    const rawThread = window.localStorage.getItem(localChatThreadStorageKey(userId));
+    if (rawThread === null) {
+      return null;
+    }
+    const parsed = JSON.parse(rawThread) as ChatThreadResponse;
+    if (parsed.thread.user_id !== userId || !Array.isArray(parsed.thread.messages)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalChatThread(thread: ChatThreadResponse, userId: string): void {
+  if (!canUseLocalChatHistory()) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(localChatThreadStorageKey(userId), JSON.stringify(thread));
+  } catch {
+    // Local persistence is best-effort for development and should never block chat.
+  }
+}
+
+function hydrateLocalChatThread(remoteThread: ChatThreadResponse, userId: string): ChatThreadResponse {
+  const localThread = readLocalChatThread(userId);
+  if (
+    localThread === null ||
+    localThread.thread.messages.length <= remoteThread.thread.messages.length
+  ) {
+    return remoteThread;
+  }
+
+  return {
+    ...remoteThread,
+    thread: {
+      ...remoteThread.thread,
+      messages: localThread.thread.messages,
+      state: {
+        ...remoteThread.thread.state,
+        ...localThread.thread.state,
+      },
+      updated_at: localThread.thread.updated_at,
+    },
+  };
 }
 
 function readableTime(timestamp: string): string {
@@ -392,13 +456,24 @@ export function CoachChat(): JSX.Element {
     if (session.token === null) {
       return;
     }
+    const token = session.token;
 
     async function loadThread(): Promise<void> {
       setThreadState((current) => ({ ...current, loading: true, error: null }));
       try {
         const thread = await loadChatThread();
-        setThreadState({ data: thread, error: null, loading: false });
+        setThreadState({
+          data: hydrateLocalChatThread(thread, token.user_id),
+          error: null,
+          loading: false,
+        });
       } catch (error) {
+        const localThread = readLocalChatThread(token.user_id);
+        if (localThread !== null) {
+          setThreadState({ data: localThread, error: null, loading: false });
+          return;
+        }
+
         setThreadState({
           data: null,
           error: error instanceof Error ? error.message : "Unable to load the coaching conversation.",
@@ -417,8 +492,26 @@ export function CoachChat(): JSX.Element {
     }
 
     void loadThread();
-    void prefetchProfile(session.token.user_id);
+    void prefetchProfile(token.user_id);
   }, [session.token]);
+
+  useEffect(() => {
+    if (session.token === null || threadState.data === null || displayedMessages.length === 0) {
+      return;
+    }
+
+    writeLocalChatThread(
+      {
+        ...threadState.data,
+        thread: {
+          ...threadState.data.thread,
+          messages: displayedMessages,
+          updated_at: new Date().toISOString(),
+        },
+      },
+      session.token.user_id,
+    );
+  }, [displayedMessages, session.token, threadState.data]);
 
   useEffect(() => {
     const scrollTarget = messageEndRef.current;
