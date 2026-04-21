@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "../../app/api/chat/route";
@@ -11,6 +13,12 @@ afterEach(() => {
 });
 
 describe("app/api/chat route", () => {
+  it("uses the GPT-5 mini model for chat responses", () => {
+    const routeSource = readFileSync(new URL("../../app/api/chat/route.ts", import.meta.url), "utf8");
+
+    expect(routeSource).toContain('openai("gpt-5-mini")');
+  });
+
   it("keeps short conversations intact for model context", () => {
     const messages = Array.from({ length: 4 }, (_, index) => ({
       id: `message-${index}`,

@@ -60,6 +60,15 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("extract multiple fields");
   });
 
+  it("includes current-date guidance and requires a response after tool use", () => {
+    const prompt = buildCoachSystemPrompt(context);
+
+    expect(prompt).toContain("Current date:");
+    expect(prompt).toContain("Do not guess the current date");
+    expect(prompt).toContain("After any tool call");
+    expect(prompt).toContain("user-facing response");
+  });
+
   it("selects a longevity model instead of defaulting to Seiler for health goals", () => {
     const longevityContext: AthleteContextBundle = {
       ...context,
