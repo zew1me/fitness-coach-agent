@@ -44,6 +44,7 @@ declare const styles: {
   readonly fieldLabel: string;
   readonly frame: string;
   readonly ghostButton: string;
+  readonly historyLoadButton: string;
   readonly hiddenInput: string;
   readonly landingCard: string;
   readonly landingHint: string;
