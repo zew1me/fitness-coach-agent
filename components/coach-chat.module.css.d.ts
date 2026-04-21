@@ -54,6 +54,7 @@ declare const styles: {
   readonly messageText: string;
   readonly messagesPane: string;
   readonly menuItem: string;
+  readonly menuForm: string;
   readonly meta: string;
   readonly page: string;
   readonly planCard: string;

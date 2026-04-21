@@ -166,6 +166,10 @@
   background: var(--accent-soft);
 }
 
+.menuForm {
+  margin: 0;
+}
+
 /* ── Messages area ───────────────────────────────────────── */
 
 .messagesPane {
