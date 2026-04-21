@@ -3,6 +3,7 @@ import { openai } from "@ai-sdk/openai";
 import { convertToModelMessages, streamText, type ToolSet, type UIMessage } from "ai";
 
 import { createCoachTools } from "../../../lib/agent/coach-tools";
+import { selectMessagesForModel } from "../../../lib/agent/message-context";
 import { buildCoachSystemPrompt } from "../../../lib/agent/system-prompt";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
 import { buildTavilyMcpUrl } from "../../../lib/site";
@@ -71,6 +72,7 @@ export async function POST(request: Request): Promise<Response> {
 
   const body = (await request.json()) as ChatRequestBody;
   const messages = body.messages ?? [];
+  const modelMessages = selectMessagesForModel(messages);
   const context = await loadAthleteContext(request, token);
 
   const tavilyApiKey = process.env["TAVILY_API_KEY"];
@@ -83,7 +85,7 @@ export async function POST(request: Request): Promise<Response> {
   const result = streamText({
     model: openai("gpt-4.1-mini"),
     system: buildCoachSystemPrompt(context),
-    messages: await convertToModelMessages(messages),
+    messages: await convertToModelMessages(modelMessages),
     tools: {
       ...createCoachTools({
         accessToken: token.access_token,
