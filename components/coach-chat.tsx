@@ -41,6 +41,13 @@ type LocalAttachment = ChatAttachment & {
 };
 
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
+const WAITING_STATUS_INTERVAL_MS = 1600;
+const WAITING_STATUSES = [
+  "Thinking...",
+  "Still working...",
+  "Checking the coaching notes...",
+  "Almost there...",
+];
 
 function emptyProfile(userId: string): AthleteProfile {
   return {
@@ -347,6 +354,7 @@ export function CoachChat(): JSX.Element {
   });
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
+  const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerLoading, setDrawerLoading] = useState(false);
@@ -438,6 +446,21 @@ export function CoachChat(): JSX.Element {
       scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [threadState.data?.thread.messages.length, sending]);
+
+  useEffect((): (() => void) | void => {
+    if (!sending) {
+      setWaitingStatusIndex(0);
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setWaitingStatusIndex((current) => (current + 1) % WAITING_STATUSES.length);
+    }, WAITING_STATUS_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [sending]);
 
   useEffect((): (() => void) => {
     return () => {
@@ -923,7 +946,11 @@ export function CoachChat(): JSX.Element {
                 </button>
               </div>
               <div className={styles.composerHint}>
-                {threadState.error ? (
+                {sending ? (
+                  <span aria-live="polite" className={styles.waitingStatus} role="status">
+                    {WAITING_STATUSES[waitingStatusIndex]}
+                  </span>
+                ) : threadState.error ? (
                   <span className={styles.errorTextInline}>{threadState.error}</span>
                 ) : (
                   "Use Shift+Enter for a new line. Add photos with the plus button."

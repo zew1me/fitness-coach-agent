@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -50,6 +50,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  vi.useRealTimers();
 });
 
 describe("CoachChat", () => {
@@ -608,6 +609,86 @@ describe("CoachChat", () => {
       });
     });
     expect(fetchMock).not.toHaveBeenCalledWith("/api/chat", expect.anything());
+  });
+
+  it("shows a rotating wait status while a message is processing", async () => {
+    let resolveSend: (() => void) | null = null;
+    chatMocks.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const input = await screen.findByPlaceholderText(/Ask anything about your training/i);
+    vi.useFakeTimers();
+    fireEvent.change(input, { target: { value: "This is a longer training update." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    expect(screen.getByText("Thinking...")).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(1600);
+    });
+
+    expect(screen.getByText("Still working...")).toBeTruthy();
+
+    await act(() => Promise.resolve(resolveSend?.()));
   });
 
   it("renders live assistant messages from the AI SDK useChat hook", async () => {
