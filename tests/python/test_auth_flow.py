@@ -121,3 +121,17 @@ async def test_browser_token_with_garbage_cookie_returns_401(
         cookies={"coach_browser_session": "not-a-valid-jwt"},
     )
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_browser_session_logout_clears_cookie(
+    auth_client: tuple[AsyncClient, AuthFlowFakeService],
+) -> None:
+    client, _ = auth_client
+    response = await client.post("/api/oauth/browser-session/logout", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?return_to=/"
+    cookie_header = response.headers["set-cookie"]
+    assert "coach_browser_session=" in cookie_header
+    assert "Max-Age=0" in cookie_header

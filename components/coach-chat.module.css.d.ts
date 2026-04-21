@@ -55,6 +55,7 @@ declare const styles: {
   readonly messageText: string;
   readonly messagesPane: string;
   readonly menuItem: string;
+  readonly menuForm: string;
   readonly meta: string;
   readonly page: string;
   readonly planCard: string;
@@ -80,6 +81,7 @@ declare const styles: {
   readonly uploadChip: string;
   readonly uploadRow: string;
   readonly uploadStatus: string;
+  readonly waitingStatus: string;
   readonly themeOption: string;
   readonly themeRow: string;
   readonly userBubble: string;

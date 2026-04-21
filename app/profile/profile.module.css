@@ -1,0 +1,189 @@
+/* ── Layout ─────────────────────────────────────────────── */
+
+.page {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.shell {
+  margin: 0 auto;
+  max-width: 680px;
+  padding: 24px 20px 48px;
+}
+
+/* ── Nav ─────────────────────────────────────────────────── */
+
+.nav {
+  margin-bottom: 28px;
+}
+
+.backLink {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.backLink:hover {
+  color: var(--text);
+}
+
+/* ── Page heading ────────────────────────────────────────── */
+
+.pageTitle {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0 0 32px;
+  color: var(--text);
+}
+
+/* ── Sections ─────────────────────────────────────────────── */
+
+.section {
+  margin-bottom: 28px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface-strong);
+  overflow: hidden;
+}
+
+.sectionTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0;
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Metric rows ─────────────────────────────────────────── */
+
+.metricRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.metricRow:last-child {
+  border-bottom: none;
+}
+
+.metricLabel {
+  flex: 0 0 140px;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.metricValue {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text);
+  flex-wrap: wrap;
+}
+
+.estimated {
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+/* ── Source badges ───────────────────────────────────────── */
+
+.badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 99px;
+  letter-spacing: 0.02em;
+}
+
+.badge_user {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.badge_file {
+  background: color-mix(in srgb, var(--success, #22c55e) 12%, transparent);
+  color: var(--success, #22c55e);
+}
+
+.badge_estimated {
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  color: var(--text-muted);
+}
+
+/* ── Staleness indicator ─────────────────────────────────── */
+
+.age {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.stale {
+  color: var(--warning, #f59e0b);
+}
+
+.notes {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Confirm button ──────────────────────────────────────── */
+
+.confirmBtn {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.confirmBtn:hover:not(:disabled) {
+  background: var(--surface-strong);
+}
+
+.confirmBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Best times ──────────────────────────────────────────── */
+
+.bestTimes {
+  /* inherits metricRow children */
+}
+
+/* ── Weight note ─────────────────────────────────────────── */
+
+.weightNote {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin: 0;
+  padding: 0 16px 12px;
+}
+
+/* ── Feedback states ─────────────────────────────────────── */
+
+.loading {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.error {
+  color: var(--error, #ef4444);
+  font-size: 0.875rem;
+  margin-bottom: 16px;
+}

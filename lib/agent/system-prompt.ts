@@ -28,6 +28,20 @@ function goalSummary(goal: GoalContext): string {
   return `${goal.title} (${goal.goal_type}${target}${course}${gain})`;
 }
 
+const STALE_THRESHOLD_DAYS = 90;
+
+function staleThresholdWarning(thresholds: AthleteContextBundle["thresholds"]): string {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - STALE_THRESHOLD_DAYS);
+  const stale = thresholds.filter((t) => {
+    if (!t.effective_from) return false;
+    return new Date(t.effective_from) < cutoff;
+  });
+  if (stale.length === 0) return "";
+  const sports = stale.map((t) => t.sport).join(", ");
+  return `Stale thresholds (>${STALE_THRESHOLD_DAYS} days old): ${sports}. Prompt the athlete to recalibrate before prescribing intensity work.`;
+}
+
 function stateInstructions(state: string): string {
   if (state === "onboarding") {
     return [
@@ -83,16 +97,27 @@ function loadLine(context: AthleteContextBundle): string {
     : "no current load snapshot";
 }
 
+function buildContextualLines(context: AthleteContextBundle): string[] {
+  const nutritionCtx = nutritionContext(context);
+  const staleWarning = staleThresholdWarning(context.thresholds);
+  const showPrinciples =
+    nutritionCtx.length > 0 ||
+    context.profile.biological_sex === "female" ||
+    hormoneStatusWarrantsPrinciples(context.profile.hormone_status);
+
+  const lines: string[] = [];
+  if (staleWarning) lines.push(staleWarning);
+  if (nutritionCtx) lines.push(`Athlete nutrition context: ${nutritionCtx}`);
+  if (showPrinciples) lines.push(NUTRITION_PRINCIPLES);
+  return lines;
+}
+
 export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
   const sports = listOrFallback(context.profile.primary_sports, "unknown");
   const goals = context.goals.map(goalSummary).join("; ") || "none recorded";
   const load = loadLine(context);
   const age = context.computed_age === null ? "unknown" : String(context.computed_age);
-  const nutritionCtx = nutritionContext(context);
-  const showPrinciples =
-    nutritionCtx.length > 0 ||
-    context.profile.biological_sex === "female" ||
-    hormoneStatusWarrantsPrinciples(context.profile.hormone_status);
+  const ceiling = context.ctl_ceiling_guidance;
 
   return [
     "You are a sport-agnostic endurance coach.",
@@ -101,9 +126,8 @@ export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
     `Athlete: ${context.profile.display_name ?? context.profile.user_id}. Age: ${age}. Sports: ${sports}.`,
     `Goals: ${goals}.`,
     `Current load: ${load}.`,
-    `CTL ceiling guidance: ${context.ctl_ceiling_guidance.age_bracket}; committed amateur CTL ${context.ctl_ceiling_guidance.committed_amateur_ctl}; ${context.ctl_ceiling_guidance.notes}`,
-    ...(nutritionCtx ? [`Athlete nutrition context: ${nutritionCtx}`] : []),
-    ...(showPrinciples ? [NUTRITION_PRINCIPLES] : []),
+    `CTL ceiling guidance: ${ceiling.age_bracket}; committed amateur CTL ${ceiling.committed_amateur_ctl}; ${ceiling.notes}`,
+    ...buildContextualLines(context),
     stateInstructions(context.profile.coaching_state),
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",

@@ -166,6 +166,10 @@
   background: var(--accent-soft);
 }
 
+.menuForm {
+  margin: 0;
+}
+
 /* ── Messages area ───────────────────────────────────────── */
 
 .messagesPane {
@@ -525,6 +529,11 @@
   color: var(--text-muted);
   font-size: 0.86rem;
   padding-left: 4px;
+}
+
+.waitingStatus {
+  color: var(--accent-strong);
+  font-weight: 700;
 }
 
 /* ── Logged-out / error states ───────────────────────────── */
