@@ -12,6 +12,8 @@ export type AthleteProfileContext = {
 
 export type SportThresholdContext = {
   confidence: string;
+  effective_from?: string | null;
+  estimation_method?: string | null;
   sport: string;
   lt1_hr_bpm?: number | null;
   lt1_pace_sec_per_km?: number | null;

@@ -72,6 +72,14 @@ class SupabaseRepository:
             "onboarding_collected",
             "dietary_restrictions",
             "nutrition_notes",
+            # Threshold source metadata (issue #54)
+            "max_hr_source",
+            "max_hr_measured_at",
+            "max_hr_notes",
+            "weight_source",
+            "weight_measured_at",
+            "weight_notes",
+            "best_times",
         }
         safe_fields = {k: v for k, v in fields.items() if k in allowed}
         safe_fields["user_id"] = user_id

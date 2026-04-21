@@ -19,6 +19,12 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from backend.config import settings
+from backend.models.athlete import (
+    AthleteProfile as _AthleteProfile,
+)
+from backend.models.athlete import (
+    SportThreshold,
+)
 from backend.models.auth import (
     BrowserSessionRequest,
     BrowserTokenResponse,
@@ -596,6 +602,39 @@ async def process_uploaded_file_endpoint(
     return {"activity": activity.model_dump(mode="json")}
 
 
+def _build_fitness_metrics(
+    profile: "_AthleteProfile", thresholds: list["SportThreshold"]
+) -> dict[str, object]:
+    """Assemble ThresholdValue objects from profile + active sport thresholds."""
+    metrics: dict[str, object] = {}
+
+    max_hr_tv = profile.max_hr_threshold_value()
+    if max_hr_tv:
+        metrics["max_hr"] = max_hr_tv.model_dump(mode="json")
+
+    weight_tv = profile.weight_threshold_value()
+    if weight_tv:
+        metrics["weight"] = weight_tv.model_dump(mode="json")
+
+    metrics["best_times"] = [bt.model_dump(mode="json") for bt in profile.best_times]
+
+    for t in thresholds:
+        if t.sport == "cycling" and t.lt2_power_watts is not None:
+            metrics["cycling_ftp"] = t.as_threshold_value(t.lt2_power_watts, "W").model_dump(
+                mode="json"
+            )
+        if t.sport == "running" and t.lt2_pace_sec_per_km is not None:
+            metrics["run_threshold_pace"] = t.as_threshold_value(
+                t.lt2_pace_sec_per_km, "sec/km"
+            ).model_dump(mode="json")
+        if t.sport == "swimming" and t.css_sec_per_100 is not None:
+            metrics["swim_css"] = t.as_threshold_value(t.css_sec_per_100, "sec/100m").model_dump(
+                mode="json"
+            )
+
+    return metrics
+
+
 class GetAthleteSummaryRequest(BaseModel):
     user_id: str
 
@@ -612,8 +651,6 @@ async def get_athlete_summary(
     try:
         profile = await repo.get_athlete_profile(payload.user_id)
     except RecordNotFoundError:
-        from backend.models.athlete import AthleteProfile as _AthleteProfile
-
         profile = _AthleteProfile(user_id=payload.user_id, coaching_state="onboarding")
 
     thresholds = await repo.get_active_thresholds(payload.user_id)
@@ -630,6 +667,7 @@ async def get_athlete_summary(
         "profile": profile.model_dump(mode="json"),
         "computed_age": age,
         "thresholds": [t.model_dump(mode="json") for t in thresholds],
+        "fitness_metrics": _build_fitness_metrics(profile, thresholds),
         "goals": [g.model_dump(mode="json") for g in goals],
         "current_load": latest_load.model_dump(mode="json") if latest_load else None,
         "recent_recovery": [r.model_dump(mode="json") for r in recovery],
@@ -735,6 +773,57 @@ async def generate_plan_structure(
             "committed_amateur_ctl": ceiling.committed_amateur_ctl,
         },
     }
+
+
+class ConfirmThresholdRequest(BaseModel):
+    """Promote an estimated/file-derived sport threshold to user-confirmed."""
+
+    user_id: str
+    sport: str  # cycling | running | swimming | ...
+
+
+@app.post("/api/engine/confirm-threshold")
+async def confirm_threshold(
+    payload: ConfirmThresholdRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Mark the active sport threshold as user-confirmed.
+
+    Sets estimation_method=manual, confidence=high, source=user.
+    """
+    enforce_user_access(payload.user_id, user_context)
+    client = repo._require_client()
+    client.table("sport_thresholds").update(
+        {"estimation_method": "manual", "confidence": "high", "source": "user"}
+    ).eq("user_id", payload.user_id).eq("sport", payload.sport).is_(
+        "superseded_at", "null"
+    ).execute()
+
+    thresholds = await repo.get_active_thresholds(payload.user_id)
+    confirmed = next((t for t in thresholds if t.sport == payload.sport), None)
+    return confirmed.model_dump(mode="json") if confirmed else {}
+
+
+class ConfirmProfileMetricRequest(BaseModel):
+    """Promote a profile-level estimated metric (max_hr, weight) to user-confirmed."""
+
+    user_id: str
+    metric: str  # "max_hr" | "weight"
+
+
+@app.post("/api/engine/confirm-profile-metric")
+async def confirm_profile_metric(
+    payload: ConfirmProfileMetricRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    enforce_user_access(payload.user_id, user_context)
+    allowed_metrics = {"max_hr", "weight"}
+    if payload.metric not in allowed_metrics:
+        raise HTTPException(status_code=400, detail=f"metric must be one of {allowed_metrics}")
+
+    source_field = f"{payload.metric}_source"
+    profile = await repo.update_athlete_profile_fields(payload.user_id, {source_field: "user"})
+    return profile.model_dump(mode="json")
 
 
 @app.post("/api/mcp")
