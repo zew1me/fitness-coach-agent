@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -50,6 +50,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  vi.useRealTimers();
 });
 
 describe("CoachChat", () => {
@@ -417,6 +418,136 @@ describe("CoachChat", () => {
     expect(screen.queryByLabelText(/FTP/i)).toBeNull();
   });
 
+  it("exports the loaded coaching history as JSONL from the account menu", async () => {
+    const objectUrls: Blob[] = [];
+    const createdLinks: HTMLAnchorElement[] = [];
+    const originalCreateElement = document.createElement.bind(document);
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: vi.fn()
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: vi.fn()
+    });
+    const createElementSpy = vi.spyOn(document, "createElement").mockImplementation((tagName, options) => {
+      const element = originalCreateElement(tagName, options);
+      if (tagName.toLowerCase() === "a") {
+        vi.spyOn(element, "click").mockImplementation(() => undefined);
+        createdLinks.push(element as HTMLAnchorElement);
+      }
+      return element;
+    });
+    const createObjectUrlSpy = vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      expect(blob).toBeInstanceOf(Blob);
+      objectUrls.push(blob as Blob);
+      return "blob:coaching-history";
+    });
+    const revokeObjectUrlSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:05:00Z",
+                messages: [
+                  {
+                    id: "message-user",
+                    attachments: [
+                      {
+                        content_type: "image/png",
+                        filename: "ride.png",
+                        object_key: "users/athlete-1/chat-attachment/ride.png",
+                        public_url: "https://cdn.example.com/ride.png"
+                      }
+                    ],
+                    content: "Here is today's ride.",
+                    created_at: "2026-04-04T09:01:00Z",
+                    metadata: {},
+                    role: "user",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  },
+                  {
+                    id: "message-assistant",
+                    attachments: [],
+                    content: "Nice aerobic work.",
+                    created_at: "2026-04-04T09:02:00Z",
+                    metadata: { message_kind: "coach_reply" },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText(/Here is today's ride/i);
+    fireEvent.click(screen.getByRole("button", { name: /Account menu/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Export JSONL/i }));
+
+    expect(createObjectUrlSpy).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrlSpy).toHaveBeenCalledWith("blob:coaching-history");
+    const downloadLink = createdLinks.find((link) => link.href === "blob:coaching-history");
+    expect(downloadLink?.download).toMatch(/^coaching-history-\d{4}-\d{2}-\d{2}\.jsonl$/);
+
+    const blobText = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(String(reader.result)));
+      reader.addEventListener("error", () => reject(reader.error));
+      reader.readAsText(objectUrls[0]!);
+    });
+    const lines = blobText.trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      id: "message-user",
+      role: "user",
+      content: "Here is today's ride.",
+      attachments: [{ public_url: "https://cdn.example.com/ride.png" }]
+    });
+    expect(JSON.parse(lines[1]!)).toMatchObject({
+      id: "message-assistant",
+      role: "assistant",
+      content: "Nice aerobic work."
+    });
+
+    createElementSpy.mockRestore();
+  });
+
   it("sends composer messages through the AI SDK useChat hook", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -484,6 +615,86 @@ describe("CoachChat", () => {
       });
     });
     expect(fetchMock).not.toHaveBeenCalledWith("/api/chat", expect.anything());
+  });
+
+  it("shows a rotating wait status while a message is processing", async () => {
+    let resolveSend: (() => void) | null = null;
+    chatMocks.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content: "Welcome back coach-side.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome"
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const input = await screen.findByPlaceholderText(/Ask anything about your training/i);
+    vi.useFakeTimers();
+    fireEvent.change(input, { target: { value: "This is a longer training update." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    expect(screen.getByText("Thinking...")).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(1600);
+    });
+
+    expect(screen.getByText("Still working...")).toBeTruthy();
+
+    await act(() => Promise.resolve(resolveSend?.()));
   });
 
   it("renders live assistant messages from the AI SDK useChat hook", async () => {

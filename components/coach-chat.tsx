@@ -41,6 +41,13 @@ type LocalAttachment = ChatAttachment & {
 };
 
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
+const WAITING_STATUS_INTERVAL_MS = 1600;
+const WAITING_STATUSES = [
+  "Thinking...",
+  "Still working...",
+  "Checking the coaching notes...",
+  "Almost there...",
+];
 
 function emptyProfile(userId: string): AthleteProfile {
   return {
@@ -91,6 +98,20 @@ function toUiMessage(message: ChatMessage): UIMessage {
     parts: [{ type: "text", text: message.content }],
     role: message.role,
   };
+}
+
+function serializeChatHistoryJsonl(messages: ChatMessage[]): string {
+  return messages.map((message) => JSON.stringify(message)).join("\n");
+}
+
+function downloadTextFile(filename: string, text: string, type: string): void {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function friendlyToolStatus(toolName: string): string {
@@ -333,6 +354,7 @@ export function CoachChat(): JSX.Element {
   });
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
+  const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerLoading, setDrawerLoading] = useState(false);
@@ -424,6 +446,21 @@ export function CoachChat(): JSX.Element {
       scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [threadState.data?.thread.messages.length, sending]);
+
+  useEffect((): (() => void) | void => {
+    if (!sending) {
+      setWaitingStatusIndex(0);
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setWaitingStatusIndex((current) => (current + 1) % WAITING_STATUSES.length);
+    }, WAITING_STATUS_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [sending]);
 
   useEffect((): (() => void) => {
     return () => {
@@ -634,6 +671,20 @@ export function CoachChat(): JSX.Element {
     }
   }
 
+  function handleExportJsonl(): void {
+    if (threadState.data === null) {
+      return;
+    }
+
+    const exportDate = new Date().toISOString().slice(0, 10);
+    downloadTextFile(
+      `coaching-history-${exportDate}.jsonl`,
+      serializeChatHistoryJsonl(threadState.data.thread.messages),
+      "application/x-ndjson;charset=utf-8",
+    );
+    setUserMenuOpen(false);
+  }
+
   function renderPlan(plan: AdaptedPlan): JSX.Element {
     return (
       <section className={styles.planCard}>
@@ -770,6 +821,14 @@ export function CoachChat(): JSX.Element {
                     >
                       Profile
                     </button>
+                    <button
+                      className={styles.menuItem}
+                      onClick={handleExportJsonl}
+                      role="menuitem"
+                      type="button"
+                    >
+                      Export JSONL
+                    </button>
                     <form
                       action="/api/oauth/browser-session/logout"
                       className={styles.menuForm}
@@ -893,7 +952,11 @@ export function CoachChat(): JSX.Element {
                 </button>
               </div>
               <div className={styles.composerHint}>
-                {threadState.error ? (
+                {sending ? (
+                  <span aria-live="polite" className={styles.waitingStatus} role="status">
+                    {WAITING_STATUSES[waitingStatusIndex]}
+                  </span>
+                ) : threadState.error ? (
                   <span className={styles.errorTextInline}>{threadState.error}</span>
                 ) : (
                   "Use Shift+Enter for a new line. Add photos with the plus button."
