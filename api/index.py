@@ -200,7 +200,7 @@ async def oauth_browser_session(
         max_age=12 * 60 * 60,
         path="/",
         samesite="lax",
-        secure=settings.app_base_url.startswith("https://"),
+        secure=settings.base_url.startswith("https://"),
     )
     return {"ok": True}
 

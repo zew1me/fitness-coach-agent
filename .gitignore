@@ -74,7 +74,9 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+.env.bootstrap
 .envrc
+scripts/bootstrap/.state.*.json
 .fseventsd
 .webassets-cache
 Icon[ ]

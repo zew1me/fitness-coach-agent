@@ -58,7 +58,7 @@ class AuthService:
         return self._browser_session_cookie_name
 
     def authorization_metadata(self) -> dict[str, object]:
-        issuer = settings.app_base_url
+        issuer = settings.base_url
         return {
             "issuer": issuer,
             "authorization_endpoint": f"{issuer}/api/oauth/authorize",
@@ -73,8 +73,8 @@ class AuthService:
 
     def protected_resource_metadata(self) -> dict[str, object]:
         return {
-            "resource": f"{settings.app_base_url}/api/mcp",
-            "authorization_servers": [settings.app_base_url],
+            "resource": f"{settings.base_url}/api/mcp",
+            "authorization_servers": [settings.base_url],
         }
 
     def parse_authorize_request(self, request: OAuthAuthorizeRequest) -> list[str]:
@@ -94,7 +94,7 @@ class AuthService:
         return scopes
 
     def build_login_redirect(self, authorize_url: str) -> str:
-        return f"{settings.app_base_url}/login?{urlencode({'return_to': authorize_url})}"
+        return f"{settings.base_url}/login?{urlencode({'return_to': authorize_url})}"
 
     def build_consent_redirect(self, request: OAuthAuthorizeRequest) -> str:
         query = {
@@ -105,7 +105,7 @@ class AuthService:
             "code_challenge": request.code_challenge or "",
             "code_challenge_method": request.code_challenge_method or "",
         }
-        return f"{settings.app_base_url}/consent?{urlencode(query)}"
+        return f"{settings.base_url}/consent?{urlencode(query)}"
 
     def build_authorize_redirect(
         self, *, request: OAuthAuthorizeRequest, browser_session: BrowserSessionContext
@@ -279,14 +279,14 @@ class AuthService:
         scopes = sorted(self._supported_scopes)
         grant = self._oauth_repo.upsert_grant(
             user_id=session.user_id,
-            client_id=settings.app_base_url,
-            redirect_uri=settings.app_base_url,
+            client_id=settings.base_url,
+            redirect_uri=settings.base_url,
             scopes=scopes,
         )
         return BrowserTokenResponse(
             access_token=self._issue_access_token(
                 user_id=session.user_id,
-                client_id=settings.app_base_url,
+                client_id=settings.base_url,
                 scopes=scopes,
                 grant_id=grant.id,
             ),
@@ -313,7 +313,7 @@ class AuthService:
             token,
             settings.app_jwt_secret,
             algorithms=["HS256"],
-            audience=f"{settings.app_base_url}/api/mcp",
+            audience=f"{settings.base_url}/api/mcp",
         )
         grant_id = str(claims.get("jti", "")) or None
         if grant_id is None:
@@ -337,7 +337,7 @@ class AuthService:
                 token,
                 settings.app_jwt_secret,
                 algorithms=["HS256"],
-                audience=f"{settings.app_base_url}/api/mcp",
+                audience=f"{settings.base_url}/api/mcp",
             )
         except jwt.PyJWTError:
             return None
@@ -369,7 +369,7 @@ class AuthService:
         return jwt.encode(
             {
                 "sub": user_id,
-                "aud": f"{settings.app_base_url}/api/mcp",
+                "aud": f"{settings.base_url}/api/mcp",
                 "azp": client_id,
                 "scope": " ".join(scopes),
                 "exp": datetime.now(UTC) + timedelta(minutes=15),

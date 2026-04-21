@@ -18,7 +18,9 @@
     "format": "prettier --write .",
     "db:start": "bash scripts/db-start.sh",
     "db:stop": "bash scripts/db-stop.sh",
-    "db:reset": "bash scripts/db-reset.sh"
+    "db:reset": "bash scripts/db-reset.sh",
+    "setup:preview": "uv run python -m scripts.bootstrap.main --env preview",
+    "setup:prod": "uv run python -m scripts.bootstrap.main --env prod"
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.36",
