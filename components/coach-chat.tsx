@@ -93,6 +93,20 @@ function toUiMessage(message: ChatMessage): UIMessage {
   };
 }
 
+function serializeChatHistoryJsonl(messages: ChatMessage[]): string {
+  return messages.map((message) => JSON.stringify(message)).join("\n");
+}
+
+function downloadTextFile(filename: string, text: string, type: string): void {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function friendlyToolStatus(toolName: string): string {
   const statuses: Record<string, string> = {
     analyze_screenshot: "Reviewing your uploaded image...",
@@ -634,6 +648,20 @@ export function CoachChat(): JSX.Element {
     }
   }
 
+  function handleExportJsonl(): void {
+    if (threadState.data === null) {
+      return;
+    }
+
+    const exportDate = new Date().toISOString().slice(0, 10);
+    downloadTextFile(
+      `coaching-history-${exportDate}.jsonl`,
+      serializeChatHistoryJsonl(threadState.data.thread.messages),
+      "application/x-ndjson;charset=utf-8",
+    );
+    setUserMenuOpen(false);
+  }
+
   function renderPlan(plan: AdaptedPlan): JSX.Element {
     return (
       <section className={styles.planCard}>
@@ -769,6 +797,14 @@ export function CoachChat(): JSX.Element {
                       type="button"
                     >
                       Profile
+                    </button>
+                    <button
+                      className={styles.menuItem}
+                      onClick={handleExportJsonl}
+                      role="menuitem"
+                      type="button"
+                    >
+                      Export JSONL
                     </button>
                     <Link className={styles.menuItem} href="/login?return_to=/" role="menuitem">
                       Sign out
