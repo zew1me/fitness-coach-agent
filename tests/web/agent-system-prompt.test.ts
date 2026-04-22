@@ -69,7 +69,7 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("user-facing response");
   });
 
-  it("selects a longevity model instead of defaulting to Seiler for health goals", () => {
+  it("includes both training models and age-specific balance note for classification by the LLM", () => {
     const longevityContext: AthleteContextBundle = {
       ...context,
       computed_age: 67,
@@ -93,12 +93,16 @@ describe("buildCoachSystemPrompt", () => {
 
     const prompt = buildCoachSystemPrompt(longevityContext);
 
-    expect(prompt).toContain("longevity-focused endurance model");
-    expect(prompt).toContain("150-300 min/week");
-    expect(prompt).toContain("2x/week strength");
-    expect(prompt).toContain("balance work");
+    // Both models are always present — the LLM classifies from goal context.
+    expect(prompt).toContain("Longevity/health model");
+    expect(prompt).toContain("150–300 min/week");
+    expect(prompt).toContain("2× strength/week");
     expect(prompt).toContain("VO2max maintenance");
-    expect(prompt).toContain("Do not default to Seiler");
+    expect(prompt).toContain("Performance/Seiler model");
+    // Age-based balance note is still injected server-side for 65+ athletes.
+    expect(prompt).toContain("balance and fall-prevention work");
+    // LLM is instructed to classify rather than having it pre-decided.
+    expect(prompt).toContain("read the athlete's goals and profile, then choose");
   });
 
   it("includes nutrition context when dietary_restrictions are set", () => {

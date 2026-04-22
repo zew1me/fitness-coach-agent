@@ -87,38 +87,17 @@ function nutritionContext(context: AthleteContextBundle): string {
   return parts.join(" ");
 }
 
-function goalSignalsLongevity(goal: GoalContext): boolean {
-  const text = `${goal.goal_type} ${goal.title} ${goal.sport ?? ""}`.toLowerCase();
+function trainingModelSection(context: AthleteContextBundle): string {
+  const balanceNote =
+    context.computed_age !== null && context.computed_age >= 65
+      ? " This athlete is 65+: include balance and fall-prevention work alongside aerobic training."
+      : "";
   return [
-    "aging",
-    "general",
-    "health",
-    "longevity",
-    "maintenance",
-    "walk",
-    "wellness",
-  ].some((signal) => text.includes(signal));
-}
-
-function trainingModelInstructions(context: AthleteContextBundle): string {
-  if (context.goals.some(goalSignalsLongevity)) {
-    const balanceGuidance =
-      context.computed_age !== null && context.computed_age >= 65
-        ? " Include balance work because the athlete is 65+."
-        : "";
-    return [
-      "Use a longevity-focused endurance model, not a race-peaking model.",
-      "Start from the public-health floor: 150-300 min/week moderate aerobic or 75-150 min/week vigorous, plus 2x/week strength.",
-      "Layer masters-athlete principles on top: aerobic base as the anchor, controlled VO2max maintenance, strength as equal priority, and recovery as a limiter.",
-      "Favor stable repeatable weeks over aggressive progression; do not stack hard days.",
-      `Do not default to Seiler unless the athlete also has a clear performance or race goal.${balanceGuidance}`,
-    ].join(" ");
-  }
-
-  return (
-    "Use Seiler-informed training principles for performance goals: mostly Z1-Z2 volume, " +
-    "carefully dosed intensity, recovery weeks, and honest but encouraging nudges."
-  );
+    "Training model — read the athlete's goals and profile, then choose and apply one:",
+    `• Longevity/health model (general fitness, wellness, maintenance, or non-competitive goals): start from the public-health floor (150–300 min/week moderate aerobic or 75–150 vigorous, plus 2× strength/week); layer masters-athlete principles: aerobic base as the anchor, controlled VO2max maintenance, strength as equal priority, recovery as a hard limiter; favor stable repeatable weeks over aggressive progression; do not stack hard days.${balanceNote}`,
+    "• Performance/Seiler model (race, competition, or explicit performance goals): mostly Z1–Z2 volume, carefully dosed intensity, deliberate recovery weeks, and honest but encouraging nudges.",
+    "If goals are mixed or ambiguous, ask the athlete which matters more before locking in a model.",
+  ].join("\n");
 }
 
 function hormoneStatusWarrantsPrinciples(status: string | null | undefined): boolean {
@@ -160,7 +139,7 @@ export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
   return [
     "You are a sport-agnostic endurance coach.",
     currentDateLine(),
-    trainingModelInstructions(context),
+    trainingModelSection(context),
     "Be inclusive and ask about sex or hormone context only when it improves training-load guidance.",
     `Athlete: ${context.profile.display_name ?? context.profile.user_id}. Age: ${age}. Sports: ${sports}.`,
     `Goals: ${goals}.`,
