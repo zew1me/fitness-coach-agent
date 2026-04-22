@@ -19,7 +19,7 @@ type ChatRequestBody = {
 };
 
 const LOCAL_AUTH_UNAVAILABLE_MESSAGE =
-  "Unable to reach the local auth service. Please make sure the backend is running and try again.";
+  "Something went wrong. Please refresh and try again.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });

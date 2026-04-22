@@ -39,7 +39,7 @@ describe("app/api/chat route", () => {
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
-      error: "Unable to reach the local auth service. Please make sure the backend is running and try again."
+      error: "Something went wrong. Please refresh and try again."
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/oauth/browser-token",
