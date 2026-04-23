@@ -18,7 +18,7 @@ type ChatRequestBody = {
   messages?: UIMessage[];
 };
 
-const LOCAL_AUTH_UNAVAILABLE_MESSAGE =
+const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
 
 function jsonError(message: string, status: number): Response {
@@ -71,7 +71,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     token = await loadBrowserToken(request);
   } catch {
-    return jsonError(LOCAL_AUTH_UNAVAILABLE_MESSAGE, 503);
+    return jsonError(AUTH_UNAVAILABLE_MESSAGE, 503);
   }
 
   if (token === null) {
