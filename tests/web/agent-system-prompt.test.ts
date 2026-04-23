@@ -58,6 +58,8 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("CTL 42");
     expect(prompt).toContain("30-39");
     expect(prompt).toContain("extract multiple fields");
+    // Age-specific balance guidance must not appear for under-65 athletes.
+    expect(prompt).not.toContain("balance and fall-prevention");
   });
 
   it("includes current-date guidance and requires a response after tool use", () => {
