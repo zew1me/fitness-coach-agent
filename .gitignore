@@ -92,3 +92,6 @@ test-results/
 
 .dev/garage/data/*
 .dev/garage/meta/*
+.env*.local
+preview
+production
