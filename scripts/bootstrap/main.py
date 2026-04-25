@@ -26,12 +26,51 @@ def _mask(value: str) -> str:
     return f"{'*' * (len(value) - _MASK_CHARS)}{value[-_MASK_CHARS:]}"
 
 
-def _setup_supabase(
+def _fetch_vercel_domain(
+    settings: BootstrapSettings,
+    vercel_project_id: str,
+    vercel_team_id: str,
+    dry_run: bool,
+) -> str:
+    """Fetch the Vercel project's stable production domain (shortest alias)."""
+    vercel = VercelClient(settings.vercel_token, vercel_project_id, vercel_team_id, dry_run=dry_run)
+    try:
+        return vercel.get_production_domain()
+    except Exception as exc:
+        print(f"  Warning: could not fetch Vercel domain: {exc}")
+        return ""
+    finally:
+        vercel.close()
+
+
+def _build_auth_site_url(settings: BootstrapSettings, env: str, vercel_domain: str) -> str:
+    """Return the primary site URL for Supabase auth configuration."""
+    if env == "prod":
+        if settings.production_domain:
+            return f"https://{settings.production_domain}"
+        return f"https://{vercel_domain}" if vercel_domain else ""
+    return f"https://{vercel_domain}" if vercel_domain else ""
+
+
+def _build_auth_redirect_urls(
+    settings: BootstrapSettings, env: str, vercel_domain: str
+) -> list[str]:
+    """Return extra allowed redirect URLs for Supabase auth configuration."""
+    urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
+    if env == "preview":
+        urls.append("https://*.vercel.app/**")
+    elif vercel_domain and ".vercel.app" in vercel_domain and not settings.production_domain:
+        urls.append(f"https://{vercel_domain}/**")
+    return urls
+
+
+def _setup_supabase(  # noqa: PLR0913
     settings: BootstrapSettings,
     env: str,
     state: dict,
     skip_migrations: bool,
     dry_run: bool,
+    vercel_domain: str = "",
 ) -> dict:
     """Provision Supabase project, fetch API keys, apply migrations. Returns keys dict."""
     print(f"\n[1/4] Supabase ({env})")
@@ -58,6 +97,11 @@ def _setup_supabase(
                 save_state(env, state)
             print("  DB password saved to state file.")
 
+        sb.configure_auth_settings(
+            project_ref,
+            site_url=_build_auth_site_url(settings, env, vercel_domain),
+            extra_redirect_urls=_build_auth_redirect_urls(settings, env, vercel_domain),
+        )
         migration_db_password = db_pass or state.get("supabase_db_password") or env_db_password
         keys = configured_keys or sb.get_api_keys(project_ref, use_cli=bool(existing_ref))
         print(f"  Project URL: {keys['url']}")
@@ -195,7 +239,7 @@ def _cached_r2_credentials(state: dict) -> dict | None:
     return None
 
 
-def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel: VercelClient) -> str:
+def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel_domain: str) -> str:
     """Determine APP_BASE_URL for the given environment."""
     if env != "prod":
         # Preview: leave blank — Python backend falls back to VERCEL_URL at runtime,
@@ -203,8 +247,7 @@ def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel: VercelC
         return ""
     if settings.production_domain:
         return f"https://{settings.production_domain}"
-    domain = vercel.get_production_domain()
-    url = f"https://{domain}" if domain else ""
+    url = f"https://{vercel_domain}" if vercel_domain else ""
     if url:
         print(f"  APP_BASE_URL (auto-detected): {url}")
     else:
@@ -283,7 +326,8 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
     settings, vercel_project_id, vercel_team_id = load_settings()
     state = load_state(env)
 
-    supabase = _setup_supabase(settings, env, state, skip_migrations, dry_run)
+    vercel_domain = _fetch_vercel_domain(settings, vercel_project_id, vercel_team_id, dry_run)
+    supabase = _setup_supabase(settings, env, state, skip_migrations, dry_run, vercel_domain)
     if not dry_run:
         save_state(env, state)
 
@@ -299,7 +343,7 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
     print(f"\n[4/4] Vercel environment variables ({env})")
     vercel = VercelClient(settings.vercel_token, vercel_project_id, vercel_team_id, dry_run=dry_run)
     try:
-        app_base_url = _resolve_app_base_url(settings, env, vercel)
+        app_base_url = _resolve_app_base_url(settings, env, vercel_domain)
         vercel_target = ["production"] if env == "prod" else ["preview"]
         env_vars = _build_env_vars(env, app_base_url, jwt_secret, supabase, r2, settings)
         vercel.upsert_env_vars(vercel_target, env_vars)

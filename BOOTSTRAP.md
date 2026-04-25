@@ -61,6 +61,19 @@ Set `PRODUCTION_DOMAIN` if you have a custom domain (e.g. `app.example.com`). Le
 
 Bootstrap intentionally leaves R2 bucket CORS unconfigured. Browser clients should upload files to the backend proxy, and the backend writes to R2 with bucket-scoped S3 credentials from `.env.bootstrap`. If browser-direct presigned uploads are reintroduced, track and configure exact R2 CORS origins separately; wildcard origins like `https://*.vercel.app` are not accepted by the Cloudflare R2 CORS API.
 
+### Supabase auth redirect URLs
+
+Bootstrap automatically configures the Supabase project's auth settings via the Management API when `SUPABASE_ACCESS_TOKEN` is set:
+
+- **Site URL** — set to your production domain or the Vercel project's stable alias.
+- **Redirect URLs** — `https://*.vercel.app/**` is added for preview environments; `http://localhost:3000/**` and `http://localhost:3001/**` are included for local development.
+- **Email confirmation** — disabled (`MAILER_AUTOCONFIRM=true`) so first-time signups receive a 6-digit OTP code directly, matching the login page UI.
+
+If `SUPABASE_ACCESS_TOKEN` is not set (e.g. existing projects using CLI login), bootstrap prints the values to configure manually in the Supabase dashboard:
+
+- **Authentication → URL Configuration**: set Site URL and add redirect URL patterns
+- **Authentication → Providers → Email**: disable *Confirm email* so OTP codes are sent directly
+
 R2 runtime credentials have a two-pass setup:
 
 1. Run bootstrap once so it creates or verifies the bucket.
