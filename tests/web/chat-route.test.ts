@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
+import { selectMessagesForModel } from "../../lib/agent/message-context";
 
 const originalFetch = globalThis.fetch;
 
