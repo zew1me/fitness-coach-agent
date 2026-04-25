@@ -21,6 +21,7 @@ export default defineConfig([
   globalIgnores([
     ".cache/**",
     ".next/**",
+    ".remember/**",
     ".uv-cache/**",
     ".venv/**",
     ".vercel/**",

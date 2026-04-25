@@ -58,6 +58,69 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("CTL 42");
     expect(prompt).toContain("30-39");
     expect(prompt).toContain("extract multiple fields");
+    // Age-specific balance guidance must not appear for under-65 athletes.
+    expect(prompt).not.toContain("balance and fall-prevention");
+  });
+
+  it("includes current-date guidance and requires a response after tool use", () => {
+    const prompt = buildCoachSystemPrompt(context);
+
+    expect(prompt).toContain(`Current date: ${new Date().toISOString().slice(0, 10)}`);
+    expect(prompt).toContain("Do not guess the current date");
+    expect(prompt).toContain("After any tool call");
+    expect(prompt).toContain("user-facing response");
+  });
+
+  it("includes both training models and age-specific balance note for classification by the LLM", () => {
+    const longevityContext: AthleteContextBundle = {
+      ...context,
+      computed_age: 67,
+      profile: {
+        ...context.profile,
+        coaching_state: "active",
+        primary_sports: ["walking", "strength"]
+      },
+      goals: [
+        {
+          id: "goal-longevity",
+          user_id: "athlete-1",
+          goal_type: "maintenance",
+          sport: "general",
+          title: "Longevity and aging well",
+          priority: 1,
+          status: "active"
+        }
+      ]
+    };
+
+    const prompt = buildCoachSystemPrompt(longevityContext);
+
+    // Both models are always present — the LLM classifies from goal context.
+    expect(prompt).toContain("Longevity/health model");
+    expect(prompt).toContain("150–300 min/week");
+    expect(prompt).toContain("2× strength/week");
+    expect(prompt).toContain("VO2max maintenance");
+    expect(prompt).toContain("Performance/Seiler model");
+    // Age-based balance note is still injected server-side for 65+ athletes.
+    expect(prompt).toContain("balance and fall-prevention work");
+    // LLM is instructed to classify rather than having it pre-decided.
+    expect(prompt).toContain("read the athlete's goals and profile, then choose");
+    // Ambiguous goals must prompt clarification, not a silent default.
+    expect(prompt).toContain("mixed or ambiguous");
+    expect(prompt).toContain("ask the athlete which matters more");
+  });
+
+  it("includes balance note at exactly age 65", () => {
+    const prompt = buildCoachSystemPrompt({ ...context, computed_age: 65 });
+
+    expect(prompt).toContain("balance and fall-prevention work");
+  });
+
+  it("omits balance note when computed_age is null", () => {
+    const prompt = buildCoachSystemPrompt({ ...context, computed_age: null });
+
+    expect(prompt).not.toContain("balance and fall-prevention");
+    expect(prompt).toContain("Longevity/health model");
   });
 
   it("includes nutrition context when dietary_restrictions are set", () => {
