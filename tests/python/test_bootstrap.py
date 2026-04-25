@@ -9,6 +9,7 @@ from scripts.bootstrap import supabase_client
 from scripts.bootstrap.cloudflare_client import CloudflareClient
 from scripts.bootstrap.config import BootstrapSettings
 from scripts.bootstrap.supabase_client import SupabaseClient
+from scripts.bootstrap.vercel_client import VercelClient
 
 
 def test_apply_migrations_links_project_then_pushes_with_password(monkeypatch, tmp_path) -> None:
@@ -464,6 +465,144 @@ def test_cloudflare_r2_token_uses_user_token_api_and_hashes_token_value() -> Non
     ]
 
 
+def test_vercel_remove_env_vars_deletes_matching_preview_key() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeHTTP:
+        def get(self, url: str, **_kwargs) -> httpx.Response:
+            calls.append(("GET", url))
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={
+                    "envs": [
+                        {"id": "env-preview", "key": "APP_BASE_URL", "target": ["preview"]},
+                        {"id": "env-prod", "key": "APP_BASE_URL", "target": ["production"]},
+                    ]
+                },
+                request=request,
+            )
+
+        def delete(self, url: str, **_kwargs) -> httpx.Response:
+            calls.append(("DELETE", url))
+            request = httpx.Request("DELETE", url)
+            return httpx.Response(200, json={}, request=request)
+
+        def close(self) -> None:
+            pass
+
+    client = VercelClient("token", "project-id", "team-id")
+    client._http = FakeHTTP()
+
+    client.remove_env_vars(["preview"], ["APP_BASE_URL"])
+    client.close()
+
+    assert calls == [
+        ("GET", "https://api.vercel.com/v10/projects/project-id/env"),
+        ("DELETE", "https://api.vercel.com/v10/projects/project-id/env/env-preview"),
+    ]
+
+
+def test_vercel_remove_env_vars_dry_run_only_reports(capsys) -> None:
+    deleted: list[str] = []
+
+    class FakeHTTP:
+        def get(self, url: str, **_kwargs) -> httpx.Response:
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={
+                    "envs": [
+                        {"id": "env-preview", "key": "APP_BASE_URL", "target": ["preview"]},
+                    ]
+                },
+                request=request,
+            )
+
+        def delete(self, url: str, **_kwargs) -> httpx.Response:
+            deleted.append(url)
+            request = httpx.Request("DELETE", url)
+            return httpx.Response(200, json={}, request=request)
+
+        def close(self) -> None:
+            pass
+
+    client = VercelClient("token", "project-id", "team-id", dry_run=True)
+    client._http = FakeHTTP()
+
+    client.remove_env_vars(["preview"], ["APP_BASE_URL"])
+    client.close()
+
+    assert deleted == []
+    assert "Would delete APP_BASE_URL (preview)" in capsys.readouterr().out
+
+
+def test_vercel_remove_env_vars_preserves_other_targets() -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeHTTP:
+        def get(self, url: str, **_kwargs) -> httpx.Response:
+            calls.append(("GET", url, None))
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={
+                    "envs": [
+                        {
+                            "id": "env-shared",
+                            "key": "APP_BASE_URL",
+                            "target": ["preview", "production"],
+                        },
+                    ]
+                },
+                request=request,
+            )
+
+        def patch(self, url: str, json: dict, **_kwargs) -> httpx.Response:
+            calls.append(("PATCH", url, json))
+            request = httpx.Request("PATCH", url)
+            return httpx.Response(200, json={}, request=request)
+
+        def delete(self, url: str, **_kwargs) -> httpx.Response:
+            raise AssertionError(f"shared env var should be narrowed, not deleted: {url}")
+
+        def close(self) -> None:
+            pass
+
+    client = VercelClient("token", "project-id", "team-id")
+    client._http = FakeHTTP()
+
+    client.remove_env_vars(["preview"], ["APP_BASE_URL"])
+    client.close()
+
+    assert calls == [
+        ("GET", "https://api.vercel.com/v10/projects/project-id/env", None),
+        (
+            "PATCH",
+            "https://api.vercel.com/v10/projects/project-id/env/env-shared",
+            {"target": ["production"]},
+        ),
+    ]
+
+
+def test_sync_vercel_env_vars_removes_preview_app_base_url_before_upsert() -> None:
+    calls: list[tuple[str, list[str], dict | list[str]]] = []
+
+    class FakeVercel:
+        def remove_env_vars(self, target: list[str], keys: list[str]) -> None:
+            calls.append(("remove", target, keys))
+
+        def upsert_env_vars(self, target: list[str], vars: dict[str, str]) -> None:
+            calls.append(("upsert", target, vars))
+
+    bootstrap_main._sync_vercel_env_vars(FakeVercel(), ["preview"], {"APP_ENV": "preview"})
+
+    assert calls == [
+        ("remove", ["preview"], ["APP_BASE_URL"]),
+        ("upsert", ["preview"], {"APP_ENV": "preview"}),
+    ]
+
+
 def _settings(**overrides: str) -> BootstrapSettings:
     defaults: dict[str, Any] = {
         "supabase_access_token": "token",
@@ -517,6 +656,10 @@ def test_configure_auth_settings_patches_management_api(monkeypatch) -> None:
     assert body["MAILER_AUTOCONFIRM"] is True
     assert "https://example.vercel.app" in body["URI_ALLOW_LIST"]
     assert "https://*.vercel.app/**" in body["URI_ALLOW_LIST"]
+    assert "{{ .Token }}" in body["MAILER_TEMPLATES_MAGIC_LINK_CONTENT"]
+    assert "{{ .ConfirmationURL }}" in body["MAILER_TEMPLATES_MAGIC_LINK_CONTENT"]
+    assert "{{ .Token }}" in body["MAILER_TEMPLATES_CONFIRMATION_CONTENT"]
+    assert "{{ .ConfirmationURL }}" in body["MAILER_TEMPLATES_CONFIRMATION_CONTENT"]
 
 
 def test_configure_auth_settings_prints_instructions_when_no_token(capsys) -> None:

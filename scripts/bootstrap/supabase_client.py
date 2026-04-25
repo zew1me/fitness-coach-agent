@@ -13,6 +13,11 @@ _POLL_INTERVAL = 5  # seconds
 _POLL_MAX = 60  # attempts (~5 minutes)
 _HTTP_UNAUTHORIZED = 401
 _HTTP_FORBIDDEN = 403
+_EMAIL_OTP_TEMPLATE = """<h2>Your sign-in code</h2>
+<p>Enter this code to sign in:</p>
+<p><strong>{{ .Token }}</strong></p>
+<p>Or use this link:</p>
+<p><a href="{{ .ConfirmationURL }}">Sign in</a></p>"""
 
 
 def _print_auth_config_instructions(site_url: str, extra_redirect_urls: list[str]) -> None:
@@ -24,7 +29,9 @@ def _print_auth_config_instructions(site_url: str, extra_redirect_urls: list[str
         f"    Site URL:      {site_url or '(your app URL)'}\n"
         f"    Redirect URLs: {redirect_list}\n"
         "  Dashboard → Authentication → Providers → Email:\n"
-        "    Disable 'Confirm email' so first-time signups receive OTP codes."
+        "    Disable 'Confirm email' so first-time signups receive OTP codes.\n"
+        "  Dashboard → Authentication → Email Templates:\n"
+        "    Include {{ .Token }} and {{ .ConfirmationURL }} in Magic Link and Confirm Signup."
     )
 
 
@@ -232,7 +239,11 @@ class SupabaseClient:
         all_urls = ([site_url] if site_url else []) + extra_redirect_urls
         allow_list = ",".join(all_urls)
 
-        body: dict = {"MAILER_AUTOCONFIRM": True}
+        body: dict = {
+            "MAILER_AUTOCONFIRM": True,
+            "MAILER_TEMPLATES_CONFIRMATION_CONTENT": _EMAIL_OTP_TEMPLATE,
+            "MAILER_TEMPLATES_MAGIC_LINK_CONTENT": _EMAIL_OTP_TEMPLATE,
+        }
         if site_url:
             body["SITE_URL"] = site_url
         if allow_list:

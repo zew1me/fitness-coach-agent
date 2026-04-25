@@ -40,19 +40,59 @@ class VercelClient:
             return min(vercel_aliases, key=len)
         return ""
 
+    def _env_vars(self) -> list[dict]:
+        r = self._http.get(
+            f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env",
+            params=self._params(),
+        )
+        r.raise_for_status()
+        return r.json().get("envs", [])
+
+    def remove_env_vars(self, target: list[str], keys: list[str]) -> None:
+        """Delete environment variables matching the given target scopes and keys."""
+        existing_vars = self._env_vars()
+        deleted = 0
+        updated = 0
+
+        for ev in existing_vars:
+            env_key = ev.get("key")
+            if env_key not in keys:
+                continue
+            for scope in target:
+                env_targets = ev.get("target", [])
+                if scope not in env_targets:
+                    continue
+                remaining_targets = [t for t in env_targets if t not in target]
+                if self._dry_run:
+                    action = "update" if remaining_targets else "delete"
+                    print(f"  [dry-run] Would {action} {env_key} ({scope})")
+                elif remaining_targets:
+                    patch = self._http.patch(
+                        f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env/{ev['id']}",
+                        json={"target": remaining_targets},
+                        params=self._params(),
+                    )
+                    patch.raise_for_status()
+                    updated += 1
+                else:
+                    delete = self._http.delete(
+                        f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env/{ev['id']}",
+                        params=self._params(),
+                    )
+                    delete.raise_for_status()
+                    deleted += 1
+                break
+
+        if deleted or updated:
+            print(f"  Vercel env vars: {deleted} deleted, {updated} updated ({target}).")
+
     def upsert_env_vars(self, target: list[str], vars: dict[str, str]) -> None:
         """Create or update Vercel environment variables for the given target scopes.
 
         target should be ["preview"] or ["production"].
         Idempotent: fetches existing vars and PATCHes by ID rather than creating duplicates.
         """
-        # Fetch current env vars
-        r = self._http.get(
-            f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env",
-            params=self._params(),
-        )
-        r.raise_for_status()
-        existing_vars = r.json().get("envs", [])
+        existing_vars = self._env_vars()
 
         # Build lookup: (key, first_target) -> env var ID
         existing_lookup: dict[tuple[str, str], str] = {}
