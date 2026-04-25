@@ -1,13 +1,16 @@
 """Cloudflare API client for R2 bucket provisioning and token management."""
 
+import hashlib
+
 import httpx
 
 _CF_BASE = "https://api.cloudflare.com/client/v4"
 
-# Permission group name fragments to match for R2 access.
-# Cloudflare uses "Workers R2 Storage: Edit" (read+write) and
-# "Workers R2 Storage: Read" (read-only). We request both for the scoped token.
-_R2_PERMISSION_NAMES = {"Workers R2 Storage: Edit", "Workers R2 Storage: Read"}
+# Permission group names for bucket-scoped R2 object access.
+_R2_PERMISSION_NAMES = {
+    "Workers R2 Storage Bucket Item Write",
+    "Workers R2 Storage Bucket Item Read",
+}
 
 
 class CloudflareClient:
@@ -65,18 +68,18 @@ class CloudflareClient:
     def ensure_cors(self, bucket_name: str, allowed_origins: list[str]) -> None:
         """Set CORS rules on the bucket for the given allowed origins.
 
-        Note: Vercel preview URLs follow the pattern
-        https://{project}-{hash}-{org}.vercel.app, which cannot be predicted
-        ahead of time. Callers should pass the most specific origins available
-        (production domain + known preview aliases). The '*.vercel.app' wildcard
-        is intentionally avoided here; pass it explicitly only if needed.
+        Cloudflare's API schema uses lower-cased fields nested under "allowed";
+        the dashboard JSON format accepts S3-style field names, but the API
+        endpoint rejects that shape.
         """
         rules = [
             {
-                "AllowedOrigins": allowed_origins,
-                "AllowedMethods": ["PUT", "GET", "HEAD"],
-                "AllowedHeaders": ["*"],
-                "MaxAgeSeconds": 3600,
+                "allowed": {
+                    "origins": allowed_origins,
+                    "methods": ["PUT", "GET", "HEAD"],
+                    "headers": ["*"],
+                },
+                "maxAgeSeconds": 3600,
             }
         ]
 
@@ -97,14 +100,14 @@ class CloudflareClient:
         Permission group IDs are not hardcoded — they are fetched at runtime
         to avoid depending on values that could change between API versions.
         """
-        data = self._get(f"/accounts/{self._account_id}/iam/permission_groups")
+        data = self._get("/user/tokens/permission_groups")
         groups = data.get("result", [])
         matched = [g for g in groups if g.get("name") in _R2_PERMISSION_NAMES]
         if not matched:
             available = [g.get("name") for g in groups if "r2" in g.get("name", "").lower()]
             raise RuntimeError(
                 f"Could not find R2 permission groups. Available R2 groups: {available}. "
-                "Check that your CF_API_TOKEN has 'Account: Read' permission."
+                "Check that your CF_API_TOKEN can create Cloudflare API tokens."
             )
         return [{"id": g["id"]} for g in matched]
 
@@ -119,13 +122,15 @@ class CloudflareClient:
         acct = self._account_id
         token_name = f"fitness-coach-agent-{env}"
 
-        # Check if a token with this name already exists
-        data = self._get(f"/accounts/{acct}/r2/tokens")
+        # Check if a user token with this name already exists. R2 S3 credentials
+        # are backed by Cloudflare API tokens: token id is the access key id,
+        # SHA-256(token value) is the secret access key.
+        data = self._get("/user/tokens")
         tokens = data.get("result", [])
         existing_token = next((t for t in tokens if t.get("name") == token_name), None)
 
         if existing_token and existing_secret:
-            access_key_id = existing_token.get("accessKeyId", "")
+            access_key_id = existing_token.get("id", "")
             print(f"  R2 token {token_name!r} already exists (reusing cached secret).")
             return {"access_key_id": access_key_id, "secret_access_key": existing_secret}
 
@@ -133,7 +138,7 @@ class CloudflareClient:
             print(f"  R2 token {token_name!r} exists but no cached secret found.")
             print("  Deleting and recreating so secret can be captured…")
             if not self._dry_run:
-                self._delete(f"/accounts/{acct}/r2/tokens/{existing_token['id']}")
+                self._delete(f"/user/tokens/{existing_token['id']}")
 
         if self._dry_run:
             print(f"  [dry-run] Would create R2 token {token_name!r}.")
@@ -146,7 +151,7 @@ class CloudflareClient:
         # Bucket resource identifier format required by Cloudflare R2 token API
         bucket_resource = f"com.cloudflare.edge.r2.bucket.{acct}_default_{bucket_name}"
         result = self._post(
-            f"/accounts/{acct}/r2/tokens",
+            "/user/tokens",
             {
                 "name": token_name,
                 "policies": [
@@ -159,8 +164,14 @@ class CloudflareClient:
             },
         )
         token_data = result.get("result", {})
-        access_key_id = token_data.get("accessKeyId", "")
-        secret_access_key = token_data.get("secretAccessKey", "")
+        access_key_id = token_data.get("id", "")
+        token_value = token_data.get("value", "")
+        if not access_key_id or not token_value:
+            raise RuntimeError(
+                "Cloudflare token creation did not return an id and one-time value. "
+                "Cannot derive R2 S3 credentials."
+            )
+        secret_access_key = hashlib.sha256(token_value.encode("utf-8")).hexdigest()
         print(f"  Created R2 token {token_name!r}.")
         return {"access_key_id": access_key_id, "secret_access_key": secret_access_key}
 

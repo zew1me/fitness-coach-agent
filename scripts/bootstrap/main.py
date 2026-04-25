@@ -26,12 +26,51 @@ def _mask(value: str) -> str:
     return f"{'*' * (len(value) - _MASK_CHARS)}{value[-_MASK_CHARS:]}"
 
 
-def _setup_supabase(
+def _fetch_vercel_domain(
+    settings: BootstrapSettings,
+    vercel_project_id: str,
+    vercel_team_id: str,
+    dry_run: bool,
+) -> str:
+    """Fetch the Vercel project's stable production domain (shortest alias)."""
+    vercel = VercelClient(settings.vercel_token, vercel_project_id, vercel_team_id, dry_run=dry_run)
+    try:
+        return vercel.get_production_domain()
+    except Exception as exc:
+        print(f"  Warning: could not fetch Vercel domain: {exc}")
+        return ""
+    finally:
+        vercel.close()
+
+
+def _build_auth_site_url(settings: BootstrapSettings, env: str, vercel_domain: str) -> str:
+    """Return the primary site URL for Supabase auth configuration."""
+    if env == "prod":
+        if settings.production_domain:
+            return f"https://{settings.production_domain}"
+        return f"https://{vercel_domain}" if vercel_domain else ""
+    return f"https://{vercel_domain}" if vercel_domain else ""
+
+
+def _build_auth_redirect_urls(
+    settings: BootstrapSettings, env: str, vercel_domain: str
+) -> list[str]:
+    """Return extra allowed redirect URLs for Supabase auth configuration."""
+    urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
+    if env == "preview":
+        urls.append("https://*.vercel.app/**")
+    elif vercel_domain and ".vercel.app" in vercel_domain and not settings.production_domain:
+        urls.append(f"https://{vercel_domain}/**")
+    return urls
+
+
+def _setup_supabase(  # noqa: PLR0913
     settings: BootstrapSettings,
     env: str,
     state: dict,
     skip_migrations: bool,
     dry_run: bool,
+    vercel_domain: str = "",
 ) -> dict:
     """Provision Supabase project, fetch API keys, apply migrations. Returns keys dict."""
     print(f"\n[1/4] Supabase ({env})")
@@ -42,17 +81,43 @@ def _setup_supabase(
             if env == "preview"
             else settings.supabase_project_ref_prod
         )
+        env_db_password = (
+            settings.supabase_db_password_preview
+            if env == "preview"
+            else settings.supabase_db_password_prod
+        )
+        configured_keys = _configured_supabase_keys(settings, env, existing_ref)
         project_ref, db_pass = sb.ensure_project(env, project_ref=existing_ref)
         state["supabase_project_ref"] = project_ref
-        # Persist the DB password if this is a newly created project — it cannot
-        # be retrieved again after creation.
+        # Persist the DB password immediately if this is a newly created project.
+        # It cannot be retrieved again after creation, and later bootstrap steps can fail.
         if db_pass:
             state["supabase_db_password"] = db_pass
+            if not dry_run:
+                save_state(env, state)
             print("  DB password saved to state file.")
-        keys = sb.get_api_keys(project_ref)
+
+        sb.configure_auth_settings(
+            project_ref,
+            site_url=_build_auth_site_url(settings, env, vercel_domain),
+            extra_redirect_urls=_build_auth_redirect_urls(settings, env, vercel_domain),
+        )
+        migration_db_password = db_pass or state.get("supabase_db_password") or env_db_password
+        keys = configured_keys or sb.get_api_keys(project_ref, use_cli=bool(existing_ref))
         print(f"  Project URL: {keys['url']}")
         if not skip_migrations:
-            sb.apply_migrations(project_ref)
+            if not migration_db_password:
+                env_var = (
+                    "SUPABASE_DB_PASSWORD_PREVIEW"
+                    if env == "preview"
+                    else "SUPABASE_DB_PASSWORD_PROD"
+                )
+                raise RuntimeError(
+                    "Supabase database password is required to apply migrations. "
+                    f"Set {env_var} in .env.bootstrap, or reset the database password "
+                    "in the Supabase dashboard and rerun bootstrap."
+                )
+            sb.apply_migrations(project_ref, str(migration_db_password))
         else:
             print("  Skipping migrations (--skip-migrations).")
     finally:
@@ -60,25 +125,72 @@ def _setup_supabase(
     return {"ref": project_ref, **keys}
 
 
+def _configured_supabase_keys(
+    settings: BootstrapSettings,
+    env: str,
+    project_ref: str,
+) -> dict | None:
+    """Return dashboard-provided Supabase keys for an existing project, if configured."""
+    if not project_ref:
+        return None
+
+    url = settings.supabase_url_preview if env == "preview" else settings.supabase_url_prod
+    anon_key = (
+        settings.supabase_anon_key_preview if env == "preview" else settings.supabase_anon_key_prod
+    )
+    service_role_key = (
+        settings.supabase_service_role_key_preview
+        if env == "preview"
+        else settings.supabase_service_role_key_prod
+    )
+    if url and anon_key and service_role_key:
+        print("  Using Supabase URL and API keys from .env.bootstrap.")
+        return {
+            "url": url,
+            "anon_key": anon_key,
+            "service_role_key": service_role_key,
+        }
+    if any((url, anon_key, service_role_key)):
+        env_suffix = "PREVIEW" if env == "preview" else "PROD"
+        raise RuntimeError(
+            "Incomplete Supabase API key configuration. Set all of "
+            f"SUPABASE_URL_{env_suffix}, SUPABASE_ANON_KEY_{env_suffix}, and "
+            f"SUPABASE_SERVICE_ROLE_KEY_{env_suffix}, or leave all three blank "
+            "to fetch keys via the Supabase CLI."
+        )
+    return None
+
+
 def _setup_r2(
     settings: BootstrapSettings,
     env: str,
     state: dict,
-    cors_origins: list[str],
     dry_run: bool,
 ) -> dict:
-    """Provision R2 bucket, CORS, and API token. Returns R2 credentials dict."""
+    """Provision R2 bucket and resolve runtime S3 credentials."""
     print(f"\n[2/4] Cloudflare R2 ({env})")
     cf = CloudflareClient(settings.cf_api_token, settings.cf_account_id, dry_run=dry_run)
     try:
         bucket_name = cf.ensure_bucket(env)
-        cf.ensure_cors(bucket_name, allowed_origins=cors_origins)
+        print("  Skipping R2 CORS configuration; uploads use the backend proxy.")
 
-        cached_secret = state.get("r2_secret_access_key", "")
-        r2_creds = cf.ensure_r2_token(bucket_name, env, existing_secret=cached_secret)
+        configured_creds = _configured_r2_credentials(settings, env)
+        cached_creds = _cached_r2_credentials(state)
+        if configured_creds:
+            print("  Using R2 S3 credentials from .env.bootstrap.")
+            r2_creds = configured_creds
+        elif cached_creds:
+            print("  Using R2 S3 credentials from state file.")
+            r2_creds = cached_creds
+        else:
+            raise RuntimeError(
+                "R2 bucket is ready, but runtime R2 S3 credentials are missing. "
+                f"Create an account-level R2 API token scoped to bucket {bucket_name!r} "
+                "with Object Read & Write permissions, then set "
+                f"R2_ACCESS_KEY_ID_{env.upper()} and R2_SECRET_ACCESS_KEY_{env.upper()} "
+                "in .env.bootstrap and rerun bootstrap."
+            )
 
-        # Persist R2 secret immediately — it is only returned at token creation time.
-        # Do this before any further API calls so it is never lost on a subsequent error.
         state["r2_access_key_id"] = r2_creds["access_key_id"]
         state["r2_secret_access_key"] = r2_creds["secret_access_key"]
         if not dry_run:
@@ -97,7 +209,37 @@ def _setup_r2(
     }
 
 
-def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel: VercelClient) -> str:
+def _configured_r2_credentials(settings: BootstrapSettings, env: str) -> dict | None:
+    """Return dashboard-created R2 S3 credentials, if configured."""
+    access_key_id = (
+        settings.r2_access_key_id_preview if env == "preview" else settings.r2_access_key_id_prod
+    )
+    secret_access_key = (
+        settings.r2_secret_access_key_preview
+        if env == "preview"
+        else settings.r2_secret_access_key_prod
+    )
+    if access_key_id and secret_access_key:
+        return {"access_key_id": access_key_id, "secret_access_key": secret_access_key}
+    if access_key_id or secret_access_key:
+        env_suffix = "PREVIEW" if env == "preview" else "PROD"
+        raise RuntimeError(
+            "Incomplete R2 credential configuration. Set both "
+            f"R2_ACCESS_KEY_ID_{env_suffix} and R2_SECRET_ACCESS_KEY_{env_suffix}, "
+            "or leave both blank to use cached state credentials."
+        )
+    return None
+
+
+def _cached_r2_credentials(state: dict) -> dict | None:
+    access_key_id = state.get("r2_access_key_id", "")
+    secret_access_key = state.get("r2_secret_access_key", "")
+    if access_key_id and secret_access_key:
+        return {"access_key_id": access_key_id, "secret_access_key": secret_access_key}
+    return None
+
+
+def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel_domain: str) -> str:
     """Determine APP_BASE_URL for the given environment."""
     if env != "prod":
         # Preview: leave blank — Python backend falls back to VERCEL_URL at runtime,
@@ -105,8 +247,7 @@ def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel: VercelC
         return ""
     if settings.production_domain:
         return f"https://{settings.production_domain}"
-    domain = vercel.get_production_domain()
-    url = f"https://{domain}" if domain else ""
+    url = f"https://{vercel_domain}" if vercel_domain else ""
     if url:
         print(f"  APP_BASE_URL (auto-detected): {url}")
     else:
@@ -115,35 +256,6 @@ def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel: VercelC
             "Set PRODUCTION_DOMAIN in .env.bootstrap."
         )
     return url
-
-
-def _build_cors_origins(settings: BootstrapSettings, vercel_domain: str) -> list[str]:
-    """Build the CORS allowed origins list from known stable domains.
-
-    Vercel preview URLs (per-commit hashes) are not predictable, so we scope CORS
-    to the production domain and any stable preview alias returned by the Vercel API.
-    Add CORS_EXTRA_ORIGINS to .env.bootstrap if you need additional origins.
-    """
-    origins: list[str] = []
-    if settings.production_domain:
-        origins.append(f"https://{settings.production_domain}")
-    if vercel_domain and ".vercel.app" in vercel_domain:
-        # Include both the exact alias and a wildcard for branch/PR previews
-        # under the same project slug.
-        slug = vercel_domain.split(".vercel.app")[0]
-        origins.append(f"https://{vercel_domain}")
-        origins.append(f"https://{slug}-*.vercel.app")
-    elif vercel_domain:
-        origins.append(f"https://{vercel_domain}")
-    # Fallback: if we have no specific origins, allow all of vercel.app.
-    # Document this clearly so operators know to tighten it once they have a stable domain.
-    if not origins:
-        print(
-            "  Warning: no specific domains found for CORS. Allowing https://*.vercel.app. "
-            "Set PRODUCTION_DOMAIN in .env.bootstrap to restrict this."
-        )
-        origins = ["https://*.vercel.app"]
-    return origins
 
 
 def _build_env_vars(  # noqa: PLR0913
@@ -214,21 +326,13 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
     settings, vercel_project_id, vercel_team_id = load_settings()
     state = load_state(env)
 
-    # Fetch the Vercel production domain early so we can use it for CORS config
-    # and APP_BASE_URL resolution without opening a second Vercel client later.
-    vercel = VercelClient(settings.vercel_token, vercel_project_id, vercel_team_id, dry_run=dry_run)
-    try:
-        vercel_domain = vercel.get_production_domain()
-    finally:
-        vercel.close()
-
-    supabase = _setup_supabase(settings, env, state, skip_migrations, dry_run)
+    vercel_domain = _fetch_vercel_domain(settings, vercel_project_id, vercel_team_id, dry_run)
+    supabase = _setup_supabase(settings, env, state, skip_migrations, dry_run, vercel_domain)
     if not dry_run:
         save_state(env, state)
 
-    cors_origins = _build_cors_origins(settings, vercel_domain)
     # _setup_r2 calls save_state internally after capturing the R2 secret.
-    r2 = _setup_r2(settings, env, state, cors_origins, dry_run)
+    r2 = _setup_r2(settings, env, state, dry_run)
 
     print(f"\n[3/4] Generating stable secrets ({env})")
     jwt_secret = get_or_generate_jwt_secret(env, state)
@@ -239,7 +343,7 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
     print(f"\n[4/4] Vercel environment variables ({env})")
     vercel = VercelClient(settings.vercel_token, vercel_project_id, vercel_team_id, dry_run=dry_run)
     try:
-        app_base_url = _resolve_app_base_url(settings, env, vercel)
+        app_base_url = _resolve_app_base_url(settings, env, vercel_domain)
         vercel_target = ["production"] if env == "prod" else ["preview"]
         env_vars = _build_env_vars(env, app_base_url, jwt_secret, supabase, r2, settings)
         vercel.upsert_env_vars(vercel_target, env_vars)

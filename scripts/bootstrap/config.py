@@ -12,15 +12,27 @@ def _read_vercel_project_json() -> dict:
 
 
 class BootstrapSettings(BaseSettings):
-    # Supabase Management API
-    supabase_access_token: str
-    supabase_org_id: str
+    # Supabase Management API. Only required when auto-creating projects.
+    supabase_access_token: str = ""
+    supabase_org_id: str = ""
     supabase_project_ref_preview: str = ""
     supabase_project_ref_prod: str = ""
+    supabase_db_password_preview: str = ""
+    supabase_db_password_prod: str = ""
+    supabase_url_preview: str = ""
+    supabase_url_prod: str = ""
+    supabase_anon_key_preview: str = ""
+    supabase_anon_key_prod: str = ""
+    supabase_service_role_key_preview: str = ""
+    supabase_service_role_key_prod: str = ""
 
     # Cloudflare R2
     cf_api_token: str
     cf_account_id: str
+    r2_access_key_id_preview: str = ""
+    r2_access_key_id_prod: str = ""
+    r2_secret_access_key_preview: str = ""
+    r2_secret_access_key_prod: str = ""
 
     # Vercel
     vercel_token: str
