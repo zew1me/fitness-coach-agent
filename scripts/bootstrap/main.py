@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import sys
+from typing import Protocol
 
 from scripts.bootstrap.cloudflare_client import CloudflareClient
 from scripts.bootstrap.config import BootstrapSettings, load_settings
@@ -17,6 +18,12 @@ from scripts.bootstrap.supabase_client import SupabaseClient
 from scripts.bootstrap.vercel_client import VercelClient
 
 _MASK_CHARS = 4
+
+
+class VercelEnvSyncClient(Protocol):
+    def remove_env_vars(self, target: list[str], keys: list[str]) -> None: ...
+
+    def upsert_env_vars(self, target: list[str], vars: dict[str, str]) -> None: ...
 
 
 def _mask(value: str) -> str:
@@ -288,7 +295,7 @@ def _build_env_vars(  # noqa: PLR0913
 
 
 def _sync_vercel_env_vars(
-    vercel: VercelClient, vercel_target: list[str], env_vars: dict[str, str]
+    vercel: VercelEnvSyncClient, vercel_target: list[str], env_vars: dict[str, str]
 ) -> None:
     """Apply Vercel env vars and clear preview-only vars that must fall back at runtime."""
     if vercel_target == ["preview"]:
