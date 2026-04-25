@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from scripts.bootstrap import main as bootstrap_main
 from scripts.bootstrap import supabase_client
 from scripts.bootstrap.cloudflare_client import CloudflareClient
+from scripts.bootstrap.config import BootstrapSettings
 from scripts.bootstrap.supabase_client import SupabaseClient
 
 
@@ -55,7 +57,7 @@ def test_supabase_api_unauthorized_mentions_access_token() -> None:
             pass
 
     client = SupabaseClient("bad-token", "org")
-    client._http = FakeHTTP()  # type: ignore[assignment]
+    client._http = FakeHTTP()
 
     with pytest.raises(RuntimeError, match="SUPABASE_ACCESS_TOKEN"):
         client._get("/projects/ref")
@@ -424,7 +426,7 @@ def test_cloudflare_r2_token_uses_user_token_api_and_hashes_token_value() -> Non
             pass
 
     client = CloudflareClient("token", "account-id")
-    client._http = FakeHTTP()  # type: ignore[assignment]
+    client._http = FakeHTTP()
 
     creds = client.ensure_r2_token("bucket-name", "preview")
     client.close()
@@ -462,8 +464,8 @@ def test_cloudflare_r2_token_uses_user_token_api_and_hashes_token_value() -> Non
     ]
 
 
-def _settings(**overrides: str) -> SimpleNamespace:
-    defaults = {
+def _settings(**overrides: str) -> BootstrapSettings:
+    defaults: dict[str, Any] = {
         "supabase_access_token": "token",
         "supabase_org_id": "org",
         "supabase_project_ref_preview": "",
@@ -482,10 +484,13 @@ def _settings(**overrides: str) -> SimpleNamespace:
         "r2_access_key_id_prod": "",
         "r2_secret_access_key_preview": "",
         "r2_secret_access_key_prod": "",
+        "vercel_token": "vercel-token",
+        "openai_api_key": "openai-key",
+        "tavily_api_key": "tavily-key",
         "production_domain": "",
     }
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    return BootstrapSettings.model_construct(**defaults)
 
 
 def test_configure_auth_settings_patches_management_api(monkeypatch) -> None:
