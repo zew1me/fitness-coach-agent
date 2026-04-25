@@ -15,6 +15,19 @@ _HTTP_UNAUTHORIZED = 401
 _HTTP_FORBIDDEN = 403
 
 
+def _print_auth_config_instructions(site_url: str, extra_redirect_urls: list[str]) -> None:
+    all_urls = ([site_url] if site_url else []) + extra_redirect_urls
+    redirect_list = ", ".join(all_urls) if all_urls else "(your app URL)/**"
+    print(
+        "  Supabase auth redirect URLs must be set manually.\n"
+        "  Dashboard → Authentication → URL Configuration:\n"
+        f"    Site URL:      {site_url or '(your app URL)'}\n"
+        f"    Redirect URLs: {redirect_list}\n"
+        "  Dashboard → Authentication → Providers → Email:\n"
+        "    Disable 'Confirm email' so first-time signups receive OTP codes."
+    )
+
+
 class SupabaseClient:
     def __init__(self, access_token: str, org_id: str, dry_run: bool = False) -> None:
         self._token = access_token
@@ -32,6 +45,11 @@ class SupabaseClient:
 
     def _post(self, path: str, body: dict) -> dict:
         r = self._http.post(f"{_BASE}{path}", json=body)
+        self._raise_for_status(r)
+        return r.json()
+
+    def _patch(self, path: str, body: dict) -> dict:
+        r = self._http.patch(f"{_BASE}{path}", json=body)
         self._raise_for_status(r)
         return r.json()
 
@@ -197,6 +215,46 @@ class SupabaseClient:
         )
         if result.returncode != 0:
             raise RuntimeError(f"supabase db push failed (exit {result.returncode})")
+
+    def configure_auth_settings(
+        self,
+        ref: str,
+        site_url: str,
+        extra_redirect_urls: list[str],
+    ) -> None:
+        """Configure Supabase auth redirect URLs and OTP behavior.
+
+        Sets SITE_URL, URI_ALLOW_LIST, and MAILER_AUTOCONFIRM=True so that magic-link
+        emails point to the right host and first-time signups receive OTP codes rather
+        than email-confirmation links. Requires SUPABASE_ACCESS_TOKEN; prints manual
+        instructions if the token is absent or the call is rejected.
+        """
+        all_urls = ([site_url] if site_url else []) + extra_redirect_urls
+        allow_list = ",".join(all_urls)
+
+        body: dict = {"MAILER_AUTOCONFIRM": True}
+        if site_url:
+            body["SITE_URL"] = site_url
+        if allow_list:
+            body["URI_ALLOW_LIST"] = allow_list
+
+        if not self._token:
+            _print_auth_config_instructions(site_url, extra_redirect_urls)
+            return
+
+        if self._dry_run:
+            print(
+                f"  [dry-run] Would configure auth: SITE_URL={site_url!r}, "
+                f"MAILER_AUTOCONFIRM=True, URI_ALLOW_LIST={allow_list!r}"
+            )
+            return
+
+        try:
+            self._patch(f"/projects/{ref}/config/auth", body)
+            print(f"  Auth settings configured: SITE_URL={site_url!r}, MAILER_AUTOCONFIRM=True")
+        except (RuntimeError, httpx.HTTPError) as exc:
+            print(f"  Warning: could not configure auth settings via API: {exc}")
+            _print_auth_config_instructions(site_url, extra_redirect_urls)
 
     def close(self) -> None:
         self._http.close()
