@@ -1,8 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import { selectMessagesForModel } from "../../lib/agent/message-context";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 describe("app/api/chat route", () => {
   it("keeps short conversations intact for model context", () => {
@@ -52,6 +58,31 @@ describe("app/api/chat route", () => {
     await expect(response.json()).resolves.toEqual({
       error: "Missing browser session cookie."
     });
+  });
+
+  it("returns a bounded 503 when the browser token proxy connection resets", async () => {
+    const error = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    const fetchMock = vi.fn(() => Promise.reject(error));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers: { cookie: "coach_browser_session=session-token" },
+        body: JSON.stringify({ messages: [] })
+      })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "Something went wrong. Please refresh and try again."
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/oauth/browser-token",
+      expect.objectContaining({
+        method: "POST"
+      })
+    );
   });
 
   it("executes get_athlete_context by calling the engine summary endpoint", async () => {
