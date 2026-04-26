@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import logging
 from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
@@ -19,6 +22,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from backend.config import settings
+from backend.logging_config import configure_logging
 from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
 )
@@ -52,6 +56,10 @@ from backend.services.auth import (
 from backend.services.chat import ChatService, ChatUnavailableError
 from backend.services.r2 import R2Service
 
+configure_logging(debug=settings.app_env == "development")
+
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Endurance Coaching Agent")
 auth_service = AuthService()
 chat_service = ChatService()
@@ -59,6 +67,26 @@ repo = SupabaseRepository()
 r2_service = R2Service()
 
 RECOVERY_WEEK_AGE_BREAKPOINT = 40
+
+
+@app.on_event("startup")
+async def log_startup() -> None:
+    """Emit startup diagnostics so it is clear which optional features are active."""
+    features = {
+        "openai": bool(settings.openai_api_key),
+        "r2_storage": all(
+            [settings.r2_access_key_id, settings.r2_secret_access_key, settings.r2_bucket]
+        ),
+        "supabase": bool(settings.supabase_url and settings.supabase_service_role_key),
+    }
+    enabled = [k for k, v in features.items() if v]
+    disabled = [k for k, v in features.items() if not v]
+    logger.info(
+        "startup env=%s features_enabled=%s features_disabled=%s",
+        settings.app_env,
+        enabled,
+        disabled,
+    )
 
 
 def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
@@ -160,9 +188,12 @@ async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OAuthInvalidGrantError as exc:
+        logger.warning("oauth token exchange failed: invalid grant client_id=%s", payload.client_id)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OAuthError as exc:
+        logger.warning("oauth token exchange failed client_id=%s error=%s", payload.client_id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info("oauth token issued client_id=%s", payload.client_id)
     return JSONResponse(bundle.model_dump(mode="json"))
 
 
@@ -172,6 +203,7 @@ async def oauth_revoke(payload: OAuthRevokeRequest) -> Mapping[str, bool]:
         revoked = auth_service.revoke(payload)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    logger.info("oauth revoke revoked=%s", revoked)
     return {"revoked": revoked}
 
 
@@ -184,6 +216,7 @@ async def oauth_browser_session(
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        logger.warning("browser session creation failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=401, detail="Unable to verify browser session.") from exc
     response.set_cookie(
         key=auth_service.browser_session_cookie_name,
@@ -194,6 +227,7 @@ async def oauth_browser_session(
         samesite="lax",
         secure=settings.base_url.startswith("https://"),
     )
+    logger.info("browser session created user_id=%s", session.user_id)
     return {"ok": True}
 
 
@@ -288,6 +322,11 @@ async def create_chat_message(
     payload: ChatSendRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    logger.debug(
+        "chat message received user_id=%s attachments=%d",
+        user_context.user_id,
+        len(payload.attachments),
+    )
     try:
         response = await chat_service.send_message(
             user_context.user_id,
@@ -295,8 +334,10 @@ async def create_chat_message(
             payload.attachments,
         )
     except ChatUnavailableError as exc:
+        logger.exception("chat unavailable user_id=%s", user_context.user_id)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
+        logger.exception("repository not configured")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return response.model_dump(mode="json")
 
@@ -473,6 +514,13 @@ async def recompute_load_endpoint(
     user_id = user_context.user_id
     since = payload.since or date.today()
     activities = await repo.list_activities(user_id, sport=payload.sport, since=since, limit=500)
+    logger.debug(
+        "recompute_load user_id=%s sport=%s since=%s activities=%d",
+        user_id,
+        payload.sport,
+        since,
+        len(activities),
+    )
 
     daily_tss: dict[date, float] = {}
     for a in activities:
@@ -487,6 +535,15 @@ async def recompute_load_endpoint(
     await repo.upsert_load_snapshots(user_id, snapshots, sport=payload.sport)
 
     latest = snapshots[-1] if snapshots else {}
+    logger.info(
+        "load recomputed user_id=%s sport=%s snapshots=%d ctl=%.1f atl=%.1f tsb=%.1f",
+        user_id,
+        payload.sport,
+        len(snapshots),
+        latest.get("ctl", 0),
+        latest.get("atl", 0),
+        latest.get("tsb", 0),
+    )
     return {
         "snapshots_written": len(snapshots),
         "latest_ctl": latest.get("ctl", 0),
@@ -559,6 +616,12 @@ async def process_uploaded_file_endpoint(
     payload: ProcessUploadedFileRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    logger.info(
+        "processing uploaded file user_id=%s filename_suffix=%s content_type=%s",
+        user_context.user_id,
+        Path(payload.filename).suffix.lower()[:16] or "none",
+        payload.content_type,
+    )
     file_bytes = await r2_service.download_file_bytes(
         user_id=user_context.user_id,
         object_key=payload.object_key,
@@ -586,11 +649,18 @@ async def process_uploaded_file_endpoint(
             "rr_interval_count": len(parsed.rr_intervals_ms or []),
         },
     )
+    logger.info(
+        "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
+        user_context.user_id,
+        parsed.sport,
+        parsed.activity_date,
+        parsed.distance_meters or 0,
+    )
     return {"activity": activity.model_dump(mode="json")}
 
 
 def _build_fitness_metrics(
-    profile: "_AthleteProfile", thresholds: list["SportThreshold"]
+    profile: _AthleteProfile, thresholds: list[SportThreshold]
 ) -> dict[str, object]:
     """Assemble ThresholdValue objects from profile + active sport thresholds."""
     metrics: dict[str, object] = {}
@@ -632,6 +702,7 @@ async def get_athlete_summary(
     try:
         profile = await repo.get_athlete_profile(user_id)
     except RecordNotFoundError:
+        logger.info("athlete summary: no profile yet user_id=%s (onboarding stub)", user_id)
         profile = _AthleteProfile(user_id=user_id, coaching_state="onboarding")
 
     thresholds = await repo.get_active_thresholds(user_id)
@@ -644,6 +715,14 @@ async def get_athlete_summary(
     age = profile.age
     ctl_ceiling = estimate_ctl_ceiling(age, profile.biological_sex or "not_specified")
 
+    logger.debug(
+        "athlete summary assembled user_id=%s state=%s thresholds=%d goals=%d has_load=%s",
+        user_id,
+        profile.coaching_state,
+        len(thresholds),
+        len(goals),
+        latest_load is not None,
+    )
     return {
         "profile": profile.model_dump(mode="json"),
         "computed_age": age,
@@ -674,6 +753,11 @@ async def update_athlete_profile(
     payload: UpdateAthleteProfileRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    logger.info(
+        "profile update user_id=%s fields=%s",
+        user_context.user_id,
+        list(payload.fields.keys()),
+    )
     profile = await repo.update_athlete_profile_fields(user_context.user_id, payload.fields)
     return profile.model_dump(mode="json")
 
@@ -717,6 +801,13 @@ async def generate_plan_structure(
     target_goal = None
     if payload.goal_id:
         target_goal = next((g for g in goals if g.id == payload.goal_id), None)
+        if target_goal is None:
+            logger.warning(
+                "generate_plan: goal_id not found, falling back to first goal"
+                " user_id=%s goal_id=%s",
+                user_id,
+                payload.goal_id,
+            )
     elif goals:
         target_goal = goals[0]
 
@@ -735,6 +826,13 @@ async def generate_plan_structure(
         recovery_week_frequency=recovery_freq,
     )
 
+    logger.info(
+        "plan structure generated user_id=%s weeks=%d goal_type=%s recovery_freq=%d",
+        user_id,
+        skeleton.total_weeks,
+        target_goal.goal_type if target_goal else "maintenance",
+        recovery_freq,
+    )
     return {
         "total_weeks": skeleton.total_weeks,
         "start_date": skeleton.start_date.isoformat(),

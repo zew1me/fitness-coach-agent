@@ -1,4 +1,5 @@
 import base64
+import logging
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, TypedDict, cast
@@ -433,9 +434,10 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
 
 @pytest.mark.asyncio
 async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
-    auth_service_fixture, monkeypatch
+    auth_service_fixture, monkeypatch, caplog
 ) -> None:
     object_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
+    sensitive_filename = "Secret Race Notes\nInjected.gpx"
     captured: dict[str, str] = {}
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
@@ -450,6 +452,7 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
 </gpx>"""
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    caplog.set_level(logging.INFO, logger="api.index")
 
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -472,7 +475,7 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
             "/api/engine/process-uploaded-file",
             json={
                 "content_type": "application/gpx+xml",
-                "filename": "run.gpx",
+                "filename": sensitive_filename,
                 "object_key": object_key,
                 "public_url": "https://cdn.example.com/run.gpx",
                 "user_id": "payload-user-is-ignored",
@@ -486,6 +489,8 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     assert body["activity"]["source_file_key"] == object_key
     assert body["activity"]["source"] == "gpx_upload"
     assert captured == {"user_id": "athlete-1", "object_key": object_key}
+    assert sensitive_filename not in caplog.text
+    assert "filename_suffix=.gpx" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -844,6 +849,31 @@ async def test_oauth_browser_session_endpoint_sets_cookie(auth_service_fixture) 
 
     assert response.status_code == 200
     assert "coach_browser_session=" in response.headers["set-cookie"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_browser_session_failure_does_not_log_token(
+    auth_service_fixture, monkeypatch, caplog
+) -> None:
+    sensitive_token = "supabase-sensitive-token"
+
+    def fail_browser_session(supabase_access_token: str) -> BrowserSessionContext:
+        raise RuntimeError(f"bad token {supabase_access_token}")
+
+    monkeypatch.setattr(auth_service_fixture, "create_browser_session", fail_browser_session)
+    caplog.set_level(logging.WARNING, logger="api.index")
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": sensitive_token},
+        )
+
+    assert response.status_code == 401
+    assert sensitive_token not in caplog.text
+    assert "bad token" not in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
 
 
 @pytest.mark.asyncio
