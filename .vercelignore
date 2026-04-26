@@ -1,0 +1,5 @@
+# Playwright test artifacts — browsers are downloaded at runtime, not bundled
+tests/web/
+playwright.config.ts
+playwright-report/
+test-results/
