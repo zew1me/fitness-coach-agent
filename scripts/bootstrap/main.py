@@ -58,7 +58,7 @@ def _build_auth_redirect_urls(
     """Return extra allowed redirect URLs for Supabase auth configuration."""
     urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
     if env == "preview":
-        urls.append("https://*.vercel.app/**")
+        urls.append("https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**")
         if vercel_domain:
             urls.append(f"https://{vercel_domain}/**")
     return urls
