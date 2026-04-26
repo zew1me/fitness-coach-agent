@@ -33,6 +33,11 @@ class BootstrapSettings(BaseSettings):
     r2_access_key_id_prod: str = ""
     r2_secret_access_key_preview: str = ""
     r2_secret_access_key_prod: str = ""
+    # Optional manual overrides for the R2 public base URL per environment.
+    # Bootstrap auto-detects these from the Cloudflare API; set these only if
+    # auto-detection fails or you're using a custom domain on your R2 bucket.
+    r2_public_base_url_preview: str = ""
+    r2_public_base_url_prod: str = ""
 
     # Vercel
     vercel_token: str
