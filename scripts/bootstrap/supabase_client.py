@@ -231,7 +231,7 @@ class SupabaseClient:
     ) -> None:
         """Configure Supabase auth redirect URLs and OTP behavior.
 
-        Sets SITE_URL, URI_ALLOW_LIST, and MAILER_AUTOCONFIRM=True so that magic-link
+        Sets site_url, uri_allow_list, and mailer_autoconfirm=True so that magic-link
         emails point to the right host and first-time signups receive OTP codes rather
         than email-confirmation links. Requires SUPABASE_ACCESS_TOKEN; prints manual
         instructions if the token is absent or the call is rejected.
@@ -240,14 +240,15 @@ class SupabaseClient:
         allow_list = ",".join(all_urls)
 
         body: dict = {
-            "MAILER_AUTOCONFIRM": True,
-            "MAILER_TEMPLATES_CONFIRMATION_CONTENT": _EMAIL_OTP_TEMPLATE,
-            "MAILER_TEMPLATES_MAGIC_LINK_CONTENT": _EMAIL_OTP_TEMPLATE,
+            "mailer_autoconfirm": True,
+            "mailer_otp_length": 6,
+            "mailer_templates_confirmation_content": _EMAIL_OTP_TEMPLATE,
+            "mailer_templates_magic_link_content": _EMAIL_OTP_TEMPLATE,
         }
         if site_url:
-            body["SITE_URL"] = site_url
+            body["site_url"] = site_url
         if allow_list:
-            body["URI_ALLOW_LIST"] = allow_list
+            body["uri_allow_list"] = allow_list
 
         if not self._token:
             _print_auth_config_instructions(site_url, extra_redirect_urls)
@@ -255,14 +256,14 @@ class SupabaseClient:
 
         if self._dry_run:
             print(
-                f"  [dry-run] Would configure auth: SITE_URL={site_url!r}, "
-                f"MAILER_AUTOCONFIRM=True, URI_ALLOW_LIST={allow_list!r}"
+                f"  [dry-run] Would configure auth: site_url={site_url!r}, "
+                f"mailer_autoconfirm=True, uri_allow_list={allow_list!r}"
             )
             return
 
         try:
             self._patch(f"/projects/{ref}/config/auth", body)
-            print(f"  Auth settings configured: SITE_URL={site_url!r}, MAILER_AUTOCONFIRM=True")
+            print(f"  Auth settings configured: site_url={site_url!r}, mailer_autoconfirm=True")
         except (RuntimeError, httpx.HTTPError) as exc:
             print(f"  Warning: could not configure auth settings via API: {exc}")
             _print_auth_config_instructions(site_url, extra_redirect_urls)

@@ -652,14 +652,15 @@ def test_configure_auth_settings_patches_management_api(monkeypatch) -> None:
     assert len(patched) == 1
     path, body = patched[0]
     assert path == "/projects/proj-ref/config/auth"
-    assert body["SITE_URL"] == "https://example.vercel.app"
-    assert body["MAILER_AUTOCONFIRM"] is True
-    assert "https://example.vercel.app" in body["URI_ALLOW_LIST"]
-    assert "https://*.vercel.app/**" in body["URI_ALLOW_LIST"]
-    assert "{{ .Token }}" in body["MAILER_TEMPLATES_MAGIC_LINK_CONTENT"]
-    assert "{{ .ConfirmationURL }}" in body["MAILER_TEMPLATES_MAGIC_LINK_CONTENT"]
-    assert "{{ .Token }}" in body["MAILER_TEMPLATES_CONFIRMATION_CONTENT"]
-    assert "{{ .ConfirmationURL }}" in body["MAILER_TEMPLATES_CONFIRMATION_CONTENT"]
+    assert body["site_url"] == "https://example.vercel.app"
+    assert body["mailer_autoconfirm"] is True
+    assert body["mailer_otp_length"] == 6
+    assert "https://example.vercel.app" in body["uri_allow_list"]
+    assert "https://*.vercel.app/**" in body["uri_allow_list"]
+    assert "{{ .Token }}" in body["mailer_templates_magic_link_content"]
+    assert "{{ .ConfirmationURL }}" in body["mailer_templates_magic_link_content"]
+    assert "{{ .Token }}" in body["mailer_templates_confirmation_content"]
+    assert "{{ .ConfirmationURL }}" in body["mailer_templates_confirmation_content"]
 
 
 def test_configure_auth_settings_prints_instructions_when_no_token(capsys) -> None:
@@ -709,16 +710,14 @@ def test_build_auth_site_url_prod_prefers_custom_domain() -> None:
 
 
 def test_build_auth_redirect_urls_preview_includes_scoped_wildcard_and_domain() -> None:
-    settings = _settings()
     domain = "fitness-coach-agent.vercel.app"
-    urls = bootstrap_main._build_auth_redirect_urls(settings, "preview", domain)
+    urls = bootstrap_main._build_auth_redirect_urls("preview", domain)
     assert "https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**" in urls
     assert "https://fitness-coach-agent.vercel.app/**" in urls
     assert "http://localhost:3000/**" in urls
 
 
 def test_build_auth_redirect_urls_prod_does_not_include_wildcard() -> None:
-    settings = _settings(production_domain="app.example.com")
     domain = "fitness-coach-agent.vercel.app"
-    urls = bootstrap_main._build_auth_redirect_urls(settings, "prod", domain)
+    urls = bootstrap_main._build_auth_redirect_urls("prod", domain)
     assert "https://*.vercel.app/**" not in urls

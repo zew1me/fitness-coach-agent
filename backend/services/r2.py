@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from asyncio import to_thread
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from uuid import uuid4
@@ -9,6 +8,7 @@ import boto3
 from botocore.client import BaseClient
 from botocore.config import Config
 from fastapi import HTTPException
+from starlette.concurrency import run_in_threadpool
 
 from backend.config import settings
 from backend.models.storage import PresignUploadRequest, PresignUploadResponse
@@ -53,8 +53,7 @@ class R2Service:
         self._validate_object_key_scope(user_id=user_id, object_key=object_key)
 
         client = self._get_client()
-        # Run blocking boto3 operation in thread pool
-        await to_thread(
+        await run_in_threadpool(
             client.put_object,
             Bucket=settings.r2_bucket,
             Key=object_key,
@@ -75,13 +74,13 @@ class R2Service:
         self._ensure_configured()
         self._validate_object_key_scope(user_id=user_id, object_key=object_key)
         client = self._get_client()
-        response = await to_thread(
+        response = await run_in_threadpool(
             client.get_object,
             Bucket=settings.r2_bucket,
             Key=object_key,
         )
         body = response["Body"]
-        return await to_thread(body.read)
+        return await run_in_threadpool(body.read)
 
     def _get_client(self) -> BaseClient:
         if self._client is None:
