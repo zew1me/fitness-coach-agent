@@ -57,7 +57,7 @@ async function loadAthleteContext(
       Authorization: `Bearer ${token.access_token}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ user_id: token.user_id })
+    body: JSON.stringify({})
   });
 
   if (!response.ok) {
@@ -99,7 +99,6 @@ export async function POST(request: Request): Promise<Response> {
       ...createCoachTools({
         accessToken: token.access_token,
         baseUrl: requestOrigin(request),
-        userId: token.user_id,
       }),
       ...tavilyTools,
     },

@@ -1,4 +1,5 @@
 import base64
+import logging
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, TypedDict, cast
@@ -301,9 +302,7 @@ class FakeAuthService(AuthService):
 async def test_protected_profile_requires_bearer_token() -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/api/engine/get-athlete-summary", json={"user_id": "athlete-1"}
-        )
+        response = await client.post("/api/engine/get-athlete-summary")
 
     assert response.status_code == 401
 
@@ -435,9 +434,10 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
 
 @pytest.mark.asyncio
 async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
-    auth_service_fixture, monkeypatch
+    auth_service_fixture, monkeypatch, caplog
 ) -> None:
     object_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
+    sensitive_filename = "Secret Race Notes\nInjected.gpx"
     captured: dict[str, str] = {}
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
@@ -452,6 +452,7 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
 </gpx>"""
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    caplog.set_level(logging.INFO, logger="api.index")
 
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -474,7 +475,7 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
             "/api/engine/process-uploaded-file",
             json={
                 "content_type": "application/gpx+xml",
-                "filename": "run.gpx",
+                "filename": sensitive_filename,
                 "object_key": object_key,
                 "public_url": "https://cdn.example.com/run.gpx",
                 "user_id": "payload-user-is-ignored",
@@ -488,6 +489,8 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     assert body["activity"]["source_file_key"] == object_key
     assert body["activity"]["source"] == "gpx_upload"
     assert captured == {"user_id": "athlete-1", "object_key": object_key}
+    assert sensitive_filename not in caplog.text
+    assert "filename_suffix=.gpx" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -849,6 +852,31 @@ async def test_oauth_browser_session_endpoint_sets_cookie(auth_service_fixture) 
 
 
 @pytest.mark.asyncio
+async def test_oauth_browser_session_failure_does_not_log_token(
+    auth_service_fixture, monkeypatch, caplog
+) -> None:
+    sensitive_token = "supabase-sensitive-token"
+
+    def fail_browser_session(supabase_access_token: str) -> BrowserSessionContext:
+        raise RuntimeError(f"bad token {supabase_access_token}")
+
+    monkeypatch.setattr(auth_service_fixture, "create_browser_session", fail_browser_session)
+    caplog.set_level(logging.WARNING, logger="api.index")
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": sensitive_token},
+        )
+
+    assert response.status_code == 401
+    assert sensitive_token not in caplog.text
+    assert "bad token" not in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_oauth_browser_token_issues_same_origin_bearer(auth_service_fixture) -> None:
     browser_cookie = auth_service_fixture.create_browser_session_token(
         BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
@@ -1149,7 +1177,6 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-1"},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1160,29 +1187,6 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
     assert body["current_load"]["ctl"] == 42
     assert body["goals"][0]["course_distance_meters"] == 14_000
     assert body["ctl_ceiling_guidance"]["committed_amateur_ctl"] > 0
-
-
-@pytest.mark.asyncio
-async def test_get_athlete_summary_rejects_cross_user_access(monkeypatch) -> None:
-    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
-        user_id="athlete-1",
-        scopes=["profile:read"],
-        client_id="test-client",
-        grant_id="grant-1",
-    )
-    monkeypatch.setattr(api_index, "repo", EngineRepository())
-
-    transport = ASGITransport(app=api_index.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-2"},
-        )
-
-    api_index.app.dependency_overrides.clear()
-
-    assert response.status_code == 403
-    assert "cannot access this resource" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -1216,7 +1220,7 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-recent-activities",
-            json={"limit": 2, "sport": "running", "user_id": "athlete-1"},
+            json={"limit": 2, "sport": "running"},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1244,7 +1248,7 @@ async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/generate-plan-structure",
-            json={"user_id": "athlete-1"},
+            json={},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1277,7 +1281,6 @@ async def test_get_athlete_summary_new_user_returns_onboarding_stub(monkeypatch)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-new"},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1364,7 +1367,6 @@ async def test_get_athlete_summary_includes_nutrition_fields(monkeypatch) -> Non
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-1"},
         )
 
     api_index.app.dependency_overrides.clear()
