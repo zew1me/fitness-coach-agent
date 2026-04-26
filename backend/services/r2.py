@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import PurePosixPath
 from uuid import uuid4
 
@@ -63,7 +64,11 @@ class R2Service:
             Body=file_stream,
             ContentType=content_type,
         )
-        logger.info("r2 upload complete user_id=%s key=%s", user_id, object_key)
+        logger.info(
+            "r2 upload complete user_id=%s key_ref=%s",
+            user_id,
+            self._object_key_log_ref(object_key),
+        )
 
         return PresignUploadResponse(
             upload_url="",  # Not used for direct uploads
@@ -116,6 +121,9 @@ class R2Service:
         if base is None:
             return None
         return f"{base.rstrip('/')}/{object_key}"
+
+    def _object_key_log_ref(self, object_key: str) -> str:
+        return sha256(object_key.encode("utf-8")).hexdigest()[:12]
 
     def _ensure_configured(self) -> None:
         missing = [
