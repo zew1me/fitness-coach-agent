@@ -79,6 +79,8 @@ export async function POST(request: Request): Promise<Response> {
     return jsonError("Missing browser session cookie.", 401);
   }
 
+  const UNAVAILABLE = "Coach is unavailable right now. Please try again.";
+
   try {
     const body = (await request.json()) as ChatRequestBody;
     const messages = body.messages ?? [];
@@ -103,11 +105,18 @@ export async function POST(request: Request): Promise<Response> {
         }),
         ...tavilyTools,
       },
+      onError: ({ error }) => {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error("[chat] stream error:", msg.replace(/key=[^&\s]+/g, "key=***"));
+      },
     });
 
-    return result.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse({
+      onError: () => UNAVAILABLE,
+    });
   } catch (error) {
-    console.error("[chat] POST error:", error);
-    return jsonError("Coach is unavailable right now. Please try again.", 503);
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("[chat] POST error:", msg.replace(/key=[^&\s]+/g, "key=***"));
+    return new Response(UNAVAILABLE, { status: 503 });
   }
 }
