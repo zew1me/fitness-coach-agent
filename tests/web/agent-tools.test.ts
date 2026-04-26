@@ -86,4 +86,43 @@ describe("coachToolDefinitions", () => {
       },
     ]);
   });
+
+  it("forwards extra internal headers to engine tool calls", async () => {
+    const requests: Array<{ headers: Headers; url: string }> = [];
+    const fetchImpl = (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({
+        headers: new Headers(init?.headers),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ status: "ok" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        })
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      extraHeaders: { "x-vercel-protection-bypass": "preview-bypass" },
+      fetchImpl,
+    });
+
+    await (
+      tools["get_recent_activities"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ limit: 1 });
+
+    expect(requests).toHaveLength(1);
+    const request = requests[0];
+    if (request === undefined) {
+      throw new Error("Expected one engine request.");
+    }
+    expect(request.url).toBe("https://coach.test/api/engine/get-recent-activities");
+    expect(request.headers.get("authorization")).toBe("Bearer token");
+    expect(request.headers.get("content-type")).toBe("application/json");
+    expect(request.headers.get("x-vercel-protection-bypass")).toBe("preview-bypass");
+  });
 });

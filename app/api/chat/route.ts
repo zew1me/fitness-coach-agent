@@ -31,6 +31,11 @@ function requestOrigin(request: Request): string {
   return `${url.protocol}//${url.host}`;
 }
 
+function vercelProtectionBypassHeaders(): Record<string, string> {
+  const bypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
+  return bypassSecret ? { "x-vercel-protection-bypass": bypassSecret } : {};
+}
+
 async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse | null> {
   const cookie = request.headers.get("cookie");
   if (!cookie?.includes("coach_browser_session=")) {
@@ -39,7 +44,7 @@ async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse 
 
   const response = await fetch(`${requestOrigin(request)}/api/oauth/browser-token`, {
     method: "POST",
-    headers: { cookie }
+    headers: { cookie, ...vercelProtectionBypassHeaders() }
   });
   if (!response.ok) {
     return null;
@@ -55,7 +60,8 @@ async function loadAthleteContext(
     method: "POST",
     headers: {
       Authorization: `Bearer ${token.access_token}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...vercelProtectionBypassHeaders()
     },
     body: JSON.stringify({})
   });
@@ -79,30 +85,45 @@ export async function POST(request: Request): Promise<Response> {
     return jsonError("Missing browser session cookie.", 401);
   }
 
-  const body = (await request.json()) as ChatRequestBody;
-  const messages = body.messages ?? [];
-  const modelMessages = selectMessagesForModel(messages);
-  const context = await loadAthleteContext(request, token);
+  const UNAVAILABLE = "Coach is unavailable right now. Please try again.";
 
-  const tavilyApiKey = process.env["TAVILY_API_KEY"];
-  const tavilyTools: ToolSet = tavilyApiKey
-    ? await createMCPClient({
-        transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
-      }).then((c) => c.tools())
-    : {};
+  try {
+    const body = (await request.json()) as ChatRequestBody;
+    const messages = body.messages ?? [];
+    const modelMessages = selectMessagesForModel(messages);
+    const context = await loadAthleteContext(request, token);
 
-  const result = streamText({
-    model: openai("gpt-5-mini"),
-    system: buildCoachSystemPrompt(context),
-    messages: await convertToModelMessages(modelMessages),
-    tools: {
-      ...createCoachTools({
-        accessToken: token.access_token,
-        baseUrl: requestOrigin(request),
-      }),
-      ...tavilyTools,
-    },
-  });
+    const tavilyApiKey = process.env["TAVILY_API_KEY"];
+    const tavilyTools: ToolSet = tavilyApiKey
+      ? await createMCPClient({
+          transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
+        }).then((c) => c.tools())
+      : {};
 
-  return result.toUIMessageStreamResponse();
+    const result = streamText({
+      model: openai("gpt-5-mini"),
+      system: buildCoachSystemPrompt(context),
+      messages: await convertToModelMessages(modelMessages),
+      tools: {
+        ...createCoachTools({
+          accessToken: token.access_token,
+          baseUrl: requestOrigin(request),
+          extraHeaders: vercelProtectionBypassHeaders(),
+        }),
+        ...tavilyTools,
+      },
+      onError: ({ error }) => {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error("[chat] stream error:", msg.replace(/key=[^&\s]+/g, "key=***"));
+      },
+    });
+
+    return result.toUIMessageStreamResponse({
+      onError: () => UNAVAILABLE,
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("[chat] POST error:", msg.replace(/key=[^&\s]+/g, "key=***"));
+    return new Response(UNAVAILABLE, { status: 503 });
+  }
 }
