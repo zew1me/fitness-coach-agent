@@ -59,9 +59,7 @@ def _build_auth_site_url(settings: BootstrapSettings, env: str, vercel_domain: s
     return f"https://{vercel_domain}" if vercel_domain else ""
 
 
-def _build_auth_redirect_urls(
-    settings: BootstrapSettings, env: str, vercel_domain: str
-) -> list[str]:
+def _build_auth_redirect_urls(env: str, vercel_domain: str) -> list[str]:
     """Return extra allowed redirect URLs for Supabase auth configuration."""
     urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
     if env == "preview":
@@ -107,7 +105,7 @@ def _setup_supabase(  # noqa: PLR0913
         sb.configure_auth_settings(
             project_ref,
             site_url=_build_auth_site_url(settings, env, vercel_domain),
-            extra_redirect_urls=_build_auth_redirect_urls(settings, env, vercel_domain),
+            extra_redirect_urls=_build_auth_redirect_urls(env, vercel_domain),
         )
         migration_db_password = db_pass or state.get("supabase_db_password") or env_db_password
         keys = configured_keys or sb.get_api_keys(project_ref, use_cli=bool(existing_ref))
