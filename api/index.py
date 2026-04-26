@@ -70,7 +70,7 @@ RECOVERY_WEEK_AGE_BREAKPOINT = 40
 
 
 @app.on_event("startup")
-async def _log_startup() -> None:
+async def log_startup() -> None:
     """Emit startup diagnostics so it is clear which optional features are active."""
     features = {
         "openai": bool(settings.openai_api_key),
