@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from uuid import uuid4
@@ -12,6 +13,8 @@ from starlette.concurrency import run_in_threadpool
 
 from backend.config import settings
 from backend.models.storage import PresignUploadRequest, PresignUploadResponse
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EXPIRATION_SECONDS = 900
 
@@ -60,6 +63,7 @@ class R2Service:
             Body=file_stream,
             ContentType=content_type,
         )
+        logger.info("r2 upload complete user_id=%s key=%s", user_id, object_key)
 
         return PresignUploadResponse(
             upload_url="",  # Not used for direct uploads
@@ -74,13 +78,16 @@ class R2Service:
         self._ensure_configured()
         self._validate_object_key_scope(user_id=user_id, object_key=object_key)
         client = self._get_client()
+        logger.debug("r2 download start user_id=%s key=%s", user_id, object_key)
         response = await run_in_threadpool(
             client.get_object,
             Bucket=settings.r2_bucket,
             Key=object_key,
         )
         body = response["Body"]
-        return await run_in_threadpool(body.read)
+        data = await run_in_threadpool(body.read)
+        logger.debug("r2 download done user_id=%s key=%s bytes=%d", user_id, object_key, len(data))
+        return data
 
     def _get_client(self) -> BaseClient:
         if self._client is None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 from urllib.parse import urlencode, urlparse
@@ -20,6 +21,8 @@ from backend.models.auth import (
     UserContext,
 )
 from backend.repos.oauth_repo import OAuthRepository, OAuthRepositoryNotConfiguredError
+
+logger = logging.getLogger(__name__)
 
 
 class OAuthError(ValueError):
@@ -155,6 +158,12 @@ class AuthService:
             code_challenge=request.code_challenge or "",
             code_challenge_method=request.code_challenge_method or "",
         )
+        logger.info(
+            "oauth consent approved user_id=%s client_id=%s scopes=%s",
+            browser_session.user_id,
+            request.client_id,
+            scopes,
+        )
         return self._append_redirect_query(
             request.redirect_uri, {"code": code, "state": request.state or ""}
         )
@@ -245,10 +254,14 @@ class AuthService:
 
     def revoke(self, request: OAuthRevokeRequest) -> bool:
         if request.token_type_hint == "refresh_token":
-            return self._oauth_repo.revoke_refresh_token(request.token)
+            revoked = self._oauth_repo.revoke_refresh_token(request.token)
+            logger.info("oauth refresh_token revoked=%s", revoked)
+            return revoked
         grant_id = self._decode_access_token_grant_id(request.token)
         if grant_id is not None:
-            return self._oauth_repo.revoke_grant(grant_id)
+            revoked = self._oauth_repo.revoke_grant(grant_id)
+            logger.info("oauth grant revoked grant_id=%s revoked=%s", grant_id, revoked)
+            return revoked
         return self._oauth_repo.revoke_refresh_token(request.token)
 
     def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
