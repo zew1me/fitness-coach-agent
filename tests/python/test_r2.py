@@ -55,3 +55,21 @@ def test_blank_endpoint_url_falls_back_to_account_id(monkeypatch) -> None:
     endpoint_url = service._resolve_endpoint_url()
 
     assert endpoint_url == "https://account-123.r2.cloudflarestorage.com"
+
+
+def test_get_client_reuses_built_client(monkeypatch) -> None:
+    service = R2Service()
+    built_clients = []
+
+    def build_client():
+        client = object()
+        built_clients.append(client)
+        return client
+
+    monkeypatch.setattr(service, "_build_client", build_client)
+
+    first_client = service._get_client()
+    second_client = service._get_client()
+
+    assert first_client is second_client
+    assert built_clients == [first_client]
