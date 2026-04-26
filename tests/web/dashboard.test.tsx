@@ -273,8 +273,12 @@ describe("CoachChat", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Show 10 older messages/i }));
 
-    expect(screen.getByText("History message 0")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Show older messages/i })).toBeNull();
+    await waitFor(() => {
+      expect(screen.getByText("History message 0")).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /Show older messages/i })).toBeNull();
+    });
   });
 
   it("restores locally persisted chat history when the local thread endpoint is unavailable", async () => {
