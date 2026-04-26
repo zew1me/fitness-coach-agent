@@ -4,6 +4,19 @@ import httpx
 
 _VERCEL_BASE = "https://api.vercel.com"
 
+# Environment variable keys that contain secrets and must be marked sensitive.
+# Sensitive vars are write-only in the Vercel dashboard (values are never shown).
+SENSITIVE_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "APP_JWT_SECRET",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "OPENAI_API_KEY",
+        "TAVILY_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+    }
+)
+
 
 class VercelClient:
     def __init__(self, token: str, project_id: str, team_id: str, dry_run: bool = False) -> None:
@@ -91,6 +104,8 @@ class VercelClient:
 
         target should be ["preview"] or ["production"].
         Idempotent: fetches existing vars and PATCHes by ID rather than creating duplicates.
+        Keys listed in SENSITIVE_ENV_KEYS are stored as type "sensitive" so their values
+        are write-only in the Vercel dashboard.
         """
         existing_vars = self._env_vars()
 
@@ -104,22 +119,26 @@ class VercelClient:
         updated = 0
 
         for key, value in vars.items():
+            is_sensitive = key in SENSITIVE_ENV_KEYS
+            var_type = "sensitive" if is_sensitive else "encrypted"
             for scope in target:
                 env_id = existing_lookup.get((key, scope))
                 if env_id:
                     if self._dry_run:
-                        print(f"  [dry-run] Would update {key} ({scope})")
+                        label = "sensitive" if is_sensitive else "encrypted"
+                        print(f"  [dry-run] Would update {key} ({scope}) [{label}]")
                     else:
                         patch = self._http.patch(
                             f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env/{env_id}",
-                            json={"value": value, "target": [scope]},
+                            json={"value": value, "target": [scope], "type": var_type},
                             params=self._params(),
                         )
                         patch.raise_for_status()
                     updated += 1
                 else:
                     if self._dry_run:
-                        print(f"  [dry-run] Would create {key} ({scope})")
+                        label = "sensitive" if is_sensitive else "encrypted"
+                        print(f"  [dry-run] Would create {key} ({scope}) [{label}]")
                     else:
                         post = self._http.post(
                             f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env",
@@ -127,7 +146,7 @@ class VercelClient:
                                 "key": key,
                                 "value": value,
                                 "target": [scope],
-                                "type": "encrypted",
+                                "type": var_type,
                             },
                             params=self._params(),
                         )
