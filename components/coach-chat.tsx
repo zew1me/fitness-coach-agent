@@ -420,6 +420,7 @@ export function CoachChat(): JSX.Element {
   const [composer, setComposer] = useState("");
   const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_RENDER_BATCH_SIZE);
   const [sending, setSending] = useState(false);
+  const [syncingThread, setSyncingThread] = useState(false);
   const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -440,6 +441,7 @@ export function CoachChat(): JSX.Element {
       credentials: "include",
     }),
   });
+  const composerBusy = sending || syncingThread;
   const displayedMessages = useMemo<ChatMessage[]>(() => {
     if (threadState.data === null || session.token === null) {
       return [];
@@ -568,7 +570,7 @@ export function CoachChat(): JSX.Element {
   }, [attachments]);
 
   async function handleSend(): Promise<void> {
-    if (sending || threadState.data === null) {
+    if (composerBusy || threadState.data === null) {
       return;
     }
     if (composer.trim().length === 0 && attachments.length === 0) {
@@ -591,6 +593,8 @@ export function CoachChat(): JSX.Element {
       await sendMessage({
         parts: [{ type: "text", text: pendingComposer }, ...uploadedFileParts(pendingAttachments)],
       });
+      setSending(false);
+      setSyncingThread(true);
       try {
         const thread = await loadChatThread();
         setThreadState({ data: hydrateLocalChatThread(thread, token.user_id), error: null, loading: false });
@@ -598,12 +602,17 @@ export function CoachChat(): JSX.Element {
         setThreadState((current) => ({
           ...current,
           error: "Message sent, but the thread failed to refresh. Reload to see the latest.",
+          loading: false,
         }));
+      } finally {
+        setSyncingThread(false);
       }
     } catch (error) {
+      setSyncingThread(false);
       setThreadState((current) => ({
         ...current,
         error: error instanceof Error ? error.message : "Unable to send your message.",
+        loading: false,
       }));
     } finally {
       setSending(false);
@@ -997,15 +1006,15 @@ export function CoachChat(): JSX.Element {
               ) : null}
 
               <div className={styles.composerRow}>
-	                <label
-	                  aria-label="Add photo"
-	                  className={sending ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}
-	                  title="Add photo or activity file"
-	                >
-	                  <input
-	                    accept={CHAT_ATTACHMENT_ACCEPT}
+                <label
+                  aria-label="Add photo"
+                  className={composerBusy ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}
+                  title="Add photo or activity file"
+                >
+                  <input
+                    accept={CHAT_ATTACHMENT_ACCEPT}
                     className={styles.hiddenInput}
-                    disabled={sending}
+                    disabled={composerBusy}
                     multiple
                     onChange={(event) => {
                       void handleFileSelect(event);
@@ -1031,17 +1040,21 @@ export function CoachChat(): JSX.Element {
                 />
                 <button
                   className={styles.sendButton}
-                  disabled={sending || (composer.trim().length === 0 && attachments.length === 0)}
+                  disabled={composerBusy || (composer.trim().length === 0 && attachments.length === 0)}
                   onClick={() => {
                     void handleSend();
                   }}
                   type="button"
                 >
-                  {sending ? "Sending..." : "Send"}
+                  {syncingThread ? "Syncing" : sending ? "Sending..." : "Send"}
                 </button>
               </div>
               <div className={styles.composerHint}>
-                {sending ? (
+                {syncingThread ? (
+                  <span aria-live="polite" className={styles.waitingStatus} role="status">
+                    Syncing coach chat...
+                  </span>
+                ) : sending ? (
                   <span aria-live="polite" className={styles.waitingStatus} role="status">
                     {WAITING_STATUSES[waitingStatusIndex]}
                   </span>
