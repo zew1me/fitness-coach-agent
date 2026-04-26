@@ -203,7 +203,16 @@ def _setup_r2(
         if not dry_run:
             save_state(env, state)
 
-        public_base_url = cf.get_public_base_url(bucket_name)
+        configured_public_base_url = (
+            settings.r2_public_base_url_preview
+            if env == "preview"
+            else settings.r2_public_base_url_prod
+        )
+        if configured_public_base_url:
+            print(f"  Using R2 public base URL from .env.bootstrap: {configured_public_base_url}")
+            public_base_url = configured_public_base_url
+        else:
+            public_base_url = cf.get_public_base_url(bucket_name)
         endpoint_url = cf.endpoint_url()
     finally:
         cf.close()
