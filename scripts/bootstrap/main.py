@@ -59,8 +59,8 @@ def _build_auth_redirect_urls(
     urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
     if env == "preview":
         urls.append("https://*.vercel.app/**")
-    elif vercel_domain and ".vercel.app" in vercel_domain and not settings.production_domain:
-        urls.append(f"https://{vercel_domain}/**")
+        if vercel_domain:
+            urls.append(f"https://{vercel_domain}/**")
     return urls
 
 
