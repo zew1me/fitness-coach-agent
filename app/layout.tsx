@@ -1,3 +1,4 @@
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import type { Metadata } from "next";
 import type { JSX, ReactNode } from "react";
 
@@ -5,7 +6,6 @@ import "./globals.css";
 
 import { AppShell } from "../components/app-shell";
 import { siteConfig } from "../lib/site";
-import "./globals.css";
 
 export const metadata: Metadata = {
   title: siteConfig.appName,
@@ -39,6 +39,7 @@ export default function RootLayout({ children }: RootLayoutProps): JSX.Element {
       </head>
       <body>
         <AppShell>{children}</AppShell>
+        <SpeedInsights />
       </body>
     </html>
   );
