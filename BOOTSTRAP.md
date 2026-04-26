@@ -66,7 +66,7 @@ Bootstrap intentionally leaves R2 bucket CORS unconfigured. Browser clients shou
 Bootstrap automatically configures the Supabase project's auth settings via the Management API when `SUPABASE_ACCESS_TOKEN` is set:
 
 - **Site URL** — set to your production domain or the Vercel project's stable alias.
-- **Redirect URLs** — `https://*.vercel.app/**` is added for preview environments; `http://localhost:3000/**` and `http://localhost:3001/**` are included for local development.
+- **Redirect URLs** — `https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**` and the Vercel project's exact stable alias are added for preview environments; `http://localhost:3000/**` and `http://localhost:3001/**` are included for local development.
 - **Email confirmation** — disabled (`MAILER_AUTOCONFIRM=true`) so first-time signups receive a 6-digit OTP code directly, matching the login page UI.
 
 If `SUPABASE_ACCESS_TOKEN` is not set (e.g. existing projects using CLI login), bootstrap prints the values to configure manually in the Supabase dashboard:

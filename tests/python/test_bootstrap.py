@@ -565,11 +565,12 @@ def test_build_auth_site_url_prod_prefers_custom_domain() -> None:
     assert url == "https://app.example.com"
 
 
-def test_build_auth_redirect_urls_preview_includes_wildcard() -> None:
+def test_build_auth_redirect_urls_preview_includes_scoped_wildcard_and_domain() -> None:
     settings = _settings()
     domain = "fitness-coach-agent.vercel.app"
     urls = bootstrap_main._build_auth_redirect_urls(settings, "preview", domain)
-    assert "https://*.vercel.app/**" in urls
+    assert "https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**" in urls
+    assert "https://fitness-coach-agent.vercel.app/**" in urls
     assert "http://localhost:3000/**" in urls
 
 
