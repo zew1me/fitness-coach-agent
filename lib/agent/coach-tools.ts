@@ -5,6 +5,7 @@ import { coachToolDefinitions } from "./tools";
 export type CoachToolContext = {
   accessToken: string;
   baseUrl: string;
+  extraHeaders?: Record<string, string>;
   fetchImpl?: typeof fetch;
 };
 
@@ -18,6 +19,7 @@ async function postEngine<TInput extends object>(
     headers: {
       Authorization: `Bearer ${context.accessToken}`,
       "Content-Type": "application/json",
+      ...(context.extraHeaders ?? {}),
     },
     body: JSON.stringify(input),
   });

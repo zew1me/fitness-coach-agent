@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from fastapi import HTTPException
 
@@ -85,3 +87,28 @@ def test_get_client_reuses_built_client(monkeypatch) -> None:
 
     assert first_client is second_client
     assert built_clients == [first_client]
+
+
+@pytest.mark.asyncio
+async def test_download_file_logs_key_ref_not_storage_path(monkeypatch, caplog) -> None:
+    class Body:
+        def read(self) -> bytes:
+            return b"activity"
+
+    class Client:
+        def get_object(self, **kwargs):
+            return {"Body": Body()}
+
+    service = R2Service(client=Client())
+    object_key = "users/user-123/check-in-image/2026/04/26/private-race-file.gpx"
+    monkeypatch.setattr("backend.services.r2.settings.r2_access_key_id", "access-key")
+    monkeypatch.setattr("backend.services.r2.settings.r2_secret_access_key", "secret-key")
+    monkeypatch.setattr("backend.services.r2.settings.r2_bucket", "bucket")
+    caplog.set_level(logging.DEBUG, logger="backend.services.r2")
+
+    data = await service.download_file_bytes(user_id="user-123", object_key=object_key)
+
+    assert data == b"activity"
+    assert object_key not in caplog.text
+    assert "private-race-file" not in caplog.text
+    assert f"key_ref={service._object_key_log_ref(object_key)}" in caplog.text

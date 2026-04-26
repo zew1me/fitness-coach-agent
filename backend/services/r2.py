@@ -83,7 +83,8 @@ class R2Service:
         self._ensure_configured()
         self._validate_object_key_scope(user_id=user_id, object_key=object_key)
         client = self._get_client()
-        logger.debug("r2 download start user_id=%s key=%s", user_id, object_key)
+        key_ref = self._object_key_log_ref(object_key)
+        logger.debug("r2 download start user_id=%s key_ref=%s", user_id, key_ref)
         response = await run_in_threadpool(
             client.get_object,
             Bucket=settings.r2_bucket,
@@ -91,7 +92,7 @@ class R2Service:
         )
         body = response["Body"]
         data = await run_in_threadpool(body.read)
-        logger.debug("r2 download done user_id=%s key=%s bytes=%d", user_id, object_key, len(data))
+        logger.debug("r2 download done user_id=%s key_ref=%s bytes=%d", user_id, key_ref, len(data))
         return data
 
     def _get_client(self) -> BaseClient:

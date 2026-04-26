@@ -31,6 +31,11 @@ function requestOrigin(request: Request): string {
   return `${url.protocol}//${url.host}`;
 }
 
+function vercelProtectionBypassHeaders(): Record<string, string> {
+  const bypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
+  return bypassSecret ? { "x-vercel-protection-bypass": bypassSecret } : {};
+}
+
 async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse | null> {
   const cookie = request.headers.get("cookie");
   if (!cookie?.includes("coach_browser_session=")) {
@@ -39,7 +44,7 @@ async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse 
 
   const response = await fetch(`${requestOrigin(request)}/api/oauth/browser-token`, {
     method: "POST",
-    headers: { cookie }
+    headers: { cookie, ...vercelProtectionBypassHeaders() }
   });
   if (!response.ok) {
     return null;
@@ -55,7 +60,8 @@ async function loadAthleteContext(
     method: "POST",
     headers: {
       Authorization: `Bearer ${token.access_token}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...vercelProtectionBypassHeaders()
     },
     body: JSON.stringify({})
   });
@@ -102,6 +108,7 @@ export async function POST(request: Request): Promise<Response> {
         ...createCoachTools({
           accessToken: token.access_token,
           baseUrl: requestOrigin(request),
+          extraHeaders: vercelProtectionBypassHeaders(),
         }),
         ...tavilyTools,
       },

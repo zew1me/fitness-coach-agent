@@ -7,9 +7,15 @@ import { createCoachTools } from "../../lib/agent/coach-tools";
 import { selectMessagesForModel } from "../../lib/agent/message-context";
 
 const originalFetch = globalThis.fetch;
+const originalVercelBypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalVercelBypassSecret === undefined) {
+    delete process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
+  } else {
+    process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] = originalVercelBypassSecret;
+  }
 });
 
 describe("app/api/chat route", () => {
@@ -69,6 +75,7 @@ describe("app/api/chat route", () => {
   });
 
   it("returns a bounded 503 when the browser token proxy connection resets", async () => {
+    process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] = "preview-bypass";
     const error = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
     const fetchMock = vi.fn(() => Promise.reject(error));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -88,6 +95,10 @@ describe("app/api/chat route", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/oauth/browser-token",
       expect.objectContaining({
+        headers: {
+          cookie: "coach_browser_session=session-token",
+          "x-vercel-protection-bypass": "preview-bypass"
+        },
         method: "POST"
       })
     );
