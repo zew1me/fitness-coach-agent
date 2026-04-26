@@ -79,30 +79,35 @@ export async function POST(request: Request): Promise<Response> {
     return jsonError("Missing browser session cookie.", 401);
   }
 
-  const body = (await request.json()) as ChatRequestBody;
-  const messages = body.messages ?? [];
-  const modelMessages = selectMessagesForModel(messages);
-  const context = await loadAthleteContext(request, token);
+  try {
+    const body = (await request.json()) as ChatRequestBody;
+    const messages = body.messages ?? [];
+    const modelMessages = selectMessagesForModel(messages);
+    const context = await loadAthleteContext(request, token);
 
-  const tavilyApiKey = process.env["TAVILY_API_KEY"];
-  const tavilyTools: ToolSet = tavilyApiKey
-    ? await createMCPClient({
-        transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
-      }).then((c) => c.tools())
-    : {};
+    const tavilyApiKey = process.env["TAVILY_API_KEY"];
+    const tavilyTools: ToolSet = tavilyApiKey
+      ? await createMCPClient({
+          transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
+        }).then((c) => c.tools())
+      : {};
 
-  const result = streamText({
-    model: openai("gpt-5-mini"),
-    system: buildCoachSystemPrompt(context),
-    messages: await convertToModelMessages(modelMessages),
-    tools: {
-      ...createCoachTools({
-        accessToken: token.access_token,
-        baseUrl: requestOrigin(request),
-      }),
-      ...tavilyTools,
-    },
-  });
+    const result = streamText({
+      model: openai("gpt-5-mini"),
+      system: buildCoachSystemPrompt(context),
+      messages: await convertToModelMessages(modelMessages),
+      tools: {
+        ...createCoachTools({
+          accessToken: token.access_token,
+          baseUrl: requestOrigin(request),
+        }),
+        ...tavilyTools,
+      },
+    });
 
-  return result.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse();
+  } catch (error) {
+    console.error("[chat] POST error:", error);
+    return jsonError("Coach is unavailable right now. Please try again.", 503);
+  }
 }
