@@ -106,7 +106,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const getAthleteContext = tools["get_athlete_context"] as {
@@ -137,7 +136,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const getActivePlan = tools["get_active_plan"] as {
@@ -168,7 +166,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const getRecentActivities = tools["get_recent_activities"] as {
@@ -187,8 +184,7 @@ describe("app/api/chat route", () => {
       expect.objectContaining({
         body: JSON.stringify({
           limit: 3,
-          sport: "running",
-          user_id: "athlete-1"
+          sport: "running"
         }),
         method: "POST"
       })
@@ -208,7 +204,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const calculateZones = tools["calculate_zones"] as {
@@ -247,7 +242,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const estimateThresholds = tools["estimate_thresholds"] as {
@@ -288,7 +282,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const generateTrainingPlan = tools["generate_training_plan"] as {
@@ -305,8 +298,7 @@ describe("app/api/chat route", () => {
       "http://localhost/api/engine/generate-plan-structure",
       expect.objectContaining({
         body: JSON.stringify({
-          goal_id: "goal-1",
-          user_id: "athlete-1"
+          goal_id: "goal-1"
         }),
         method: "POST"
       })
@@ -326,7 +318,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const processUploadedFile = tools["process_uploaded_file"] as {
@@ -366,7 +357,6 @@ describe("app/api/chat route", () => {
       accessToken: "token-1",
       baseUrl: "http://localhost",
       fetchImpl: fetchMock as unknown as typeof fetch,
-      userId: "athlete-1"
     });
 
     const processUploadedFile = tools["process_uploaded_file"] as {
@@ -391,8 +381,7 @@ describe("app/api/chat route", () => {
           content_type: "application/gpx+xml",
           filename: "morning-run.gpx",
           object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
-          public_url: "https://example.com/morning-run.gpx",
-          user_id: "athlete-1"
+          public_url: "https://example.com/morning-run.gpx"
         }),
         method: "POST"
       })

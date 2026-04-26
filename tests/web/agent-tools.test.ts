@@ -60,7 +60,6 @@ describe("coachToolDefinitions", () => {
       accessToken: "token",
       baseUrl: "https://coach.test",
       fetchImpl,
-      userId: "athlete-1",
     });
 
     await (
@@ -82,7 +81,6 @@ describe("coachToolDefinitions", () => {
             dietary_restrictions: ["vegetarian"],
             onboarding_collected: { nutrition: true },
           },
-          user_id: "athlete-1",
         },
         url: "https://coach.test/api/engine/update-athlete-profile",
       },

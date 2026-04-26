@@ -301,9 +301,7 @@ class FakeAuthService(AuthService):
 async def test_protected_profile_requires_bearer_token() -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/api/engine/get-athlete-summary", json={"user_id": "athlete-1"}
-        )
+        response = await client.post("/api/engine/get-athlete-summary")
 
     assert response.status_code == 401
 
@@ -1149,7 +1147,6 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-1"},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1160,29 +1157,6 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
     assert body["current_load"]["ctl"] == 42
     assert body["goals"][0]["course_distance_meters"] == 14_000
     assert body["ctl_ceiling_guidance"]["committed_amateur_ctl"] > 0
-
-
-@pytest.mark.asyncio
-async def test_get_athlete_summary_rejects_cross_user_access(monkeypatch) -> None:
-    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
-        user_id="athlete-1",
-        scopes=["profile:read"],
-        client_id="test-client",
-        grant_id="grant-1",
-    )
-    monkeypatch.setattr(api_index, "repo", EngineRepository())
-
-    transport = ASGITransport(app=api_index.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-2"},
-        )
-
-    api_index.app.dependency_overrides.clear()
-
-    assert response.status_code == 403
-    assert "cannot access this resource" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -1216,7 +1190,7 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-recent-activities",
-            json={"limit": 2, "sport": "running", "user_id": "athlete-1"},
+            json={"limit": 2, "sport": "running"},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1244,7 +1218,7 @@ async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/generate-plan-structure",
-            json={"user_id": "athlete-1"},
+            json={},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1277,7 +1251,6 @@ async def test_get_athlete_summary_new_user_returns_onboarding_stub(monkeypatch)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-new"},
         )
 
     api_index.app.dependency_overrides.clear()
@@ -1364,7 +1337,6 @@ async def test_get_athlete_summary_includes_nutrition_fields(monkeypatch) -> Non
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/get-athlete-summary",
-            json={"user_id": "athlete-1"},
         )
 
     api_index.app.dependency_overrides.clear()

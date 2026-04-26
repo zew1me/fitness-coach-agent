@@ -78,14 +78,6 @@ def require_user_context(authorization: str | None = Header(default=None)) -> Us
         raise HTTPException(status_code=401, detail="Invalid bearer token") from exc
 
 
-def enforce_user_access(requested_user_id: str, user_context: UserContext) -> None:
-    if requested_user_id != user_context.user_id:
-        raise HTTPException(
-            status_code=403,
-            detail="Authenticated user cannot access this resource.",
-        )
-
-
 # ── Health ────────────────────────────────────────────────────
 
 
@@ -467,7 +459,6 @@ async def estimate_thresholds_endpoint(
 
 
 class RecomputeLoadRequest(BaseModel):
-    user_id: str
     since: date | None = None
     sport: str | None = None
 
@@ -479,24 +470,21 @@ async def recompute_load_endpoint(
 ) -> Mapping[str, object]:
     from backend.engine.training_load import recompute_load_series
 
-    enforce_user_access(payload.user_id, user_context)
-
+    user_id = user_context.user_id
     since = payload.since or date.today()
-    activities = await repo.list_activities(
-        payload.user_id, sport=payload.sport, since=since, limit=500
-    )
+    activities = await repo.list_activities(user_id, sport=payload.sport, since=since, limit=500)
 
     daily_tss: dict[date, float] = {}
     for a in activities:
         daily_tss[a.activity_date] = daily_tss.get(a.activity_date, 0) + (a.tss or 0)
 
-    prev = await repo.get_latest_load(payload.user_id, sport=payload.sport)
+    prev = await repo.get_latest_load(user_id, sport=payload.sport)
     initial_ctl = prev.ctl if prev else 0.0
     initial_atl = prev.atl if prev else 0.0
 
     snapshots = recompute_load_series(daily_tss, since, date.today(), initial_ctl, initial_atl)
 
-    await repo.upsert_load_snapshots(payload.user_id, snapshots, sport=payload.sport)
+    await repo.upsert_load_snapshots(user_id, snapshots, sport=payload.sport)
 
     latest = snapshots[-1] if snapshots else {}
     return {
@@ -516,7 +504,6 @@ class ProcessUploadedFileRequest(BaseModel):
     filename: str
     object_key: str
     public_url: str | None = None
-    user_id: str
 
 
 @app.post("/api/engine/analyze-screenshot")
@@ -635,30 +622,24 @@ def _build_fitness_metrics(
     return metrics
 
 
-class GetAthleteSummaryRequest(BaseModel):
-    user_id: str
-
-
 @app.post("/api/engine/get-athlete-summary")
 async def get_athlete_summary(
-    payload: GetAthleteSummaryRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    enforce_user_access(payload.user_id, user_context)
-
     from backend.engine.thresholds import estimate_ctl_ceiling
 
+    user_id = user_context.user_id
     try:
-        profile = await repo.get_athlete_profile(payload.user_id)
+        profile = await repo.get_athlete_profile(user_id)
     except RecordNotFoundError:
-        profile = _AthleteProfile(user_id=payload.user_id, coaching_state="onboarding")
+        profile = _AthleteProfile(user_id=user_id, coaching_state="onboarding")
 
-    thresholds = await repo.get_active_thresholds(payload.user_id)
-    goals = await repo.list_active_goals(payload.user_id)
-    latest_load = await repo.get_latest_load(payload.user_id)
-    recovery = await repo.list_recovery_logs(payload.user_id, limit=7)
-    schedule = await repo.get_schedule(payload.user_id)
-    active_plan = await repo.get_active_plan(payload.user_id)
+    thresholds = await repo.get_active_thresholds(user_id)
+    goals = await repo.list_active_goals(user_id)
+    latest_load = await repo.get_latest_load(user_id)
+    recovery = await repo.list_recovery_logs(user_id, limit=7)
+    schedule = await repo.get_schedule(user_id)
+    active_plan = await repo.get_active_plan(user_id)
 
     age = profile.age
     ctl_ceiling = estimate_ctl_ceiling(age, profile.biological_sex or "not_specified")
@@ -685,7 +666,6 @@ async def get_athlete_summary(
 
 
 class UpdateAthleteProfileRequest(BaseModel):
-    user_id: str
     fields: dict[str, object]
 
 
@@ -694,13 +674,11 @@ async def update_athlete_profile(
     payload: UpdateAthleteProfileRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    enforce_user_access(payload.user_id, user_context)
-    profile = await repo.update_athlete_profile_fields(payload.user_id, payload.fields)
+    profile = await repo.update_athlete_profile_fields(user_context.user_id, payload.fields)
     return profile.model_dump(mode="json")
 
 
 class GetRecentActivitiesRequest(BaseModel):
-    user_id: str
     sport: str | None = None
     limit: int = 20
 
@@ -710,10 +688,8 @@ async def get_recent_activities(
     payload: GetRecentActivitiesRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    enforce_user_access(payload.user_id, user_context)
-
     activities = await repo.list_activities(
-        payload.user_id,
+        user_context.user_id,
         sport=payload.sport,
         limit=min(max(payload.limit, 1), 100),
     )
@@ -722,7 +698,6 @@ async def get_recent_activities(
 
 
 class GeneratePlanStructureRequest(BaseModel):
-    user_id: str
     goal_id: str | None = None
 
 
@@ -734,11 +709,10 @@ async def generate_plan_structure(
     from backend.engine.periodization import build_plan_skeleton
     from backend.engine.thresholds import estimate_ctl_ceiling
 
-    enforce_user_access(payload.user_id, user_context)
-
-    profile = await repo.get_athlete_profile(payload.user_id)
-    goals = await repo.list_active_goals(payload.user_id)
-    latest_load = await repo.get_latest_load(payload.user_id)
+    user_id = user_context.user_id
+    profile = await repo.get_athlete_profile(user_id)
+    goals = await repo.list_active_goals(user_id)
+    latest_load = await repo.get_latest_load(user_id)
 
     target_goal = None
     if payload.goal_id:
@@ -778,7 +752,6 @@ async def generate_plan_structure(
 class ConfirmThresholdRequest(BaseModel):
     """Promote an estimated/file-derived sport threshold to user-confirmed."""
 
-    user_id: str
     sport: str  # cycling | running | swimming | ...
 
 
@@ -791,15 +764,13 @@ async def confirm_threshold(
 
     Sets estimation_method=manual, confidence=high, source=user.
     """
-    enforce_user_access(payload.user_id, user_context)
+    user_id = user_context.user_id
     client = repo._require_client()
     client.table("sport_thresholds").update(
         {"estimation_method": "manual", "confidence": "high", "source": "user"}
-    ).eq("user_id", payload.user_id).eq("sport", payload.sport).is_(
-        "superseded_at", "null"
-    ).execute()
+    ).eq("user_id", user_id).eq("sport", payload.sport).is_("superseded_at", "null").execute()
 
-    thresholds = await repo.get_active_thresholds(payload.user_id)
+    thresholds = await repo.get_active_thresholds(user_id)
     confirmed = next((t for t in thresholds if t.sport == payload.sport), None)
     return confirmed.model_dump(mode="json") if confirmed else {}
 
@@ -807,7 +778,6 @@ async def confirm_threshold(
 class ConfirmProfileMetricRequest(BaseModel):
     """Promote a profile-level estimated metric (max_hr, weight) to user-confirmed."""
 
-    user_id: str
     metric: str  # "max_hr" | "weight"
 
 
@@ -816,13 +786,12 @@ async def confirm_profile_metric(
     payload: ConfirmProfileMetricRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    enforce_user_access(payload.user_id, user_context)
     allowed_metrics = {"max_hr", "weight"}
     if payload.metric not in allowed_metrics:
         raise HTTPException(status_code=400, detail=f"metric must be one of {allowed_metrics}")
 
     source_field = f"{payload.metric}_source"
-    profile = await repo.update_athlete_profile_fields(payload.user_id, {source_field: "user"})
+    profile = await repo.update_athlete_profile_fields(user_context.user_id, {source_field: "user"})
     return profile.model_dump(mode="json")
 
 

@@ -6,7 +6,6 @@ export type CoachToolContext = {
   accessToken: string;
   baseUrl: string;
   fetchImpl?: typeof fetch;
-  userId: string;
 };
 
 async function postEngine<TInput extends object>(
@@ -31,9 +30,7 @@ async function postEngine<TInput extends object>(
 }
 
 async function getAthleteSummary(context: CoachToolContext): Promise<Record<string, unknown>> {
-  const summary = await postEngine(context, "/api/engine/get-athlete-summary", {
-    user_id: context.userId,
-  });
+  const summary = await postEngine(context, "/api/engine/get-athlete-summary", {});
 
   return summary !== null && typeof summary === "object" && !Array.isArray(summary)
     ? (summary as Record<string, unknown>)
@@ -45,6 +42,7 @@ function engineInput(input: unknown): Record<string, unknown> {
     return {};
   }
 
+  // Strip any user_id the LLM might include — the backend derives user identity from the bearer token.
   return Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([key]) => key !== "user_id"));
 }
 
@@ -84,7 +82,6 @@ function processUploadedFile(input: unknown, context: CoachToolContext): unknown
       filename,
       object_key: objectKey,
       public_url: publicUrl,
-      user_id: context.userId,
     });
   }
 
@@ -101,7 +98,6 @@ function updateAthleteProfile(input: unknown, context: CoachToolContext): unknow
 
   return postEngine(context, "/api/engine/update-athlete-profile", {
     fields,
-    user_id: context.userId,
   });
 }
 
@@ -119,10 +115,7 @@ function executeDeterministicEngineTool(
   }
 
   if (name === "generate_training_plan") {
-    return postEngine(context, "/api/engine/generate-plan-structure", {
-      ...engineInput(input),
-      user_id: context.userId,
-    });
+    return postEngine(context, "/api/engine/generate-plan-structure", engineInput(input));
   }
 
   return null;
@@ -140,10 +133,7 @@ function executeCoachTool(name: string, input: unknown, context: CoachToolContex
   }
 
   if (name === "get_recent_activities") {
-    return postEngine(context, "/api/engine/get-recent-activities", {
-      ...engineInput(input),
-      user_id: context.userId,
-    });
+    return postEngine(context, "/api/engine/get-recent-activities", engineInput(input));
   }
 
   if (name === "update_athlete_profile") {
