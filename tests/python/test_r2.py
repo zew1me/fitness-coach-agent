@@ -1,6 +1,8 @@
 import logging
+from typing import cast
 
 import pytest
+from botocore.client import BaseClient
 from fastapi import HTTPException
 
 from backend.models.storage import PresignUploadRequest
@@ -99,7 +101,7 @@ async def test_download_file_logs_key_ref_not_storage_path(monkeypatch, caplog) 
         def get_object(self, **kwargs):
             return {"Body": Body()}
 
-    service = R2Service(client=Client())
+    service = R2Service(client=cast(BaseClient, Client()))
     object_key = "users/user-123/check-in-image/2026/04/26/private-race-file.gpx"
     monkeypatch.setattr("backend.services.r2.settings.r2_access_key_id", "access-key")
     monkeypatch.setattr("backend.services.r2.settings.r2_secret_access_key", "secret-key")
