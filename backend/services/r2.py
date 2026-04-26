@@ -19,12 +19,15 @@ DEFAULT_EXPIRATION_SECONDS = 900
 class R2Service:
     """Issue presigned upload URLs for user-scoped R2 object keys."""
 
+    def __init__(self, *, client: BaseClient | None = None) -> None:
+        self._client = client
+
     def create_presigned_upload(
         self, *, user_id: str, request: PresignUploadRequest
     ) -> PresignUploadResponse:
         self._ensure_configured()
         object_key = self._build_object_key(user_id=user_id, request=request)
-        client = self._build_client()
+        client = self._get_client()
         upload_url = client.generate_presigned_url(
             ClientMethod="put_object",
             Params={
@@ -49,7 +52,7 @@ class R2Service:
         self._ensure_configured()
         self._validate_object_key_scope(user_id=user_id, object_key=object_key)
 
-        client = self._build_client()
+        client = self._get_client()
         await run_in_threadpool(
             client.put_object,
             Bucket=settings.r2_bucket,
@@ -70,7 +73,7 @@ class R2Service:
         """Download a user-scoped object from R2."""
         self._ensure_configured()
         self._validate_object_key_scope(user_id=user_id, object_key=object_key)
-        client = self._build_client()
+        client = self._get_client()
         response = await run_in_threadpool(
             client.get_object,
             Bucket=settings.r2_bucket,
@@ -78,6 +81,11 @@ class R2Service:
         )
         body = response["Body"]
         return await run_in_threadpool(body.read)
+
+    def _get_client(self) -> BaseClient:
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
 
     def _build_client(self) -> BaseClient:
         return boto3.client(
