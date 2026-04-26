@@ -32,6 +32,18 @@ def test_public_url_uses_configured_base(monkeypatch) -> None:
     assert public_url == "https://cdn.example.com/training/users/u/check-in-image/file.png"
 
 
+def test_object_key_log_ref_does_not_expose_storage_path() -> None:
+    service = R2Service()
+    object_key = "users/user-123/check-in-image/2026/04/26/private-race-file.gpx"
+
+    log_ref = service._object_key_log_ref(object_key)
+
+    assert len(log_ref) == 12
+    assert log_ref != object_key
+    assert "users/user-123" not in log_ref
+    assert "private-race-file" not in log_ref
+
+
 def test_blank_endpoint_url_without_account_id_is_missing_config(monkeypatch) -> None:
     service = R2Service()
     monkeypatch.setattr("backend.services.r2.settings.r2_endpoint_url", "")
