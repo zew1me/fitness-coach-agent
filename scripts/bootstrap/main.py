@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import sys
+from typing import Protocol
 
 from scripts.bootstrap.cloudflare_client import CloudflareClient
 from scripts.bootstrap.config import BootstrapSettings, load_settings
@@ -17,6 +18,12 @@ from scripts.bootstrap.supabase_client import SupabaseClient
 from scripts.bootstrap.vercel_client import VercelClient
 
 _MASK_CHARS = 4
+
+
+class VercelEnvSyncClient(Protocol):
+    def remove_env_vars(self, target: list[str], keys: list[str]) -> None: ...
+
+    def upsert_env_vars(self, target: list[str], vars: dict[str, str]) -> None: ...
 
 
 def _mask(value: str) -> str:
@@ -287,6 +294,15 @@ def _build_env_vars(  # noqa: PLR0913
     return vars
 
 
+def _sync_vercel_env_vars(
+    vercel: VercelEnvSyncClient, vercel_target: list[str], env_vars: dict[str, str]
+) -> None:
+    """Apply Vercel env vars and clear preview-only vars that must fall back at runtime."""
+    if vercel_target == ["preview"]:
+        vercel.remove_env_vars(vercel_target, ["APP_BASE_URL"])
+    vercel.upsert_env_vars(vercel_target, env_vars)
+
+
 def _print_summary(
     env: str, supabase: dict, r2: dict, app_base_url: str, vercel_target: list
 ) -> None:
@@ -346,7 +362,7 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
         app_base_url = _resolve_app_base_url(settings, env, vercel_domain)
         vercel_target = ["production"] if env == "prod" else ["preview"]
         env_vars = _build_env_vars(env, app_base_url, jwt_secret, supabase, r2, settings)
-        vercel.upsert_env_vars(vercel_target, env_vars)
+        _sync_vercel_env_vars(vercel, vercel_target, env_vars)
     finally:
         vercel.close()
 

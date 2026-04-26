@@ -66,13 +66,17 @@ Bootstrap intentionally leaves R2 bucket CORS unconfigured. Browser clients shou
 Bootstrap automatically configures the Supabase project's auth settings via the Management API when `SUPABASE_ACCESS_TOKEN` is set:
 
 - **Site URL** — set to your production domain or the Vercel project's stable alias.
-- **Redirect URLs** — `https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**` and the Vercel project's exact stable alias are added for preview environments; `http://localhost:3000/**` and `http://localhost:3001/**` are included for local development.
-- **Email confirmation** — disabled (`MAILER_AUTOCONFIRM=true`) so first-time signups receive a 6-digit OTP code directly, matching the login page UI.
+- **Redirect URLs** — `https://*.vercel.app/**` is added for preview environments; `http://localhost:3000/**` and `http://localhost:3001/**` are included for local development.
+- **Email confirmation** — disabled (`MAILER_AUTOCONFIRM=true`) so first-time signups receive the passwordless login email instead of the default signup confirmation.
+- **Email templates** — Magic Link and Confirm Signup templates include both `{{ .Token }}` for the 6-digit code and `{{ .ConfirmationURL }}` as a fallback link.
+- **Preview base URL** — `APP_BASE_URL` is removed from the Vercel Preview environment so preview deployments fall back to Vercel's per-deployment `VERCEL_URL`.
 
 If `SUPABASE_ACCESS_TOKEN` is not set (e.g. existing projects using CLI login), bootstrap prints the values to configure manually in the Supabase dashboard:
 
 - **Authentication → URL Configuration**: set Site URL and add redirect URL patterns
 - **Authentication → Providers → Email**: disable *Confirm email* so OTP codes are sent directly
+- **Authentication → Email Templates**: update Magic Link and Confirm Signup so the email body includes `{{ .Token }}` and `{{ .ConfirmationURL }}`
+- **Vercel → Project Settings → Environment Variables**: remove `APP_BASE_URL` from Preview; keep it only for Production
 
 R2 runtime credentials have a two-pass setup:
 
