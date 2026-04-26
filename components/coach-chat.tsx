@@ -591,8 +591,15 @@ export function CoachChat(): JSX.Element {
       await sendMessage({
         parts: [{ type: "text", text: pendingComposer }, ...uploadedFileParts(pendingAttachments)],
       });
-      const thread = await loadChatThread();
-      setThreadState({ data: hydrateLocalChatThread(thread, token.user_id), error: null, loading: false });
+      try {
+        const thread = await loadChatThread();
+        setThreadState({ data: hydrateLocalChatThread(thread, token.user_id), error: null, loading: false });
+      } catch {
+        setThreadState((current) => ({
+          ...current,
+          error: "Message sent, but the thread failed to refresh. Reload to see the latest.",
+        }));
+      }
     } catch (error) {
       setThreadState((current) => ({
         ...current,
