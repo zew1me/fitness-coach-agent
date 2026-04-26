@@ -17,16 +17,22 @@ async function appendBrowserSessionCookie(
   accessToken: string
 ): Promise<void> {
   const baseUrl = process.env["APP_BASE_URL"] ?? request.nextUrl.origin;
+  const fetchHeaders: Record<string, string> = { "Content-Type": "application/json" };
+  const bypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
+  if (bypassSecret) {
+    fetchHeaders["x-vercel-protection-bypass"] = bypassSecret;
+  }
   const sessionResponse = await fetch(`${baseUrl}/api/oauth/browser-session`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers: fetchHeaders,
     body: JSON.stringify({ access_token: accessToken })
   });
 
   if (!sessionResponse.ok) {
-    throw new Error("Unable to establish the OAuth browser session.");
+    const body = await sessionResponse.text().catch(() => "");
+    throw new Error(
+      `Unable to establish the OAuth browser session (${sessionResponse.status}${body ? `: ${body.slice(0, 200)}` : ""})`
+    );
   }
 
   const setCookieHeader = sessionResponse.headers.get("set-cookie");
