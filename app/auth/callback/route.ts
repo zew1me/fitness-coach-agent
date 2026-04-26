@@ -26,7 +26,10 @@ async function appendBrowserSessionCookie(
   });
 
   if (!sessionResponse.ok) {
-    throw new Error("Unable to establish the OAuth browser session.");
+    const body = await sessionResponse.text().catch(() => "");
+    throw new Error(
+      `Unable to establish the OAuth browser session (${sessionResponse.status}${body ? `: ${body.slice(0, 200)}` : ""})`
+    );
   }
 
   const setCookieHeader = sessionResponse.headers.get("set-cookie");
