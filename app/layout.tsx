@@ -1,7 +1,6 @@
+import { Analytics } from "@vercel/analytics/next";
 import type { Metadata } from "next";
 import type { JSX, ReactNode } from "react";
-
-import "./globals.css";
 
 import { AppShell } from "../components/app-shell";
 import { siteConfig } from "../lib/site";
@@ -39,6 +38,7 @@ export default function RootLayout({ children }: RootLayoutProps): JSX.Element {
       </head>
       <body>
         <AppShell>{children}</AppShell>
+        <Analytics />
       </body>
     </html>
   );
