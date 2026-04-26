@@ -16,7 +16,14 @@ async function appendBrowserSessionCookie(
   response: NextResponse,
   accessToken: string
 ): Promise<void> {
-  const baseUrl = process.env["APP_BASE_URL"] ?? request.nextUrl.origin;
+  // On Vercel preview deployments, always use the request origin so that the
+  // internal browser-session call targets the same deployment that served the
+  // auth callback.  APP_BASE_URL (if set) may point to the production URL,
+  // which would cause JWT validation to fail because the token was issued by
+  // the preview Supabase project.
+  const isPreview = process.env["VERCEL_ENV"] === "preview";
+  const baseUrl =
+    isPreview ? request.nextUrl.origin : (process.env["APP_BASE_URL"] ?? request.nextUrl.origin);
   const fetchHeaders: Record<string, string> = { "Content-Type": "application/json" };
   const bypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
   if (bypassSecret) {
