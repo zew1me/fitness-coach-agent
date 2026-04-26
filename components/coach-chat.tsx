@@ -582,28 +582,8 @@ export function CoachChat(): JSX.Element {
       if (token === null) {
         throw new Error("Unable to send without an active browser session.");
       }
-      const thread = threadState.data.thread;
       const pendingComposer = composer;
       const pendingAttachments = attachments;
-      const optimisticMessage: ChatMessage = {
-        id: `local-${Date.now()}`,
-        attachments: pendingAttachments
-          .filter((attachment) => attachment.status === "uploaded")
-          .map(({ content_type, filename, object_key, public_url }) => ({
-            content_type,
-            created_at: new Date().toISOString(),
-            filename,
-            object_key,
-            public_url,
-            user_id: token.user_id,
-          })),
-        content: pendingComposer,
-        created_at: new Date().toISOString(),
-        metadata: { message_kind: "user_turn" },
-        role: "user",
-        thread_id: thread.id,
-        user_id: token.user_id,
-      };
       // Clear immediately so the composer feels responsive before the network call.
       removePreviewUrls(pendingAttachments);
       setAttachments([]);
@@ -611,17 +591,8 @@ export function CoachChat(): JSX.Element {
       await sendMessage({
         parts: [{ type: "text", text: pendingComposer }, ...uploadedFileParts(pendingAttachments)],
       });
-      setThreadState({
-        data: {
-          ...threadState.data,
-          thread: {
-            ...thread,
-            messages: [...thread.messages, optimisticMessage],
-          },
-        },
-        error: null,
-        loading: false,
-      });
+      const thread = await loadChatThread();
+      setThreadState({ data: hydrateLocalChatThread(thread, token.user_id), error: null, loading: false });
     } catch (error) {
       setThreadState((current) => ({
         ...current,
