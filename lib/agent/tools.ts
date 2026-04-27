@@ -1,10 +1,8 @@
 import { z } from "zod";
 
-const userInputSchema = z.object({
-  user_id: z.string().min(1)
-});
+const userInputSchema = z.object({});
 
-const recentActivitiesInputSchema = userInputSchema.extend({
+const recentActivitiesInputSchema = z.object({
   limit: z.number().int().min(1).max(100).default(20),
   sport: z.string().min(1).optional()
 });
@@ -28,7 +26,6 @@ const thresholdInputSchema = z.object({
   sport: z.string().min(1),
   test_duration_minutes: z.number().int().positive().optional(),
   test_power_watts: z.number().int().positive().optional(),
-  user_id: z.string().min(1)
 });
 
 const zonesInputSchema = z.object({
@@ -40,12 +37,10 @@ const zonesInputSchema = z.object({
   lt2_pace_sec_km: z.number().int().positive().optional(),
   max_hr: z.number().int().positive().optional(),
   sport: z.string().min(1),
-  user_id: z.string().min(1)
 });
 
 const activityTextInputSchema = z.object({
   text: z.string().min(1),
-  user_id: z.string().min(1)
 });
 
 const uploadedFileInputSchema = z.object({
@@ -53,33 +48,28 @@ const uploadedFileInputSchema = z.object({
   filename: z.string().min(1),
   object_key: z.string().min(1),
   public_url: z.string().url().nullable().optional(),
-  user_id: z.string().min(1)
 });
 
 const recoveryInputSchema = z.object({
   entries: z.array(z.record(z.unknown())).min(1),
-  user_id: z.string().min(1)
 });
 
 const scheduleInputSchema = z.object({
   overrides: z.array(z.record(z.unknown())).optional(),
-  user_id: z.string().min(1),
   weekly_pattern: z.record(z.unknown()).optional()
 });
 
 const profileInputSchema = z.object({
   fields: z.record(z.unknown()),
-  user_id: z.string().min(1)
 });
 
-const planInputSchema = userInputSchema.extend({
+const planInputSchema = z.object({
   goal_id: z.string().min(1).optional()
 });
 
 const adjustPlanInputSchema = z.object({
   plan_id: z.string().min(1),
   reason: z.string().min(1),
-  user_id: z.string().min(1)
 });
 
 type ToolDefinition<TSchema extends z.ZodTypeAny> = {
@@ -118,7 +108,6 @@ export const coachToolDefinitions = {
       action: z.enum(["abandon", "complete", "create", "update"]),
       goal: goalSchema,
       goal_id: z.string().min(1).optional(),
-      user_id: z.string().min(1).optional()
     })
   ),
   update_athlete_profile: defineTool("Persist extracted athlete profile fields.", profileInputSchema),

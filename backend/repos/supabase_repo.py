@@ -72,6 +72,9 @@ class SupabaseRepository:
             "onboarding_collected",
             "dietary_restrictions",
             "nutrition_notes",
+            "notes",
+            "injuries_rehab",
+            "constraints",
             # Threshold source metadata (issue #54)
             "max_hr_source",
             "max_hr_measured_at",
@@ -82,6 +85,8 @@ class SupabaseRepository:
             "best_times",
         }
         safe_fields = {k: v for k, v in fields.items() if k in allowed}
+        if "primary_sports" in safe_fields and isinstance(safe_fields["primary_sports"], str):
+            safe_fields["primary_sports"] = [safe_fields["primary_sports"]]
         safe_fields["user_id"] = user_id
         response = (
             client.table("athlete_profiles").upsert(safe_fields, on_conflict="user_id").execute()
