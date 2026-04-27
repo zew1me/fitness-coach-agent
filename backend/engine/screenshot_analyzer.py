@@ -98,6 +98,34 @@ Return a JSON object:
 
 Use null for fields not visible. Do not guess."""
 
+EXTRACT_TRAINING_LOAD_CHART_PROMPT = """Extract data from this training load chart screenshot.
+It may show CTL/fitness, ATL/fatigue, TSB/form, training stress, or similar time-series lines.
+
+Return a JSON object:
+{
+  "date_range": {
+    "start": "YYYY-MM-DD",
+    "end": "YYYY-MM-DD"
+  },
+  "source_app_hint": "<app name or null>",
+  "x_axis_label": "<label or null>",
+  "y_axis_label": "<label or null>",
+  "series": [
+    {
+      "date": "YYYY-MM-DD",
+      "metric": "ctl|atl|tsb|tss|training_load|fatigue|fitness|form|other",
+      "label": "<visible series label>",
+      "value": <number>,
+      "confidence": <0.0-1.0>
+    }
+  ],
+  "visible_annotations": ["<short note for visible races, workouts, or labels>"]
+}
+
+Extract the visible date range and readable value points. Use null when dates or labels are not
+visible. Approximate values only when the chart axis/grid makes the value clear, and lower the
+confidence for approximate points. Do not guess hidden values."""
+
 
 @dataclass
 class ScreenshotClassification:
@@ -144,6 +172,7 @@ async def extract_from_screenshot(
     """Step 2: Extract structured data based on classification."""
     prompt_map = {
         "activity_single": EXTRACT_ACTIVITY_PROMPT,
+        "training_load_chart": EXTRACT_TRAINING_LOAD_CHART_PROMPT,
         "wellness_multi_day": EXTRACT_WELLNESS_MULTI_PROMPT,
         "wellness_single_day": EXTRACT_WELLNESS_SINGLE_PROMPT,
     }
