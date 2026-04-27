@@ -28,6 +28,7 @@
     "@ai-sdk/react": "^3.0.170",
     "@supabase/ssr": "^0.10.0",
     "@supabase/supabase-js": "^2.49.1",
+    "@vercel/analytics": "^2.0.1",
     "ai": "^6.0.168",
     "next": "^15.2.2",
     "react": "^19.0.0",
