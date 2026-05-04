@@ -3,7 +3,10 @@ import { openai } from "@ai-sdk/openai";
 import { convertToModelMessages, streamText, type ToolSet, type UIMessage } from "ai";
 
 import { createCoachTools } from "../../../lib/agent/coach-tools";
-import { selectMessagesForModel } from "../../../lib/agent/message-context";
+import {
+  appendImageExtractionsToMessages,
+  selectMessagesForModel
+} from "../../../lib/agent/message-context";
 import { buildCoachSystemPrompt } from "../../../lib/agent/system-prompt";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
 import { buildTavilyMcpUrl } from "../../../lib/site";
@@ -73,6 +76,36 @@ async function loadAthleteContext(
   return (await response.json()) as AthleteContextBundle;
 }
 
+async function extractImageContent(
+  request: Request,
+  token: BrowserTokenResponse,
+  imageUrl: string
+): Promise<{ data: unknown; screenshot_type: string } | null> {
+  try {
+    const response = await fetch(`${requestOrigin(request)}/api/engine/analyze-screenshot`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        "Content-Type": "application/json",
+        ...vercelProtectionBypassHeaders()
+      },
+      body: JSON.stringify({ image_url: imageUrl })
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as { data?: unknown; screenshot_type?: unknown };
+    return {
+      data: payload.data ?? {},
+      screenshot_type: typeof payload.screenshot_type === "string" ? payload.screenshot_type : "unknown"
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(request: Request): Promise<Response> {
   let token: BrowserTokenResponse | null;
   try {
@@ -90,7 +123,10 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const body = (await request.json()) as ChatRequestBody;
     const messages = body.messages ?? [];
-    const modelMessages = selectMessagesForModel(messages);
+    const modelMessages = await appendImageExtractionsToMessages(
+      selectMessagesForModel(messages),
+      ({ imageUrl }) => extractImageContent(request, token, imageUrl)
+    );
     const context = await loadAthleteContext(request, token);
 
     const tavilyApiKey = process.env["TAVILY_API_KEY"];

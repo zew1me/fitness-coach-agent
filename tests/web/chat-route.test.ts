@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
-import { selectMessagesForModel } from "../../lib/agent/message-context";
+import {
+  appendImageExtractionsToMessages,
+  selectMessagesForModel
+} from "../../lib/agent/message-context";
 
 const originalFetch = globalThis.fetch;
 const originalVercelBypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
@@ -58,6 +61,55 @@ describe("app/api/chat route", () => {
     expect(selected.slice(1).map((message) => message.id)).toEqual(
       messages.slice(16).map((message) => message.id)
     );
+  });
+
+  it("adds extracted image content to model context as text", async () => {
+    const messages = [
+      {
+        id: "message-with-image",
+        parts: [
+          { text: "Here is my chart.", type: "text" as const },
+          {
+            filename: "fitness-chart.png",
+            mediaType: "image/png",
+            type: "file" as const,
+            url: "https://example.com/fitness-chart.png"
+          }
+        ],
+        role: "user" as const
+      }
+    ];
+
+    const enriched = await appendImageExtractionsToMessages(messages, ({ imageUrl }) => {
+      expect(imageUrl).toBe("https://example.com/fitness-chart.png");
+      return Promise.resolve({
+        data: {
+          date_range: { end: "2026-04-26", start: "2026-04-20" },
+          series: [
+            { date: "2026-04-20", metric: "ctl", value: 42 },
+            { date: "2026-04-21", metric: "ctl", value: 43 }
+          ]
+        },
+        screenshot_type: "training_load_chart"
+      });
+    });
+
+    expect(enriched[0]?.parts).toContainEqual({
+      type: "text",
+      text:
+        "Extracted image content from fitness-chart.png (training_load_chart):\n" +
+        JSON.stringify(
+          {
+            date_range: { end: "2026-04-26", start: "2026-04-20" },
+            series: [
+              { date: "2026-04-20", metric: "ctl", value: 42 },
+              { date: "2026-04-21", metric: "ctl", value: 43 }
+            ]
+          },
+          null,
+          2
+        )
+    });
   });
 
   it("returns 401 when the browser session cookie is absent", async () => {

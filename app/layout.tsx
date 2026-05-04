@@ -1,3 +1,4 @@
+import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import type { Metadata } from "next";
 import type { JSX, ReactNode } from "react";
@@ -39,6 +40,7 @@ export default function RootLayout({ children }: RootLayoutProps): JSX.Element {
       </head>
       <body>
         <AppShell>{children}</AppShell>
+        <Analytics />
         <SpeedInsights />
       </body>
     </html>
