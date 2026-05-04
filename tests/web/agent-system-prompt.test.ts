@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCoachSystemPrompt } from "../../lib/agent/system-prompt";
+import { buildCoachSystemPrompt, buildLeadCoachPrompt, buildSpecialistPrompt } from "../../lib/agent/system-prompt";
 import type { AthleteContextBundle } from "../../lib/agent/types";
 
 const context: AthleteContextBundle = {
@@ -166,5 +166,31 @@ describe("buildCoachSystemPrompt", () => {
     const prompt = buildCoachSystemPrompt(maleContext);
 
     expect(prompt).not.toContain("LEA");
+  });
+
+  it("builds role-specific specialist prompts that forbid user-facing prose and persistence", () => {
+    const prompt = buildSpecialistPrompt("recovery", { recent_recovery: context.recent_recovery });
+
+    expect(prompt).toContain("Recovery specialist");
+    expect(prompt).toContain("structured report only");
+    expect(prompt).toContain("Do not write user-facing prose");
+    expect(prompt).toContain("Do not call tools or persist data");
+  });
+
+  it("builds a lead coach prompt that includes specialist reports and final-response guidance", () => {
+    const prompt = buildLeadCoachPrompt(context, [
+      {
+        confidence: "medium",
+        proposedUpdates: [],
+        risks: ["Keep intensity conservative."],
+        role: "workout",
+        summary: "Workout specialist suggests moving intervals after poor sleep.",
+      },
+    ]);
+
+    expect(prompt).toContain("Lead coach");
+    expect(prompt).toContain("Workout specialist suggests moving intervals");
+    expect(prompt).toContain("Keep intensity conservative");
+    expect(prompt).toContain("user-facing response");
   });
 });

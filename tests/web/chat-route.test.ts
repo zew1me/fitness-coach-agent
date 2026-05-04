@@ -8,6 +8,20 @@ import {
   appendImageExtractionsToMessages,
   selectMessagesForModel
 } from "../../lib/agent/message-context";
+import { streamCoachTurn } from "../../lib/agent/orchestrator";
+
+import { athleteContextFixture } from "./agent-fixtures";
+
+vi.mock("../../lib/agent/orchestrator", () => ({
+  streamCoachTurn: vi.fn(() =>
+    Promise.resolve(
+      new Response("coach stream", {
+        headers: { "content-type": "text/plain" },
+        status: 200,
+      })
+    )
+  ),
+}));
 
 const originalFetch = globalThis.fetch;
 const originalVercelBypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
@@ -19,11 +33,115 @@ afterEach(() => {
   } else {
     process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] = originalVercelBypassSecret;
   }
+  vi.clearAllMocks();
 });
 
 describe("app/api/chat route", () => {
-  it("uses the GPT-5 mini model for chat responses", () => {
-    const routeSource = readFileSync(new URL("../../app/api/chat/route.ts", import.meta.url), "utf8");
+  it("delegates authenticated chat turns to the orchestrator", async () => {
+    const messages = [
+      {
+        id: "message-1",
+        parts: [{ text: "Can you adjust tomorrow's workout?", type: "text" as const }],
+        role: "user" as const,
+      },
+    ];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe("coach stream");
+    expect(streamCoachTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accessToken: "token-1",
+        baseUrl: "http://localhost",
+        context: athleteContextFixture,
+        extraHeaders: {},
+        messages,
+        messagesAreModelSelected: true,
+        streamErrorMessage: "Coach is unavailable right now. Please try again.",
+      })
+    );
+  });
+
+  it("delegates exactly one selected model window for long chat turns", async () => {
+    const messages = Array.from({ length: 40 }, (_, index) => ({
+      id: `message-${index}`,
+      parts: [{ text: `Message ${index}`, type: "text" as const }],
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const)
+    }));
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      })
+    );
+
+    expect(streamCoachTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            id: "context-window-notice",
+            parts: [
+              {
+                text: expect.stringContaining("previous 16 chat messages"),
+                type: "text",
+              },
+            ],
+            role: "system",
+          }),
+          ...messages.slice(16),
+        ],
+        messagesAreModelSelected: true,
+      })
+    );
+  });
+
+  it("keeps the GPT-5 mini model in the orchestrator for chat responses", () => {
+    const routeSource = readFileSync(new URL("../../lib/agent/orchestrator.ts", import.meta.url), "utf8");
 
     expect(routeSource).toContain('openai("gpt-5-mini")');
   });

@@ -1,3 +1,4 @@
+import type { InternalSpecialistRole, SpecialistReport } from "./orchestration-types";
 import type { AthleteContextBundle, GoalContext } from "./types";
 
 const NUTRITION_PRINCIPLES = [
@@ -129,7 +130,74 @@ function buildContextualLines(context: AthleteContextBundle): string[] {
   return lines;
 }
 
-export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
+function specialistReportSection(reports: SpecialistReport[]): string {
+  if (reports.length === 0) {
+    return "Specialist reports: none for this turn.";
+  }
+
+  return [
+    "Specialist reports:",
+    ...reports.map((report) => {
+      const risks = report.risks.length > 0 ? ` Risks: ${report.risks.join("; ")}` : "";
+      const proposedUpdates =
+        report.proposedUpdates.length > 0
+          ? ` Proposed updates: ${report.proposedUpdates
+              .map((update) => `${update.toolName} (${update.rationale})`)
+              .join("; ")}`
+          : "";
+      return `- ${report.role}: ${report.summary} Confidence: ${report.confidence}.${risks}${proposedUpdates}`;
+    }),
+  ].join("\n");
+}
+
+function roleLabel(role: InternalSpecialistRole): string {
+  const labels: Record<InternalSpecialistRole, string> = {
+    intake: "Intake specialist",
+    nutrition: "Nutrition specialist",
+    recovery: "Recovery specialist",
+    workout: "Workout specialist",
+  };
+  return labels[role];
+}
+
+export function buildSpecialistPrompt(role: InternalSpecialistRole, contextSlice: unknown): string {
+  return [
+    `${roleLabel(role)}.`,
+    currentDateLine(),
+    trainingModelSection({
+      active_plan: null,
+      computed_age: null,
+      ctl_ceiling_guidance: {
+        age_bracket: "unknown",
+        committed_amateur_ctl: 0,
+        elite_ctl: 0,
+        notes: "Use the provided slice only.",
+        recovery_week_frequency: "unknown",
+        recreational_ctl: 0,
+      },
+      current_load: null,
+      goals: [],
+      profile: {
+        coaching_state: "active",
+        primary_sports: [],
+        user_id: "server-authenticated-athlete",
+      },
+      recent_recovery: [],
+      schedule: null,
+      thresholds: [],
+    }),
+    "Return a structured report only using the provided schema.",
+    "Do not write user-facing prose.",
+    "Do not call tools or persist data.",
+    "Do not include user_id in proposed update inputs; server auth injects identity.",
+    `Context slice: ${JSON.stringify(contextSlice)}`,
+  ].join("\n\n");
+}
+
+export function buildLeadCoachPrompt(
+  context: AthleteContextBundle,
+  specialistReports: SpecialistReport[] = []
+): string {
   const sports = listOrFallback(context.profile.primary_sports, "unknown");
   const goals = context.goals.map(goalSummary).join("; ") || "none recorded";
   const load = loadLine(context);
@@ -137,7 +205,7 @@ export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
   const ceiling = context.ctl_ceiling_guidance;
 
   return [
-    "You are a sport-agnostic endurance coach.",
+    "You are the Lead coach for a sport-agnostic endurance coaching team.",
     currentDateLine(),
     trainingModelSection(context),
     "Be inclusive and ask about sex or hormone context only when it improves training-load guidance.",
@@ -147,8 +215,14 @@ export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
     `CTL ceiling guidance: ${ceiling.age_bracket}; committed amateur CTL ${ceiling.committed_amateur_ctl}; ${ceiling.notes}`,
     ...buildContextualLines(context),
     stateInstructions(context.profile.coaching_state),
+    specialistReportSection(specialistReports),
+    "Synthesize specialist reports into one concise user-facing response. Resolve conflicts conservatively.",
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
     "After any tool call, continue with a concise user-facing response that explains what changed, what was saved, or what you need next.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",
   ].join("\n\n");
+}
+
+export function buildCoachSystemPrompt(context: AthleteContextBundle): string {
+  return buildLeadCoachPrompt(context);
 }

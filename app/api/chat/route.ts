@@ -1,13 +1,11 @@
 import { createMCPClient } from "@ai-sdk/mcp";
-import { openai } from "@ai-sdk/openai";
-import { convertToModelMessages, streamText, type ToolSet, type UIMessage } from "ai";
+import { type ToolSet, type UIMessage } from "ai";
 
-import { createCoachTools } from "../../../lib/agent/coach-tools";
 import {
   appendImageExtractionsToMessages,
   selectMessagesForModel
 } from "../../../lib/agent/message-context";
-import { buildCoachSystemPrompt } from "../../../lib/agent/system-prompt";
+import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
 import { buildTavilyMcpUrl } from "../../../lib/site";
 
@@ -24,6 +22,7 @@ type ChatRequestBody = {
 
 const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
+const COACH_UNAVAILABLE_MESSAGE = "Coach is unavailable right now. Please try again.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
@@ -37,6 +36,11 @@ function requestOrigin(request: Request): string {
 function vercelProtectionBypassHeaders(): Record<string, string> {
   const bypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
   return bypassSecret ? { "x-vercel-protection-bypass": bypassSecret } : {};
+}
+
+function safeErrorMessage(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.replace(/key=[^&\s]+/g, "key=***");
 }
 
 async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse | null> {
@@ -118,8 +122,6 @@ export async function POST(request: Request): Promise<Response> {
     return jsonError("Missing browser session cookie.", 401);
   }
 
-  const UNAVAILABLE = "Coach is unavailable right now. Please try again.";
-
   try {
     const body = (await request.json()) as ChatRequestBody;
     const messages = body.messages ?? [];
@@ -136,30 +138,18 @@ export async function POST(request: Request): Promise<Response> {
         }).then((c) => c.tools())
       : {};
 
-    const result = streamText({
-      model: openai("gpt-5-mini"),
-      system: buildCoachSystemPrompt(context),
-      messages: await convertToModelMessages(modelMessages),
-      tools: {
-        ...createCoachTools({
-          accessToken: token.access_token,
-          baseUrl: requestOrigin(request),
-          extraHeaders: vercelProtectionBypassHeaders(),
-        }),
-        ...tavilyTools,
-      },
-      onError: ({ error }) => {
-        const msg = error instanceof Error ? error.message : String(error);
-        console.error("[chat] stream error:", msg.replace(/key=[^&\s]+/g, "key=***"));
-      },
-    });
-
-    return result.toUIMessageStreamResponse({
-      onError: () => UNAVAILABLE,
+    return streamCoachTurn({
+      accessToken: token.access_token,
+      baseUrl: requestOrigin(request),
+      context,
+      extraHeaders: vercelProtectionBypassHeaders(),
+      messages: modelMessages,
+      messagesAreModelSelected: true,
+      streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+      tavilyTools,
     });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error("[chat] POST error:", msg.replace(/key=[^&\s]+/g, "key=***"));
-    return new Response(UNAVAILABLE, { status: 503 });
+    console.error("[chat] POST error:", safeErrorMessage(error));
+    return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });
   }
 }
