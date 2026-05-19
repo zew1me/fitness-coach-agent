@@ -36,6 +36,15 @@ function normalizeEmail(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
+function normalizeInviteCode(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function buildEmailRedirectTo(request: Request, returnTo: unknown): string {
   const callbackUrl = new URL("/auth/callback", request.url);
   callbackUrl.searchParams.set(
@@ -49,9 +58,9 @@ function hashInviteCode(value: string): Buffer {
   return createHash("sha256").update(value, "utf8").digest();
 }
 
-function isInviteCodeValid(candidate: unknown): boolean {
+function isInviteCodeValid(candidate: string): boolean {
   const inviteCode = process.env["INVITE_CODE"];
-  if (!inviteCode || typeof candidate !== "string") {
+  if (!inviteCode) {
     return false;
   }
 
@@ -152,11 +161,12 @@ async function createInvitedUser(email: string): Promise<NextResponse | null> {
 }
 
 async function handleNewUser(body: RequestOtpBody, email: string, emailRedirectTo: string): Promise<NextResponse> {
-  if (body.inviteCode === undefined || body.inviteCode === "") {
+  const inviteCode = normalizeInviteCode(body.inviteCode);
+  if (inviteCode === null) {
     return inviteRequiredResponse();
   }
 
-  if (!isInviteCodeValid(body.inviteCode)) {
+  if (!isInviteCodeValid(inviteCode)) {
     return invalidInviteResponse();
   }
 
