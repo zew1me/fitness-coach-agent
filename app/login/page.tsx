@@ -41,6 +41,8 @@ function isLinkError(code: string): boolean {
 function LoginPageContent(): JSX.Element {
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [inviteRequired, setInviteRequired] = useState(false);
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -82,22 +84,35 @@ function LoginPageContent(): JSX.Element {
     setIsError(false);
 
     try {
-      const supabase = getBrowserSupabaseClient();
-      const callbackUrl = new URL("/auth/callback", window.location.origin);
-      callbackUrl.searchParams.set("return_to", returnTo);
-
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: {
-          emailRedirectTo: callbackUrl.toString(),
-          shouldCreateUser: true
-        }
+      const response = await fetch("/api/auth/request-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          inviteCode: inviteRequired ? inviteCode : null,
+          returnTo
+        })
       });
 
-      if (error !== null) {
-        throw error;
+      const payload = (await response.json()) as {
+        error?: string;
+        message?: string;
+        status?: string;
+        inviteRequired?: boolean;
+      };
+
+      if (!response.ok) {
+        if (payload.error === "invite_required") {
+          setInviteRequired(true);
+          setStatus(payload.message ?? "This looks new. Enter your invite code.");
+          setIsError(false);
+          return;
+        }
+
+        throw new Error(payload.message ?? "Unable to start login.");
       }
 
+      setInviteRequired(false);
       setOtpSent(true);
       setStatus("Check your email for a magic link or 6-digit code.");
     } catch (error) {
@@ -167,8 +182,22 @@ function LoginPageContent(): JSX.Element {
               type="email"
               value={email}
             />
+            {inviteRequired ? (
+              <>
+                <label htmlFor="invite-code">Invite code</label>
+                <input
+                  autoComplete="one-time-code"
+                  className="input"
+                  id="invite-code"
+                  onChange={(event) => setInviteCode(event.target.value)}
+                  required
+                  type="text"
+                  value={inviteCode}
+                />
+              </>
+            ) : null}
             <button className="button" disabled={submitting} type="submit">
-              {submitting ? "Sending..." : "Send magic link"}
+              {submitting ? "Sending..." : "Send code"}
             </button>
           </form>
         ) : (

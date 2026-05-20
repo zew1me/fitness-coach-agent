@@ -14,7 +14,7 @@ async function emailInput(page: import("@playwright/test").Page) {
 }
 
 async function sendButton(page: import("@playwright/test").Page) {
-  return page.getByRole("button", { name: /send magic link/i });
+  return page.getByRole("button", { name: /send code/i });
 }
 
 // ── hash-fragment errors (set by Supabase, never visible to server) ───────────
