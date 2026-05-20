@@ -18,6 +18,7 @@ class OnboardingRepo:
             updated_at=now,
             user_id="athlete-1",
         )
+        self.create_calls: list[dict[str, Any]] = []
 
     async def get_or_create_chat_thread(self, user_id: str) -> ChatThread:
         return self.thread
@@ -35,6 +36,16 @@ class OnboardingRepo:
         metadata: dict[str, Any],
         attachments: list[Any] | None = None,
     ) -> ChatMessage:
+        self.create_calls.append(
+            {
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "role": role,
+                "content": content,
+                "metadata": metadata,
+                "attachments": list(attachments or []),
+            }
+        )
         message = ChatMessage(
             attachments=[],
             content=content,
@@ -59,3 +70,35 @@ async def test_onboarding_welcome_sets_optional_conversational_expectations() ->
     assert "none of it is required" in welcome
     assert "normal language" in welcome
     assert "sports, goals, recent training, and schedule" in welcome
+
+
+@pytest.mark.asyncio
+async def test_persist_message_writes_single_row_with_role_and_metadata() -> None:
+    repo = OnboardingRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    message = await service.persist_message(
+        "athlete-1",
+        role="user",
+        content="I train ~8 hours/week",
+        metadata={"message_kind": "user_turn", "client_message_id": "abc-123"},
+    )
+
+    assert message.role == "user"
+    assert message.content == "I train ~8 hours/week"
+    assert message.thread_id == "thread-1"
+    assert len(repo.create_calls) == 1
+    call = repo.create_calls[0]
+    assert call["role"] == "user"
+    assert call["metadata"] == {"message_kind": "user_turn", "client_message_id": "abc-123"}
+    assert call["attachments"] == []
+
+
+@pytest.mark.asyncio
+async def test_persist_message_defaults_metadata_to_empty_dict() -> None:
+    repo = OnboardingRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    await service.persist_message("athlete-1", role="assistant", content="Got it.")
+
+    assert repo.create_calls[0]["metadata"] == {}

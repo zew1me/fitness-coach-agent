@@ -80,6 +80,51 @@ async function loadAthleteContext(
   return (await response.json()) as AthleteContextBundle;
 }
 
+function latestUserText(messages: UIMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "user") continue;
+    return message.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  return "";
+}
+
+async function persistUserMessage(
+  request: Request,
+  token: BrowserTokenResponse,
+  content: string,
+  clientMessageId: string | undefined
+): Promise<void> {
+  if (content.length === 0) return;
+  try {
+    const response = await fetch(`${requestOrigin(request)}/api/chat/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        "Content-Type": "application/json",
+        ...vercelProtectionBypassHeaders(),
+      },
+      body: JSON.stringify({
+        role: "user",
+        content,
+        metadata: {
+          message_kind: "user_turn",
+          ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
+        },
+      }),
+    });
+    if (!response.ok) {
+      console.error("[chat] persist user message failed:", response.status);
+    }
+  } catch (error) {
+    console.error("[chat] persist user message error:", safeErrorMessage(error));
+  }
+}
+
 async function extractImageContent(
   request: Request,
   token: BrowserTokenResponse,
@@ -128,6 +173,13 @@ export async function POST(request: Request): Promise<Response> {
     const modelMessages = await appendImageExtractionsToMessages(
       selectMessagesForModel(messages),
       ({ imageUrl }) => extractImageContent(request, token, imageUrl)
+    );
+    const latestUserMessage = [...messages].reverse().find((m) => m.role === "user");
+    await persistUserMessage(
+      request,
+      token,
+      latestUserText(messages),
+      latestUserMessage?.id
     );
     const context = await loadAthleteContext(request, token);
 

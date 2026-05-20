@@ -82,6 +82,31 @@ export async function streamCoachTurn({
       const msg = error instanceof Error ? error.message : String(error);
       console.error("[chat] stream error:", msg.replace(/key=[^&\s]+/g, "key=***"));
     },
+    onFinish: async ({ text, finishReason }) => {
+      const trimmed = text.trim();
+      if (trimmed.length === 0) return;
+      try {
+        const response = await fetch(`${baseUrl}/api/chat/messages`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            ...(extraHeaders ?? {}),
+          },
+          body: JSON.stringify({
+            role: "assistant",
+            content: trimmed,
+            metadata: { message_kind: "assistant_reply", finish_reason: finishReason },
+          }),
+        });
+        if (!response.ok) {
+          console.error("[chat] persist assistant reply failed:", response.status);
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error("[chat] persist assistant reply error:", msg);
+      }
+    },
   });
 
   return result.toUIMessageStreamResponse({

@@ -44,12 +44,8 @@ class ChatThreadBootstrap(BaseModel):
     thread: ChatThread
 
 
-class ChatSendRequest(BaseModel):
+class ChatPersistRequest(BaseModel):
     attachments: list[ChatAttachmentInput] = Field(default_factory=list)
-    content: str = Field(default="", max_length=8000)
-
-
-class ChatSendResponse(BaseModel):
-    attachments_enabled: bool
-    profile_complete: bool
-    thread: ChatThread
+    content: str = Field(default="", max_length=32000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    role: Literal["user", "assistant"]

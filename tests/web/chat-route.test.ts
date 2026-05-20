@@ -87,6 +87,114 @@ describe("app/api/chat route", () => {
     );
   });
 
+  it("persists the latest user turn to the backend before streaming", async () => {
+    const messages = [
+      {
+        id: "older-message",
+        parts: [{ text: "Earlier reply", type: "text" as const }],
+        role: "assistant" as const,
+      },
+      {
+        id: "latest-user-message",
+        parts: [{ text: "I train ~8 hours/week", type: "text" as const }],
+        role: "user" as const,
+      },
+    ];
+    const persistRequests: { url: string; body: unknown; headers: Record<string, string> }[] = [];
+    const fetchMock = vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr.endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+      if (urlStr.endsWith("/api/chat/messages")) {
+        persistRequests.push({
+          url: urlStr,
+          body: JSON.parse(String(init?.body ?? "{}")),
+          headers: Object.fromEntries(new Headers(init?.headers).entries()),
+        });
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: "message-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(persistRequests).toHaveLength(1);
+    expect(persistRequests[0]?.body).toEqual({
+      role: "user",
+      content: "I train ~8 hours/week",
+      metadata: { message_kind: "user_turn", client_message_id: "latest-user-message" },
+    });
+    expect(persistRequests[0]?.headers["authorization"]).toBe("Bearer token-1");
+  });
+
+  it("still returns a stream when user-message persistence fails", async () => {
+    const messages = [
+      {
+        id: "msg-1",
+        parts: [{ text: "Hi coach", type: "text" as const }],
+        role: "user" as const,
+      },
+    ];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      const urlStr = String(url);
+      if (urlStr.endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+      if (urlStr.endsWith("/api/chat/messages")) {
+        return Promise.resolve(new Response("kaboom", { status: 503 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(streamCoachTurn).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
   it("delegates exactly one selected model window for long chat turns", async () => {
     const messages = Array.from({ length: 40 }, (_, index) => ({
       id: `message-${index}`,
