@@ -20,6 +20,19 @@ type ChatRequestBody = {
   messages?: UIMessage[];
 };
 
+type PersistAttachment = {
+  content_type: string;
+  filename: string;
+  object_key: string;
+  public_url: string;
+};
+
+type LatestUserTurn = {
+  attachments: PersistAttachment[];
+  id: string;
+  text: string;
+};
+
 const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
 const COACH_UNAVAILABLE_MESSAGE = "Coach is unavailable right now. Please try again.";
@@ -80,26 +93,51 @@ async function loadAthleteContext(
   return (await response.json()) as AthleteContextBundle;
 }
 
-function latestUserText(messages: UIMessage[]): string {
+function filePartsToAttachments(parts: UIMessage["parts"]): PersistAttachment[] {
+  return parts.flatMap((part) => {
+    if (part.type !== "file") return [];
+    if (!part.url.startsWith("http")) return [];
+    let objectKey: string;
+    try {
+      objectKey = new URL(part.url).pathname.replace(/^\//, "") || part.url;
+    } catch {
+      return [];
+    }
+    return [
+      {
+        content_type: part.mediaType,
+        filename: part.filename ?? "attachment",
+        object_key: objectKey,
+        public_url: part.url,
+      },
+    ];
+  });
+}
+
+function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message?.role !== "user") continue;
-    return message.parts
+    const text = message.parts
       .map((part) => (part.type === "text" ? part.text : ""))
       .filter(Boolean)
       .join("\n")
       .trim();
+    return {
+      attachments: filePartsToAttachments(message.parts),
+      id: message.id,
+      text,
+    };
   }
-  return "";
+  return null;
 }
 
 async function persistUserMessage(
   request: Request,
   token: BrowserTokenResponse,
-  content: string,
-  clientMessageId: string | undefined
+  turn: LatestUserTurn
 ): Promise<void> {
-  if (content.length === 0) return;
+  if (turn.text.length === 0 && turn.attachments.length === 0) return;
   try {
     const response = await fetch(`${requestOrigin(request)}/api/chat/messages`, {
       method: "POST",
@@ -110,11 +148,9 @@ async function persistUserMessage(
       },
       body: JSON.stringify({
         role: "user",
-        content,
-        metadata: {
-          message_kind: "user_turn",
-          ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
-        },
+        content: turn.text,
+        metadata: { message_kind: "user_turn", client_message_id: turn.id },
+        attachments: turn.attachments,
       }),
     });
     if (!response.ok) {
@@ -174,13 +210,10 @@ export async function POST(request: Request): Promise<Response> {
       selectMessagesForModel(messages),
       ({ imageUrl }) => extractImageContent(request, token, imageUrl)
     );
-    const latestUserMessage = [...messages].reverse().find((m) => m.role === "user");
-    await persistUserMessage(
-      request,
-      token,
-      latestUserText(messages),
-      latestUserMessage?.id
-    );
+    const latestUserTurn = summarizeLatestUserTurn(messages);
+    if (latestUserTurn !== null) {
+      await persistUserMessage(request, token, latestUserTurn);
+    }
     const context = await loadAthleteContext(request, token);
 
     const tavilyApiKey = process.env["TAVILY_API_KEY"];

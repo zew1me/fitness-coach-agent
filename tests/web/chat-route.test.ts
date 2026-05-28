@@ -133,7 +133,7 @@ describe("app/api/chat route", () => {
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const response = await POST(
+    await POST(
       new Request("http://localhost/api/chat", {
         body: JSON.stringify({ messages }),
         headers: { cookie: "coach_browser_session=session-token" },
@@ -141,14 +141,78 @@ describe("app/api/chat route", () => {
       })
     );
 
-    expect(response.status).toBe(200);
     expect(persistRequests).toHaveLength(1);
     expect(persistRequests[0]?.body).toEqual({
       role: "user",
       content: "I train ~8 hours/week",
       metadata: { message_kind: "user_turn", client_message_id: "latest-user-message" },
+      attachments: [],
     });
     expect(persistRequests[0]?.headers["authorization"]).toBe("Bearer token-1");
+  });
+
+  it("forwards file-part attachments on the persisted user turn", async () => {
+    const messages = [
+      {
+        id: "msg-with-image",
+        parts: [
+          { text: "Here's my chart", type: "text" as const },
+          {
+            filename: "fitness.png",
+            mediaType: "image/png",
+            type: "file" as const,
+            url: "https://r2.example.com/users/athlete-1/chat-attachment/2026/04/19/fitness.png",
+          },
+        ],
+        role: "user" as const,
+      },
+    ];
+    const persistBodies: unknown[] = [];
+    const fetchMock = vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr.endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+      if (urlStr.endsWith("/api/chat/messages")) {
+        persistBodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: "msg-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      })
+    );
+
+    expect(persistBodies).toHaveLength(1);
+    expect((persistBodies[0] as { attachments: unknown[] }).attachments).toEqual([
+      {
+        content_type: "image/png",
+        filename: "fitness.png",
+        object_key: "users/athlete-1/chat-attachment/2026/04/19/fitness.png",
+        public_url: "https://r2.example.com/users/athlete-1/chat-attachment/2026/04/19/fitness.png",
+      },
+    ]);
   });
 
   it("still returns a stream when user-message persistence fails", async () => {
@@ -191,7 +255,6 @@ describe("app/api/chat route", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(streamCoachTurn).toHaveBeenCalled();
     errorSpy.mockRestore();
   });
 

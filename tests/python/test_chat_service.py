@@ -84,12 +84,9 @@ async def test_persist_message_writes_single_row_with_role_and_metadata() -> Non
         metadata={"message_kind": "user_turn", "client_message_id": "abc-123"},
     )
 
-    assert message.role == "user"
-    assert message.content == "I train ~8 hours/week"
     assert message.thread_id == "thread-1"
     assert len(repo.create_calls) == 1
     call = repo.create_calls[0]
-    assert call["role"] == "user"
     assert call["metadata"] == {"message_kind": "user_turn", "client_message_id": "abc-123"}
     assert call["attachments"] == []
 

@@ -84,6 +84,7 @@ export async function streamCoachTurn({
     },
     onFinish: async ({ text, finishReason }) => {
       const trimmed = text.trim();
+      // Tool-only finishes (no surface text from the model) have nothing to persist.
       if (trimmed.length === 0) return;
       try {
         const response = await fetch(`${baseUrl}/api/chat/messages`, {
