@@ -70,6 +70,22 @@ describe("POST /api/auth/request-otp", () => {
     expect(adminClientMock.auth.admin.createUser).not.toHaveBeenCalled();
   });
 
+  it("asks for an invite code when the client submits null before the invite field is shown", async () => {
+    adminClientMock.auth.signInWithOtp.mockResolvedValueOnce({
+      error: new Error("Signups not allowed")
+    });
+    const { POST } = await importRoute();
+
+    const response = await POST(buildRequest({ email: "new@example.com", inviteCode: null }));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "invite_required",
+      message: "This looks new. Enter your invite code."
+    });
+    expect(adminClientMock.auth.admin.createUser).not.toHaveBeenCalled();
+  });
+
   it("rejects an invalid invite code for a new user", async () => {
     process.env["INVITE_CODE"] = "alpha-access";
     adminClientMock.auth.signInWithOtp.mockResolvedValueOnce({
