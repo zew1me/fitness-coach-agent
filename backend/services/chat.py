@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Any, Literal
+
 from backend.config import settings
 from backend.models.athlete import AthleteProfile
 from backend.models.chat import (
     ChatAttachmentInput,
-    ChatSendResponse,
+    ChatMessage,
     ChatThreadBootstrap,
 )
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
@@ -18,8 +20,8 @@ class ChatUnavailableError(RuntimeError):
 class ChatService:
     """Persist the athlete-facing coaching conversation.
 
-    The LLM coaching layer now belongs in the TypeScript AI SDK route. This Python service
-    keeps thread and attachment persistence available without direct model calls.
+    The LLM coaching layer lives in the TypeScript AI SDK route; this Python service is the
+    single source of truth for thread and message persistence in Supabase.
     """
 
     def __init__(
@@ -50,36 +52,23 @@ class ChatService:
             thread=thread,
         )
 
-    async def send_message(
-        self, user_id: str, content: str, attachments: list[ChatAttachmentInput]
-    ) -> ChatSendResponse:
+    async def persist_message(
+        self,
+        user_id: str,
+        *,
+        role: Literal["user", "assistant"],
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        attachments: list[ChatAttachmentInput] | None = None,
+    ) -> ChatMessage:
         thread = await self._repo.get_or_create_chat_thread(user_id)
-        profile = await self._get_profile(user_id)
-
-        cleaned_content = content.strip()
-        if cleaned_content or attachments:
-            await self._repo.create_chat_message(
-                thread_id=thread.id,
-                user_id=user_id,
-                role="user",
-                content=cleaned_content,
-                metadata={"message_kind": "user_turn"},
-                attachments=attachments,
-            )
-
-        await self._repo.create_chat_message(
+        return await self._repo.create_chat_message(
             thread_id=thread.id,
             user_id=user_id,
-            role="assistant",
-            content=self._handoff_reply(cleaned_content, len(attachments)),
-            metadata={"message_kind": "assistant_reply", "source": "python_persistence_shell"},
-        )
-
-        updated_thread = await self._repo.get_or_create_chat_thread(user_id)
-        return ChatSendResponse(
-            attachments_enabled=self.attachments_enabled,
-            profile_complete=self._profile_complete(profile),
-            thread=updated_thread,
+            role=role,
+            content=content,
+            metadata=metadata or {},
+            attachments=attachments,
         )
 
     @property
@@ -113,17 +102,3 @@ class ChatService:
                 "message."
             )
         return "Welcome back. Tell me what changed in training, recovery, schedule, or goals."
-
-    @staticmethod
-    def _handoff_reply(content: str, attachment_count: int) -> str:
-        if attachment_count > 0:
-            return (
-                "I saved your message and attachment metadata. The streaming coaching layer will "
-                "process uploaded files through the engine route next."
-            )
-        if content:
-            return (
-                "I saved your message. The streaming coaching layer will use this thread as "
-                "context for the next response."
-            )
-        return "I saved the turn and am ready for the next update."

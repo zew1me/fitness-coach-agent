@@ -1,12 +1,10 @@
 import {
   athleteProfileSchema,
-  chatMessageSchema,
   uploadRequestSchema
 } from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
-  ChatAttachment,
   ChatThreadResponse,
   FitnessMetrics,
   PresignUploadRequest,
@@ -190,27 +188,6 @@ export async function loadChatThread(fetchImpl: FetchLike = fetch): Promise<Chat
     "/api/chat/thread",
     {
       method: "GET"
-    },
-    fetchImpl
-  );
-}
-
-export async function sendChatMessage(
-  payload: {
-    attachments?: ChatAttachment[];
-    content: string;
-  },
-  fetchImpl: FetchLike = fetch
-): Promise<ChatThreadResponse> {
-  const body = chatMessageSchema.parse({
-    content: payload.content,
-    attachments: payload.attachments ?? []
-  });
-  return authorizedFetch<ChatThreadResponse>(
-    "/api/chat/messages",
-    {
-      method: "POST",
-      body: JSON.stringify(body)
     },
     fetchImpl
   );

@@ -37,7 +37,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.chat import ChatSendRequest
+from backend.models.chat import ChatPersistRequest
 from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
@@ -318,20 +318,23 @@ async def get_chat_thread(
 
 
 @app.post("/api/chat/messages")
-async def create_chat_message(
-    payload: ChatSendRequest,
+async def persist_chat_message(
+    payload: ChatPersistRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     logger.debug(
-        "chat message received user_id=%s attachments=%d",
+        "chat message persist user_id=%s role=%s attachments=%d",
         user_context.user_id,
+        payload.role,
         len(payload.attachments),
     )
     try:
-        response = await chat_service.send_message(
+        message = await chat_service.persist_message(
             user_context.user_id,
-            payload.content,
-            payload.attachments,
+            role=payload.role,
+            content=payload.content,
+            metadata=payload.metadata,
+            attachments=payload.attachments,
         )
     except ChatUnavailableError as exc:
         logger.exception("chat unavailable user_id=%s", user_context.user_id)
@@ -339,7 +342,7 @@ async def create_chat_message(
     except RepositoryNotConfiguredError as exc:
         logger.exception("repository not configured")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return response.model_dump(mode="json")
+    return message.model_dump(mode="json")
 
 
 @app.post("/api/chat/attachments/presign")
