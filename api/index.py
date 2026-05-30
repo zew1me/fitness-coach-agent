@@ -323,16 +323,17 @@ async def persist_chat_message(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     logger.debug(
-        "chat message persist user_id=%s role=%s attachments=%d",
+        "chat message persist user_id=%s role=%s parts=%d attachments=%d",
         user_context.user_id,
         payload.role,
+        len(payload.parts),
         len(payload.attachments),
     )
     try:
         message = await chat_service.persist_message(
             user_context.user_id,
             role=payload.role,
-            content=payload.content,
+            parts=payload.parts,
             metadata=payload.metadata,
             attachments=payload.attachments,
         )

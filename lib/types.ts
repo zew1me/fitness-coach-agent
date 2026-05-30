@@ -65,20 +65,17 @@ export type PresignUploadResponse = {
   upload_url: string;
 };
 
-export type ChatAttachment = {
-  content_type: string;
-  created_at?: string;
-  filename: string;
-  id?: string;
-  message_id?: string;
-  object_key: string;
-  public_url: string | null;
-  user_id?: string;
-};
+// MessagePart and MessageAttachment mirror the AI SDK UIMessage shape. They
+// are deliberately permissive so new AI-SDK part types (tool-*, reasoning,
+// data-*) round-trip through the backend without churn.
+export type MessagePart = Record<string, unknown> & { type: string };
+export type MessageAttachment = Record<string, unknown>;
 
 export type ChatMessage = {
-  attachments: ChatAttachment[];
-  content: string;
+  attachments: MessageAttachment[];
+  // `content` is a denormalized text mirror kept during the parts-JSON
+  // migration window; renderers should drive off `parts` instead.
+  content?: string;
   created_at: string;
   id: string;
   metadata: {
@@ -86,6 +83,10 @@ export type ChatMessage = {
     pending_profile_field?: string | null;
     plan?: AdaptedPlan;
   } & Record<string, unknown>;
+  // Backfill migration 0004 guarantees `parts` is non-empty on every persisted
+  // row. Optional here only because legacy in-flight payloads (tests, transient
+  // local mocks) may omit it; the renderer's `deriveParts` shim covers those.
+  parts?: MessagePart[];
   role: "user" | "assistant";
   thread_id: string;
   user_id: string;

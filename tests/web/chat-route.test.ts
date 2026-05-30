@@ -144,14 +144,13 @@ describe("app/api/chat route", () => {
     expect(persistRequests).toHaveLength(1);
     expect(persistRequests[0]?.body).toEqual({
       role: "user",
-      content: "I train ~8 hours/week",
+      parts: [{ text: "I train ~8 hours/week", type: "text" }],
       metadata: { message_kind: "user_turn", client_message_id: "latest-user-message" },
-      attachments: [],
     });
     expect(persistRequests[0]?.headers["authorization"]).toBe("Bearer token-1");
   });
 
-  it("forwards file-part attachments on the persisted user turn", async () => {
+  it("forwards file parts verbatim on the persisted user turn", async () => {
     const messages = [
       {
         id: "msg-with-image",
@@ -205,12 +204,13 @@ describe("app/api/chat route", () => {
     );
 
     expect(persistBodies).toHaveLength(1);
-    expect((persistBodies[0] as { attachments: unknown[] }).attachments).toEqual([
+    expect((persistBodies[0] as { parts: unknown[] }).parts).toEqual([
+      { text: "Here's my chart", type: "text" },
       {
-        content_type: "image/png",
         filename: "fitness.png",
-        object_key: "users/athlete-1/chat-attachment/2026/04/19/fitness.png",
-        public_url: "https://r2.example.com/users/athlete-1/chat-attachment/2026/04/19/fitness.png",
+        mediaType: "image/png",
+        type: "file",
+        url: "https://r2.example.com/users/athlete-1/chat-attachment/2026/04/19/fitness.png",
       },
     ]);
   });
