@@ -35,9 +35,9 @@ class OnboardingRepo:
         thread_id: str,
         user_id: str,
         role: str,
-        content: str,
-        metadata: dict[str, Any],
-        attachments: list[Any] | None = None,
+        parts: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         message_id: str | None = None,
     ) -> ChatMessage:
         self.create_calls.append(
@@ -45,18 +45,20 @@ class OnboardingRepo:
                 "thread_id": thread_id,
                 "user_id": user_id,
                 "role": role,
-                "content": content,
-                "metadata": metadata,
+                "parts": list(parts),
+                "metadata": dict(metadata or {}),
                 "attachments": list(attachments or []),
                 "message_id": message_id,
             }
         )
+        content = "".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
         message = ChatMessage(
-            attachments=[],
+            attachments=list(attachments or []),
             content=content,
             created_at=datetime(2026, 4, 19, tzinfo=UTC),
             id=f"message-{len(self.thread.messages) + 1}",
-            metadata=metadata,
+            metadata=metadata or {},
+            parts=list(parts),
             role=cast(Any, role),
             thread_id=thread_id,
             user_id=user_id,
@@ -76,7 +78,9 @@ async def test_onboarding_welcome_asks_for_sport_and_goal_first() -> None:
     assert repo.create_calls[0]["role"] == "assistant"
     assert repo.create_calls[0]["metadata"] == {"message_kind": "welcome"}
 
-    welcome = bootstrap.thread.messages[0].content
+    welcome_parts = bootstrap.thread.messages[0].parts
+    assert welcome_parts and welcome_parts[0]["type"] == "text"
+    welcome = welcome_parts[0]["text"]
     welcome_lower = welcome.lower()
     assert "sport" in welcome_lower
     assert re.search(r"\b(coaching|goal|objective|help|improve)\b", welcome_lower) is not None
@@ -88,21 +92,32 @@ async def test_onboarding_welcome_asks_for_sport_and_goal_first() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persist_message_writes_single_row_with_role_and_metadata() -> None:
+async def test_persist_message_writes_parts_and_metadata() -> None:
     repo = OnboardingRepo()
     service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
+    parts = [
+        {
+            "type": "file",
+            "filename": "long-run.gpx",
+            "mediaType": "application/gpx+xml",
+            "url": "https://r2.example/users/athlete-1/long-run.gpx",
+        },
+        {"type": "text", "text": "I train ~8 hours/week"},
+    ]
     message = await service.persist_message(
         "athlete-1",
         role="user",
-        content="I train ~8 hours/week",
+        parts=parts,
         metadata={"message_kind": "user_turn", "client_message_id": "abc-123"},
     )
 
     assert message.thread_id == "thread-1"
+    assert message.parts == parts
     assert len(repo.create_calls) == 1
     call = repo.create_calls[0]
     assert call["metadata"] == {"message_kind": "user_turn", "client_message_id": "abc-123"}
+    assert call["parts"] == parts
     assert call["attachments"] == []
     assert call["message_id"] is None
 
@@ -116,7 +131,7 @@ async def test_persist_message_threads_caller_message_id_to_repository() -> None
     await service.persist_message(
         "athlete-1",
         role="user",
-        content="I train ~8 hours/week",
+        parts=[{"type": "text", "text": "I train ~8 hours/week"}],
         message_id=message_id,
     )
 
@@ -124,11 +139,54 @@ async def test_persist_message_threads_caller_message_id_to_repository() -> None
 
 
 @pytest.mark.asyncio
+async def test_persist_message_round_trips_mixed_part_kinds() -> None:
+    """A mixed text / file / tool / reasoning parts array survives persistence verbatim.
+
+    This is the contract that prevents the lossy translation bug (issue #149):
+    if the AI SDK's UIMessage parts can't round-trip, tool-call pills and inline
+    images disappear on reload.
+    """
+    repo = OnboardingRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    parts = [
+        {"type": "text", "text": "Reviewing your screenshot..."},
+        {
+            "type": "tool-analyze_screenshot",
+            "toolCallId": "call-1",
+            "state": "output-available",
+            "output": {"screenshot_type": "garmin_summary"},
+        },
+        {
+            "type": "file",
+            "filename": "garmin.png",
+            "mediaType": "image/png",
+            "url": "https://r2.example/users/athlete-1/garmin.png",
+        },
+        {
+            "type": "reasoning",
+            "text": "User uploaded a Garmin summary; explain fitness vs. fatigue.",
+        },
+        {"type": "text", "text": "Your fitness is trending up nicely."},
+    ]
+
+    message = await service.persist_message("athlete-1", role="assistant", parts=parts)
+
+    assert message.parts == parts
+    persisted = repo.thread.messages[-1]
+    assert persisted.parts == parts
+
+
+@pytest.mark.asyncio
 async def test_persist_message_defaults_metadata_to_empty_dict() -> None:
     repo = OnboardingRepo()
     service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
-    await service.persist_message("athlete-1", role="assistant", content="Got it.")
+    await service.persist_message(
+        "athlete-1",
+        role="assistant",
+        parts=[{"type": "text", "text": "Got it."}],
+    )
 
     assert repo.create_calls[0]["metadata"] == {}
 
@@ -137,7 +195,7 @@ def test_chat_persist_request_accepts_uuid_message_id() -> None:
     payload = ChatPersistRequest(
         id="63ff9606-9158-43d7-a82b-d31ef9788b7d",
         role="user",
-        content="I train ~8 hours/week",
+        parts=[{"type": "text", "text": "I train ~8 hours/week"}],
     )
 
     assert payload.id == UUID("63ff9606-9158-43d7-a82b-d31ef9788b7d")
@@ -145,4 +203,4 @@ def test_chat_persist_request_accepts_uuid_message_id() -> None:
 
 def test_chat_persist_request_rejects_invalid_message_id() -> None:
     with pytest.raises(ValidationError):
-        ChatPersistRequest(id="not-a-uuid", role="user", content="Bad id")
+        ChatPersistRequest(id="not-a-uuid", role="user", parts=[{"type": "text", "text": "Bad id"}])

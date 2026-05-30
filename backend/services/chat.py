@@ -5,9 +5,10 @@ from typing import Any, Literal
 from backend.config import settings
 from backend.models.athlete import AthleteProfile
 from backend.models.chat import (
-    ChatAttachmentInput,
     ChatMessage,
     ChatThreadBootstrap,
+    MessageAttachment,
+    MessagePart,
 )
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
 from backend.services.r2 import R2Service
@@ -37,11 +38,12 @@ class ChatService:
         profile = await self._get_profile(user_id)
 
         if not thread.messages:
+            welcome_text = self._initial_welcome(profile)
             await self._repo.create_chat_message(
                 thread_id=thread.id,
                 user_id=user_id,
                 role="assistant",
-                content=self._initial_welcome(profile),
+                parts=[{"type": "text", "text": welcome_text}],
                 metadata={"message_kind": "welcome"},
             )
             thread = await self._repo.get_or_create_chat_thread(user_id)
@@ -57,9 +59,9 @@ class ChatService:
         user_id: str,
         *,
         role: Literal["user", "assistant"],
-        content: str,
+        parts: list[MessagePart],
         metadata: dict[str, Any] | None = None,
-        attachments: list[ChatAttachmentInput] | None = None,
+        attachments: list[MessageAttachment] | None = None,
         message_id: str | None = None,
     ) -> ChatMessage:
         thread = await self._repo.get_or_create_chat_thread(user_id)
@@ -67,7 +69,7 @@ class ChatService:
             thread_id=thread.id,
             user_id=user_id,
             role=role,
-            content=content,
+            parts=parts,
             metadata=metadata or {},
             attachments=attachments,
             message_id=message_id,

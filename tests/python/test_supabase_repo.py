@@ -1,11 +1,9 @@
 import re
 from datetime import date
-from typing import Any, cast
 
 import pytest
 
 from backend.models.athlete import AthleteProfile, SportThreshold
-from backend.models.chat import ChatAttachmentInput
 from backend.models.training import Activity
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -285,7 +283,7 @@ async def test_create_chat_message_honors_caller_message_id() -> None:
         thread_id="thread-1",
         user_id="athlete-1",
         role="user",
-        content="I train ~8 hours/week",
+        parts=[{"type": "text", "text": "I train ~8 hours/week"}],
         message_id=message_id,
     )
 
@@ -301,7 +299,7 @@ async def test_create_chat_message_generates_uuid_when_message_id_omitted() -> N
         thread_id="thread-1",
         user_id="athlete-1",
         role="assistant",
-        content="Welcome.",
+        parts=[{"type": "text", "text": "Welcome."}],
     )
 
     assert re.fullmatch(
@@ -311,7 +309,7 @@ async def test_create_chat_message_generates_uuid_when_message_id_omitted() -> N
 
 
 @pytest.mark.asyncio
-async def test_create_chat_message_links_attachments_to_honored_message_id() -> None:
+async def test_create_chat_message_persists_json_attachments_with_honored_message_id() -> None:
     client = FakeSupabaseClient()
     repo = SupabaseRepository(client=client)
     message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
@@ -320,22 +318,24 @@ async def test_create_chat_message_links_attachments_to_honored_message_id() -> 
         thread_id="thread-1",
         user_id="athlete-1",
         role="user",
-        content="Here's my workout chart",
+        parts=[{"type": "text", "text": "Here's my workout chart"}],
         message_id=message_id,
         attachments=[
-            ChatAttachmentInput(
-                content_type="image/png",
-                filename="chart.png",
-                object_key="users/athlete-1/chat-attachment/chart.png",
-                public_url="https://example.com/chart.png",
-            )
+            {
+                "type": "file",
+                "mediaType": "image/png",
+                "filename": "chart.png",
+                "url": "https://example.com/chart.png",
+            }
         ],
     )
 
     assert message.id == message_id
-    assert [attachment.message_id for attachment in message.attachments] == [message_id]
-    attachment_rows = cast(
-        list[dict[str, Any]],
-        client._tables["chat_attachments"]._rows,
-    )
-    assert attachment_rows[0]["message_id"] == message_id
+    assert message.attachments == [
+        {
+            "type": "file",
+            "mediaType": "image/png",
+            "filename": "chart.png",
+            "url": "https://example.com/chart.png",
+        }
+    ]

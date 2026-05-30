@@ -929,6 +929,74 @@ describe("CoachChat", () => {
     await act(() => Promise.resolve(resolveSend?.()));
   });
 
+  it("renders persisted file parts inline so images survive a reload (issue #149)", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: true,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:05:00Z",
+                messages: [
+                  {
+                    id: "persisted-with-image",
+                    attachments: [],
+                    parts: [
+                      { type: "text", text: "Here's my ride summary" },
+                      {
+                        type: "file",
+                        mediaType: "image/png",
+                        filename: "ride.png",
+                        url: "https://cdn.example.com/ride.png"
+                      }
+                    ],
+                    created_at: "2026-04-04T09:01:00Z",
+                    metadata: { message_kind: "user_turn" },
+                    role: "user",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText(/Here's my ride summary/);
+    const image = await screen.findByAltText("ride.png") as HTMLImageElement;
+    expect(image.src).toBe("https://cdn.example.com/ride.png");
+  });
+
   it("renders live assistant messages from the AI SDK useChat hook", async () => {
     chatMocks.messages.push({
       id: "streamed-message-1",

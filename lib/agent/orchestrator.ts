@@ -43,14 +43,6 @@ function generateUuid(): string {
   return crypto.randomUUID();
 }
 
-function uiMessageText(message: UIMessage): string {
-  return message.parts
-    .map((part) => (part.type === "text" ? part.text : ""))
-    .filter(Boolean)
-    .join("\n")
-    .trim();
-}
-
 export async function streamCoachTurn({
   accessToken,
   baseUrl,
@@ -101,9 +93,11 @@ export async function streamCoachTurn({
     onError: () => streamErrorMessage,
     onFinish: async ({ responseMessage, finishReason, isAborted }) => {
       if (isAborted) return;
-      const trimmed = uiMessageText(responseMessage);
-      // Tool-only finishes (no surface text from the model) have nothing to persist.
-      if (trimmed.length === 0) return;
+      // Persist the assistant turn as its full `parts[]` array so tool-call
+      // pills, reasoning blocks, and file parts survive page reloads. Tool-only
+      // finishes (no text or tool parts) have nothing to persist.
+      const parts = responseMessage.parts;
+      if (parts.length === 0) return;
       try {
         const response = await fetch(`${baseUrl}/api/chat/messages`, {
           method: "POST",
@@ -115,7 +109,7 @@ export async function streamCoachTurn({
           body: JSON.stringify({
             id: responseMessage.id,
             role: "assistant",
-            content: trimmed,
+            parts,
             metadata: {
               message_kind: "assistant_reply",
               finish_reason: finishReason,

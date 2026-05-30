@@ -11,10 +11,10 @@ from backend.models.athlete import (
     SportThreshold,
 )
 from backend.models.chat import (
-    ChatAttachmentInput,
-    ChatAttachmentRecord,
     ChatMessage,
     ChatThread,
+    MessageAttachment,
+    MessagePart,
 )
 from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
 from supabase import Client, create_client
@@ -388,25 +388,7 @@ class SupabaseRepository:
             .execute()
         )
         rows = response.data or []
-        messages = [self._parse_chat_message(row) for row in rows]
-        if not messages:
-            return []
-        attachments_response = (
-            client.table("chat_attachments")
-            .select("*")
-            .in_("message_id", [message.id for message in messages])
-            .order("created_at")
-            .execute()
-        )
-        attachment_rows = attachments_response.data or []
-        attachments_by_message: dict[str, list[ChatAttachmentRecord]] = {}
-        for row in attachment_rows:
-            attachment = self._parse_chat_attachment(row)
-            attachments_by_message.setdefault(attachment.message_id, []).append(attachment)
-        return [
-            message.model_copy(update={"attachments": attachments_by_message.get(message.id, [])})
-            for message in messages
-        ]
+        return [self._parse_chat_message(row) for row in rows]
 
     async def create_chat_message(  # noqa: PLR0913
         self,
@@ -414,19 +396,25 @@ class SupabaseRepository:
         thread_id: str,
         user_id: str,
         role: str,
-        content: str,
+        parts: list[MessagePart],
         metadata: dict[str, Any] | None = None,
-        attachments: list[ChatAttachmentInput] | None = None,
+        attachments: list[MessageAttachment] | None = None,
         message_id: str | None = None,
     ) -> ChatMessage:
         client = self._require_client()
         message_id = message_id or str(uuid4())
+        # `content` is denormalized plain text kept for one release window so
+        # existing readers (exports, search) keep working until the follow-up
+        # drop migration. Derive it from any text parts.
+        content = "".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
         payload = {
             "id": message_id,
             "thread_id": thread_id,
             "user_id": user_id,
             "role": role,
             "content": content,
+            "parts": parts,
+            "attachments": attachments or [],
             "metadata": metadata or {},
             "created_at": datetime.now(UTC).isoformat(),
         }
@@ -434,27 +422,7 @@ class SupabaseRepository:
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted chat message row.")
-        message = self._parse_chat_message(rows[0])
-        if attachments:
-            attachment_payloads = [
-                {
-                    "id": str(uuid4()),
-                    "message_id": message_id,
-                    "user_id": user_id,
-                    "filename": attachment.filename,
-                    "content_type": attachment.content_type,
-                    "object_key": attachment.object_key,
-                    "public_url": attachment.public_url,
-                    "created_at": datetime.now(UTC).isoformat(),
-                }
-                for attachment in attachments
-            ]
-            client.table("chat_attachments").insert(attachment_payloads).execute()
-        messages = await self.list_chat_messages(thread_id)
-        for existing in messages:
-            if existing.id == message.id:
-                return existing
-        return message
+        return self._parse_chat_message(rows[0])
 
     # ── Internal helpers ──────────────────────────────────────
 
@@ -481,9 +449,3 @@ class SupabaseRepository:
         if not isinstance(row, dict):
             raise TypeError("Supabase chat message rows must be objects.")
         return ChatMessage.model_validate(row)
-
-    @staticmethod
-    def _parse_chat_attachment(row: object) -> ChatAttachmentRecord:
-        if not isinstance(row, dict):
-            raise TypeError("Supabase chat attachment rows must be objects.")
-        return ChatAttachmentRecord.model_validate(row)

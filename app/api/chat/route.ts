@@ -20,17 +20,9 @@ type ChatRequestBody = {
   messages?: UIMessage[];
 };
 
-type PersistAttachment = {
-  content_type: string;
-  filename: string;
-  object_key: string;
-  public_url: string;
-};
-
 type LatestUserTurn = {
-  attachments: PersistAttachment[];
   id: string;
-  text: string;
+  parts: UIMessage["parts"];
 };
 
 const AUTH_UNAVAILABLE_MESSAGE =
@@ -93,40 +85,13 @@ async function loadAthleteContext(
   return (await response.json()) as AthleteContextBundle;
 }
 
-function filePartsToAttachments(parts: UIMessage["parts"]): PersistAttachment[] {
-  return parts.flatMap((part) => {
-    if (part.type !== "file") return [];
-    if (!part.url.startsWith("http")) return [];
-    let objectKey: string;
-    try {
-      objectKey = new URL(part.url).pathname.replace(/^\//, "") || part.url;
-    } catch {
-      return [];
-    }
-    return [
-      {
-        content_type: part.mediaType,
-        filename: part.filename ?? "attachment",
-        object_key: objectKey,
-        public_url: part.url,
-      },
-    ];
-  });
-}
-
 function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message?.role !== "user") continue;
-    const text = message.parts
-      .map((part) => (part.type === "text" ? part.text : ""))
-      .filter(Boolean)
-      .join("\n")
-      .trim();
     return {
-      attachments: filePartsToAttachments(message.parts),
       id: message.id,
-      text,
+      parts: message.parts,
     };
   }
   return null;
@@ -137,7 +102,7 @@ async function persistUserMessage(
   token: BrowserTokenResponse,
   turn: LatestUserTurn
 ): Promise<void> {
-  if (turn.text.length === 0 && turn.attachments.length === 0) return;
+  if (turn.parts.length === 0) return;
   try {
     const response = await fetch(`${requestOrigin(request)}/api/chat/messages`, {
       method: "POST",
@@ -149,9 +114,8 @@ async function persistUserMessage(
       body: JSON.stringify({
         id: turn.id,
         role: "user",
-        content: turn.text,
+        parts: turn.parts,
         metadata: { message_kind: "user_turn", client_message_id: turn.id },
-        attachments: turn.attachments,
       }),
     });
     if (!response.ok) {

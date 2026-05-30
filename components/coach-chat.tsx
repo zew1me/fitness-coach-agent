@@ -19,7 +19,6 @@ import type {
   AdaptedPlan,
   AthleteProfile,
   BrowserTokenResponse,
-  ChatAttachment,
   ChatMessage,
   ChatThreadResponse,
 } from "../lib/types";
@@ -34,9 +33,13 @@ type SessionState = {
   token: BrowserTokenResponse | null;
 };
 
-type LocalAttachment = ChatAttachment & {
+type LocalAttachment = {
+  content_type: string;
   dataUrl: string | null;
+  filename: string;
+  object_key: string;
   previewUrl: string | null;
+  public_url: string | null;
   status: "error" | "uploaded" | "uploading";
 };
 
@@ -157,10 +160,48 @@ function accountLabel(profile: AthleteProfile | null): string {
   return displayName ? displayName : "Account";
 }
 
+function readString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function legacyAttachmentToFilePart(
+  attachment: Record<string, unknown>,
+): UIMessage["parts"][number] | null {
+  const url = readString(attachment, "public_url");
+  if (url === null) return null;
+  const mediaType =
+    readString(attachment, "content_type") ??
+    readString(attachment, "mediaType") ??
+    "application/octet-stream";
+  const filename = readString(attachment, "filename") ?? "attachment";
+  return { type: "file", mediaType, filename, url };
+}
+
+// Real persisted messages always have `parts` populated (the 0004 migration
+// backfilled every legacy row). This shim covers in-flight test fixtures and
+// any callers still constructing the legacy shape: synthesize parts from the
+// text `content` + legacy `attachments` join so the renderer never has to
+// branch on shape.
+function deriveParts(message: ChatMessage): UIMessage["parts"] {
+  if (message.parts && message.parts.length > 0) {
+    return message.parts as UIMessage["parts"];
+  }
+  const synthesized: UIMessage["parts"] = [];
+  if (message.content && message.content.length > 0) {
+    synthesized.push({ type: "text", text: message.content });
+  }
+  for (const attachment of message.attachments) {
+    const part = legacyAttachmentToFilePart(attachment);
+    if (part !== null) synthesized.push(part);
+  }
+  return synthesized;
+}
+
 function toUiMessage(message: ChatMessage): UIMessage {
   return {
     id: message.id,
-    parts: [{ type: "text", text: message.content }],
+    parts: deriveParts(message),
     role: message.role,
   };
 }
@@ -208,12 +249,7 @@ function uiPartText(part: UIMessage["parts"][number]): string | null {
   return null;
 }
 
-function uiMessageText(message: UIMessage): string {
-  return message.parts.flatMap((part) => {
-    const text = uiPartText(part);
-    return text === null ? [] : [text];
-  }).join("\n");
-}
+
 
 function toLiveChatMessage(message: UIMessage, threadId: string, userId: string): ChatMessage | null {
   if (message.role !== "assistant" && message.role !== "user") {
@@ -222,7 +258,7 @@ function toLiveChatMessage(message: UIMessage, threadId: string, userId: string)
 
   return {
     attachments: [],
-    content: uiMessageText(message),
+    parts: message.parts as NonNullable<ChatMessage["parts"]>,
     created_at: new Date().toISOString(),
     id: message.id,
     metadata: { message_kind: "streaming" },
@@ -252,9 +288,7 @@ function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
   });
 }
 
-function isImageAttachment(attachment: { content_type: string; filename: string }): boolean {
-  return attachment.content_type.startsWith("image/");
-}
+
 
 function activityContentType(file: File): string {
   if (file.type) {
@@ -454,7 +488,7 @@ export function CoachChat(): JSX.Element {
     const additionalMessages = liveMessages
       .filter((message) => !persistedIds.has(message.id))
       .map((message) => toLiveChatMessage(message, thread.id, token.user_id))
-      .filter((message): message is ChatMessage => message !== null && message.content.length > 0);
+      .filter((message): message is ChatMessage => message !== null && (message.parts ?? []).length > 0);
 
     return [...persistedMessages, ...additionalMessages];
   }, [liveMessages, session.token, threadState.data]);
@@ -815,26 +849,44 @@ export function CoachChat(): JSX.Element {
               ? `${styles.bubble} ${styles.assistantBubble}`
               : `${styles.bubble} ${styles.userBubble}`;
           const plan = message.metadata.plan;
+          const parts = deriveParts(message);
+          const textBlocks = parts
+            .map((part) => uiPartText(part))
+            .filter((text): text is string => text !== null && text.length > 0);
+          const fileParts = parts.filter(
+            (part): part is FileUIPart => part.type === "file",
+          );
 
           return (
             <div className={rowClass} key={message.id}>
               <div className={bubbleClass}>
-                {message.content ? <p className={styles.messageText}>{message.content}</p> : null}
-                {message.attachments.length > 0 ? (
+                {textBlocks.map((text, idx) => (
+                  <p className={styles.messageText} key={`text-${idx}`}>{text}</p>
+                ))}
+                {fileParts.length > 0 ? (
                   <div className={styles.attachmentGrid}>
-                    {message.attachments.map((attachment) => (
-                      <div className={styles.attachmentThumb} key={attachment.id ?? attachment.object_key}>
-                        {attachment.public_url && isImageAttachment(attachment) ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img alt={attachment.filename} src={attachment.public_url} />
-                        ) : (
-                          <div className={styles.attachmentFileCard}>
-                            <span>{fileTypeBadge(attachment) ?? "FILE"}</span>
-                          </div>
-                        )}
-                        <span className={styles.attachmentName}>{attachment.filename}</span>
-                      </div>
-                    ))}
+                    {fileParts.map((part, idx) => {
+                      const filename = part.filename ?? "attachment";
+                      const contentType = part.mediaType;
+                      const isImage = contentType.startsWith("image/");
+                      const badge = fileTypeBadge({
+                        content_type: contentType,
+                        filename,
+                      });
+                      return (
+                        <div className={styles.attachmentThumb} key={`file-${part.url}-${idx}`}>
+                          {isImage ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img alt={filename} src={part.url} />
+                          ) : (
+                            <div className={styles.attachmentFileCard}>
+                              <span>{badge ?? "FILE"}</span>
+                            </div>
+                          )}
+                          <span className={styles.attachmentName}>{filename}</span>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
                 {plan ? renderPlan(plan) : null}

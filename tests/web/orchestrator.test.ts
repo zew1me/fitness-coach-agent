@@ -111,7 +111,7 @@ describe("streamCoachTurn", () => {
         body: JSON.stringify({
           id: "46db0714-d6d8-402b-a421-00b21b3a29f6",
           role: "assistant",
-          content: "Keep tomorrow easy.",
+          parts: [{ text: "Keep tomorrow easy.", type: "text" }],
           metadata: {
             message_kind: "assistant_reply",
             finish_reason: "stop",
