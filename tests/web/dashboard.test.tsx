@@ -345,6 +345,185 @@ describe("CoachChat", () => {
     expect(screen.queryByText(/Sorry, we're out running/i)).toBeNull();
   });
 
+  it("prefers the remote chat thread over a longer stale local cache", async () => {
+    localStorage.setItem(
+      "fitness-coach.local-chat-thread.athlete-1",
+      JSON.stringify({
+        attachments_enabled: false,
+        profile_complete: true,
+        thread: {
+          id: "thread-1",
+          user_id: "athlete-1",
+          state: {},
+          created_at: "2026-04-04T09:00:00Z",
+          updated_at: "2026-04-04T09:01:00Z",
+          messages: [
+            {
+              id: "remote-message-1",
+              attachments: [],
+              content: "Canonical server note.",
+              created_at: "2026-04-04T09:00:00Z",
+              metadata: {},
+              role: "user",
+              thread_id: "thread-1",
+              user_id: "athlete-1"
+            },
+            {
+              id: "stale-local-duplicate",
+              attachments: [],
+              content: "Stale duplicate note.",
+              created_at: "2026-04-04T09:00:01Z",
+              metadata: {},
+              role: "user",
+              thread_id: "thread-1",
+              user_id: "athlete-1"
+            }
+          ]
+        }
+      })
+    );
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:02:00Z",
+                messages: [
+                  {
+                    id: "remote-message-1",
+                    attachments: [],
+                    content: "Canonical server note.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {},
+                    role: "user",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText("Canonical server note.");
+    expect(screen.queryByText("Stale duplicate note.")).toBeNull();
+
+    await waitFor(() => {
+      const cachedRaw = localStorage.getItem("fitness-coach.local-chat-thread.athlete-1");
+      expect(cachedRaw).not.toBeNull();
+      const cached = JSON.parse(cachedRaw ?? "") as {
+        thread: { messages: Array<{ content: string; id: string }> };
+      };
+      expect(cached.thread.messages).toEqual([
+        expect.objectContaining({ content: "Canonical server note.", id: "remote-message-1" })
+      ]);
+    });
+  });
+
+  it("does not write transient live chat messages into local storage", async () => {
+    chatMocks.messages.push({
+      id: "live-message-1",
+      parts: [{ text: "Transient optimistic note.", type: "text" }],
+      role: "user"
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read", "profile:write", "plans:read", "plans:write", "metrics:write"],
+              token_type: "Bearer",
+              user_id: "athlete-1"
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:02:00Z",
+                messages: [
+                  {
+                    id: "remote-message-1",
+                    attachments: [],
+                    content: "Canonical server note.",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {},
+                    role: "user",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1"
+                  }
+                ]
+              }
+            }),
+            { status: 200 }
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText("Canonical server note.");
+    await waitFor(() => {
+      const cachedRaw = localStorage.getItem("fitness-coach.local-chat-thread.athlete-1");
+      expect(cachedRaw).not.toBeNull();
+      const cached = JSON.parse(cachedRaw ?? "") as {
+        thread: { messages: Array<{ content: string; id: string }> };
+      };
+      expect(cached.thread.messages).toEqual([
+        expect.objectContaining({ content: "Canonical server note.", id: "remote-message-1" })
+      ]);
+    });
+  });
+
   it("uses friendly signed-in copy instead of showing a raw user id", async () => {
     const userId = "aa687ce1-5189-4c28-bf24-e8b1574ebc5b";
     const fetchMock = vi.fn((input: RequestInfo | URL) => {

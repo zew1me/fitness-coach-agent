@@ -112,29 +112,6 @@ function writeLocalChatThread(thread: ChatThreadResponse, userId: string): void 
   }
 }
 
-function hydrateLocalChatThread(remoteThread: ChatThreadResponse, userId: string): ChatThreadResponse {
-  const localThread = readLocalChatThread(userId);
-  if (
-    localThread === null ||
-    localThread.thread.messages.length <= remoteThread.thread.messages.length
-  ) {
-    return remoteThread;
-  }
-
-  return {
-    ...remoteThread,
-    thread: {
-      ...remoteThread.thread,
-      messages: localThread.thread.messages,
-      state: {
-        ...remoteThread.thread.state,
-        ...localThread.thread.state,
-      },
-      updated_at: localThread.thread.updated_at,
-    },
-  };
-}
-
 function readableTime(timestamp: string): string {
   return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
@@ -521,7 +498,7 @@ export function CoachChat(): JSX.Element {
       try {
         const thread = await loadChatThread();
         setThreadState({
-          data: hydrateLocalChatThread(thread, token.user_id),
+          data: thread,
           error: null,
           loading: false,
         });
@@ -554,22 +531,16 @@ export function CoachChat(): JSX.Element {
   }, [session.token]);
 
   useEffect(() => {
-    if (session.token === null || threadState.data === null || displayedMessages.length === 0) {
+    if (
+      session.token === null ||
+      threadState.data === null ||
+      threadState.data.thread.messages.length === 0
+    ) {
       return;
     }
 
-    writeLocalChatThread(
-      {
-        ...threadState.data,
-        thread: {
-          ...threadState.data.thread,
-          messages: displayedMessages,
-          updated_at: new Date().toISOString(),
-        },
-      },
-      session.token.user_id,
-    );
-  }, [displayedMessages, session.token, threadState.data]);
+    writeLocalChatThread(threadState.data, session.token.user_id);
+  }, [session.token, threadState.data]);
 
   useEffect(() => {
     const scrollTarget = messageEndRef.current;
@@ -633,7 +604,7 @@ export function CoachChat(): JSX.Element {
       setSyncingThread(true);
       try {
         const thread = await loadChatThread();
-        setThreadState({ data: hydrateLocalChatThread(thread, token.user_id), error: null, loading: false });
+        setThreadState({ data: thread, error: null, loading: false });
       } catch {
         setThreadState((current) => ({
           ...current,
