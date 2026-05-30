@@ -597,7 +597,7 @@ export function CoachChat(): JSX.Element {
       setAttachments([]);
       setComposer("");
       await sendMessage({
-        messageId,
+        id: messageId,
         parts: [{ type: "text", text: pendingComposer }, ...uploadedFileParts(pendingAttachments)],
       });
       setSending(false);
