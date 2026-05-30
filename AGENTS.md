@@ -72,14 +72,26 @@ Consent grants are durable (persisted to `oauth_grants` table). The `require_use
 ### Database (Supabase + Postgres)
 
 Migrations in `supabase/migrations/`:
-- `0001_initial_schema.sql` — `athlete_profiles`, `check_ins`
-- `0002_oauth_durable_consent.sql` — `oauth_grants`, `oauth_authorization_codes`, `oauth_refresh_tokens`
+- `0001_schema.sql` — initial schema (athlete profiles, check-ins, OAuth tables, chat tables, etc.)
+- `0002_nutrition.sql` — nutrition tracking
+- `0003_fitness_thresholds.sql` — sport-specific threshold source metadata
+- `0004_chat_messages_parts.sql` — adopts AI SDK `UIMessage.parts` JSON shape on `chat_messages` (see "Chat persistence" below)
 
 Use separate Supabase projects per environment (development / preview / production).
 
-### Storage
+### Chat persistence
 
-Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` returns a presigned URL; the client uploads directly to R2.
+`chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table and eliminates the lossy translation that used to drop inline images and tool-call status on reload (issue #149).
+
+The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
+
+### Storage — current reality vs. intent
+
+**Intent.** Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
+
+**Current reality (as of #149 landing).** Chat image attachments are being written into Postgres as inline base64 `data:image/png;base64,…` URLs inside `chat_messages.parts`, **not** as R2 URLs. Row sizes for a single-image message reach ~250KB. The R2 presign + upload calls *do* happen and the bytes land in R2, but the `public_url` returned by the upload proxy isn't being threaded back into the `LocalAttachment` state before submit, so `uploadedFileParts` falls through to its `attachment.dataUrl` (base64) fallback (`components/coach-chat.tsx:237`). Tracked in **issue #163**; whether R2 is referenced by anything else in the running app is **issue #164**.
+
+Anyone reasoning about storage costs, backup size, or LLM context bloat should treat chat images as Postgres rows today, not R2 objects.
 
 ## Environment Variables
 
