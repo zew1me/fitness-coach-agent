@@ -945,7 +945,7 @@ describe("CoachChat", () => {
 
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalledWith({
-        messageId: expect.stringMatching(uuidPattern),
+        id: expect.stringMatching(uuidPattern),
         parts: [{ text: "I ran easy today.", type: "text" }]
       });
     });
@@ -1429,7 +1429,7 @@ describe("CoachChat", () => {
 
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalledWith({
-        messageId: expect.stringMatching(uuidPattern),
+        id: expect.stringMatching(uuidPattern),
         parts: [
           { text: "Please analyze this workout.", type: "text" },
           {
@@ -1549,7 +1549,7 @@ describe("CoachChat", () => {
 
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalledWith({
-        messageId: expect.stringMatching(uuidPattern),
+        id: expect.stringMatching(uuidPattern),
         parts: [
           { text: "Please parse this activity.", type: "text" },
           {
