@@ -81,15 +81,27 @@ describe("coachToolDefinitions", () => {
     expect(
       coachToolDefinitions.update_athlete_profile.inputSchema.parse({
         fields: {
+          biological_sex: "not_specified",
           dietary_restrictions: ["vegetarian"],
+          hormone_status: "not_specified",
           onboarding_collected: { nutrition: true },
         },
       })
     ).toMatchObject({
       fields: {
+        biological_sex: "not_specified",
+        hormone_status: "not_specified",
         onboarding_collected: { nutrition: true },
       },
     });
+
+    expect(() =>
+      coachToolDefinitions.update_athlete_profile.inputSchema.parse({
+        fields: {
+          hormone_status: "not_provided",
+        },
+      })
+    ).toThrow();
 
     expect(
       coachToolDefinitions.save_recovery_data.inputSchema.parse({

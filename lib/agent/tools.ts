@@ -89,15 +89,24 @@ const onboardingCollectedSchema = z.object({
   nutrition: z.boolean().optional(),
 });
 
+const biologicalSexSchema = z.enum(["male", "female", "not_specified"]);
+const hormoneStatusSchema = z.enum([
+  "endogenous",
+  "hrt_estrogen",
+  "hrt_testosterone",
+  "not_specified",
+]);
+const coachingStateSchema = z.enum(["onboarding", "calibrating", "active", "paused"]);
+
 const profileFieldsSchema = z.object({
-  biological_sex: z.string().min(1).optional(),
+  biological_sex: biologicalSexSchema.optional(),
   birth_date: z.string().min(1).optional(),
-  coaching_state: z.string().min(1).optional(),
+  coaching_state: coachingStateSchema.optional(),
   constraints: z.array(z.string().min(1)).optional(),
   dietary_restrictions: z.array(z.string().min(1)).optional(),
   display_name: z.string().min(1).optional(),
   height_cm: z.number().positive().optional(),
-  hormone_status: z.string().min(1).optional(),
+  hormone_status: hormoneStatusSchema.optional(),
   injuries_rehab: z.array(z.string().min(1)).optional(),
   max_hr_bpm: z.number().int().positive().optional(),
   notes: z.string().min(1).optional(),

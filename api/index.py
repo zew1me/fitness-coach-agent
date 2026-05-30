@@ -761,7 +761,13 @@ async def update_athlete_profile(
         user_context.user_id,
         list(payload.fields.keys()),
     )
-    profile = await repo.update_athlete_profile_fields(user_context.user_id, payload.fields)
+    try:
+        profile = await repo.update_athlete_profile_fields(user_context.user_id, payload.fields)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("profile update unavailable user_id=%s", user_context.user_id)
+        raise HTTPException(status_code=503, detail="Unable to update athlete profile.") from exc
     return profile.model_dump(mode="json")
 
 
