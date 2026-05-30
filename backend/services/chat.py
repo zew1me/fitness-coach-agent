@@ -96,9 +96,7 @@ class ChatService:
     def _initial_welcome(profile: AthleteProfile) -> str:
         if profile.coaching_state == "onboarding":
             return (
-                "Welcome. I'll ask a few questions to understand your background, but none "
-                "of it is required. Tell me about your sports, goals, recent training, and "
-                "schedule in normal language; I can gather multiple details from a single "
-                "message."
+                "Welcome. Let's start with just two things: what sport or sports are you "
+                "training for, and what would you like coaching around?"
             )
         return "Welcome back. Tell me what changed in training, recovery, schedule, or goals."

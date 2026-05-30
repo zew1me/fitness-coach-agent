@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -61,15 +62,25 @@ class OnboardingRepo:
 
 
 @pytest.mark.asyncio
-async def test_onboarding_welcome_sets_optional_conversational_expectations() -> None:
-    service = ChatService(repo=cast(Any, OnboardingRepo()), r2_service=cast(Any, object()))
+async def test_onboarding_welcome_asks_for_sport_and_goal_first() -> None:
+    repo = OnboardingRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
     bootstrap = await service.bootstrap_thread("athlete-1")
 
+    assert len(repo.create_calls) == 1
+    assert repo.create_calls[0]["role"] == "assistant"
+    assert repo.create_calls[0]["metadata"] == {"message_kind": "welcome"}
+
     welcome = bootstrap.thread.messages[0].content
-    assert "none of it is required" in welcome
-    assert "normal language" in welcome
-    assert "sports, goals, recent training, and schedule" in welcome
+    welcome_lower = welcome.lower()
+    assert "sport" in welcome_lower
+    assert re.search(r"\b(coaching|goal|objective|help|improve)\b", welcome_lower) is not None
+    assert re.search(r"\bage\b", welcome_lower) is None
+    assert "nutrition" not in welcome_lower
+    assert "equipment" not in welcome_lower
+    assert "availability" not in welcome_lower
+    assert "recent training" not in welcome_lower
 
 
 @pytest.mark.asyncio

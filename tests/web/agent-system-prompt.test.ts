@@ -57,7 +57,11 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("14km hill climb");
     expect(prompt).toContain("CTL 42");
     expect(prompt).toContain("30-39");
-    expect(prompt).toContain("extract multiple fields");
+    expect(prompt).toContain("Onboarding goal");
+    expect(prompt).toContain("sport context");
+    expect(prompt).toContain("coaching objective");
+    expect(prompt).toContain("one or two natural follow-up questions");
+    expect(prompt).toContain("Nutrition should wait until after the opening exchange");
     // Age-specific balance guidance must not appear for under-65 athletes.
     expect(prompt).not.toContain("balance and fall-prevention");
   });
