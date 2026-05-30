@@ -54,7 +54,7 @@ class ChatService:
             thread=thread,
         )
 
-    async def persist_message(
+    async def persist_message(  # noqa: PLR0913
         self,
         user_id: str,
         *,
@@ -62,6 +62,7 @@ class ChatService:
         parts: list[MessagePart],
         metadata: dict[str, Any] | None = None,
         attachments: list[MessageAttachment] | None = None,
+        message_id: str | None = None,
     ) -> ChatMessage:
         thread = await self._repo.get_or_create_chat_thread(user_id)
         return await self._repo.create_chat_message(
@@ -71,6 +72,7 @@ class ChatService:
             parts=parts,
             metadata=metadata or {},
             attachments=attachments,
+            message_id=message_id,
         )
 
     @property

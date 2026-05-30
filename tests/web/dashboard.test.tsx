@@ -34,6 +34,7 @@ vi.mock("@ai-sdk/react", () => ({
 import { CoachChat } from "../../components/coach-chat";
 
 const originalFetch = globalThis.fetch;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const localStorageStore = new Map<string, string>();
 const localStorageMock = {
   clear: (): void => {
@@ -765,6 +766,7 @@ describe("CoachChat", () => {
 
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        messageId: expect.stringMatching(uuidPattern),
         parts: [{ text: "I ran easy today.", type: "text" }]
       });
     });
@@ -1248,6 +1250,7 @@ describe("CoachChat", () => {
 
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        messageId: expect.stringMatching(uuidPattern),
         parts: [
           { text: "Please analyze this workout.", type: "text" },
           {
@@ -1367,6 +1370,7 @@ describe("CoachChat", () => {
 
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        messageId: expect.stringMatching(uuidPattern),
         parts: [
           { text: "Please parse this activity.", type: "text" },
           {

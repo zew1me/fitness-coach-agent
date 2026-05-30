@@ -39,6 +39,10 @@ function filterLeadTools(coachTools: ToolSet): ToolSet {
   return coachTools;
 }
 
+function generateUuid(): string {
+  return crypto.randomUUID();
+}
+
 export async function streamCoachTurn({
   accessToken,
   baseUrl,
@@ -85,8 +89,10 @@ export async function streamCoachTurn({
   });
 
   return result.toUIMessageStreamResponse({
+    generateMessageId: generateUuid,
     onError: () => streamErrorMessage,
-    onFinish: async ({ responseMessage }) => {
+    onFinish: async ({ responseMessage, finishReason, isAborted }) => {
+      if (isAborted) return;
       // Persist the assistant turn as its full `parts[]` array so tool-call
       // pills, reasoning blocks, and file parts survive page reloads. Tool-only
       // finishes (no text or tool parts) have nothing to persist.
@@ -101,9 +107,14 @@ export async function streamCoachTurn({
             ...(extraHeaders ?? {}),
           },
           body: JSON.stringify({
+            id: responseMessage.id,
             role: "assistant",
             parts,
-            metadata: { message_kind: "assistant_reply" },
+            metadata: {
+              message_kind: "assistant_reply",
+              finish_reason: finishReason,
+              client_message_id: responseMessage.id,
+            },
           }),
         });
         if (!response.ok) {
@@ -114,5 +125,6 @@ export async function streamCoachTurn({
         console.error("[chat] persist assistant reply error:", msg);
       }
     },
+    originalMessages: selectedMessages,
   });
 }

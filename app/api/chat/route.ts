@@ -112,6 +112,7 @@ async function persistUserMessage(
         ...vercelProtectionBypassHeaders(),
       },
       body: JSON.stringify({
+        id: turn.id,
         role: "user",
         parts: turn.parts,
         metadata: { message_kind: "user_turn", client_message_id: turn.id },

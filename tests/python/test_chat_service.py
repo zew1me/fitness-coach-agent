@@ -1,11 +1,13 @@
 import re
 from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from backend.models.athlete import AthleteProfile
-from backend.models.chat import ChatMessage, ChatThread
+from backend.models.chat import ChatMessage, ChatPersistRequest, ChatThread
 from backend.services.chat import ChatService
 
 
@@ -36,6 +38,7 @@ class OnboardingRepo:
         parts: list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        message_id: str | None = None,
     ) -> ChatMessage:
         self.create_calls.append(
             {
@@ -45,6 +48,7 @@ class OnboardingRepo:
                 "parts": list(parts),
                 "metadata": dict(metadata or {}),
                 "attachments": list(attachments or []),
+                "message_id": message_id,
             }
         )
         content = "".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
@@ -115,6 +119,23 @@ async def test_persist_message_writes_parts_and_metadata() -> None:
     assert call["metadata"] == {"message_kind": "user_turn", "client_message_id": "abc-123"}
     assert call["parts"] == parts
     assert call["attachments"] == []
+    assert call["message_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_persist_message_threads_caller_message_id_to_repository() -> None:
+    repo = OnboardingRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+    message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
+
+    await service.persist_message(
+        "athlete-1",
+        role="user",
+        parts=[{"type": "text", "text": "I train ~8 hours/week"}],
+        message_id=message_id,
+    )
+
+    assert repo.create_calls[0]["message_id"] == message_id
 
 
 @pytest.mark.asyncio
@@ -168,3 +189,18 @@ async def test_persist_message_defaults_metadata_to_empty_dict() -> None:
     )
 
     assert repo.create_calls[0]["metadata"] == {}
+
+
+def test_chat_persist_request_accepts_uuid_message_id() -> None:
+    payload = ChatPersistRequest(
+        id="63ff9606-9158-43d7-a82b-d31ef9788b7d",
+        role="user",
+        parts=[{"type": "text", "text": "I train ~8 hours/week"}],
+    )
+
+    assert payload.id == UUID("63ff9606-9158-43d7-a82b-d31ef9788b7d")
+
+
+def test_chat_persist_request_rejects_invalid_message_id() -> None:
+    with pytest.raises(ValidationError):
+        ChatPersistRequest(id="not-a-uuid", role="user", parts=[{"type": "text", "text": "Bad id"}])

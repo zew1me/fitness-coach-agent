@@ -399,9 +399,10 @@ class SupabaseRepository:
         parts: list[MessagePart],
         metadata: dict[str, Any] | None = None,
         attachments: list[MessageAttachment] | None = None,
+        message_id: str | None = None,
     ) -> ChatMessage:
         client = self._require_client()
-        message_id = str(uuid4())
+        message_id = message_id or str(uuid4())
         # `content` is denormalized plain text kept for one release window so
         # existing readers (exports, search) keep working until the follow-up
         # drop migration. Derive it from any text parts.
