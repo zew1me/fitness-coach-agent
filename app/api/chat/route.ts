@@ -223,7 +223,7 @@ export async function POST(request: Request): Promise<Response> {
         }).then((c) => c.tools())
       : {};
 
-    return streamCoachTurn({
+    return await streamCoachTurn({
       accessToken: token.access_token,
       baseUrl: requestOrigin(request),
       context,

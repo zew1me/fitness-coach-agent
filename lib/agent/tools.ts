@@ -10,7 +10,7 @@ const recentActivitiesInputSchema = z.object({
 const goalSchema = z.object({
   course_distance_meters: z.number().positive().optional(),
   course_elevation_gain_meters: z.number().nonnegative().optional(),
-  course_profile: z.record(z.unknown()).optional(),
+  course_profile_notes: z.string().min(1).optional(),
   goal_type: z.string().min(1),
   improvement_baseline_value: z.number().optional(),
   improvement_metric: z.string().min(1).optional(),
@@ -50,17 +50,68 @@ const uploadedFileInputSchema = z.object({
   public_url: z.string().url().nullable().optional(),
 });
 
+const recoveryEntrySchema = z.object({
+  body_battery: z.number().int().min(0).max(100).optional(),
+  hrv_ms: z.number().positive().optional(),
+  log_date: z.string().min(1).optional(),
+  notes: z.string().min(1).optional(),
+  resting_hr_bpm: z.number().int().positive().optional(),
+  sleep_consistency_pct: z.number().min(0).max(100).optional(),
+  sleep_duration_hours: z.number().nonnegative().optional(),
+  sleep_score: z.number().nonnegative().optional(),
+  stress_score: z.number().nonnegative().optional(),
+  subjective_energy: z.number().int().min(1).max(5).optional(),
+});
+
 const recoveryInputSchema = z.object({
-  entries: z.array(z.record(z.unknown())).min(1),
+  entries: z.array(recoveryEntrySchema).min(1),
+});
+
+const weeklyPatternDaySchema = z.object({
+  available: z.boolean().optional(),
+  max_hours: z.number().nonnegative().optional(),
+  notes: z.string().min(1).optional(),
+});
+
+const scheduleOverrideSchema = z.object({
+  available: z.boolean().optional(),
+  max_hours: z.number().nonnegative().optional(),
+  override_date: z.string().min(1).optional(),
+  reason: z.string().min(1).optional(),
 });
 
 const scheduleInputSchema = z.object({
-  overrides: z.array(z.record(z.unknown())).optional(),
-  weekly_pattern: z.record(z.unknown()).optional()
+  overrides: z.array(scheduleOverrideSchema).optional(),
+  weekly_pattern: z.record(weeklyPatternDaySchema).optional(),
+});
+
+const onboardingCollectedSchema = z.object({
+  nutrition: z.boolean().optional(),
+});
+
+const profileFieldsSchema = z.object({
+  biological_sex: z.string().min(1).optional(),
+  birth_date: z.string().min(1).optional(),
+  coaching_state: z.string().min(1).optional(),
+  constraints: z.array(z.string().min(1)).optional(),
+  dietary_restrictions: z.array(z.string().min(1)).optional(),
+  display_name: z.string().min(1).optional(),
+  height_cm: z.number().positive().optional(),
+  hormone_status: z.string().min(1).optional(),
+  injuries_rehab: z.array(z.string().min(1)).optional(),
+  max_hr_bpm: z.number().int().positive().optional(),
+  notes: z.string().min(1).optional(),
+  nutrition_notes: z.string().min(1).optional(),
+  onboarding_collected: onboardingCollectedSchema.optional(),
+  primary_sports: z.array(z.string().min(1)).optional(),
+  resting_hr_bpm: z.number().int().positive().optional(),
+  specialization_pct: z.number().int().min(0).max(100).optional(),
+  weekly_available_hours: z.number().positive().optional(),
+  weight_kg: z.number().positive().optional(),
 });
 
 const profileInputSchema = z.object({
-  fields: z.record(z.unknown()),
+  fields: profileFieldsSchema,
 });
 
 const planInputSchema = z.object({

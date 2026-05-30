@@ -445,6 +445,39 @@ describe("app/api/chat route", () => {
     );
   });
 
+  it("returns a bounded 503 when coach streaming setup fails", async () => {
+    vi.mocked(streamCoachTurn).mockRejectedValueOnce(new Error("Invalid schema for response_format"));
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          })
+        );
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        })
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers: { cookie: "coach_browser_session=session-token" },
+        body: JSON.stringify({ messages: [] }),
+      })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.text()).resolves.toBe("Coach is unavailable right now. Please try again.");
+  });
+
   it("executes get_athlete_context by calling the engine summary endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(

@@ -45,13 +45,31 @@ function hasUserIdKey(value: unknown): boolean {
   return Object.entries(value).some(([key, nestedValue]) => key === "user_id" || hasUserIdKey(nestedValue));
 }
 
-const proposedUpdateInputSchema = z.record(z.unknown()).superRefine((input, context) => {
-  if (hasUserIdKey(input)) {
+const proposedUpdateInputSchema = z.string().min(2).superRefine((input, context) => {
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Specialist proposed update input must be a JSON object string.",
+      });
+      return;
+    }
+    if (!hasUserIdKey(parsed)) {
+      return;
+    }
+  } catch {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "Specialist proposed updates must not include user_id; server auth injects identity.",
+      message: "Specialist proposed update input must be a JSON object string.",
     });
+    return;
   }
+
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: "Specialist proposed updates must not include user_id; server auth injects identity.",
+  });
 });
 
 export const proposedUpdateSchema = z

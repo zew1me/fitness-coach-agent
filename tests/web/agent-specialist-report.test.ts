@@ -1,3 +1,4 @@
+import { zodSchema } from "ai";
 import { describe, expect, it } from "vitest";
 
 import { specialistReportSchema } from "../../lib/agent/orchestration-types";
@@ -8,11 +9,11 @@ describe("specialistReportSchema", () => {
       confidence: "medium",
       proposedUpdates: [
         {
-          input: {
+          input: JSON.stringify({
             fields: {
               weekly_available_hours: 7,
             },
-          },
+          }),
           rationale: "The athlete gave a new weekly availability.",
           toolName: "update_athlete_profile",
         },
@@ -31,7 +32,7 @@ describe("specialistReportSchema", () => {
         confidence: "low",
         proposedUpdates: [
           {
-            input: {},
+            input: "{}",
             rationale: "Specialists must not request arbitrary tools.",
             toolName: "get_athlete_context",
           },
@@ -49,10 +50,10 @@ describe("specialistReportSchema", () => {
         confidence: "high",
         proposedUpdates: [
           {
-            input: {
+            input: JSON.stringify({
               entries: [{ log_date: "2026-05-04", sleep_score: 40 }],
               user_id: "attacker-controlled-user",
-            },
+            }),
             rationale: "The server must inject identity later.",
             toolName: "save_recovery_data",
           },
@@ -62,5 +63,33 @@ describe("specialistReportSchema", () => {
         summary: "Poor sleep.",
       })
     ).toThrow();
+  });
+
+  it("rejects proposed update inputs that are not JSON object strings", () => {
+    expect(() =>
+      specialistReportSchema.parse({
+        confidence: "medium",
+        proposedUpdates: [
+          {
+            input: JSON.stringify(["not", "an", "object"]),
+            rationale: "Arrays are not valid tool inputs.",
+            toolName: "save_recovery_data",
+          },
+        ],
+        role: "recovery",
+        risks: [],
+        summary: "Invalid input shape.",
+      })
+    ).toThrow();
+  });
+
+  it("emits an OpenAI-compatible schema for proposed update input", async () => {
+    const jsonSchema = (await zodSchema(specialistReportSchema).jsonSchema) as {
+      properties?: Record<string, { items?: { properties?: Record<string, { type?: unknown }> } }>;
+    };
+
+    expect(
+      jsonSchema.properties?.["proposedUpdates"]?.items?.properties?.["input"]?.type
+    ).toBe("string");
   });
 });
