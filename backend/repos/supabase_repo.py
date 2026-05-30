@@ -28,6 +28,106 @@ class RecordNotFoundError(LookupError):
     """Raised when a requested record is absent in persistence."""
 
 
+_DROP_FIELD = object()
+
+_PROFILE_FIELDS = {
+    "display_name",
+    "biological_sex",
+    "hormone_status",
+    "birth_date",
+    "weight_kg",
+    "height_cm",
+    "resting_hr_bpm",
+    "max_hr_bpm",
+    "primary_sports",
+    "weekly_available_hours",
+    "coaching_state",
+    "specialization_pct",
+    "onboarding_collected",
+    "dietary_restrictions",
+    "nutrition_notes",
+    "notes",
+    "injuries_rehab",
+    "constraints",
+    # Threshold source metadata (issue #54)
+    "max_hr_source",
+    "max_hr_measured_at",
+    "max_hr_notes",
+    "weight_source",
+    "weight_measured_at",
+    "weight_notes",
+    "best_times",
+}
+
+_PROFILE_ENUM_VALUES = {
+    "biological_sex": {"male", "female", "not_specified"},
+    "hormone_status": {"endogenous", "hrt_estrogen", "hrt_testosterone", "not_specified"},
+    "coaching_state": {"onboarding", "calibrating", "active", "paused"},
+}
+
+_PROFILE_ENUM_ALIASES = {
+    "biological_sex": {
+        "man": "male",
+        "woman": "female",
+    },
+    "hormone_status": {},
+    "coaching_state": {},
+}
+
+_NOT_SPECIFIED_ALIASES = {
+    "",
+    "n/a",
+    "na",
+    "none",
+    "not_disclosed",
+    "not_provided",
+    "not_specified",
+    "prefer_not_to_say",
+    "unknown",
+    "unspecified",
+}
+
+
+def _canonical_profile_enum_token(value: str) -> str:
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _normalize_profile_enum_value(field: str, value: object) -> object:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return _DROP_FIELD
+
+    token = _canonical_profile_enum_token(value)
+    if token in _NOT_SPECIFIED_ALIASES and "not_specified" in _PROFILE_ENUM_VALUES[field]:
+        return "not_specified"
+
+    alias = _PROFILE_ENUM_ALIASES[field].get(token)
+    if alias is not None:
+        return alias
+    if token in _PROFILE_ENUM_VALUES[field]:
+        return token
+    return _DROP_FIELD
+
+
+def _safe_athlete_profile_fields(fields: dict) -> dict[str, object]:
+    safe_fields = {k: v for k, v in fields.items() if k in _PROFILE_FIELDS}
+    for array_field in ("primary_sports", "constraints", "injuries_rehab", "dietary_restrictions"):
+        if array_field in safe_fields and isinstance(safe_fields[array_field], str):
+            safe_fields[array_field] = [safe_fields[array_field]]
+
+    for field in _PROFILE_ENUM_VALUES:
+        if field not in safe_fields:
+            continue
+        normalized = _normalize_profile_enum_value(field, safe_fields[field])
+        if normalized is _DROP_FIELD:
+            del safe_fields[field]
+        else:
+            safe_fields[field] = normalized
+
+    return safe_fields
+
+
 class SupabaseRepository:
     """Supabase-backed adapter for all domain persistence."""
 
@@ -56,38 +156,7 @@ class SupabaseRepository:
     async def update_athlete_profile_fields(self, user_id: str, fields: dict) -> AthleteProfile:
         """Merge a partial dict of fields into the existing profile row (upsert on user_id)."""
         client = self._require_client()
-        allowed = {
-            "display_name",
-            "biological_sex",
-            "hormone_status",
-            "birth_date",
-            "weight_kg",
-            "height_cm",
-            "resting_hr_bpm",
-            "max_hr_bpm",
-            "primary_sports",
-            "weekly_available_hours",
-            "coaching_state",
-            "specialization_pct",
-            "onboarding_collected",
-            "dietary_restrictions",
-            "nutrition_notes",
-            "notes",
-            "injuries_rehab",
-            "constraints",
-            # Threshold source metadata (issue #54)
-            "max_hr_source",
-            "max_hr_measured_at",
-            "max_hr_notes",
-            "weight_source",
-            "weight_measured_at",
-            "weight_notes",
-            "best_times",
-        }
-        safe_fields = {k: v for k, v in fields.items() if k in allowed}
-        for array_field in ("primary_sports", "constraints", "injuries_rehab"):
-            if array_field in safe_fields and isinstance(safe_fields[array_field], str):
-                safe_fields[array_field] = [safe_fields[array_field]]
+        safe_fields = _safe_athlete_profile_fields(fields)
         safe_fields["user_id"] = user_id
         response = (
             client.table("athlete_profiles").upsert(safe_fields, on_conflict="user_id").execute()

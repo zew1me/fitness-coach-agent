@@ -1343,6 +1343,35 @@ async def test_update_athlete_profile_persists_fields(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_athlete_profile_returns_bounded_error(monkeypatch) -> None:
+    """update-athlete-profile returns a bounded 503 when persistence fails."""
+
+    class FailingRepository(EngineRepository):
+        async def update_athlete_profile_fields(self, user_id: str, fields: dict) -> AthleteProfile:
+            raise RuntimeError("database rejected profile update")
+
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", FailingRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/update-athlete-profile",
+            json={"fields": {"hormone_status": "not_provided"}},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Unable to update athlete profile."}
+
+
+@pytest.mark.asyncio
 async def test_get_athlete_summary_includes_nutrition_fields(monkeypatch) -> None:
     """Athlete summary returns dietary_restrictions and nutrition_notes."""
 

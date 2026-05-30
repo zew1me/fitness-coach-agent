@@ -265,6 +265,40 @@ async def test_update_athlete_profile_fields_allows_nutrition_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_athlete_profile_fields_normalizes_not_provided_hormone_status() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    profile = await repo.update_athlete_profile_fields(
+        "athlete-4",
+        {
+            "dietary_restrictions": ["mostly vegetarian with some seafood"],
+            "hormone_status": "not_provided",
+            "nutrition_notes": "mostly vegetarian with some seafood",
+        },
+    )
+
+    assert profile.hormone_status == "not_specified"
+    assert profile.dietary_restrictions == ["mostly vegetarian with some seafood"]
+    assert profile.nutrition_notes == "mostly vegetarian with some seafood"
+
+
+@pytest.mark.asyncio
+async def test_update_athlete_profile_fields_drops_unknown_optional_profile_enums() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    profile = await repo.update_athlete_profile_fields(
+        "athlete-5",
+        {
+            "hormone_status": "irrelevant",
+            "nutrition_notes": "Still save the valid sibling field",
+        },
+    )
+
+    assert profile.hormone_status is None
+    assert profile.nutrition_notes == "Still save the valid sibling field"
+
+
+@pytest.mark.asyncio
 async def test_repository_requires_supabase_configuration() -> None:
     repo = SupabaseRepository(client=None)
     repo._client = None
