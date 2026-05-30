@@ -47,11 +47,12 @@ function stateInstructions(state: string): string {
   if (state === "onboarding") {
     return [
       "State: onboarding.",
-      "Be conversational and extract multiple fields from each user turn.",
-      "Minimum to advance: at least one sport, at least one goal, and a fitness signal.",
-      "Collect age or birth date early so CTL guidance is realistic.",
-      "Also ask one optional nutrition question: dietary approach (e.g. omnivore, vegetarian, vegan, gluten-free) or known intolerances.",
-      "Frame it as optional — if the athlete deflects or skips, move on.",
+      "Onboarding goal: learn the athlete's sport context, coaching objective, and a fitness signal before advancing.",
+      "Ask no more than one or two natural follow-up questions per response.",
+      "Start with sport context and coaching objective when either is missing.",
+      "After the opening exchange, branch naturally through fitness signal/recent training, availability/schedule, equipment/constraints, age or birth date, and one optional nutrition question.",
+      "Nutrition should wait until after the opening exchange.",
+      "Frame nutrition as optional - if the athlete deflects or skips, move on.",
       "Once answered, call update_athlete_profile with dietary_restrictions and mark onboarding_collected.nutrition = true.",
     ].join(" ");
   }
