@@ -34,13 +34,12 @@ def _mask(value: str) -> str:
 
 
 def _fetch_vercel_domain(
-    settings: BootstrapSettings,
     vercel_project_id: str,
     vercel_team_id: str,
     dry_run: bool,
 ) -> str:
     """Fetch the Vercel project's stable production domain (shortest alias)."""
-    vercel = VercelClient(settings.vercel_token, vercel_project_id, vercel_team_id, dry_run=dry_run)
+    vercel = VercelClient(vercel_project_id, vercel_team_id, dry_run=dry_run)
     try:
         return vercel.get_production_domain()
     except Exception as exc:
@@ -188,12 +187,9 @@ def _setup_r2(
             print("  Using R2 S3 credentials from state file.")
             r2_creds = cached_creds
         else:
-            raise RuntimeError(
-                "R2 bucket is ready, but runtime R2 S3 credentials are missing. "
-                f"Create an account-level R2 API token scoped to bucket {bucket_name!r} "
-                "with Object Read & Write permissions, then set "
-                f"R2_ACCESS_KEY_ID_{env.upper()} and R2_SECRET_ACCESS_KEY_{env.upper()} "
-                "in .env.bootstrap and rerun bootstrap."
+            print("  Minting R2 S3 token via Cloudflare API…")
+            r2_creds = cf.ensure_r2_token(
+                bucket_name, env, existing_secret=state.get("r2_secret_access_key", "")
             )
 
         state["r2_access_key_id"] = r2_creds["access_key_id"]
@@ -349,7 +345,7 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
     settings, vercel_project_id, vercel_team_id = load_settings()
     state = load_state(env)
 
-    vercel_domain = _fetch_vercel_domain(settings, vercel_project_id, vercel_team_id, dry_run)
+    vercel_domain = _fetch_vercel_domain(vercel_project_id, vercel_team_id, dry_run)
     supabase = _setup_supabase(settings, env, state, skip_migrations, dry_run, vercel_domain)
     if not dry_run:
         save_state(env, state)
@@ -364,7 +360,7 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
     print("  APP_JWT_SECRET: ready.")
 
     print(f"\n[4/4] Vercel environment variables ({env})")
-    vercel = VercelClient(settings.vercel_token, vercel_project_id, vercel_team_id, dry_run=dry_run)
+    vercel = VercelClient(vercel_project_id, vercel_team_id, dry_run=dry_run)
     try:
         app_base_url = _resolve_app_base_url(settings, env, vercel_domain)
         vercel_target = ["production"] if env == "prod" else ["preview"]

@@ -303,8 +303,9 @@ def test_setup_r2_creates_bucket_then_requests_runtime_credentials(monkeypatch) 
         def ensure_cors(self, *_args, **_kwargs) -> None:
             raise AssertionError("bootstrap should not configure R2 CORS")
 
-        def ensure_r2_token(self, *_args, **_kwargs) -> dict:
-            raise AssertionError("bootstrap should not auto-create R2 runtime credentials")
+        def ensure_r2_token(self, bucket_name: str, env: str, **_kwargs) -> dict:
+            calls.append(f"ensure_r2_token:{bucket_name}:{env}")
+            return {"access_key_id": "minted-id", "secret_access_key": "minted-secret"}
 
         def get_public_base_url(self, bucket_name: str) -> str:
             calls.append(f"get_public_base_url:{bucket_name}")
@@ -318,10 +319,16 @@ def test_setup_r2_creates_bucket_then_requests_runtime_credentials(monkeypatch) 
 
     monkeypatch.setattr(bootstrap_main, "CloudflareClient", FakeCloudflareClient)
 
-    with pytest.raises(RuntimeError, match="R2_ACCESS_KEY_ID_PREVIEW"):
-        bootstrap_main._setup_r2(_settings(), "preview", {}, False)
+    result = bootstrap_main._setup_r2(_settings(), "preview", {}, False)
 
-    assert calls == ["ensure_bucket:preview", "close"]
+    assert result["access_key_id"] == "minted-id"
+    assert result["secret_access_key"] == "minted-secret"
+    assert calls == [
+        "ensure_bucket:preview",
+        "ensure_r2_token:fitness-coach-agent-preview:preview",
+        "get_public_base_url:fitness-coach-agent-preview",
+        "close",
+    ]
 
 
 def test_setup_r2_uses_configured_credentials_without_creating_token(monkeypatch) -> None:
@@ -465,121 +472,84 @@ def test_cloudflare_r2_token_uses_user_token_api_and_hashes_token_value() -> Non
     ]
 
 
-def test_vercel_remove_env_vars_deletes_matching_preview_key() -> None:
+def test_vercel_remove_env_vars_deletes_matching_preview_key(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
+    fake_run = _make_fake_vercel_run(
+        calls,
+        {
+            ("GET", "/v10/projects/project-id/env?teamId=team-id"): {
+                "envs": [
+                    {"id": "env-preview", "key": "APP_BASE_URL", "target": ["preview"]},
+                    {"id": "env-prod", "key": "APP_BASE_URL", "target": ["production"]},
+                ]
+            },
+            ("DELETE", "/v10/projects/project-id/env/env-preview?teamId=team-id"): {},
+        },
+    )
+    monkeypatch.setattr("scripts.bootstrap.vercel_client.subprocess.run", fake_run)
 
-    class FakeHTTP:
-        def get(self, url: str, **_kwargs) -> httpx.Response:
-            calls.append(("GET", url))
-            request = httpx.Request("GET", url)
-            return httpx.Response(
-                200,
-                json={
-                    "envs": [
-                        {"id": "env-preview", "key": "APP_BASE_URL", "target": ["preview"]},
-                        {"id": "env-prod", "key": "APP_BASE_URL", "target": ["production"]},
-                    ]
-                },
-                request=request,
-            )
-
-        def delete(self, url: str, **_kwargs) -> httpx.Response:
-            calls.append(("DELETE", url))
-            request = httpx.Request("DELETE", url)
-            return httpx.Response(200, json={}, request=request)
-
-        def close(self) -> None:
-            pass
-
-    client = VercelClient("token", "project-id", "team-id")
-    client._http = FakeHTTP()
-
+    client = VercelClient("project-id", "team-id")
     client.remove_env_vars(["preview"], ["APP_BASE_URL"])
     client.close()
 
     assert calls == [
-        ("GET", "https://api.vercel.com/v10/projects/project-id/env"),
-        ("DELETE", "https://api.vercel.com/v10/projects/project-id/env/env-preview"),
+        ("GET", "/v10/projects/project-id/env?teamId=team-id"),
+        ("DELETE", "/v10/projects/project-id/env/env-preview?teamId=team-id"),
     ]
 
 
-def test_vercel_remove_env_vars_dry_run_only_reports(capsys) -> None:
-    deleted: list[str] = []
+def test_vercel_remove_env_vars_dry_run_only_reports(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str]] = []
+    fake_run = _make_fake_vercel_run(
+        calls,
+        {
+            ("GET", "/v10/projects/project-id/env?teamId=team-id"): {
+                "envs": [
+                    {"id": "env-preview", "key": "APP_BASE_URL", "target": ["preview"]},
+                ]
+            },
+        },
+    )
+    monkeypatch.setattr("scripts.bootstrap.vercel_client.subprocess.run", fake_run)
 
-    class FakeHTTP:
-        def get(self, url: str, **_kwargs) -> httpx.Response:
-            request = httpx.Request("GET", url)
-            return httpx.Response(
-                200,
-                json={
-                    "envs": [
-                        {"id": "env-preview", "key": "APP_BASE_URL", "target": ["preview"]},
-                    ]
-                },
-                request=request,
-            )
-
-        def delete(self, url: str, **_kwargs) -> httpx.Response:
-            deleted.append(url)
-            request = httpx.Request("DELETE", url)
-            return httpx.Response(200, json={}, request=request)
-
-        def close(self) -> None:
-            pass
-
-    client = VercelClient("token", "project-id", "team-id", dry_run=True)
-    client._http = FakeHTTP()
-
+    client = VercelClient("project-id", "team-id", dry_run=True)
     client.remove_env_vars(["preview"], ["APP_BASE_URL"])
     client.close()
 
-    assert deleted == []
+    delete_calls = [c for c in calls if c[0] == "DELETE"]
+    assert delete_calls == []
     assert "Would delete APP_BASE_URL (preview)" in capsys.readouterr().out
 
 
-def test_vercel_remove_env_vars_preserves_other_targets() -> None:
+def test_vercel_remove_env_vars_preserves_other_targets(monkeypatch) -> None:
     calls: list[tuple[str, str, dict | None]] = []
+    fake_run = _make_fake_vercel_run(
+        calls,
+        {
+            ("GET", "/v10/projects/project-id/env?teamId=team-id"): {
+                "envs": [
+                    {
+                        "id": "env-shared",
+                        "key": "APP_BASE_URL",
+                        "target": ["preview", "production"],
+                    },
+                ]
+            },
+            ("PATCH", "/v10/projects/project-id/env/env-shared?teamId=team-id"): {},
+        },
+        capture_body=True,
+    )
+    monkeypatch.setattr("scripts.bootstrap.vercel_client.subprocess.run", fake_run)
 
-    class FakeHTTP:
-        def get(self, url: str, **_kwargs) -> httpx.Response:
-            calls.append(("GET", url, None))
-            request = httpx.Request("GET", url)
-            return httpx.Response(
-                200,
-                json={
-                    "envs": [
-                        {
-                            "id": "env-shared",
-                            "key": "APP_BASE_URL",
-                            "target": ["preview", "production"],
-                        },
-                    ]
-                },
-                request=request,
-            )
-
-        def patch(self, url: str, json: dict, **_kwargs) -> httpx.Response:
-            calls.append(("PATCH", url, json))
-            request = httpx.Request("PATCH", url)
-            return httpx.Response(200, json={}, request=request)
-
-        def delete(self, url: str, **_kwargs) -> httpx.Response:
-            raise AssertionError(f"shared env var should be narrowed, not deleted: {url}")
-
-        def close(self) -> None:
-            pass
-
-    client = VercelClient("token", "project-id", "team-id")
-    client._http = FakeHTTP()
-
+    client = VercelClient("project-id", "team-id")
     client.remove_env_vars(["preview"], ["APP_BASE_URL"])
     client.close()
 
     assert calls == [
-        ("GET", "https://api.vercel.com/v10/projects/project-id/env", None),
+        ("GET", "/v10/projects/project-id/env?teamId=team-id", None),
         (
             "PATCH",
-            "https://api.vercel.com/v10/projects/project-id/env/env-shared",
+            "/v10/projects/project-id/env/env-shared?teamId=team-id",
             {"target": ["production"]},
         ),
     ]
@@ -623,13 +593,45 @@ def _settings(**overrides: str) -> BootstrapSettings:
         "r2_access_key_id_prod": "",
         "r2_secret_access_key_preview": "",
         "r2_secret_access_key_prod": "",
-        "vercel_token": "vercel-token",
         "openai_api_key": "openai-key",
         "tavily_api_key": "tavily-key",
         "production_domain": "",
     }
     defaults.update(overrides)
     return BootstrapSettings.model_construct(**defaults)
+
+
+def _make_fake_vercel_run(
+    calls: list,
+    responses: dict[tuple[str, str], Any],
+    *,
+    capture_body: bool = False,
+):
+    """Stub for subprocess.run mimicking `vercel api` invocations.
+
+    `responses` maps (method, path) -> dict to return as JSON stdout.
+    When `capture_body` is True, calls record (method, path, body_dict).
+    """
+
+    def fake_run(command: list[str], **kwargs):
+        path = command[2]
+        method = command[command.index("--method") + 1]
+        body = kwargs.get("input")
+        body_dict = None
+        if body is not None:
+            import json as _json
+
+            body_dict = _json.loads(body)
+        if capture_body:
+            calls.append((method, path, body_dict))
+        else:
+            calls.append((method, path))
+        payload = responses.get((method, path), {})
+        import json as _json
+
+        return SimpleNamespace(returncode=0, stdout=_json.dumps(payload), stderr="")
+
+    return fake_run
 
 
 def test_configure_auth_settings_patches_management_api(monkeypatch) -> None:

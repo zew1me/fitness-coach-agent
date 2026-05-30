@@ -1,8 +1,11 @@
-"""Vercel REST API client for environment variable management."""
+"""Vercel API client backed by the `vercel api` CLI subcommand.
 
-import httpx
+Uses the local `vercel` CLI's stored authentication (from `vercel login`)
+instead of a bearer token. The CLI must be installed and logged in.
+"""
 
-_VERCEL_BASE = "https://api.vercel.com"
+import json
+import subprocess
 
 # Environment variable keys that contain secrets and must be marked sensitive.
 # Sensitive vars are write-only in the Vercel dashboard (values are never shown).
@@ -19,47 +22,63 @@ SENSITIVE_ENV_KEYS: frozenset[str] = frozenset(
 
 
 class VercelClient:
-    def __init__(self, token: str, project_id: str, team_id: str, dry_run: bool = False) -> None:
+    def __init__(self, project_id: str, team_id: str, dry_run: bool = False) -> None:
         self._project_id = project_id
         self._team_id = team_id
         self._dry_run = dry_run
-        self._http = httpx.Client(
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
 
-    def _params(self) -> dict:
-        return {"teamId": self._team_id} if self._team_id else {}
+    def _scoped_path(self, path: str) -> str:
+        if not self._team_id:
+            return path
+        sep = "&" if "?" in path else "?"
+        return f"{path}{sep}teamId={self._team_id}"
+
+    def _api(self, method: str, path: str, body: dict | None = None) -> dict:
+        cmd = [
+            "vercel",
+            "api",
+            self._scoped_path(path),
+            "--method",
+            method,
+            "--raw",
+            "--non-interactive",
+        ]
+        if method == "DELETE":
+            cmd.append("--dangerously-skip-permissions")
+        if body is not None:
+            cmd.extend(["--input", "-"])
+        result = subprocess.run(
+            cmd,
+            input=json.dumps(body) if body is not None else None,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"vercel api {method} {path} failed (exit {result.returncode}): "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+        out = result.stdout.strip()
+        return json.loads(out) if out else {}
 
     def get_production_domain(self) -> str:
         """Return the canonical production domain for this project.
 
         Prefers a non-vercel.app custom domain; falls back to the vercel.app alias.
         """
-        r = self._http.get(
-            f"{_VERCEL_BASE}/v10/projects/{self._project_id}",
-            params=self._params(),
-        )
-        r.raise_for_status()
-        data = r.json()
+        data = self._api("GET", f"/v10/projects/{self._project_id}")
         aliases = [a.get("domain", "") for a in data.get("alias", [])]
-        # Prefer shortest custom domain (not *.vercel.app)
         custom = [a for a in aliases if a and ".vercel.app" not in a]
         if custom:
             return min(custom, key=len)
-        # Fall back to the vercel.app alias
         vercel_aliases = [a for a in aliases if ".vercel.app" in a]
         if vercel_aliases:
             return min(vercel_aliases, key=len)
         return ""
 
     def _env_vars(self) -> list[dict]:
-        r = self._http.get(
-            f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env",
-            params=self._params(),
-        )
-        r.raise_for_status()
-        return r.json().get("envs", [])
+        return self._api("GET", f"/v10/projects/{self._project_id}/env").get("envs", [])
 
     def remove_env_vars(self, target: list[str], keys: list[str]) -> None:
         """Delete environment variables matching the given target scopes and keys."""
@@ -80,19 +99,14 @@ class VercelClient:
                     action = "update" if remaining_targets else "delete"
                     print(f"  [dry-run] Would {action} {env_key} ({scope})")
                 elif remaining_targets:
-                    patch = self._http.patch(
-                        f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env/{ev['id']}",
-                        json={"target": remaining_targets},
-                        params=self._params(),
+                    self._api(
+                        "PATCH",
+                        f"/v10/projects/{self._project_id}/env/{ev['id']}",
+                        {"target": remaining_targets},
                     )
-                    patch.raise_for_status()
                     updated += 1
                 else:
-                    delete = self._http.delete(
-                        f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env/{ev['id']}",
-                        params=self._params(),
-                    )
-                    delete.raise_for_status()
+                    self._api("DELETE", f"/v10/projects/{self._project_id}/env/{ev['id']}")
                     deleted += 1
                 break
 
@@ -109,7 +123,6 @@ class VercelClient:
         """
         existing_vars = self._env_vars()
 
-        # Build lookup: (key, first_target) -> env var ID
         existing_lookup: dict[tuple[str, str], str] = {}
         for ev in existing_vars:
             for t in ev.get("target", []):
@@ -123,37 +136,34 @@ class VercelClient:
             var_type = "sensitive" if is_sensitive else "encrypted"
             for scope in target:
                 env_id = existing_lookup.get((key, scope))
+                label = "sensitive" if is_sensitive else "encrypted"
                 if env_id:
                     if self._dry_run:
-                        label = "sensitive" if is_sensitive else "encrypted"
                         print(f"  [dry-run] Would update {key} ({scope}) [{label}]")
                     else:
-                        patch = self._http.patch(
-                            f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env/{env_id}",
-                            json={"value": value, "target": [scope], "type": var_type},
-                            params=self._params(),
+                        self._api(
+                            "PATCH",
+                            f"/v10/projects/{self._project_id}/env/{env_id}",
+                            {"value": value, "target": [scope], "type": var_type},
                         )
-                        patch.raise_for_status()
                     updated += 1
                 else:
                     if self._dry_run:
-                        label = "sensitive" if is_sensitive else "encrypted"
                         print(f"  [dry-run] Would create {key} ({scope}) [{label}]")
                     else:
-                        post = self._http.post(
-                            f"{_VERCEL_BASE}/v10/projects/{self._project_id}/env",
-                            json={
+                        self._api(
+                            "POST",
+                            f"/v10/projects/{self._project_id}/env",
+                            {
                                 "key": key,
                                 "value": value,
                                 "target": [scope],
                                 "type": var_type,
                             },
-                            params=self._params(),
                         )
-                        post.raise_for_status()
                     created += 1
 
         print(f"  Vercel env vars: {created} created, {updated} updated ({target}).")
 
     def close(self) -> None:
-        self._http.close()
+        pass

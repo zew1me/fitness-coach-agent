@@ -39,8 +39,7 @@ class BootstrapSettings(BaseSettings):
     r2_public_base_url_preview: str = ""
     r2_public_base_url_prod: str = ""
 
-    # Vercel
-    vercel_token: str
+    # Vercel — authentication comes from the local `vercel` CLI; no token needed.
     production_domain: str = ""
 
     # App secrets passed through to Vercel env vars
