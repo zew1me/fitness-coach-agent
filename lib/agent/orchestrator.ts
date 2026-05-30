@@ -82,10 +82,16 @@ export async function streamCoachTurn({
       const msg = error instanceof Error ? error.message : String(error);
       console.error("[chat] stream error:", msg.replace(/key=[^&\s]+/g, "key=***"));
     },
-    onFinish: async ({ text, finishReason }) => {
-      const trimmed = text.trim();
-      // Tool-only finishes (no surface text from the model) have nothing to persist.
-      if (trimmed.length === 0) return;
+  });
+
+  return result.toUIMessageStreamResponse({
+    onError: () => streamErrorMessage,
+    onFinish: async ({ responseMessage }) => {
+      // Persist the assistant turn as its full `parts[]` array so tool-call
+      // pills, reasoning blocks, and file parts survive page reloads. Tool-only
+      // finishes (no text or tool parts) have nothing to persist.
+      const parts = responseMessage.parts;
+      if (parts.length === 0) return;
       try {
         const response = await fetch(`${baseUrl}/api/chat/messages`, {
           method: "POST",
@@ -96,8 +102,8 @@ export async function streamCoachTurn({
           },
           body: JSON.stringify({
             role: "assistant",
-            content: trimmed,
-            metadata: { message_kind: "assistant_reply", finish_reason: finishReason },
+            parts,
+            metadata: { message_kind: "assistant_reply" },
           }),
         });
         if (!response.ok) {
@@ -108,9 +114,5 @@ export async function streamCoachTurn({
         console.error("[chat] persist assistant reply error:", msg);
       }
     },
-  });
-
-  return result.toUIMessageStreamResponse({
-    onError: () => streamErrorMessage,
   });
 }
