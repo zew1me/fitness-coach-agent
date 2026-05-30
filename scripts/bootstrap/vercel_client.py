@@ -132,14 +132,12 @@ class VercelClient:
         updated = 0
 
         for key, value in vars.items():
-            is_sensitive = key in SENSITIVE_ENV_KEYS
-            var_type = "sensitive" if is_sensitive else "encrypted"
+            var_type = "sensitive" if key in SENSITIVE_ENV_KEYS else "encrypted"
             for scope in target:
                 env_id = existing_lookup.get((key, scope))
-                label = "sensitive" if is_sensitive else "encrypted"
                 if env_id:
                     if self._dry_run:
-                        print(f"  [dry-run] Would update {key} ({scope}) [{label}]")
+                        print(f"  [dry-run] Would update {key} ({scope}) [{var_type}]")
                     else:
                         self._api(
                             "PATCH",
@@ -149,7 +147,7 @@ class VercelClient:
                     updated += 1
                 else:
                     if self._dry_run:
-                        print(f"  [dry-run] Would create {key} ({scope}) [{label}]")
+                        print(f"  [dry-run] Would create {key} ({scope}) [{var_type}]")
                     else:
                         self._api(
                             "POST",
