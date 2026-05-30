@@ -179,6 +179,7 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("structured report only");
     expect(prompt).toContain("Do not write user-facing prose");
     expect(prompt).toContain("Do not call tools or persist data");
+    expect(prompt).toContain("Use empty arrays for proposedUpdates and risks when none apply");
   });
 
   it("builds a lead coach prompt that includes specialist reports and final-response guidance", () => {

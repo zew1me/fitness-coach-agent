@@ -83,13 +83,17 @@ describe("specialistReportSchema", () => {
     ).toThrow();
   });
 
-  it("emits an OpenAI-compatible schema for proposed update input", async () => {
+  it("emits an OpenAI-compatible schema for structured outputs", async () => {
     const jsonSchema = (await zodSchema(specialistReportSchema).jsonSchema) as {
       properties?: Record<string, { items?: { properties?: Record<string, { type?: unknown }> } }>;
+      required?: string[];
     };
 
     expect(
       jsonSchema.properties?.["proposedUpdates"]?.items?.properties?.["input"]?.type
     ).toBe("string");
+    expect(jsonSchema.required?.sort()).toEqual(
+      Object.keys(jsonSchema.properties ?? {}).sort()
+    );
   });
 });

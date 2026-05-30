@@ -83,8 +83,8 @@ export const proposedUpdateSchema = z
 export const specialistReportSchema = z
   .object({
     confidence: z.enum(["low", "medium", "high"]),
-    proposedUpdates: z.array(proposedUpdateSchema).default([]),
-    risks: z.array(z.string()).default([]),
+    proposedUpdates: z.array(proposedUpdateSchema),
+    risks: z.array(z.string()),
     role: internalSpecialistRoleSchema,
     summary: z.string().min(1),
   })
