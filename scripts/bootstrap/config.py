@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
 def _read_vercel_project_json() -> dict:
@@ -51,6 +51,21 @@ class BootstrapSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # .env.bootstrap is authoritative. Otherwise a stale SUPABASE_ACCESS_TOKEN
+        # exported in the shell silently masks a corrected value in the file and
+        # causes confusing 401s on the Supabase Management API.
+        del settings_cls
+        return (init_settings, dotenv_settings, env_settings, file_secret_settings)
 
 
 def load_settings() -> tuple[BootstrapSettings, str, str]:

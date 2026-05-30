@@ -1,6 +1,7 @@
 """Supabase Management API client for project provisioning and migrations."""
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -163,12 +164,26 @@ class SupabaseClient:
             "service_role_key": keys.get("service_role", ""),
         }
 
+    def _cli_env(self) -> dict[str, str]:
+        """Subprocess env for the Supabase CLI: forwards the bootstrap PAT.
+
+        The CLI reads SUPABASE_ACCESS_TOKEN from its environment. Without this,
+        the CLI inherits only the parent shell — so if the operator's shell has
+        no token (or a stale one), CLI commands fail even when the script itself
+        has a valid PAT loaded from .env.bootstrap.
+        """
+        env = os.environ.copy()
+        if self._token:
+            env["SUPABASE_ACCESS_TOKEN"] = self._token
+        return env
+
     def _get_api_keys_from_cli(self, ref: str) -> list[dict]:
         result = subprocess.run(
             ["supabase", "projects", "api-keys", "--project-ref", ref, "--output", "json"],
             capture_output=True,
             text=True,
             check=False,
+            env=self._cli_env(),
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -210,6 +225,7 @@ class SupabaseClient:
             capture_output=False,
             text=True,
             check=False,
+            env=self._cli_env(),
         )
         if link_result.returncode != 0:
             raise RuntimeError(f"supabase link failed (exit {link_result.returncode})")
@@ -219,6 +235,7 @@ class SupabaseClient:
             capture_output=False,
             text=True,
             check=False,
+            env=self._cli_env(),
         )
         if result.returncode != 0:
             raise RuntimeError(f"supabase db push failed (exit {result.returncode})")

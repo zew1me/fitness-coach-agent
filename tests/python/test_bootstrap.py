@@ -96,6 +96,65 @@ def test_get_api_keys_can_use_supabase_cli(monkeypatch) -> None:
     }
 
 
+def test_supabase_cli_subprocesses_receive_access_token_in_env(monkeypatch, tmp_path) -> None:
+    # The Supabase CLI authenticates via SUPABASE_ACCESS_TOKEN. The bootstrap
+    # script must forward its own PAT to the CLI subprocess; otherwise the CLI
+    # falls back to the operator's shell env, which may have no/stale token.
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    (migrations_dir / "0001_schema.sql").write_text("select 1;")
+    monkeypatch.setattr(supabase_client, "_MIGRATIONS_DIR", migrations_dir)
+    monkeypatch.delenv("SUPABASE_ACCESS_TOKEN", raising=False)
+
+    captured_envs: list[dict[str, str]] = []
+
+    def fake_run(_command: list[str], **kwargs):
+        captured_envs.append(kwargs.get("env") or {})
+        return SimpleNamespace(returncode=0, stdout="[]")
+
+    monkeypatch.setattr(supabase_client.subprocess, "run", fake_run)
+
+    client = SupabaseClient("sbp_test_token", "org")
+    client._get_api_keys_from_cli("project-ref")
+    client.apply_migrations("project-ref", "db-pw")
+    client.close()
+
+    assert len(captured_envs) == 3
+    for env in captured_envs:
+        assert env.get("SUPABASE_ACCESS_TOKEN") == "sbp_test_token"
+
+
+def test_supabase_cli_env_falls_back_when_token_blank(monkeypatch) -> None:
+    # When the bootstrap PAT is blank, do not stomp on an existing shell token —
+    # the operator may rely on `supabase login` / shell-exported token.
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "shell-token")
+
+    client = SupabaseClient("", "")
+    env = client._cli_env()
+    client.close()
+
+    assert env["SUPABASE_ACCESS_TOKEN"] == "shell-token"
+
+
+def test_bootstrap_settings_env_file_overrides_shell_env(monkeypatch, tmp_path) -> None:
+    # A stale SUPABASE_ACCESS_TOKEN in the shell must not silently mask the
+    # value in .env.bootstrap. This is the bug that caused production OTP setup
+    # to PATCH the Supabase Management API with the wrong token and 401.
+    env_file = tmp_path / ".env.bootstrap"
+    env_file.write_text(
+        "SUPABASE_ACCESS_TOKEN=sbp_from_file\n"
+        "CF_API_TOKEN=cf-required\n"
+        "CF_ACCOUNT_ID=acct-required\n"
+        "OPENAI_API_KEY=openai-required\n"
+        "TAVILY_API_KEY=tavily-required\n"
+    )
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "stale_from_shell")
+
+    settings = BootstrapSettings(_env_file=str(env_file))  # type: ignore[call-arg]
+
+    assert settings.supabase_access_token == "sbp_from_file"
+
+
 def test_setup_supabase_saves_new_db_password_before_migration_failure(monkeypatch) -> None:
     saved_states: list[dict] = []
 
