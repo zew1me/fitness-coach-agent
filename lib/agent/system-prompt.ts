@@ -190,7 +190,7 @@ export function buildSpecialistPrompt(role: InternalSpecialistRole, contextSlice
     "Return a structured report only using the provided schema.",
     "Do not write user-facing prose.",
     "Do not call tools or persist data.",
-    "Do not include user_id in proposed update inputs; server auth injects identity.",
+    "Write proposed update inputs as JSON object strings, and do not include user_id; server auth injects identity.",
     `Context slice: ${JSON.stringify(contextSlice)}`,
   ].join("\n\n");
 }

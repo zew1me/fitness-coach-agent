@@ -1,7 +1,35 @@
+import { zodSchema } from "ai";
 import { describe, expect, it } from "vitest";
 
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import { coachToolDefinitions } from "../../lib/agent/tools";
+
+function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
+  if (schema === null || typeof schema !== "object") {
+    return;
+  }
+
+  if (Array.isArray(schema)) {
+    schema.forEach((item, index) => assertTypedAdditionalProperties(item, `${path}[${index}]`));
+    return;
+  }
+
+  const record = schema as Record<string, unknown>;
+  const additionalProperties = record["additionalProperties"];
+  if (
+    additionalProperties !== undefined &&
+    additionalProperties !== false &&
+    additionalProperties !== true
+  ) {
+    expect(additionalProperties, `${path}.additionalProperties`).toEqual(
+      expect.objectContaining({ type: expect.anything() })
+    );
+  }
+
+  for (const [key, value] of Object.entries(record)) {
+    assertTypedAdditionalProperties(value, `${path}.${key}`);
+  }
+}
 
 describe("coachToolDefinitions", () => {
   it("exposes the planned coaching tool surface", () => {
@@ -39,6 +67,59 @@ describe("coachToolDefinitions", () => {
 
     expect(parsed.goal.title).toBe("Hill climb");
     expect(parsed.goal.course_elevation_gain_meters).toBe(700);
+  });
+
+  it("emits OpenAI-compatible schemas for all coach tools", async () => {
+    for (const [name, definition] of Object.entries(coachToolDefinitions)) {
+      const jsonSchema = await zodSchema(definition.inputSchema).jsonSchema;
+
+      expect(() => assertTypedAdditionalProperties(jsonSchema, name)).not.toThrow();
+    }
+  });
+
+  it("validates profile onboarding, recovery, and schedule domain field names", () => {
+    expect(
+      coachToolDefinitions.update_athlete_profile.inputSchema.parse({
+        fields: {
+          dietary_restrictions: ["vegetarian"],
+          onboarding_collected: { nutrition: true },
+        },
+      })
+    ).toMatchObject({
+      fields: {
+        onboarding_collected: { nutrition: true },
+      },
+    });
+
+    expect(
+      coachToolDefinitions.save_recovery_data.inputSchema.parse({
+        entries: [
+          {
+            body_battery: 55,
+            hrv_ms: 48,
+            log_date: "2026-05-30",
+            sleep_duration_hours: 7.5,
+            stress_score: 22,
+            subjective_energy: 4,
+          },
+        ],
+      })
+    ).toMatchObject({
+      entries: [{ hrv_ms: 48, sleep_duration_hours: 7.5 }],
+    });
+
+    expect(
+      coachToolDefinitions.update_schedule.inputSchema.parse({
+        overrides: [{ available: false, max_hours: 0, override_date: "2026-06-01", reason: "travel" }],
+        weekly_pattern: {
+          monday: { available: true, max_hours: 1.5 },
+        },
+      })
+    ).toMatchObject({
+      weekly_pattern: {
+        monday: { available: true, max_hours: 1.5 },
+      },
+    });
   });
 
   it("routes athlete profile updates to the engine with nutrition fields", async () => {
