@@ -37,11 +37,12 @@ supabase link --project-ref <project-ref>
 |---|---|
 | `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens; only needed for auto-creating projects |
 | `SUPABASE_ORG_ID` | Your org slug from the Supabase dashboard URL; only needed for auto-creating projects |
-| `CF_API_TOKEN` | dash.cloudflare.com → My Profile → API Tokens → create with R2 bucket edit permissions |
+| `CF_API_TOKEN` | dash.cloudflare.com → My Profile → API Tokens → create with **Workers R2 Storage:Edit** *and* **API Tokens:Edit** (the second permission lets the script auto-mint the R2 S3 runtime token) |
 | `CF_ACCOUNT_ID` | Cloudflare dashboard right sidebar (any page) |
-| `VERCEL_TOKEN` | vercel.com/account/tokens |
 | `OPENAI_API_KEY` | platform.openai.com |
 | `TAVILY_API_KEY` | tavily.com |
+
+Vercel authentication uses the local `vercel` CLI (`vercel login`); no token is needed in `.env.bootstrap`.
 
 ## Step 2 — Create `.env.bootstrap`
 
