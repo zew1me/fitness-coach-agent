@@ -1,10 +1,10 @@
 # AI Agent Based Endurance Coaching
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to agents when working with code in this repository.
 
 ## What This App Is
 
-A ChatGPT-first endurance coaching app. Athletes log in via magic link, manage their fitness profiles, and submit check-ins. ChatGPT (or any OAuth client) connects via a durable OAuth 2.0 PKCE consent flow to read athlete data and request adaptive 14-day training plans.
+A ChatGPT like experience for endurance coaching. Athletes log in via magic link, manage their fitness profiles, and submit check-ins, and get plans.
 
 Two runtimes:
 - **Next.js 15 frontend** (TypeScript, Supabase Auth, App Router)
@@ -77,11 +77,11 @@ Migrations in `supabase/migrations/`:
 - `0003_fitness_thresholds.sql` — sport-specific threshold source metadata
 - `0004_chat_messages_parts.sql` — adopts AI SDK `UIMessage.parts` JSON shape on `chat_messages` (see "Chat persistence" below)
 
-Use separate Supabase projects per environment (development / preview / production).
+Use separate Supabase projects per environment (development (local) / preview / production).
 
 ### Chat persistence
 
-`chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table and eliminates the lossy translation that used to drop inline images and tool-call status on reload (issue #149).
+`chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table. 
 
 The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
 
@@ -99,8 +99,6 @@ See `.env.example`. Required:
 - `APP_ENV`, `APP_BASE_URL`, `APP_JWT_SECRET`
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-
-Optional (features degrade gracefully without):
 - `OPENAI_API_KEY` — plan generation
 - `R2_*` — file uploads
 
