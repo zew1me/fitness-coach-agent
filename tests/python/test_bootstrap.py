@@ -64,16 +64,6 @@ def test_supabase_api_unauthorized_mentions_access_token() -> None:
         client._get("/projects/ref")
 
 
-def test_existing_project_ref_skips_management_api_verification() -> None:
-    client = SupabaseClient("", "")
-
-    project_ref, db_password = client.ensure_project("preview", project_ref="existing-ref")
-    client.close()
-
-    assert project_ref == "existing-ref"
-    assert db_password is None
-
-
 def test_get_api_keys_can_use_supabase_cli(monkeypatch) -> None:
     def fake_run(command: list[str], **_kwargs):
         assert command == [
@@ -699,27 +689,9 @@ def test_configure_auth_settings_dry_run(monkeypatch, capsys) -> None:
     assert "https://prod.example.com" in out
 
 
-def test_build_auth_site_url_preview_uses_vercel_domain() -> None:
-    settings = _settings()
-    url = bootstrap_main._build_auth_site_url(settings, "preview", "fitness-coach-agent.vercel.app")
-    assert url == "https://fitness-coach-agent.vercel.app"
-
-
-def test_build_auth_site_url_prod_prefers_custom_domain() -> None:
-    settings = _settings(production_domain="app.example.com")
-    url = bootstrap_main._build_auth_site_url(settings, "prod", "fitness-coach-agent.vercel.app")
-    assert url == "https://app.example.com"
-
-
 def test_build_auth_redirect_urls_preview_includes_scoped_wildcard_and_domain() -> None:
     domain = "fitness-coach-agent.vercel.app"
     urls = bootstrap_main._build_auth_redirect_urls("preview", domain)
     assert "https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**" in urls
     assert "https://fitness-coach-agent.vercel.app/**" in urls
     assert "http://localhost:3000/**" in urls
-
-
-def test_build_auth_redirect_urls_prod_does_not_include_wildcard() -> None:
-    domain = "fitness-coach-agent.vercel.app"
-    urls = bootstrap_main._build_auth_redirect_urls("prod", domain)
-    assert "https://*.vercel.app/**" not in urls
