@@ -39,6 +39,18 @@ function filterLeadTools(coachTools: ToolSet): ToolSet {
   return coachTools;
 }
 
+function generateUuid(): string {
+  return crypto.randomUUID();
+}
+
+function uiMessageText(message: UIMessage): string {
+  return message.parts
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 export async function streamCoachTurn({
   accessToken,
   baseUrl,
@@ -82,8 +94,14 @@ export async function streamCoachTurn({
       const msg = error instanceof Error ? error.message : String(error);
       console.error("[chat] stream error:", msg.replace(/key=[^&\s]+/g, "key=***"));
     },
-    onFinish: async ({ text, finishReason }) => {
-      const trimmed = text.trim();
+  });
+
+  return result.toUIMessageStreamResponse({
+    generateMessageId: generateUuid,
+    onError: () => streamErrorMessage,
+    onFinish: async ({ responseMessage, finishReason, isAborted }) => {
+      if (isAborted) return;
+      const trimmed = uiMessageText(responseMessage);
       // Tool-only finishes (no surface text from the model) have nothing to persist.
       if (trimmed.length === 0) return;
       try {
@@ -95,9 +113,14 @@ export async function streamCoachTurn({
             ...(extraHeaders ?? {}),
           },
           body: JSON.stringify({
+            id: responseMessage.id,
             role: "assistant",
             content: trimmed,
-            metadata: { message_kind: "assistant_reply", finish_reason: finishReason },
+            metadata: {
+              message_kind: "assistant_reply",
+              finish_reason: finishReason,
+              client_message_id: responseMessage.id,
+            },
           }),
         });
         if (!response.ok) {
@@ -108,9 +131,6 @@ export async function streamCoachTurn({
         console.error("[chat] persist assistant reply error:", msg);
       }
     },
-  });
-
-  return result.toUIMessageStreamResponse({
-    onError: () => streamErrorMessage,
+    originalMessages: selectedMessages,
   });
 }

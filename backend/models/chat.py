@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -47,5 +48,6 @@ class ChatThreadBootstrap(BaseModel):
 class ChatPersistRequest(BaseModel):
     attachments: list[ChatAttachmentInput] = Field(default_factory=list)
     content: str = Field(default="", max_length=32000)
+    id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     role: Literal["user", "assistant"]

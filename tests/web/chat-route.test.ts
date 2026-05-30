@@ -95,7 +95,7 @@ describe("app/api/chat route", () => {
         role: "assistant" as const,
       },
       {
-        id: "latest-user-message",
+        id: "63ff9606-9158-43d7-a82b-d31ef9788b7d",
         parts: [{ text: "I train ~8 hours/week", type: "text" as const }],
         role: "user" as const,
       },
@@ -143,9 +143,13 @@ describe("app/api/chat route", () => {
 
     expect(persistRequests).toHaveLength(1);
     expect(persistRequests[0]?.body).toEqual({
+      id: "63ff9606-9158-43d7-a82b-d31ef9788b7d",
       role: "user",
       content: "I train ~8 hours/week",
-      metadata: { message_kind: "user_turn", client_message_id: "latest-user-message" },
+      metadata: {
+        message_kind: "user_turn",
+        client_message_id: "63ff9606-9158-43d7-a82b-d31ef9788b7d",
+      },
       attachments: [],
     });
     expect(persistRequests[0]?.headers["authorization"]).toBe("Bearer token-1");
@@ -154,7 +158,7 @@ describe("app/api/chat route", () => {
   it("forwards file-part attachments on the persisted user turn", async () => {
     const messages = [
       {
-        id: "msg-with-image",
+        id: "46db0714-d6d8-402b-a421-00b21b3a29f6",
         parts: [
           { text: "Here's my chart", type: "text" as const },
           {
@@ -205,6 +209,7 @@ describe("app/api/chat route", () => {
     );
 
     expect(persistBodies).toHaveLength(1);
+    expect((persistBodies[0] as { id: string }).id).toBe("46db0714-d6d8-402b-a421-00b21b3a29f6");
     expect((persistBodies[0] as { attachments: unknown[] }).attachments).toEqual([
       {
         content_type: "image/png",

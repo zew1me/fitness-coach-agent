@@ -586,11 +586,13 @@ export function CoachChat(): JSX.Element {
       }
       const pendingComposer = composer;
       const pendingAttachments = attachments;
+      const messageId = crypto.randomUUID();
       // Clear immediately so the composer feels responsive before the network call.
       removePreviewUrls(pendingAttachments);
       setAttachments([]);
       setComposer("");
       await sendMessage({
+        messageId,
         parts: [{ type: "text", text: pendingComposer }, ...uploadedFileParts(pendingAttachments)],
       });
       setSending(false);

@@ -1,8 +1,11 @@
+import re
 from datetime import date
+from typing import Any, cast
 
 import pytest
 
 from backend.models.athlete import AthleteProfile, SportThreshold
+from backend.models.chat import ChatAttachmentInput
 from backend.models.training import Activity
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -22,15 +25,21 @@ class FakeTableQuery:
         self._filters: dict[str, object] = {}
         self._is_null: set[str] = set()
         self._inserted_payload: dict[str, object] | None = None
+        self._inserted_payloads: list[dict[str, object]] | None = None
         self._upserted_payload: dict[str, object] | None = None
         self._update_payload: dict[str, object] | None = None
         self._limit: int | None = None
+        self._in_filters: dict[str, set[object]] = {}
 
     def select(self, *_columns: str) -> "FakeTableQuery":
         return self
 
     def eq(self, column: str, value: object) -> "FakeTableQuery":
         self._filters[column] = value
+        return self
+
+    def in_(self, column: str, values: list[object]) -> "FakeTableQuery":
+        self._in_filters[column] = set(values)
         return self
 
     def is_(self, column: str, value: object) -> "FakeTableQuery":
@@ -45,8 +54,11 @@ class FakeTableQuery:
         self._limit = count
         return self
 
-    def insert(self, payload: dict[str, object]) -> "FakeTableQuery":
-        self._inserted_payload = payload
+    def insert(self, payload: dict[str, object] | list[dict[str, object]]) -> "FakeTableQuery":
+        if isinstance(payload, list):
+            self._inserted_payloads = payload
+        else:
+            self._inserted_payload = payload
         return self
 
     def upsert(self, payload: dict[str, object], on_conflict: str) -> "FakeTableQuery":
@@ -62,6 +74,9 @@ class FakeTableQuery:
         if self._inserted_payload is not None:
             self._rows.append(self._inserted_payload)
             return FakeResponse([self._inserted_payload])
+        if self._inserted_payloads is not None:
+            self._rows.extend(self._inserted_payloads)
+            return FakeResponse(self._inserted_payloads)
         if self._upserted_payload is not None:
             self._rows.append(self._upserted_payload)
             return FakeResponse([self._upserted_payload])
@@ -82,6 +97,7 @@ class FakeTableQuery:
             row
             for row in self._rows
             if all(row.get(column) == value for column, value in self._filters.items())
+            and all(row.get(column) in values for column, values in self._in_filters.items())
             and all(row.get(column) is None for column in self._is_null)
         ]
 
@@ -93,11 +109,17 @@ class FakeSupabaseClient:
         athlete_rows: list[dict[str, object]] | None = None,
         threshold_rows: list[dict[str, object]] | None = None,
         activity_rows: list[dict[str, object]] | None = None,
+        chat_thread_rows: list[dict[str, object]] | None = None,
+        chat_message_rows: list[dict[str, object]] | None = None,
+        chat_attachment_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._tables = {
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
             "sport_thresholds": FakeTableQuery(threshold_rows or []),
             "activities": FakeTableQuery(activity_rows or []),
+            "chat_threads": FakeTableQuery(chat_thread_rows or []),
+            "chat_messages": FakeTableQuery(chat_message_rows or []),
+            "chat_attachments": FakeTableQuery(chat_attachment_rows or []),
         }
 
     def table(self, table_name: str) -> FakeTableQuery:
@@ -251,3 +273,69 @@ async def test_repository_requires_supabase_configuration() -> None:
 
     with pytest.raises(RepositoryNotConfiguredError):
         await repo.get_athlete_profile("athlete-1")
+
+
+@pytest.mark.asyncio
+async def test_create_chat_message_honors_caller_message_id() -> None:
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+    message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
+
+    message = await repo.create_chat_message(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        role="user",
+        content="I train ~8 hours/week",
+        message_id=message_id,
+    )
+
+    assert message.id == message_id
+
+
+@pytest.mark.asyncio
+async def test_create_chat_message_generates_uuid_when_message_id_omitted() -> None:
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    message = await repo.create_chat_message(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        role="assistant",
+        content="Welcome.",
+    )
+
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        message.id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_chat_message_links_attachments_to_honored_message_id() -> None:
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+    message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
+
+    message = await repo.create_chat_message(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        role="user",
+        content="Here's my workout chart",
+        message_id=message_id,
+        attachments=[
+            ChatAttachmentInput(
+                content_type="image/png",
+                filename="chart.png",
+                object_key="users/athlete-1/chat-attachment/chart.png",
+                public_url="https://example.com/chart.png",
+            )
+        ],
+    )
+
+    assert message.id == message_id
+    assert [attachment.message_id for attachment in message.attachments] == [message_id]
+    attachment_rows = cast(
+        list[dict[str, Any]],
+        client._tables["chat_attachments"]._rows,
+    )
+    assert attachment_rows[0]["message_id"] == message_id

@@ -417,9 +417,10 @@ class SupabaseRepository:
         content: str,
         metadata: dict[str, Any] | None = None,
         attachments: list[ChatAttachmentInput] | None = None,
+        message_id: str | None = None,
     ) -> ChatMessage:
         client = self._require_client()
-        message_id = str(uuid4())
+        message_id = message_id or str(uuid4())
         payload = {
             "id": message_id,
             "thread_id": thread_id,

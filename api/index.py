@@ -335,6 +335,7 @@ async def persist_chat_message(
             content=payload.content,
             metadata=payload.metadata,
             attachments=payload.attachments,
+            message_id=str(payload.id) if payload.id is not None else None,
         )
     except ChatUnavailableError as exc:
         logger.exception("chat unavailable user_id=%s", user_context.user_id)
