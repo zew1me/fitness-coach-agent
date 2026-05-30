@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -60,16 +61,7 @@ configure_logging(debug=settings.app_env == "development")
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Endurance Coaching Agent")
-auth_service = AuthService()
-chat_service = ChatService()
-repo = SupabaseRepository()
-r2_service = R2Service()
 
-RECOVERY_WEEK_AGE_BREAKPOINT = 40
-
-
-@app.on_event("startup")
 async def log_startup() -> None:
     """Emit startup diagnostics so it is clear which optional features are active."""
     features = {
@@ -87,6 +79,21 @@ async def log_startup() -> None:
         enabled,
         disabled,
     )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    await log_startup()
+    yield
+
+
+app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
+auth_service = AuthService()
+chat_service = ChatService()
+repo = SupabaseRepository()
+r2_service = R2Service()
+
+RECOVERY_WEEK_AGE_BREAKPOINT = 40
 
 
 def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:

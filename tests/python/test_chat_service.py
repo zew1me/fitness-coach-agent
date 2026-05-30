@@ -192,10 +192,12 @@ async def test_persist_message_defaults_metadata_to_empty_dict() -> None:
 
 
 def test_chat_persist_request_accepts_uuid_message_id() -> None:
-    payload = ChatPersistRequest(
-        id="63ff9606-9158-43d7-a82b-d31ef9788b7d",
-        role="user",
-        parts=[{"type": "text", "text": "I train ~8 hours/week"}],
+    payload = ChatPersistRequest.model_validate(
+        {
+            "id": "63ff9606-9158-43d7-a82b-d31ef9788b7d",
+            "role": "user",
+            "parts": [{"type": "text", "text": "I train ~8 hours/week"}],
+        }
     )
 
     assert payload.id == UUID("63ff9606-9158-43d7-a82b-d31ef9788b7d")
@@ -203,4 +205,6 @@ def test_chat_persist_request_accepts_uuid_message_id() -> None:
 
 def test_chat_persist_request_rejects_invalid_message_id() -> None:
     with pytest.raises(ValidationError):
-        ChatPersistRequest(id="not-a-uuid", role="user", parts=[{"type": "text", "text": "Bad id"}])
+        ChatPersistRequest.model_validate(
+            {"id": "not-a-uuid", "role": "user", "parts": [{"type": "text", "text": "Bad id"}]}
+        )
