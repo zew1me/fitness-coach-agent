@@ -7,12 +7,15 @@ Two-step process:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from backend.config import settings
+
+logger = logging.getLogger(__name__)
 
 MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE = 0.3
 
@@ -224,28 +227,39 @@ async def _call_vision(prompt: str, image_url: str) -> str:
     if not settings.openai_api_key:
         return "{}"
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {settings.openai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-5-mini",
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": prompt},
-                            {"type": "input_image", "image_url": image_url},
-                        ],
-                    }
-                ],
-            },
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-5-mini",
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": prompt},
+                                {"type": "input_image", "image_url": image_url},
+                            ],
+                        }
+                    ],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as error:
+        logger.warning(
+            "screenshot vision request failed status=%s detail=%s",
+            error.response.status_code,
+            error.response.text[:500],
         )
-        resp.raise_for_status()
-        data = resp.json()
+        return "{}"
+    except (httpx.HTTPError, ValueError) as error:
+        logger.warning("screenshot vision request error: %s", error)
+        return "{}"
 
     # Extract text from response
     for item in data.get("output", []):
