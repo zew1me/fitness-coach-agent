@@ -120,6 +120,10 @@ The script is safe to re-run at any time:
 - Existing R2 buckets and tokens are detected and reused (secret read from state file)
 - Vercel env vars are updated in place (no duplicates)
 
+If Supabase reports `Remote migration versions not found in local migrations directory`,
+stop and compare migration history before retrying bootstrap. See
+`docs/supabase-migration-history.md`.
+
 To skip migrations on a re-run (e.g. when only updating env vars):
 
 ```bash

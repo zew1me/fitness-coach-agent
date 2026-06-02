@@ -77,6 +77,10 @@ Migrations in `supabase/migrations/`:
 - `0003_fitness_thresholds.sql` — sport-specific threshold source metadata
 - `0004_chat_messages_parts.sql` — adopts AI SDK `UIMessage.parts` JSON shape on `chat_messages` (see "Chat persistence" below)
 
+When introducing a new migration, update `docs/supabase-migration-history.md`
+in the same change so migration ordering and any environment-specific repair
+notes stay current.
+
 Use separate Supabase projects per environment (development (local) / preview / production).
 
 ### Chat persistence

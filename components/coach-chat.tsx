@@ -155,7 +155,7 @@ function legacyAttachmentToFilePart(
   return { type: "file", mediaType, filename, url };
 }
 
-// Real persisted messages always have `parts` populated (the 0004 migration
+// Real persisted messages always have `parts` populated (the chat-parts migration
 // backfilled every legacy row). This shim covers in-flight test fixtures and
 // any callers still constructing the legacy shape: synthesize parts from the
 // text `content` + legacy `attachments` join so the renderer never has to
