@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 
 from backend.engine import screenshot_analyzer
@@ -37,3 +38,35 @@ async def test_extract_training_load_chart_to_series(monkeypatch: pytest.MonkeyP
             "https://example.com/chart.png",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_returns_unknown_when_vision_rejects_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAsyncClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, **_kwargs: object) -> httpx.Response:
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                400,
+                json={"error": {"message": "invalid image URL"}},
+                request=request,
+            )
+
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/private.png")
+
+    assert result.screenshot_type == "unknown"
+    assert result.raw_response == "Could not confidently classify this screenshot."
+    assert result.data["classification"]["confidence"] == 0.0
