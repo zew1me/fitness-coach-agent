@@ -18,18 +18,37 @@ The standalone Supabase Preview project had a remote-only version:
 ```
 
 That version came from a security migration created on 2026-04-26 that enabled
-RLS and fixed the `set_updated_at` function search path. It was pushed directly
-to preview from an unmerged branch, so `main` did not contain a matching local
-migration file.
+RLS and fixed the `set_updated_at` function search path. It was introduced on
+the never-merged branch behind
+[PR #122](https://github.com/zew1me/fitness-coach-agent/pull/122) (commit
+[`e38d1b677ef73b2e06ea13d8169e3d24a7b50e7e`](https://github.com/zew1me/fitness-coach-agent/commit/e38d1b677ef73b2e06ea13d8169e3d24a7b50e7e),
+file `supabase/migrations/0004_rls_and_security.sql`) and pushed directly to
+preview from that branch — so `main` never contained a matching local migration
+file, and `0004` later got reused by `0004_chat_messages_parts.sql`.
 
 The repair path was operational, not a new committed migration:
 
-- run `supabase/preview_rollback_20260426192302.sql` against the preview project
-- mark the orphan version reverted with `supabase migration repair`
+- execute a one-off SQL script against the preview project that drops the 16
+  RLS policies the orphan migration created, disables RLS on those tables, and
+  restores `public.set_updated_at()` to its pre-#111 definition (matching the
+  body in `supabase/migrations/0001_schema.sql`)
+- mark the orphan version reverted with
+  `supabase migration repair --status reverted 20260426192302`
 - let `supabase db push` apply the real `0004_chat_messages_parts.sql` migration
 
-Do not restore `20260426192302` as a local migration unless the RLS work is being
-reintroduced intentionally as a new forward migration for every environment.
+The rollback script lived in-tree transiently as
+`supabase/preview_rollback_20260426192302.sql` while it was applied to preview
+and was then removed. If a similar repair is ever needed on another
+environment, recover the script body from `main`'s history at commit
+[`354a239643d72340c5df63cf869d52f68ee163ec`](https://github.com/zew1me/fitness-coach-agent/commit/354a239643d72340c5df63cf869d52f68ee163ec):
+
+```bash
+git show 354a239643d72340c5df63cf869d52f68ee163ec:supabase/preview_rollback_20260426192302.sql
+```
+
+Do not restore `20260426192302` as a local migration unless the RLS work from
+PR #122 is being reintroduced intentionally as a new forward migration for
+every environment.
 
 Supabase Git preview branches have their own project refs. A branch can continue
 to report stale remote-only versions even after the standalone preview project is
