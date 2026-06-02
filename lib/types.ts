@@ -83,7 +83,7 @@ export type ChatMessage = {
     pending_profile_field?: string | null;
     plan?: AdaptedPlan;
   } & Record<string, unknown>;
-  // Backfill migration 0004 guarantees `parts` is non-empty on every persisted
+  // The chat-parts backfill migration guarantees `parts` is non-empty on every persisted
   // row. Optional here only because legacy in-flight payloads (tests, transient
   // local mocks) may omit it; the renderer's `deriveParts` shim covers those.
   parts?: MessagePart[];

@@ -62,12 +62,9 @@ public URL. Configure:
 
 ## Supabase Persistence
 
-The API now expects two Postgres tables:
-
-- `athlete_profiles`
-- `check_ins`
-
-An initial schema is included at `supabase/migrations/0001_initial_schema.sql`.
+Database schema changes live in `supabase/migrations/`. See
+`docs/supabase-migration-history.md` for migration ordering and Supabase Preview
+history repair notes.
 
 Configure:
 
@@ -141,12 +138,6 @@ Suggested mapping:
 - `preview`: pre-production validation with production-like configuration
 - `production`: live traffic only
 
-Apply the initial schema with:
-
-```bash
-SUPABASE_PROJECT_REF=dophynckrsokbmwwfsgd scripts/apply_supabase_migration.sh
-```
-
 Current backend behavior:
 
 - `POST /api/profile` reads the athlete profile from Supabase.
@@ -161,5 +152,3 @@ If a profile is missing, profile and plan generation return `404`.
 
 - The current implementation is still a scaffold in product terms, but profile reads and check-in writes now have a concrete persistence path.
 - OAuth consent now persists durable grants and binds authorization to a browser session; real provider secrets are still required before deployment.
-- GitHub issue filing is currently blocked locally until a remote is configured and `gh auth login` is refreshed.
-- Once GitHub access is configured, run `scripts/create_github_issues.sh` to file the prepared issue set from `docs/github-issues/`.
