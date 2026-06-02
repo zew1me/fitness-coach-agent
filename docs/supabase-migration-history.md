@@ -24,9 +24,20 @@ migration file.
 
 The repair path was operational, not a new committed migration:
 
-- run `supabase/preview_rollback_20260426192302.sql` against the preview project
-- mark the orphan version reverted with `supabase migration repair`
+- execute a one-off SQL script against the preview project that dropped the 16
+  RLS policies the orphan migration created, disabled row-level security on
+  those tables, and restored `public.set_updated_at()` to its pre-`20260426192302`
+  definition (matching `supabase/migrations/0001_schema.sql`)
+- mark the orphan version reverted with
+  `supabase migration repair --status reverted 20260426192302`
 - let `supabase db push` apply the real `0004_chat_messages_parts.sql` migration
+
+The script lived transiently in-tree as
+`supabase/preview_rollback_20260426192302.sql` and was removed once preview was
+repaired; reconstruct it from `git show e38d1b6:supabase/migrations/0004_rls_and_security.sql`
+(the source of truth for what to undo) and from `0001_schema.sql` (for the
+restored `set_updated_at` body) if a similar repair is needed on another
+environment.
 
 Do not restore `20260426192302` as a local migration unless the RLS work is being
 reintroduced intentionally as a new forward migration for every environment.
