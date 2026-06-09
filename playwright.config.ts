@@ -2,7 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 /**
  * UI tests — run explicitly with `bun run test:ui`.
- * NOT included in `bun run check` or CI.
+ * They now run as a separate task in CI, see 
+ * .github/workflows/ci.yml.
  *
  * The dev server starts automatically unless BASE_URL is set.
  * Point at a deployed preview with:
