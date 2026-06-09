@@ -730,9 +730,13 @@ export function CoachChat(): JSX.Element {
   // upload path as the + button. `handleFilesAdded` already filters unsupported
   // types and surfaces the error, so we forward every dropped file.
   function handleDragOver(event: React.DragEvent): void {
-    if (composerBusy) return;
     if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    // preventDefault must come before the composerBusy guard: the browser
+    // decides whether to allow a drop based on whether dragover calls
+    // preventDefault. Skipping it here would make the drop target invalid
+    // even if handleDrop also calls preventDefault.
     event.preventDefault();
+    if (composerBusy) return;
     setDragActive(true);
   }
 
@@ -744,11 +748,13 @@ export function CoachChat(): JSX.Element {
   }
 
   function handleDrop(event: React.DragEvent): void {
+    // preventDefault must come first — if called after the composerBusy guard,
+    // a drop while sending would not suppress the browser's default navigation.
+    event.preventDefault();
     setDragActive(false);
     if (composerBusy) return;
     const files = Array.from(event.dataTransfer.files);
     if (files.length === 0) return;
-    event.preventDefault();
     void handleFilesAdded(files);
   }
 
