@@ -104,7 +104,7 @@ function LoginPageContent(): JSX.Element {
       if (!response.ok) {
         if (payload.error === "invite_required") {
           setInviteRequired(true);
-          setStatus(payload.message ?? "This looks new. Enter your invite code.");
+          setStatus(payload.message ?? "This coach is currently accepting referred athletes only. Enter your invite code to get started.");
           setIsError(false);
           return;
         }
@@ -164,7 +164,7 @@ function LoginPageContent(): JSX.Element {
     <main className="page">
       <section className="page-card">
         <h1>Login</h1>
-        <p>Sign in with a magic link so ChatGPT consent can bind to your athlete account.</p>
+        <p>Sign in with a magic link</p>
         {!otpSent ? (
           <form
             onSubmit={(event) => {

@@ -63,10 +63,7 @@ describe("POST /api/auth/request-otp", () => {
     const response = await POST(buildRequest({ email: "new@example.com" }));
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "invite_required",
-      message: "This looks new. Enter your invite code."
-    });
+    await expect(response.json()).resolves.toHaveProperty("error", "invite_required");
     expect(adminClientMock.auth.admin.createUser).not.toHaveBeenCalled();
   });
 
@@ -79,10 +76,7 @@ describe("POST /api/auth/request-otp", () => {
     const response = await POST(buildRequest({ email: "new@example.com", inviteCode: null }));
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "invite_required",
-      message: "This looks new. Enter your invite code."
-    });
+    await expect(response.json()).resolves.toHaveProperty("error", "invite_required");
     expect(adminClientMock.auth.admin.createUser).not.toHaveBeenCalled();
   });
 

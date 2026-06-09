@@ -68,7 +68,7 @@ describe("LoginPage", () => {
         new Response(
           JSON.stringify({
             error: "invite_required",
-            message: "This looks new. Enter your invite code."
+            message: "This coach is currently accepting referred athletes only. Enter your invite code to get started."
           }),
           { status: 409, headers: { "content-type": "application/json" } }
         )
@@ -83,7 +83,7 @@ describe("LoginPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /send code/i }));
 
     expect(await screen.findByLabelText("Invite code")).toBeTruthy();
-    expect(screen.getByText("This looks new. Enter your invite code.")).toBeTruthy();
+    expect(screen.getByText("This coach is currently accepting referred athletes only. Enter your invite code to get started.")).toBeTruthy();
   });
 
   it("submits the invite code after the new-user gate is shown", async () => {
@@ -93,7 +93,7 @@ describe("LoginPage", () => {
         new Response(
           JSON.stringify({
             error: "invite_required",
-            message: "This looks new. Enter your invite code."
+            message: "This coach is currently accepting referred athletes only. Enter your invite code to get started."
           }),
           { status: 409, headers: { "content-type": "application/json" } }
         )

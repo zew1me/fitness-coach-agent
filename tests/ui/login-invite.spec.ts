@@ -36,7 +36,7 @@ test.describe("invite-gated login flow", () => {
           isFirstAttempt
             ? {
                 error: "invite_required",
-                message: "This looks new. Enter your invite code.",
+                message: "This coach is currently accepting referred athletes only. Enter your invite code to get started.",
               }
             : { status: "otp_sent", inviteRequired: false }
         ),
@@ -48,7 +48,7 @@ test.describe("invite-gated login flow", () => {
     await page.getByRole("button", { name: /send code/i }).click();
 
     await expect(page.getByLabel("Invite code")).toBeVisible();
-    await expect(page.getByText("This looks new. Enter your invite code.")).toBeVisible();
+    await expect(page.getByText("This coach is currently accepting referred athletes only. Enter your invite code to get started.")).toBeVisible();
 
     await page.getByLabel("Invite code").fill("alpha-access");
     await page.getByRole("button", { name: /send code/i }).click();
