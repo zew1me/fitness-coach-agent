@@ -164,7 +164,7 @@ function LoginPageContent(): JSX.Element {
     <main className="page">
       <section className="page-card">
         <h1>Login</h1>
-        <p>Sign in with a magic link so ChatGPT consent can bind to your athlete account.</p>
+        <p>Sign in with a magic link</p>
         {!otpSent ? (
           <form
             onSubmit={(event) => {
