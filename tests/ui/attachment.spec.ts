@@ -14,7 +14,7 @@ import { mockAuthenticatedSession } from "./helpers/session";
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async function attachLabel(page: import("@playwright/test").Page) {
-  return page.getByLabel("Add photo");
+  return page.getByLabel("Add photo or activity file");
 }
 
 // ── structure & accessibility ─────────────────────────────────────────────────
