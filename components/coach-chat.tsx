@@ -1076,7 +1076,7 @@ export function CoachChat(): JSX.Element {
                 onDrop={handleDrop}
               >
                 <label
-                  aria-label="Add photo"
+                  aria-label="Add photo or activity file"
                   className={composerBusy ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}
                   title="Add photo or activity file"
                 >
