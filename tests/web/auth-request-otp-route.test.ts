@@ -65,7 +65,7 @@ describe("POST /api/auth/request-otp", () => {
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
       error: "invite_required",
-      message: "This looks new. Enter your invite code."
+      message: "This coach is currently accepting referred athletes only. Enter your invite code to get started."
     });
     expect(adminClientMock.auth.admin.createUser).not.toHaveBeenCalled();
   });
@@ -81,7 +81,7 @@ describe("POST /api/auth/request-otp", () => {
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
       error: "invite_required",
-      message: "This looks new. Enter your invite code."
+      message: "This coach is currently accepting referred athletes only. Enter your invite code to get started."
     });
     expect(adminClientMock.auth.admin.createUser).not.toHaveBeenCalled();
   });

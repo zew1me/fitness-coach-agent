@@ -114,7 +114,7 @@ async function parseRequest(request: Request): Promise<ParsedRequest> {
 
 function inviteRequiredResponse(): NextResponse {
   return jsonResponse(
-    { error: "invite_required", message: "This looks new. Enter your invite code." },
+    { error: "invite_required", message: "Invite code required." },
     409
   );
 }
