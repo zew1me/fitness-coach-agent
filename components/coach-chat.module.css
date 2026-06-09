@@ -459,6 +459,16 @@
   grid-template-columns: auto 1fr auto;
   align-items: end;
   gap: 12px;
+  border-radius: 12px;
+  outline: 2px dashed transparent;
+  outline-offset: 4px;
+  transition: outline-color 0.12s ease, background 0.12s ease;
+}
+
+/* Drag-to-attach cue (issue #161): highlight the whole composer as a drop target. */
+.composerRowDragActive {
+  outline-color: var(--accent, #4f8cff);
+  background: var(--accent-soft, rgba(79, 140, 255, 0.08));
 }
 
 .attachButton {

@@ -9,71 +9,7 @@
  * Requires the dev server to be running on http://localhost:3000 (or BASE_URL).
  */
 import { test, expect } from "@playwright/test";
-
-// ── API mocks ─────────────────────────────────────────────────────────────────
-
-async function mockAuthenticatedSession(
-  page: import("@playwright/test").Page,
-): Promise<void> {
-  await page.route("**/api/oauth/browser-token", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        user_id: "test-user-123",
-        access_token: "fake-token-for-tests",
-      }),
-    }),
-  );
-
-  await page.route("**/api/chat/thread", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        thread: {
-          id: "thread-test-1",
-          messages: [],
-          created_at: "2026-01-01T00:00:00Z",
-          updated_at: "2026-01-01T00:00:00Z",
-        },
-      }),
-    }),
-  );
-
-  await page.route("**/api/engine/get-athlete-summary", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        profile: {
-          user_id: "test-user-123",
-          coaching_state: "onboarding",
-          primary_sports: [],
-        },
-      }),
-    }),
-  );
-
-  await page.route("**/api/chat/attachments/presign", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        upload_url: "https://example.com/upload",
-        object_key: "test-file-key",
-        public_url: "https://example.com/test-image.png",
-        method: "PUT",
-        headers: {},
-      }),
-    }),
-  );
-
-  // Intercept the actual file upload so tests are hermetic
-  await page.route("https://example.com/upload", (route) =>
-    route.fulfill({ status: 200 }),
-  );
-}
+import { mockAuthenticatedSession } from "./helpers/session";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -97,10 +33,10 @@ test.describe("attachment button structure", () => {
     expect(await label.evaluate((el) => el.tagName.toLowerCase())).toBe(
       "label",
     );
-    await expect(label).toHaveAttribute("title", "Add photo");
+    await expect(label).toHaveAttribute("title", "Add photo or activity file");
   });
 
-  test("label contains the file input with accept='image/*'", async ({
+  test("label contains the file input accepting images and activity files", async ({
     page,
   }) => {
     await mockAuthenticatedSession(page);
@@ -110,7 +46,11 @@ test.describe("attachment button structure", () => {
     await expect(label).toBeVisible();
 
     const fileInput = label.locator("input[type='file']");
-    await expect(fileInput).toHaveAttribute("accept", "image/*");
+    // CHAT_ATTACHMENT_ACCEPT in components/coach-chat.tsx — images plus GPX/FIT/TCX.
+    await expect(fileInput).toHaveAttribute(
+      "accept",
+      "image/*,application/gpx+xml,.gpx,.fit,.tcx",
+    );
     await expect(fileInput).toHaveAttribute("multiple");
   });
 });

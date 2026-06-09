@@ -18,6 +18,35 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
 
+  ui:
+    runs-on: ubuntu-latest
+    # End-to-end Playwright tests. Fully hermetic — every backend call is
+    # intercepted by page.route, so no live Supabase/R2/OpenAI is contacted.
+    # The dummy public env below only lets `bun dev` boot the chat page.
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: dummy-anon-key-for-ci
+      APP_ENV: development
+      APP_BASE_URL: http://localhost:3000
+      APP_JWT_SECRET: dummy-jwt-secret-for-ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bunx playwright install --with-deps chromium
+      - run: bun run test:ui
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
   python:
     runs-on: ubuntu-latest
     steps:
