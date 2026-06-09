@@ -434,6 +434,7 @@ export function CoachChat(): JSX.Element {
   const [syncingThread, setSyncingThread] = useState(false);
   const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
+  const [dragActive, setDragActive] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerStatus, setDrawerStatus] = useState<string | null>(null);
@@ -723,6 +724,40 @@ export function CoachChat(): JSX.Element {
     }
   }
 
+  // Dragging a file onto a bare <textarea> makes the browser navigate to the
+  // file URL (issue #161). Capturing dragover/drop on the composer wrapper and
+  // calling preventDefault keeps the file in-app and routes it through the same
+  // upload path as the + button. `handleFilesAdded` already filters unsupported
+  // types and surfaces the error, so we forward every dropped file.
+  function handleDragOver(event: React.DragEvent): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    // preventDefault must come before the composerBusy guard: the browser
+    // decides whether to allow a drop based on whether dragover calls
+    // preventDefault. Skipping it here would make the drop target invalid
+    // even if handleDrop also calls preventDefault.
+    event.preventDefault();
+    if (composerBusy) return;
+    setDragActive(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent): void {
+    // Only clear when the pointer actually leaves the wrapper, not when it
+    // crosses into a child element (relatedTarget still inside the wrapper).
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragActive(false);
+  }
+
+  function handleDrop(event: React.DragEvent): void {
+    // preventDefault must come first — if called after the composerBusy guard,
+    // a drop while sending would not suppress the browser's default navigation.
+    event.preventDefault();
+    setDragActive(false);
+    if (composerBusy) return;
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length === 0) return;
+    void handleFilesAdded(files);
+  }
+
   async function openDrawer(): Promise<void> {
     if (session.token === null) {
       return;
@@ -830,7 +865,7 @@ export function CoachChat(): JSX.Element {
 
           return (
             <div className={rowClass} key={message.id}>
-              <div className={bubbleClass}>
+              <div className={bubbleClass} data-role={message.role} data-testid="chat-bubble">
                 {textBlocks.map((text, idx) => (
                   <p className={styles.messageText} key={`text-${idx}`}>{text}</p>
                 ))}
@@ -1030,7 +1065,16 @@ export function CoachChat(): JSX.Element {
                 </div>
               ) : null}
 
-              <div className={styles.composerRow}>
+              <div
+                className={
+                  dragActive ? `${styles.composerRow} ${styles.composerRowDragActive}` : styles.composerRow
+                }
+                data-testid="composer-row"
+                onDragEnter={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+              >
                 <label
                   aria-label="Add photo"
                   className={composerBusy ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}

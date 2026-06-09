@@ -19,6 +19,7 @@ declare const styles: {
   readonly composerHint: string;
   readonly composerInput: string;
   readonly composerRow: string;
+  readonly composerRowDragActive: string;
   readonly composerWrap: string;
   readonly drawer: string;
   readonly drawerBackdrop: string;

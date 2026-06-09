@@ -15,9 +15,11 @@ export default defineConfig({
   testDir: "./tests/ui",
   fullyParallel: true,
   forbidOnly: !!process.env["CI"],
-  retries: 0,
+  // One retry in CI so a flaky streaming-mock run captures a trace (see `trace`
+  // below) for the uploaded playwright-report artifact.
+  retries: process.env["CI"] ? 1 : 0,
   workers: 1,
-  reporter: "list",
+  reporter: process.env["CI"] ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL,
     trace: "on-first-retry",
