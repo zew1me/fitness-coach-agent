@@ -8,7 +8,6 @@
   ],
   "ignoreExportsUsedInFile": true,
   "ignoreDependencies": [
-    "jscpd",
     "@next/eslint-plugin-next",
     "@testing-library/jest-dom",
     "eslint-config-next"

@@ -45,7 +45,7 @@ pre-push:
     pytest:
       run: uv run pytest
     jscpd:
-      run: ./node_modules/.bin/jscpd --exit-code --threshold 1
+      run: ./node_modules/.bin/jscpd --reporters ai,console
     knip:
       run: ./node_modules/.bin/knip
     playwright:

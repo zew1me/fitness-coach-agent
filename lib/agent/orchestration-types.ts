@@ -8,14 +8,6 @@ export const internalSpecialistRoleSchema = z.enum([
   "recovery",
   "workout",
 ]);
-export const specialistRoleSchema = z.enum([
-  "lead",
-  "intake",
-  "nutrition",
-  "recovery",
-  "workout",
-]);
-
 export type InternalSpecialistRole = z.infer<
   typeof internalSpecialistRoleSchema
 >;
