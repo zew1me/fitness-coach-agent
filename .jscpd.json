@@ -1,0 +1,15 @@
+{
+  "path": ["app", "components", "lib", "api", "backend"],
+  "languages": ["typescript", "javascript", "python"],
+  "ignore": [
+    "**/node_modules/**",
+    "**/.next/**",
+    "**/tests/**",
+    "**/supabase/migrations/**",
+    "**/__pycache__/**",
+    "**/*.min.js"
+  ],
+  "minTokens": 50,
+  "threshold": 1,
+  "reporters": ["console"]
+}

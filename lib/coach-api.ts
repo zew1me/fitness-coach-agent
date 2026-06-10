@@ -1,14 +1,11 @@
-import {
-  athleteProfileSchema,
-  uploadRequestSchema
-} from "./schemas";
+import { athleteProfileSchema, uploadRequestSchema } from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
   ChatThreadResponse,
   FitnessMetrics,
   PresignUploadRequest,
-  PresignUploadResponse
+  PresignUploadResponse,
 } from "./types";
 
 type FetchLike = typeof fetch;
@@ -19,7 +16,10 @@ function normalizeErrorText(detail: string): string {
     return "The coaching backend is unavailable right now. Please try again in a moment.";
   }
 
-  if (trimmed.startsWith("<") || trimmed.toLowerCase().includes("<!doctype html")) {
+  if (
+    trimmed.startsWith("<") ||
+    trimmed.toLowerCase().includes("<!doctype html")
+  ) {
     return "The coaching backend is unavailable right now. Please try again in a moment.";
   }
 
@@ -58,10 +58,12 @@ async function readJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function fetchBrowserToken(fetchImpl: FetchLike = fetch): Promise<BrowserTokenResponse> {
+export async function fetchBrowserToken(
+  fetchImpl: FetchLike = fetch,
+): Promise<BrowserTokenResponse> {
   const response = await fetchImpl("/api/oauth/browser-token", {
     method: "POST",
-    credentials: "include"
+    credentials: "include",
   });
   return readJson<BrowserTokenResponse>(response);
 }
@@ -69,56 +71,56 @@ export async function fetchBrowserToken(fetchImpl: FetchLike = fetch): Promise<B
 async function authorizedFetch<T>(
   path: string,
   init: RequestInit,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
 ): Promise<T> {
   const token = await fetchBrowserToken(fetchImpl);
   const headers = new Headers(init.headers ?? {});
   headers.set("Authorization", `Bearer ${token.access_token}`);
-  if (init.body !== undefined && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
+  if (
+    init.body !== undefined &&
+    !(init.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
     headers.set("Content-Type", "application/json");
   }
 
   const response = await fetchImpl(path, {
     ...init,
     credentials: "include",
-    headers
+    headers,
   });
 
   return readJson<T>(response);
 }
 
-export function parseListInput(value: string): string[] {
-  return value
-    .split(/\r?\n|,/)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-}
-
-export async function loadProfile(userId: string, fetchImpl: FetchLike = fetch): Promise<AthleteProfile> {
+export async function loadProfile(
+  userId: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<AthleteProfile> {
   type SummaryResponse = { profile: AthleteProfile };
   const summary = await authorizedFetch<SummaryResponse>(
     "/api/engine/get-athlete-summary",
     {
       method: "POST",
-      body: JSON.stringify({ user_id: userId })
+      body: JSON.stringify({ user_id: userId }),
     },
-    fetchImpl
+    fetchImpl,
   );
   return summary.profile;
 }
 
 export async function loadFitnessMetrics(
   userId: string,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
 ): Promise<FitnessMetrics> {
   type SummaryResponse = { fitness_metrics: FitnessMetrics };
   const summary = await authorizedFetch<SummaryResponse>(
     "/api/engine/get-athlete-summary",
     {
       method: "POST",
-      body: JSON.stringify({ user_id: userId })
+      body: JSON.stringify({ user_id: userId }),
     },
-    fetchImpl
+    fetchImpl,
   );
   return summary.fitness_metrics;
 }
@@ -126,92 +128,79 @@ export async function loadFitnessMetrics(
 export async function confirmSportThreshold(
   userId: string,
   sport: string,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
 ): Promise<void> {
   await authorizedFetch<unknown>(
     "/api/engine/confirm-threshold",
     {
       method: "POST",
-      body: JSON.stringify({ user_id: userId, sport })
+      body: JSON.stringify({ user_id: userId, sport }),
     },
-    fetchImpl
+    fetchImpl,
   );
 }
 
 export async function confirmProfileMetric(
   userId: string,
   metric: "max_hr" | "weight",
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
 ): Promise<void> {
   await authorizedFetch<unknown>(
     "/api/engine/confirm-profile-metric",
     {
       method: "POST",
-      body: JSON.stringify({ user_id: userId, metric })
+      body: JSON.stringify({ user_id: userId, metric }),
     },
-    fetchImpl
+    fetchImpl,
   );
 }
 
 export async function saveProfile(
   profile: AthleteProfile,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
 ): Promise<AthleteProfile> {
   const { user_id, ...fields } = athleteProfileSchema.parse(profile);
   return authorizedFetch<AthleteProfile>(
     "/api/engine/update-athlete-profile",
     {
       method: "POST",
-      body: JSON.stringify({ user_id, fields })
+      body: JSON.stringify({ user_id, fields }),
     },
-    fetchImpl
+    fetchImpl,
   );
 }
 
-export async function createUploadIntent(
-  payload: PresignUploadRequest,
-  fetchImpl: FetchLike = fetch
-): Promise<PresignUploadResponse> {
-  const body = uploadRequestSchema.parse(payload);
-  return authorizedFetch<PresignUploadResponse>(
-    "/api/files/presign-upload",
-    {
-      method: "POST",
-      body: JSON.stringify(body)
-    },
-    fetchImpl
-  );
-}
-
-export async function loadChatThread(fetchImpl: FetchLike = fetch): Promise<ChatThreadResponse> {
+export async function loadChatThread(
+  fetchImpl: FetchLike = fetch,
+): Promise<ChatThreadResponse> {
   return authorizedFetch<ChatThreadResponse>(
     "/api/chat/thread",
     {
-      method: "GET"
+      method: "GET",
     },
-    fetchImpl
+    fetchImpl,
   );
 }
 
 export async function createChatUploadIntent(
   payload: PresignUploadRequest,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
 ): Promise<PresignUploadResponse> {
   const body = uploadRequestSchema.parse(payload);
   return authorizedFetch<PresignUploadResponse>(
     "/api/chat/attachments/presign",
     {
       method: "POST",
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
     },
-    fetchImpl
+    fetchImpl,
   );
 }
 
 export async function uploadFile(
   objectKey: string,
   file: File,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
 ): Promise<PresignUploadResponse> {
   const formData = new FormData();
   formData.append("object_key", objectKey);
@@ -221,8 +210,8 @@ export async function uploadFile(
     "/api/chat/attachments/upload",
     {
       method: "POST",
-      body: formData
+      body: formData,
     },
-    fetchImpl
+    fetchImpl,
   );
 }

@@ -4,7 +4,7 @@ const userInputSchema = z.object({});
 
 const recentActivitiesInputSchema = z.object({
   limit: z.number().int().min(1).max(100).default(20),
-  sport: z.string().min(1).optional()
+  sport: z.string().min(1).optional(),
 });
 
 const goalSchema = z.object({
@@ -17,7 +17,7 @@ const goalSchema = z.object({
   improvement_target_value: z.number().optional(),
   sport: z.string().min(1).optional(),
   target_date: z.string().optional(),
-  title: z.string().min(1)
+  title: z.string().min(1),
 });
 
 const thresholdInputSchema = z.object({
@@ -96,7 +96,12 @@ const hormoneStatusSchema = z.enum([
   "hrt_testosterone",
   "not_specified",
 ]);
-const coachingStateSchema = z.enum(["onboarding", "calibrating", "active", "paused"]);
+const coachingStateSchema = z.enum([
+  "onboarding",
+  "calibrating",
+  "active",
+  "paused",
+]);
 
 const profileFieldsSchema = z.object({
   biological_sex: biologicalSexSchema.optional(),
@@ -124,7 +129,7 @@ const profileInputSchema = z.object({
 });
 
 const planInputSchema = z.object({
-  goal_id: z.string().min(1).optional()
+  goal_id: z.string().min(1).optional(),
 });
 
 const adjustPlanInputSchema = z.object({
@@ -139,46 +144,74 @@ type ToolDefinition<TSchema extends z.ZodTypeAny> = {
 
 function defineTool<TSchema extends z.ZodTypeAny>(
   description: string,
-  inputSchema: TSchema
+  inputSchema: TSchema,
 ): ToolDefinition<TSchema> {
   return { description, inputSchema };
 }
 
 export const coachToolDefinitions = {
-  get_athlete_context: defineTool("Load full athlete context for the current turn.", userInputSchema),
-  get_recent_activities: defineTool("Load recent normalized activities.", recentActivitiesInputSchema),
-  get_active_plan: defineTool("Load the active plan and upcoming workouts.", userInputSchema),
+  get_athlete_context: defineTool(
+    "Load full athlete context for the current turn.",
+    userInputSchema,
+  ),
+  get_recent_activities: defineTool(
+    "Load recent normalized activities.",
+    recentActivitiesInputSchema,
+  ),
+  get_active_plan: defineTool(
+    "Load the active plan and upcoming workouts.",
+    userInputSchema,
+  ),
   get_compliance_summary: defineTool(
     "Summarize planned versus actual completion over recent weeks.",
-    userInputSchema
+    userInputSchema,
   ),
   save_activity_from_text: defineTool(
     "Persist an activity described in natural language after deterministic scoring.",
-    activityTextInputSchema
+    activityTextInputSchema,
   ),
   process_uploaded_file: defineTool(
     "Process GPX, FIT, or screenshot uploads through the engine.",
-    uploadedFileInputSchema
+    uploadedFileInputSchema,
   ),
-  save_recovery_data: defineTool("Persist recovery and wellness observations.", recoveryInputSchema),
-  update_schedule: defineTool("Persist weekly availability or date overrides.", scheduleInputSchema),
+  save_recovery_data: defineTool(
+    "Persist recovery and wellness observations.",
+    recoveryInputSchema,
+  ),
+  update_schedule: defineTool(
+    "Persist weekly availability or date overrides.",
+    scheduleInputSchema,
+  ),
   update_goals: defineTool(
     "Create, update, complete, or abandon athlete goals.",
     z.object({
       action: z.enum(["abandon", "complete", "create", "update"]),
       goal: goalSchema,
       goal_id: z.string().min(1).optional(),
-    })
+    }),
   ),
-  update_athlete_profile: defineTool("Persist extracted athlete profile fields.", profileInputSchema),
-  calculate_zones: defineTool("Calculate zone boundaries from thresholds.", zonesInputSchema),
-  estimate_thresholds: defineTool("Estimate LT1/LT2 thresholds from tests or races.", thresholdInputSchema),
-  generate_training_plan: defineTool("Generate and persist a training plan.", planInputSchema),
-  adjust_plan: defineTool("Adjust existing plan prescriptions.", adjustPlanInputSchema),
+  update_athlete_profile: defineTool(
+    "Persist extracted athlete profile fields.",
+    profileInputSchema,
+  ),
+  calculate_zones: defineTool(
+    "Calculate zone boundaries from thresholds.",
+    zonesInputSchema,
+  ),
+  estimate_thresholds: defineTool(
+    "Estimate LT1/LT2 thresholds from tests or races.",
+    thresholdInputSchema,
+  ),
+  generate_training_plan: defineTool(
+    "Generate and persist a training plan.",
+    planInputSchema,
+  ),
+  adjust_plan: defineTool(
+    "Adjust existing plan prescriptions.",
+    adjustPlanInputSchema,
+  ),
   recalibrate_thresholds: defineTool(
     "Re-estimate thresholds from recent performance evidence.",
-    userInputSchema
-  )
+    userInputSchema,
+  ),
 } as const;
-
-export type CoachToolName = keyof typeof coachToolDefinitions;

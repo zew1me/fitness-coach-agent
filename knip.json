@@ -1,0 +1,17 @@
+{
+  "$schema": "https://unpkg.com/knip/schema.json",
+  "ignore": [
+    "components/brand-mark.tsx",
+    "components/brand-mark-gallery.tsx",
+    "components/status-card.tsx",
+    "components/theme-switcher.tsx"
+  ],
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "jscpd",
+    "@next/eslint-plugin-next",
+    "@testing-library/jest-dom",
+    "eslint-config-next"
+  ],
+  "ignoreBinaries": ["uv"]
+}

@@ -7,6 +7,7 @@ This file provides guidance to agents when working with code in this repository.
 A ChatGPT like experience for endurance coaching. Athletes log in via magic link, manage their fitness profiles, and submit check-ins, and get plans.
 
 Two runtimes:
+
 - **Next.js 15 frontend** (TypeScript, Supabase Auth, App Router)
 - **Python FastAPI backend** running on Vercel Functions (`api/index.py` entrypoint)
 
@@ -42,6 +43,7 @@ uv run ruff format .                 # format
 ### Frontend (`app/`, `components/`, `lib/`)
 
 Next.js 15 App Router. Key pages:
+
 - `app/login/page.tsx` — magic link OTP via Supabase
 - `app/auth/callback/page.tsx` — Supabase auth callback
 - `app/consent/page.tsx` — OAuth consent UI (POSTs to `/api/oauth/authorize/decision`)
@@ -61,6 +63,7 @@ Next.js 15 App Router. Key pages:
 ### OAuth Flow
 
 The app implements OAuth 2.0 PKCE as a provider (not consumer). ChatGPT is the OAuth client. Key endpoints:
+
 - `GET /.well-known/oauth-authorization-server` — discovery
 - `GET /api/oauth/authorize` — start flow (redirects to login if unauthenticated)
 - `POST /api/oauth/authorize/decision` — user approves/denies consent
@@ -72,6 +75,7 @@ Consent grants are durable (persisted to `oauth_grants` table). The `require_use
 ### Database (Supabase + Postgres)
 
 Migrations in `supabase/migrations/`:
+
 - `0001_schema.sql` — initial schema (athlete profiles, check-ins, OAuth tables, chat tables, etc.)
 - `0002_nutrition.sql` — nutrition tracking
 - `0003_fitness_thresholds.sql` — sport-specific threshold source metadata
@@ -85,7 +89,7 @@ Use separate Supabase projects per environment (development (local) / preview / 
 
 ### Chat persistence
 
-`chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table. 
+`chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table.
 
 The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
 
@@ -93,13 +97,14 @@ The legacy columns `chat_messages.content` (denormalized text mirror) and the se
 
 **Intent.** Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
 
-**Current reality (as of #149 landing).** Chat image attachments are being written into Postgres as inline base64 `data:image/png;base64,…` URLs inside `chat_messages.parts`, **not** as R2 URLs. Row sizes for a single-image message reach ~250KB. The R2 presign + upload calls *do* happen and the bytes land in R2, but the `public_url` returned by the upload proxy isn't being threaded back into the `LocalAttachment` state before submit, so `uploadedFileParts` falls through to its `attachment.dataUrl` (base64) fallback (`components/coach-chat.tsx:237`). Tracked in **issue #163**; whether R2 is referenced by anything else in the running app is **issue #164**.
+**Current reality (as of #149 landing).** Chat image attachments are being written into Postgres as inline base64 `data:image/png;base64,…` URLs inside `chat_messages.parts`, **not** as R2 URLs. Row sizes for a single-image message reach ~250KB. The R2 presign + upload calls _do_ happen and the bytes land in R2, but the `public_url` returned by the upload proxy isn't being threaded back into the `LocalAttachment` state before submit, so `uploadedFileParts` falls through to its `attachment.dataUrl` (base64) fallback (`components/coach-chat.tsx:237`). Tracked in **issue #163**; whether R2 is referenced by anything else in the running app is **issue #164**.
 
 Anyone reasoning about storage costs, backup size, or LLM context bloat should treat chat images as Postgres rows today, not R2 objects.
 
 ## Environment Variables
 
 See `.env.example`. Required:
+
 - `APP_ENV`, `APP_BASE_URL`, `APP_JWT_SECRET`
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
@@ -111,6 +116,65 @@ See `.env.example`. Required:
 - Web tests: `tests/web/` — Vitest, `environment: "node"`
 - Python tests: `tests/python/` — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for fixtures
+
+## Local hooks (lefthook)
+
+`bun install` automatically installs git hooks via the `prepare` script — no extra step needed after cloning.
+
+### Pre-commit (fast, autofix)
+
+Runs in parallel on staged files only. Fixes are re-staged automatically (`stage_fixed: true`):
+
+| Hook             | What it does                                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------------- |
+| `eslint-fix`     | ESLint `--fix` on staged `*.{ts,tsx,js,mjs,cjs}`                                                                |
+| `prettier-write` | Prettier on staged `*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}`                                                     |
+| `ruff-fix`       | `ruff check --fix` on staged `*.py`                                                                             |
+| `ruff-format`    | `ruff format` on staged `*.py`                                                                                  |
+| `actionlint`     | Lints `.github/workflows/` files (only when they are staged); gracefully skips if `actionlint` is not installed |
+
+Install actionlint once with `brew install actionlint` to get GitHub Actions workflow linting on commit.
+
+### Pre-push (full CI gate)
+
+Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus three additional static checks:
+
+| Step                | Command                                                                       |
+| ------------------- | ----------------------------------------------------------------------------- |
+| `lint`              | `bun run lint`                                                                |
+| `ruff-check`        | `uv run ruff check .`                                                         |
+| `ruff-format-check` | `uv run ruff format --check .`                                                |
+| `typecheck`         | `bun run typecheck`                                                           |
+| `ty`                | `uv run ty check`                                                             |
+| `vitest`            | `bun run test`                                                                |
+| `pytest`            | `uv run pytest`                                                               |
+| `jscpd`             | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
+| `knip`              | Dead-code / unused-export detection (production code only)                    |
+| `playwright`        | Full Playwright UI suite (see opt-out below)                                  |
+
+### Skipping the Playwright suite
+
+Playwright is slow (~2–3 min). Skip it on a given push using **either** method:
+
+```bash
+# 1. Keyword in the last commit subject
+git commit -m "fix: tweak layout lefthook-skip-ui"
+git push
+
+# 2. One-off env var (no commit amend needed)
+LEFTHOOK_SKIP_UI=1 git push
+```
+
+All other pre-push checks still run when Playwright is skipped.
+
+### Bypass hooks entirely
+
+```bash
+git commit --no-verify   # skip pre-commit
+git push --no-verify     # skip pre-push
+```
+
+Use sparingly — the hooks exist to keep the CI green before you push.
 
 ## Code Conventions
 
