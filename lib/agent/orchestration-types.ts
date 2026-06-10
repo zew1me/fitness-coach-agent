@@ -2,11 +2,15 @@ import { z } from "zod";
 
 import type { AthleteContextBundle } from "./types";
 
-export const internalSpecialistRoleSchema = z.enum(["intake", "nutrition", "recovery", "workout"]);
-export const specialistRoleSchema = z.enum(["lead", "intake", "nutrition", "recovery", "workout"]);
-
-export type InternalSpecialistRole = z.infer<typeof internalSpecialistRoleSchema>;
-export type SpecialistRole = z.infer<typeof specialistRoleSchema>;
+export const internalSpecialistRoleSchema = z.enum([
+  "intake",
+  "nutrition",
+  "recovery",
+  "workout",
+]);
+export type InternalSpecialistRole = z.infer<
+  typeof internalSpecialistRoleSchema
+>;
 
 export type TurnIntentKind =
   | "general"
@@ -42,35 +46,47 @@ function hasUserIdKey(value: unknown): boolean {
     return value.some(hasUserIdKey);
   }
 
-  return Object.entries(value).some(([key, nestedValue]) => key === "user_id" || hasUserIdKey(nestedValue));
+  return Object.entries(value).some(
+    ([key, nestedValue]) => key === "user_id" || hasUserIdKey(nestedValue),
+  );
 }
 
-const proposedUpdateInputSchema = z.string().min(2).superRefine((input, context) => {
-  try {
-    const parsed = JSON.parse(input) as unknown;
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+const proposedUpdateInputSchema = z
+  .string()
+  .min(2)
+  .superRefine((input, context) => {
+    try {
+      const parsed = JSON.parse(input) as unknown;
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed)
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Specialist proposed update input must be a JSON object string.",
+        });
+        return;
+      }
+      if (!hasUserIdKey(parsed)) {
+        return;
+      }
+    } catch {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Specialist proposed update input must be a JSON object string.",
+        message:
+          "Specialist proposed update input must be a JSON object string.",
       });
       return;
     }
-    if (!hasUserIdKey(parsed)) {
-      return;
-    }
-  } catch {
+
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "Specialist proposed update input must be a JSON object string.",
+      message:
+        "Specialist proposed updates must not include user_id; server auth injects identity.",
     });
-    return;
-  }
-
-  context.addIssue({
-    code: z.ZodIssueCode.custom,
-    message: "Specialist proposed updates must not include user_id; server auth injects identity.",
   });
-});
 
 export const proposedUpdateSchema = z
   .object({
@@ -92,7 +108,6 @@ export const specialistReportSchema = z
 
 export const specialistReportsSchema = z.array(specialistReportSchema);
 
-export type ProposedUpdate = z.infer<typeof proposedUpdateSchema>;
 export type SpecialistReport = z.infer<typeof specialistReportSchema>;
 
 type IntakeContextSlice = {
@@ -101,7 +116,9 @@ type IntakeContextSlice = {
     coaching_state: AthleteContextBundle["profile"]["coaching_state"];
     display_name: AthleteContextBundle["profile"]["display_name"] | undefined;
     primary_sports: AthleteContextBundle["profile"]["primary_sports"];
-    weekly_available_hours: AthleteContextBundle["profile"]["weekly_available_hours"] | undefined;
+    weekly_available_hours:
+      | AthleteContextBundle["profile"]["weekly_available_hours"]
+      | undefined;
   };
   schedule: AthleteContextBundle["schedule"];
 };
@@ -109,10 +126,18 @@ type IntakeContextSlice = {
 type NutritionContextSlice = {
   computed_age: AthleteContextBundle["computed_age"];
   profile: {
-    biological_sex: AthleteContextBundle["profile"]["biological_sex"] | undefined;
-    dietary_restrictions: AthleteContextBundle["profile"]["dietary_restrictions"] | undefined;
-    hormone_status: AthleteContextBundle["profile"]["hormone_status"] | undefined;
-    nutrition_notes: AthleteContextBundle["profile"]["nutrition_notes"] | undefined;
+    biological_sex:
+      | AthleteContextBundle["profile"]["biological_sex"]
+      | undefined;
+    dietary_restrictions:
+      | AthleteContextBundle["profile"]["dietary_restrictions"]
+      | undefined;
+    hormone_status:
+      | AthleteContextBundle["profile"]["hormone_status"]
+      | undefined;
+    nutrition_notes:
+      | AthleteContextBundle["profile"]["nutrition_notes"]
+      | undefined;
   };
 };
 
@@ -130,7 +155,9 @@ type WorkoutContextSlice = {
   goals: AthleteContextBundle["goals"];
   profile: {
     primary_sports: AthleteContextBundle["profile"]["primary_sports"];
-    weekly_available_hours: AthleteContextBundle["profile"]["weekly_available_hours"] | undefined;
+    weekly_available_hours:
+      | AthleteContextBundle["profile"]["weekly_available_hours"]
+      | undefined;
   };
   schedule: AthleteContextBundle["schedule"];
   thresholds: AthleteContextBundle["thresholds"];
@@ -145,7 +172,9 @@ type LeadContextSlice = {
     coaching_state: AthleteContextBundle["profile"]["coaching_state"];
     display_name: AthleteContextBundle["profile"]["display_name"] | undefined;
     primary_sports: AthleteContextBundle["profile"]["primary_sports"];
-    weekly_available_hours: AthleteContextBundle["profile"]["weekly_available_hours"] | undefined;
+    weekly_available_hours:
+      | AthleteContextBundle["profile"]["weekly_available_hours"]
+      | undefined;
   };
 };
 

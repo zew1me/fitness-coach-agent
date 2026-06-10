@@ -11,11 +11,12 @@ export const athleteProfileSchema = z.object({
 });
 
 export const uploadRequestSchema = z.object({
-  content_length: z.number().int().min(1).max(25 * 1024 * 1024),
+  content_length: z
+    .number()
+    .int()
+    .min(1)
+    .max(25 * 1024 * 1024),
   content_type: z.string().trim().min(1),
   filename: z.string().trim().min(1),
-  purpose: z.string().trim().min(1).default("check-in-image")
+  purpose: z.string().trim().min(1).default("check-in-image"),
 });
-
-export type AthleteProfileInput = z.infer<typeof athleteProfileSchema>;
-export type UploadRequestInput = z.infer<typeof uploadRequestSchema>;

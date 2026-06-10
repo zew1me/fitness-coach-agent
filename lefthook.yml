@@ -1,0 +1,63 @@
+# Pre-commit: fast autofix on staged files only.
+# Pre-push: full CI gate — mirrors .github/workflows/ci.yml exactly, plus jscpd/knip/actionlint.
+
+pre-commit:
+  parallel: true
+  commands:
+    eslint-fix:
+      glob: "*.{ts,tsx,js,mjs,cjs}"
+      run: ./node_modules/.bin/eslint --fix --max-warnings=0 {staged_files}
+      stage_fixed: true
+    prettier-write:
+      glob: "*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}"
+      run: ./node_modules/.bin/prettier --write {staged_files}
+      stage_fixed: true
+    ruff-fix:
+      glob: "*.py"
+      run: uv run ruff check --fix {staged_files}
+      stage_fixed: true
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format {staged_files}
+      stage_fixed: true
+    actionlint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: >
+        command -v actionlint > /dev/null 2>&1
+        && actionlint {staged_files}
+        || (echo "actionlint not installed — run: brew install actionlint" && exit 0)
+
+pre-push:
+  parallel: false
+  commands:
+    lint:
+      run: bun run lint
+    ruff-check:
+      run: uv run ruff check .
+    ruff-format-check:
+      run: uv run ruff format --check .
+    typecheck:
+      run: bun run typecheck
+    ty:
+      run: uv run ty check
+    vitest:
+      run: bun run test
+    pytest:
+      run: uv run pytest
+    cpd:
+      run: ./node_modules/.bin/cpd app components lib api backend -t 1 -k 50 -r ai --no-tips
+    knip:
+      run: ./node_modules/.bin/knip
+    playwright:
+      run: |
+        if [ "${LEFTHOOK_SKIP_UI:-0}" = "1" ] || git log -1 --pretty=%s | grep -q "lefthook-skip-ui"; then
+          echo "Playwright skipped (lefthook-skip-ui)"
+          exit 0
+        fi
+        bun run test:ui
+      env:
+        NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: dummy-anon-key-for-ci
+        APP_ENV: development
+        APP_BASE_URL: http://localhost:3000
+        APP_JWT_SECRET: dummy-jwt-secret-for-ci
