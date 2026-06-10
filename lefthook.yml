@@ -44,8 +44,8 @@ pre-push:
       run: bun run test
     pytest:
       run: uv run pytest
-    jscpd:
-      run: ./node_modules/.bin/jscpd --reporters ai,console
+    cpd:
+      run: ./node_modules/.bin/cpd app components lib api backend -t 1 -k 50 -r ai --no-tips
     knip:
       run: ./node_modules/.bin/knip
     playwright:
