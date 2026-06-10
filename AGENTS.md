@@ -148,7 +148,7 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | `ty`                | `uv run ty check`                                                             |
 | `vitest`            | `bun run test`                                                                |
 | `pytest`            | `uv run pytest`                                                               |
-| `jscpd`             | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
+| `cpd`               | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
 | `knip`              | Dead-code / unused-export detection (production code only)                    |
 | `playwright`        | Full Playwright UI suite
 
