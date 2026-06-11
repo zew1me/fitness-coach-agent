@@ -6,5 +6,6 @@
     "@testing-library/jest-dom",
     "eslint-config-next"
   ],
+  "ignore": [".uv-cache/**"],
   "ignoreBinaries": ["uv"]
 }

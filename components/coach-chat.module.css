@@ -456,7 +456,7 @@
 
 .composerRow {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: end;
   gap: 12px;
   border-radius: 12px;
@@ -503,6 +503,7 @@
 
 .composerInput {
   width: 100%;
+  min-width: 0;
   min-height: 44px;
   max-height: 180px;
   resize: none;
@@ -526,6 +527,26 @@
   color: #ffffff;
   font-weight: 700;
   padding: 11px 16px;
+}
+
+.sendButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.sendIcon {
+  display: none;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.sendButtonText {
+  display: inline;
 }
 
 .sendButton:hover:not(:disabled),
@@ -754,7 +775,10 @@
   width: 1px;
   height: 1px;
   overflow: hidden;
-  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  margin: -1px;
+  border: 0;
+  padding: 0;
   white-space: nowrap;
 }
 
@@ -783,11 +807,32 @@
   }
 
   .composerRow {
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
   }
 
   .sendButton {
-    grid-column: 1 / -1;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    padding: 0;
+  }
+
+  .sendIcon {
+    display: block;
+  }
+
+  .sendButtonText {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    margin: -1px;
+    border: 0;
+    padding: 0;
+    white-space: nowrap;
   }
 
   .bubble {
