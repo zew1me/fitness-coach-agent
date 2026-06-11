@@ -6,7 +6,7 @@ pre-commit:
   commands:
     eslint-fix:
       glob: "*.{ts,tsx,js,mjs,cjs}"
-      run: ./node_modules/.bin/eslint --fix --max-warnings=0 {staged_files}
+      run: ./node_modules/.bin/eslint --fix --max-warnings=0 --no-warn-ignored {staged_files}
       stage_fixed: true
     prettier-write:
       glob: "*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}"
