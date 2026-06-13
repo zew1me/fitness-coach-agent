@@ -46,6 +46,16 @@ test.describe("composer Enter key behavior (#157)", () => {
     await page.setViewportSize(DESKTOP_VIEWPORT);
     await mockAuthenticatedSession(page);
 
+    let chatPostCount = 0;
+    await page.route("**/api/chat", (route) => {
+      chatPostCount += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: "text/plain",
+        body: "",
+      });
+    });
+
     await page.goto("/");
 
     const textarea = page.getByTestId("composer-row").locator("textarea");
@@ -61,5 +71,8 @@ test.describe("composer Enter key behavior (#157)", () => {
     await page.keyboard.up("Shift");
     await textarea.type("line two");
     await expect(textarea).toHaveValue("line one\nline two");
+
+    await page.keyboard.press("Enter");
+    await expect.poll(() => chatPostCount).toBe(1);
   });
 });
