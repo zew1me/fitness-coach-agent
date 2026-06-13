@@ -22,6 +22,7 @@ import type {
   ChatMessage,
   ChatThreadResponse,
 } from "../lib/types";
+import { useIsMobile } from "../lib/use-is-mobile";
 import { useTheme } from "../lib/use-theme";
 import type { ThemeMode } from "../lib/use-theme";
 
@@ -496,6 +497,7 @@ export function CoachChat(): JSX.Element {
   const [profile, setProfile] = useState<AthleteProfile | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const { mode: themeMode, setTheme } = useTheme();
+  const isMobile = useIsMobile();
   const chatMessages = useMemo<UIMessage[]>(
     () => threadState.data?.thread.messages.map(toUiMessage) ?? [],
     [threadState.data?.thread.messages],
@@ -1243,7 +1245,7 @@ export function CoachChat(): JSX.Element {
                   className={styles.composerInput}
                   onChange={(event) => setComposer(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
+                    if (!isMobile && event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
                       void handleSend();
                     }
@@ -1295,6 +1297,8 @@ export function CoachChat(): JSX.Element {
                   <span className={styles.errorTextInline}>
                     {threadState.error}
                   </span>
+                ) : isMobile ? (
+                  "Tap the send button when you're ready. Add photos with the plus button."
                 ) : (
                   "Use Shift+Enter for a new line. Add photos with the plus button."
                 )}
