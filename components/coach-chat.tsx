@@ -35,7 +35,6 @@ type SessionState = {
 
 type LocalAttachment = {
   content_type: string;
-  dataUrl: string | null;
   filename: string;
   object_key: string;
   previewUrl: string | null;
@@ -73,7 +72,10 @@ function onlyWelcomeMessage(messages: ChatMessage[]): boolean {
 }
 
 function canUseLocalChatHistory(): boolean {
-  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+  return (
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1"
+  );
 }
 
 function localChatThreadStorageKey(userId: string): string {
@@ -86,12 +88,17 @@ function readLocalChatThread(userId: string): ChatThreadResponse | null {
   }
 
   try {
-    const rawThread = window.localStorage.getItem(localChatThreadStorageKey(userId));
+    const rawThread = window.localStorage.getItem(
+      localChatThreadStorageKey(userId),
+    );
     if (rawThread === null) {
       return null;
     }
     const parsed = JSON.parse(rawThread) as ChatThreadResponse;
-    if (parsed.thread.user_id !== userId || !Array.isArray(parsed.thread.messages)) {
+    if (
+      parsed.thread.user_id !== userId ||
+      !Array.isArray(parsed.thread.messages)
+    ) {
       return null;
     }
     return parsed;
@@ -100,13 +107,19 @@ function readLocalChatThread(userId: string): ChatThreadResponse | null {
   }
 }
 
-function writeLocalChatThread(thread: ChatThreadResponse, userId: string): void {
+function writeLocalChatThread(
+  thread: ChatThreadResponse,
+  userId: string,
+): void {
   if (!canUseLocalChatHistory()) {
     return;
   }
 
   try {
-    window.localStorage.setItem(localChatThreadStorageKey(userId), JSON.stringify(thread));
+    window.localStorage.setItem(
+      localChatThreadStorageKey(userId),
+      JSON.stringify(thread),
+    );
   } catch {
     // Local persistence is best-effort for development and should never block chat.
   }
@@ -137,7 +150,10 @@ function accountLabel(profile: AthleteProfile | null): string {
   return displayName ? displayName : "Account";
 }
 
-function readString(record: Record<string, unknown>, key: string): string | null {
+function readString(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
   const value = record[key];
   return typeof value === "string" ? value : null;
 }
@@ -204,7 +220,7 @@ function friendlyToolStatus(toolName: string): string {
     get_athlete_context: "Looking up your info...",
     process_uploaded_file: "Reading your activity file...",
     save_check_in: "Saving your check-in...",
-    update_athlete_profile: "Updating your profile..."
+    update_athlete_profile: "Updating your profile...",
   };
 
   return statuses[toolName] ?? "Working on that...";
@@ -226,9 +242,11 @@ function uiPartText(part: UIMessage["parts"][number]): string | null {
   return null;
 }
 
-
-
-function toLiveChatMessage(message: UIMessage, threadId: string, userId: string): ChatMessage | null {
+function toLiveChatMessage(
+  message: UIMessage,
+  threadId: string,
+  userId: string,
+): ChatMessage | null {
   if (message.role !== "assistant" && message.role !== "user") {
     return null;
   }
@@ -247,11 +265,7 @@ function toLiveChatMessage(message: UIMessage, threadId: string, userId: string)
 
 function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
   return attachments.flatMap((attachment) => {
-    if (attachment.status !== "uploaded") {
-      return [];
-    }
-    const url = attachment.public_url ?? attachment.dataUrl;
-    if (url === null) {
+    if (attachment.status !== "uploaded" || attachment.public_url === null) {
       return [];
     }
     return [
@@ -259,13 +273,11 @@ function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
         filename: attachment.filename,
         mediaType: attachment.content_type,
         type: "file",
-        url,
+        url: attachment.public_url,
       },
     ];
   });
 }
-
-
 
 function activityContentType(file: File): string {
   if (file.type) {
@@ -283,10 +295,15 @@ function isSupportedAttachment(file: File): boolean {
     return true;
   }
   const name = file.name.toLowerCase();
-  return name.endsWith(".gpx") || name.endsWith(".fit") || name.endsWith(".tcx");
+  return (
+    name.endsWith(".gpx") || name.endsWith(".fit") || name.endsWith(".tcx")
+  );
 }
 
-function fileTypeBadge(attachment: { content_type: string; filename: string }): string | null {
+function fileTypeBadge(attachment: {
+  content_type: string;
+  filename: string;
+}): string | null {
   if (attachment.content_type.startsWith("image/")) {
     return null;
   }
@@ -304,21 +321,26 @@ function ChatLoading(): JSX.Element {
   );
 }
 
-function LoggedOutLanding({ error }: Readonly<{ error: string | null }>): JSX.Element {
+function LoggedOutLanding({
+  error,
+}: Readonly<{ error: string | null }>): JSX.Element {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.landingCard}>
         <p className={styles.eyebrow}>Athlete Coach</p>
-        <h1 className={styles.landingTitle}>A simpler coaching experience, built like chat.</h1>
+        <h1 className={styles.landingTitle}>
+          A simpler coaching experience, built like chat.
+        </h1>
         <p className={styles.landingText}>
-          Sign in once, then use a single focused conversation for check-ins, plan requests,
-          and photo-backed coaching updates. The forms are gone from the main surface so the
-          experience feels closer to a modern chat assistant than a dashboard.
+          Sign in once, then use a single focused conversation for check-ins,
+          plan requests, and photo-backed coaching updates. The forms are gone
+          from the main surface so the experience feels closer to a modern chat
+          assistant than a dashboard.
         </p>
         {error ? (
           <p className={styles.landingHint}>
-            Sign in to start your coaching chat. If the app feels slow to wake up, give it a
-            moment and try again.
+            Sign in to start your coaching chat. If the app feels slow to wake
+            up, give it a moment and try again.
           </p>
         ) : null}
         <div className={styles.actionRow}>
@@ -388,7 +410,9 @@ function OutRunningIllustration(): JSX.Element {
   );
 }
 
-function ChatErrorState({ error }: Readonly<{ error: string | null }>): JSX.Element {
+function ChatErrorState({
+  error,
+}: Readonly<{ error: string | null }>): JSX.Element {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.errorCard}>
@@ -396,12 +420,16 @@ function ChatErrorState({ error }: Readonly<{ error: string | null }>): JSX.Elem
         <p className={styles.eyebrow}>Coach unavailable</p>
         <h1 className={styles.errorTitle}>Sorry, we&apos;re out running.</h1>
         <p className={styles.errorText}>
-          We&apos;ll be back soon. You&apos;ve got this. In the meantime, hang onto the thread and
-          try again in a minute or two.
+          We&apos;ll be back soon. You&apos;ve got this. In the meantime, hang
+          onto the thread and try again in a minute or two.
         </p>
         {error ? <p className={styles.errorDetail}>{error}</p> : null}
         <div className={styles.actionRow}>
-          <button className={styles.primaryButton} onClick={() => window.location.reload()} type="button">
+          <button
+            className={styles.primaryButton}
+            onClick={() => window.location.reload()}
+            type="button"
+          >
             Retry
           </button>
         </div>
@@ -429,7 +457,9 @@ export function CoachChat(): JSX.Element {
     loading: false,
   });
   const [composer, setComposer] = useState("");
-  const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_RENDER_BATCH_SIZE);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(
+    MESSAGE_RENDER_BATCH_SIZE,
+  );
   const [sending, setSending] = useState(false);
   const [syncingThread, setSyncingThread] = useState(false);
   const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
@@ -462,11 +492,16 @@ export function CoachChat(): JSX.Element {
     const thread = threadState.data.thread;
     const token = session.token;
     const persistedMessages = thread.messages;
-    const persistedIds = new Set(persistedMessages.map((message) => message.id));
+    const persistedIds = new Set(
+      persistedMessages.map((message) => message.id),
+    );
     const additionalMessages = liveMessages
       .filter((message) => !persistedIds.has(message.id))
       .map((message) => toLiveChatMessage(message, thread.id, token.user_id))
-      .filter((message): message is ChatMessage => message !== null && (message.parts ?? []).length > 0);
+      .filter(
+        (message): message is ChatMessage =>
+          message !== null && (message.parts ?? []).length > 0,
+      );
 
     return [...persistedMessages, ...additionalMessages];
   }, [liveMessages, session.token, threadState.data]);
@@ -479,7 +514,10 @@ export function CoachChat(): JSX.Element {
       } catch (error) {
         setSession({
           token: null,
-          error: error instanceof Error ? error.message : "Unable to connect your browser session.",
+          error:
+            error instanceof Error
+              ? error.message
+              : "Unable to connect your browser session.",
           loading: false,
         });
       }
@@ -512,7 +550,10 @@ export function CoachChat(): JSX.Element {
 
         setThreadState({
           data: null,
-          error: error instanceof Error ? error.message : "Unable to load the coaching conversation.",
+          error:
+            error instanceof Error
+              ? error.message
+              : "Unable to load the coaching conversation.",
           loading: false,
         });
       }
@@ -545,7 +586,10 @@ export function CoachChat(): JSX.Element {
 
   useEffect(() => {
     const scrollTarget = messageEndRef.current;
-    if (scrollTarget !== null && typeof scrollTarget.scrollIntoView === "function") {
+    if (
+      scrollTarget !== null &&
+      typeof scrollTarget.scrollIntoView === "function"
+    ) {
       scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [threadState.data?.thread.messages.length, sending]);
@@ -561,7 +605,9 @@ export function CoachChat(): JSX.Element {
     }
 
     const intervalId = window.setInterval(() => {
-      setWaitingStatusIndex((current) => (current + 1) % WAITING_STATUSES.length);
+      setWaitingStatusIndex(
+        (current) => (current + 1) % WAITING_STATUSES.length,
+      );
     }, WAITING_STATUS_INTERVAL_MS);
 
     return () => {
@@ -599,7 +645,10 @@ export function CoachChat(): JSX.Element {
       setComposer("");
       await sendMessage({
         id: messageId,
-        parts: [{ type: "text", text: pendingComposer }, ...uploadedFileParts(pendingAttachments)],
+        parts: [
+          { type: "text", text: pendingComposer },
+          ...uploadedFileParts(pendingAttachments),
+        ],
       });
       setSending(false);
       setSyncingThread(true);
@@ -609,7 +658,8 @@ export function CoachChat(): JSX.Element {
       } catch {
         setThreadState((current) => ({
           ...current,
-          error: "Message sent, but the thread failed to refresh. Reload to see the latest.",
+          error:
+            "Message sent, but the thread failed to refresh. Reload to see the latest.",
           loading: false,
         }));
       } finally {
@@ -619,7 +669,10 @@ export function CoachChat(): JSX.Element {
       setSyncingThread(false);
       setThreadState((current) => ({
         ...current,
-        error: error instanceof Error ? error.message : "Unable to send your message.",
+        error:
+          error instanceof Error
+            ? error.message
+            : "Unable to send your message.",
         loading: false,
       }));
     } finally {
@@ -634,10 +687,11 @@ export function CoachChat(): JSX.Element {
       .filter(isSupportedAttachment)
       .map<LocalAttachment>((file) => ({
         content_type: activityContentType(file),
-        dataUrl: null,
         filename: file.name,
         object_key: "",
-        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
+        previewUrl: file.type.startsWith("image/")
+          ? URL.createObjectURL(file)
+          : null,
         public_url: null,
         status: "uploading",
       }));
@@ -647,7 +701,8 @@ export function CoachChat(): JSX.Element {
       if (!isSupportedAttachment(file)) {
         setThreadState((current) => ({
           ...current,
-          error: "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
+          error:
+            "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
         }));
         continue;
       }
@@ -663,19 +718,27 @@ export function CoachChat(): JSX.Element {
 
         const uploaded = await uploadFile(intent.object_key, file);
 
-        let dataUrl: string | null = null;
-        if (contentType.startsWith("image/")) {
-          try {
-            const buffer = await file.arrayBuffer();
-            const bytes = new Uint8Array(buffer);
-            let binary = "";
-            for (let i = 0; i < bytes.length; i++) {
-              binary += String.fromCharCode(bytes[i] as number);
-            }
-            dataUrl = `data:${contentType};base64,${btoa(binary)}`;
-          } catch {
-            // Non-critical: data URL is only a fallback when public_url is unavailable
-          }
+        if (uploaded.public_url === null) {
+          setAttachments((current) =>
+            current.map((attachment) =>
+              attachment.filename === file.name && attachment.object_key === ""
+                ? {
+                    ...attachment,
+                    object_key: uploaded.object_key,
+                    status: "error",
+                  }
+                : attachment,
+            ),
+          );
+          // public_url is null when R2_PUBLIC_BASE_URL is unset on the server.
+          // Without it we have no canonical URL to persist, and the legacy
+          // base64 fallback used to bloat chat_messages rows to >250KB (#163).
+          setThreadState((current) => ({
+            ...current,
+            error:
+              "We uploaded the file but couldn't get a shareable link back. Ask an admin to check the storage configuration.",
+          }));
+          continue;
         }
 
         setAttachments((current) =>
@@ -683,7 +746,6 @@ export function CoachChat(): JSX.Element {
             attachment.filename === file.name && attachment.object_key === ""
               ? {
                   ...attachment,
-                  dataUrl,
                   object_key: uploaded.object_key,
                   public_url: uploaded.public_url,
                   status: "uploaded",
@@ -701,13 +763,18 @@ export function CoachChat(): JSX.Element {
         );
         setThreadState((current) => ({
           ...current,
-          error: error instanceof Error ? error.message : "Unable to upload that attachment.",
+          error:
+            error instanceof Error
+              ? error.message
+              : "Unable to upload that attachment.",
         }));
       }
     }
   }
 
-  async function handleFileSelect(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+  async function handleFileSelect(
+    event: ChangeEvent<HTMLInputElement>,
+  ): Promise<void> {
     await handleFilesAdded(Array.from(event.target.files ?? []));
     event.target.value = "";
   }
@@ -743,7 +810,8 @@ export function CoachChat(): JSX.Element {
   function handleDragLeave(event: React.DragEvent): void {
     // Only clear when the pointer actually leaves the wrapper, not when it
     // crosses into a child element (relatedTarget still inside the wrapper).
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    if (event.currentTarget.contains(event.relatedTarget as Node | null))
+      return;
     setDragActive(false);
   }
 
@@ -793,7 +861,11 @@ export function CoachChat(): JSX.Element {
         setThreadState({ data: thread, error: null, loading: false });
       }
     } catch (error) {
-      setDrawerStatus(error instanceof Error ? error.message : "Unable to save your athlete settings.");
+      setDrawerStatus(
+        error instanceof Error
+          ? error.message
+          : "Unable to save your athlete settings.",
+      );
     } finally {
       setDrawerLoading(false);
     }
@@ -835,16 +907,24 @@ export function CoachChat(): JSX.Element {
     );
   }
 
-  function renderMessages(messages: ChatMessage[], hiddenMessageCount = 0): JSX.Element {
+  function renderMessages(
+    messages: ChatMessage[],
+    hiddenMessageCount = 0,
+  ): JSX.Element {
     return (
       <div className={styles.messageStack}>
         {hiddenMessageCount > 0 ? (
           <button
             className={styles.historyLoadButton}
-            onClick={() => setVisibleMessageCount((current) => current + MESSAGE_RENDER_BATCH_SIZE)}
+            onClick={() =>
+              setVisibleMessageCount(
+                (current) => current + MESSAGE_RENDER_BATCH_SIZE,
+              )
+            }
             type="button"
           >
-            Show {Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older messages
+            Show {Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older
+            messages
           </button>
         ) : null}
         {messages.map((message) => {
@@ -865,9 +945,15 @@ export function CoachChat(): JSX.Element {
 
           return (
             <div className={rowClass} key={message.id}>
-              <div className={bubbleClass} data-role={message.role} data-testid="chat-bubble">
+              <div
+                className={bubbleClass}
+                data-role={message.role}
+                data-testid="chat-bubble"
+              >
                 {textBlocks.map((text, idx) => (
-                  <p className={styles.messageText} key={`text-${idx}`}>{text}</p>
+                  <p className={styles.messageText} key={`text-${idx}`}>
+                    {text}
+                  </p>
                 ))}
                 {fileParts.length > 0 ? (
                   <div className={styles.attachmentGrid}>
@@ -880,7 +966,10 @@ export function CoachChat(): JSX.Element {
                         filename,
                       });
                       return (
-                        <div className={styles.attachmentThumb} key={`file-${part.url}-${idx}`}>
+                        <div
+                          className={styles.attachmentThumb}
+                          key={`file-${part.url}-${idx}`}
+                        >
                           {isImage ? (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img alt={filename} src={part.url} />
@@ -889,14 +978,18 @@ export function CoachChat(): JSX.Element {
                               <span>{badge ?? "FILE"}</span>
                             </div>
                           )}
-                          <span className={styles.attachmentName}>{filename}</span>
+                          <span className={styles.attachmentName}>
+                            {filename}
+                          </span>
                         </div>
                       );
                     })}
                   </div>
                 ) : null}
                 {plan ? renderPlan(plan) : null}
-                <div className={styles.attachmentName}>{readableTime(message.created_at)}</div>
+                <div className={styles.attachmentName}>
+                  {readableTime(message.created_at)}
+                </div>
               </div>
             </div>
           );
@@ -947,7 +1040,9 @@ export function CoachChat(): JSX.Element {
           <header className={styles.topbar}>
             <div className={styles.brandBlock}>
               <p className={styles.brand}>{siteConfig.appName}</p>
-              <span className={styles.meta}>{coachingStatusLabel(threadState.data.profile_complete)}</span>
+              <span className={styles.meta}>
+                {coachingStatusLabel(threadState.data.profile_complete)}
+              </span>
             </div>
             <div className={styles.topbarActions}>
               <div className={styles.accountMenuWrap}>
@@ -963,7 +1058,11 @@ export function CoachChat(): JSX.Element {
                   <span aria-hidden="true">⌄</span>
                 </button>
                 {userMenuOpen ? (
-                  <div aria-label="Account" className={styles.accountMenu} role="menu">
+                  <div
+                    aria-label="Account"
+                    className={styles.accountMenu}
+                    role="menu"
+                  >
                     <div className={styles.accountSummary}>
                       <span>Signed in</span>
                       <strong>{accountLabel(profile)}</strong>
@@ -992,7 +1091,11 @@ export function CoachChat(): JSX.Element {
                       className={styles.menuForm}
                       method="post"
                     >
-                      <button className={styles.menuItem} role="menuitem" type="submit">
+                      <button
+                        className={styles.menuItem}
+                        role="menuitem"
+                        type="submit"
+                      >
                         Sign out
                       </button>
                     </form>
@@ -1007,29 +1110,42 @@ export function CoachChat(): JSX.Element {
               <div className={styles.emptyState}>
                 <div className={styles.emptyCard}>
                   <p className={styles.eyebrow}>Coach Chat</p>
-                  <h1 className={styles.emptyTitle}>What should we work on next?</h1>
+                  <h1 className={styles.emptyTitle}>
+                    What should we work on next?
+                  </h1>
                   <p className={styles.emptyText}>
-                    Use this thread for quick training updates, image-backed check-ins, and your next
-                    14-day plan. I’ll keep the details in the background and keep the surface focused.
+                    Use this thread for quick training updates, image-backed
+                    check-ins, and your next 14-day plan. I’ll keep the details
+                    in the background and keep the surface focused.
                   </p>
                   <div className={styles.starterRow}>
                     <button
                       className={styles.starterButton}
-                      onClick={() => setComposer("I just finished a training session and want to log how it felt.")}
+                      onClick={() =>
+                        setComposer(
+                          "I just finished a training session and want to log how it felt.",
+                        )
+                      }
                       type="button"
                     >
                       Log a training session
                     </button>
                     <button
                       className={styles.starterButton}
-                      onClick={() => setComposer("Build my next 14-day training plan.")}
+                      onClick={() =>
+                        setComposer("Build my next 14-day training plan.")
+                      }
                       type="button"
                     >
                       Generate next plan
                     </button>
                     <button
                       className={styles.starterButton}
-                      onClick={() => setComposer("I have some soreness and travel coming up this week.")}
+                      onClick={() =>
+                        setComposer(
+                          "I have some soreness and travel coming up this week.",
+                        )
+                      }
                       type="button"
                     >
                       Adapt around fatigue
@@ -1048,9 +1164,14 @@ export function CoachChat(): JSX.Element {
               {attachments.length > 0 ? (
                 <div className={styles.uploadRow}>
                   {attachments.map((attachment) => (
-                    <div className={styles.uploadChip} key={`${attachment.filename}-${attachment.previewUrl ?? ""}`}>
+                    <div
+                      className={styles.uploadChip}
+                      key={`${attachment.filename}-${attachment.previewUrl ?? ""}`}
+                    >
                       {fileTypeBadge(attachment) ? (
-                        <span className={styles.uploadBadge}>{fileTypeBadge(attachment)}</span>
+                        <span className={styles.uploadBadge}>
+                          {fileTypeBadge(attachment)}
+                        </span>
                       ) : null}
                       <span>{attachment.filename}</span>
                       <span className={styles.uploadStatus}>
@@ -1067,7 +1188,9 @@ export function CoachChat(): JSX.Element {
 
               <div
                 className={
-                  dragActive ? `${styles.composerRow} ${styles.composerRowDragActive}` : styles.composerRow
+                  dragActive
+                    ? `${styles.composerRow} ${styles.composerRowDragActive}`
+                    : styles.composerRow
                 }
                 data-testid="composer-row"
                 onDragEnter={handleDragOver}
@@ -1077,7 +1200,11 @@ export function CoachChat(): JSX.Element {
               >
                 <label
                   aria-label="Add photo or activity file"
-                  className={composerBusy ? `${styles.attachButton} ${styles.attachDisabled}` : styles.attachButton}
+                  className={
+                    composerBusy
+                      ? `${styles.attachButton} ${styles.attachDisabled}`
+                      : styles.attachButton
+                  }
                   title="Add photo or activity file"
                 >
                   <input
@@ -1109,7 +1236,10 @@ export function CoachChat(): JSX.Element {
                 />
                 <button
                   className={styles.sendButton}
-                  disabled={composerBusy || (composer.trim().length === 0 && attachments.length === 0)}
+                  disabled={
+                    composerBusy ||
+                    (composer.trim().length === 0 && attachments.length === 0)
+                  }
                   onClick={() => {
                     void handleSend();
                   }}
@@ -1120,15 +1250,25 @@ export function CoachChat(): JSX.Element {
               </div>
               <div className={styles.composerHint}>
                 {syncingThread ? (
-                  <span aria-live="polite" className={styles.waitingStatus} role="status">
+                  <span
+                    aria-live="polite"
+                    className={styles.waitingStatus}
+                    role="status"
+                  >
                     Syncing coach chat...
                   </span>
                 ) : sending ? (
-                  <span aria-live="polite" className={styles.waitingStatus} role="status">
+                  <span
+                    aria-live="polite"
+                    className={styles.waitingStatus}
+                    role="status"
+                  >
                     {WAITING_STATUSES[waitingStatusIndex]}
                   </span>
                 ) : threadState.error ? (
-                  <span className={styles.errorTextInline}>{threadState.error}</span>
+                  <span className={styles.errorTextInline}>
+                    {threadState.error}
+                  </span>
                 ) : (
                   "Use Shift+Enter for a new line. Add photos with the plus button."
                 )}
@@ -1153,10 +1293,15 @@ export function CoachChat(): JSX.Element {
               <div>
                 <h2 className={styles.drawerTitle}>Profile</h2>
                 <p className={styles.drawerText}>
-                  Review the profile details your coach uses for training guidance.
+                  Review the profile details your coach uses for training
+                  guidance.
                 </p>
               </div>
-              <button className={styles.drawerClose} onClick={() => setDrawerOpen(false)} type="button">
+              <button
+                className={styles.drawerClose}
+                onClick={() => setDrawerOpen(false)}
+                type="button"
+              >
                 Close
               </button>
             </div>
@@ -1184,7 +1329,12 @@ export function CoachChat(): JSX.Element {
                   Display name
                   <input
                     className={styles.fieldInput}
-                    onChange={(event) => setProfile({ ...profile, display_name: event.target.value || null })}
+                    onChange={(event) =>
+                      setProfile({
+                        ...profile,
+                        display_name: event.target.value || null,
+                      })
+                    }
                     placeholder="Your name (optional)"
                     value={profile.display_name ?? ""}
                   />
@@ -1214,7 +1364,10 @@ export function CoachChat(): JSX.Element {
                     onChange={(event) =>
                       setProfile({
                         ...profile,
-                        weekly_available_hours: event.target.value === "" ? null : Number(event.target.value),
+                        weekly_available_hours:
+                          event.target.value === ""
+                            ? null
+                            : Number(event.target.value),
                       })
                     }
                     step="0.5"
@@ -1234,7 +1387,9 @@ export function CoachChat(): JSX.Element {
                     {drawerLoading ? "Saving..." : "Save profile"}
                   </button>
                 </div>
-                {drawerStatus ? <p className={styles.drawerStatus}>{drawerStatus}</p> : null}
+                {drawerStatus ? (
+                  <p className={styles.drawerStatus}>{drawerStatus}</p>
+                ) : null}
               </div>
             ) : (
               <p className={styles.drawerStatus}>No profile loaded yet.</p>
