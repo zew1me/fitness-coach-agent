@@ -227,8 +227,8 @@
 .emptyTitle {
   margin: 0;
   color: var(--text);
-  font-size: clamp(2.1rem, 5vw, 3.9rem);
-  letter-spacing: -0.05em;
+  font-size: 3.2rem;
+  letter-spacing: 0;
   line-height: 1;
 }
 
@@ -462,7 +462,9 @@
   border-radius: 12px;
   outline: 2px dashed transparent;
   outline-offset: 4px;
-  transition: outline-color 0.12s ease, background 0.12s ease;
+  transition:
+    outline-color 0.12s ease,
+    background 0.12s ease;
 }
 
 /* Drag-to-attach cue (issue #161): highlight the whole composer as a drop target. */
@@ -755,7 +757,10 @@
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    border-color 140ms ease;
 }
 
 .themeOption:has(input:checked) {
@@ -810,6 +815,11 @@
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
+  }
+
+  .emptyTitle {
+    font-size: 2.2rem;
+    line-height: 1.05;
   }
 
   .sendButton {

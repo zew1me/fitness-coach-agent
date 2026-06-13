@@ -43,6 +43,11 @@ type LocalAttachment = {
   status: "error" | "uploaded" | "uploading";
 };
 
+type StarterPrompt = {
+  label: string;
+  prompt: string;
+};
+
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
 const MESSAGE_RENDER_BATCH_SIZE = 60;
 const LOCAL_CHAT_THREAD_STORAGE_PREFIX = "fitness-coach.local-chat-thread";
@@ -52,6 +57,36 @@ const WAITING_STATUSES = [
   "Still working...",
   "Checking the coaching notes...",
   "Almost there...",
+];
+const ONBOARDING_STARTERS: StarterPrompt[] = [
+  {
+    label: "Running base and consistency",
+    prompt: "I'm training for running and want help building consistency.",
+  },
+  {
+    label: "Cycling race prep",
+    prompt:
+      "I'm training for a cycling race and want help balancing intensity and recovery.",
+  },
+  {
+    label: "Triathlon build",
+    prompt:
+      "I'm training for triathlon and want help building toward my next event.",
+  },
+];
+const COACHING_STARTERS: StarterPrompt[] = [
+  {
+    label: "Log a training session",
+    prompt: "I just finished a training session and want to log how it felt.",
+  },
+  {
+    label: "Generate next plan",
+    prompt: "Build my next 14-day training plan.",
+  },
+  {
+    label: "Adapt around fatigue",
+    prompt: "I have some soreness and travel coming up this week.",
+  },
 ];
 
 function emptyProfile(userId: string): AthleteProfile {
@@ -1051,6 +1086,16 @@ export function CoachChat(): JSX.Element {
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageCount);
   const visibleMessages =
     hiddenMessageCount > 0 ? messages.slice(hiddenMessageCount) : messages;
+  const welcomeOnly = onlyWelcomeMessage(messages);
+  const onboardingWelcome = welcomeOnly && !threadState.data.profile_complete;
+  const starterPrompts = onboardingWelcome
+    ? ONBOARDING_STARTERS
+    : COACHING_STARTERS;
+  const composerPlaceholder = threadState.data.profile_complete
+    ? "Ask your coach..."
+    : onboardingWelcome
+      ? "Tell your coach your sport and goal..."
+      : "Reply to your coach...";
 
   return (
     <main className={styles.page}>
@@ -1125,50 +1170,31 @@ export function CoachChat(): JSX.Element {
           </header>
 
           <section className={styles.messagesPane}>
-            {onlyWelcomeMessage(messages) ? (
+            {welcomeOnly ? (
               <div className={styles.emptyState}>
                 <div className={styles.emptyCard}>
                   <p className={styles.eyebrow}>Coach Chat</p>
                   <h1 className={styles.emptyTitle}>
-                    What should we work on next?
+                    {onboardingWelcome
+                      ? "Start with your sport and goal"
+                      : "What should we work on next?"}
                   </h1>
                   <p className={styles.emptyText}>
-                    Use this thread for quick training updates, image-backed
-                    check-ins, and your next 14-day plan. I’ll keep the details
-                    in the background and keep the surface focused.
+                    {onboardingWelcome
+                      ? "Tell me what you are training for and what you want coaching around. A short answer is enough."
+                      : "Use this thread for quick training updates, image-backed check-ins, and your next 14-day plan. I'll keep the details in the background and keep the surface focused."}
                   </p>
                   <div className={styles.starterRow}>
-                    <button
-                      className={styles.starterButton}
-                      onClick={() =>
-                        setComposer(
-                          "I just finished a training session and want to log how it felt.",
-                        )
-                      }
-                      type="button"
-                    >
-                      Log a training session
-                    </button>
-                    <button
-                      className={styles.starterButton}
-                      onClick={() =>
-                        setComposer("Build my next 14-day training plan.")
-                      }
-                      type="button"
-                    >
-                      Generate next plan
-                    </button>
-                    <button
-                      className={styles.starterButton}
-                      onClick={() =>
-                        setComposer(
-                          "I have some soreness and travel coming up this week.",
-                        )
-                      }
-                      type="button"
-                    >
-                      Adapt around fatigue
-                    </button>
+                    {starterPrompts.map((starter) => (
+                      <button
+                        className={styles.starterButton}
+                        key={starter.label}
+                        onClick={() => setComposer(starter.prompt)}
+                        type="button"
+                      >
+                        {starter.label}
+                      </button>
+                    ))}
                   </div>
                   {renderMessages(visibleMessages, hiddenMessageCount)}
                 </div>
@@ -1249,7 +1275,7 @@ export function CoachChat(): JSX.Element {
                     }
                   }}
                   onPaste={handlePaste}
-                  placeholder="Ask your coach..."
+                  placeholder={composerPlaceholder}
                   rows={1}
                   value={composer}
                 />
