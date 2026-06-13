@@ -1731,9 +1731,12 @@ describe("CoachChat", () => {
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalled();
     });
-    const [callArgs] = chatMocks.sendMessage.mock.calls[0] as [
-      { parts: Array<{ type: string; url?: string }> },
-    ];
+    const [firstCall] = chatMocks.sendMessage.mock.calls;
+    const callArgs = (
+      firstCall as unknown as [
+        { parts: Array<{ type: string; text?: string; url?: string }> },
+      ]
+    )[0];
     expect(callArgs.parts).toEqual([
       { type: "text", text: "Please analyze this workout." },
     ]);
