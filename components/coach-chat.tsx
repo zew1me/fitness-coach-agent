@@ -464,7 +464,17 @@ function ChatErrorState({
   );
 }
 
-// eslint-disable-next-line complexity
+/**
+ * Render the Coach Chat user interface for browser-based coaching interactions.
+ *
+ * The component manages browser session bootstrap, loads and syncs the chat thread
+ * and athlete profile, handles message composition (text and attachments),
+ * supports image and activity-file uploads, displays assistant/user messages
+ * (including tool statuses and attachments), and provides a profile/settings drawer
+ * and export functionality.
+ *
+ * @returns A JSX element containing the complete coach chat interface.
+ */
 export function CoachChat(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
