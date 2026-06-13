@@ -1728,21 +1728,15 @@ describe("CoachChat", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
 
+    // The strict equality on parts is the real regression guard for #163: it
+    // proves the failed-upload attachment was dropped and no base64 data: URL
+    // sneaked into chat_messages.parts.
     await waitFor(() => {
-      expect(chatMocks.sendMessage).toHaveBeenCalled();
+      expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        id: expect.stringMatching(uuidPattern),
+        parts: [{ type: "text", text: "Please analyze this workout." }],
+      });
     });
-    const [firstCall] = chatMocks.sendMessage.mock.calls;
-    const callArgs = (
-      firstCall as unknown as [
-        { parts: Array<{ type: string; text?: string; url?: string }> },
-      ]
-    )[0];
-    expect(callArgs.parts).toEqual([
-      { type: "text", text: "Please analyze this workout." },
-    ]);
-    for (const part of callArgs.parts) {
-      expect(part.url ?? "").not.toMatch(/^data:/);
-    }
   });
 
   it("uploads GPX attachments through the chat attachment endpoint and shows a file badge", async () => {
