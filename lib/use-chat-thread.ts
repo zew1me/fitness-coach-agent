@@ -39,7 +39,8 @@ export function readLocalChatThread(userId: string): ChatThreadResponse | null {
       return null;
     }
     return parsed;
-  } catch {
+  } catch (error) {
+    console.warn("Discarding corrupt local chat thread cache", error);
     return null;
   }
 }
@@ -57,8 +58,10 @@ export function writeLocalChatThread(
       localChatThreadStorageKey(userId),
       JSON.stringify(thread),
     );
-  } catch {
-    // Local persistence is best-effort for development and should never block chat.
+  } catch (error) {
+    // Local persistence is best-effort for development and should never block
+    // chat — log so QuotaExceededError doesn't disappear into the void.
+    console.warn("Failed to persist local chat thread", error);
   }
 }
 
@@ -125,6 +128,12 @@ export function useChatThread(
       state.data === null ||
       state.data.thread.messages.length === 0
     ) {
+      return;
+    }
+    // Guard against a token swap landing while the previous user's thread is
+    // still in state — without this, the in-flight write would stamp user A's
+    // history under user B's storage key.
+    if (state.data.thread.user_id !== token.user_id) {
       return;
     }
     writeLocalChatThread(state.data, token.user_id);

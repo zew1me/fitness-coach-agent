@@ -78,9 +78,11 @@ describe("useBrowserSession", () => {
     fetchBrowserTokenMock.mockReturnValueOnce(
       pending as ReturnType<typeof fetchBrowserToken>,
     );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const { result, unmount } = renderHook(() => useBrowserSession());
     expect(result.current.loading).toBe(true);
+    const lastSnapshot = result.current;
 
     unmount();
     await act(async () => {
@@ -93,8 +95,15 @@ describe("useBrowserSession", () => {
       });
       await pending.catch(() => undefined);
     });
-    // No unhandled state updates after unmount; absence of React's warning is
-    // the contract, so we just assert the run completes.
-    expect(true).toBe(true);
+    // After unmount, the hook must not call setState — React would warn via
+    // console.error, and the last rendered snapshot must remain stable.
+    const reactWarnings = errorSpy.mock.calls.filter(
+      (args) =>
+        typeof args[0] === "string" &&
+        args[0].includes("Can't perform a React state update on an unmounted"),
+    );
+    expect(reactWarnings).toHaveLength(0);
+    expect(result.current).toBe(lastSnapshot);
+    errorSpy.mockRestore();
   });
 });

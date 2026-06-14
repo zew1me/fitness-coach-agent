@@ -1176,8 +1176,9 @@ async function tryReadDataUrl(
       binary += String.fromCharCode(bytes[i] as number);
     }
     return `data:${contentType};base64,${btoa(binary)}`;
-  } catch {
+  } catch (error) {
     // Non-critical: data URL is only a fallback when public_url is unavailable.
+    console.warn("Failed to build data URL for attachment fallback", error);
     return null;
   }
 }
@@ -1399,7 +1400,8 @@ function CoachChatBody({
       try {
         const refreshed = await loadChatThread();
         setThreadData(refreshed);
-      } catch {
+      } catch (refreshError) {
+        console.error("Chat thread refresh failed after send", refreshError);
         setThreadError(
           "Message sent, but the thread failed to refresh. Reload to see the latest.",
         );
@@ -1407,6 +1409,7 @@ function CoachChatBody({
         setSyncingThread(false);
       }
     } catch (error) {
+      console.error("Sending coach message failed", error);
       setSyncingThread(false);
       setThreadError(errorMessage(error, "Unable to send your message."));
     } finally {
@@ -1425,8 +1428,12 @@ function CoachChatBody({
     try {
       const refreshed = await loadChatThread();
       setThreadData(refreshed);
-    } catch {
+    } catch (refreshError) {
       // Profile saved; thread refresh is best-effort.
+      console.warn(
+        "Profile saved but chat thread refresh failed",
+        refreshError,
+      );
     }
   }
 

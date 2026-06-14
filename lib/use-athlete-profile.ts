@@ -40,8 +40,13 @@ export function useAthleteProfile(
       try {
         const loaded = await loadProfile(userId);
         if (!cancelled) setProfileState(loaded);
-      } catch {
-        if (!cancelled) setProfileState(emptyProfile(userId));
+      } catch (error) {
+        if (cancelled) return;
+        // Surface the failure so the drawer doesn't silently invite the user
+        // to overwrite their saved profile with the empty fallback.
+        console.error("Failed to prefetch athlete profile", error);
+        setProfileState(emptyProfile(userId));
+        setStatus("Couldn't load your saved profile. Showing defaults.");
       }
     }
     void prefetch(token.user_id);
@@ -61,8 +66,10 @@ export function useAthleteProfile(
     try {
       const loaded = await loadProfile(token.user_id);
       setProfileState(loaded);
-    } catch {
+    } catch (error) {
+      console.error("Failed to load athlete profile", error);
       setProfileState(emptyProfile(token.user_id));
+      setStatus("Couldn't load your saved profile. Showing defaults.");
     } finally {
       setSaving(false);
     }
