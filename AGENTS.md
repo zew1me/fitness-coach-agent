@@ -113,7 +113,7 @@ See `.env.example`. Required:
 
 ## Tests
 
-- Web tests: `tests/web/` — Vitest, `environment: "node"`
+- Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
 - Python tests: `tests/python/` — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for fixtures
 
