@@ -1,4 +1,7 @@
-import type { InternalSpecialistRole, SpecialistReport } from "./orchestration-types";
+import type {
+  InternalSpecialistRole,
+  SpecialistReport,
+} from "./orchestration-types";
 import type { AthleteContextBundle, GoalContext } from "./types";
 
 const NUTRITION_PRINCIPLES = [
@@ -18,11 +21,13 @@ function listOrFallback(values: string[], fallback: string): string {
 
 function goalSummary(goal: GoalContext): string {
   const course =
-    goal.course_distance_meters !== null && goal.course_distance_meters !== undefined
+    goal.course_distance_meters !== null &&
+    goal.course_distance_meters !== undefined
       ? `, course ${Math.round(goal.course_distance_meters)}m`
       : "";
   const gain =
-    goal.course_elevation_gain_meters !== null && goal.course_elevation_gain_meters !== undefined
+    goal.course_elevation_gain_meters !== null &&
+    goal.course_elevation_gain_meters !== undefined
       ? `, gain ${Math.round(goal.course_elevation_gain_meters)}m`
       : "";
   const target = goal.target_date ? `, target ${goal.target_date}` : "";
@@ -31,7 +36,9 @@ function goalSummary(goal: GoalContext): string {
 
 const STALE_THRESHOLD_DAYS = 90;
 
-function staleThresholdWarning(thresholds: AthleteContextBundle["thresholds"]): string {
+function staleThresholdWarning(
+  thresholds: AthleteContextBundle["thresholds"],
+): string {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - STALE_THRESHOLD_DAYS);
   const stale = thresholds.filter((t) => {
@@ -81,7 +88,9 @@ function stateInstructions(state: string): string {
 function nutritionContext(context: AthleteContextBundle): string {
   const parts: string[] = [];
   if (context.profile.dietary_restrictions?.length) {
-    parts.push(`Dietary restrictions: ${context.profile.dietary_restrictions.join(", ")}.`);
+    parts.push(
+      `Dietary restrictions: ${context.profile.dietary_restrictions.join(", ")}.`,
+    );
   }
   if (context.profile.nutrition_notes) {
     parts.push(`Nutrition notes: ${context.profile.nutrition_notes}`);
@@ -102,8 +111,12 @@ function trainingModelSection(context: AthleteContextBundle): string {
   ].join("\n");
 }
 
-function hormoneStatusWarrantsPrinciples(status: string | null | undefined): boolean {
-  return status != null && status !== "endogenous" && status !== "not_specified";
+function hormoneStatusWarrantsPrinciples(
+  status: string | null | undefined,
+): boolean {
+  return (
+    status != null && status !== "endogenous" && status !== "not_specified"
+  );
 }
 
 function loadLine(context: AthleteContextBundle): string {
@@ -139,7 +152,8 @@ function specialistReportSection(reports: SpecialistReport[]): string {
   return [
     "Specialist reports:",
     ...reports.map((report) => {
-      const risks = report.risks.length > 0 ? ` Risks: ${report.risks.join("; ")}` : "";
+      const risks =
+        report.risks.length > 0 ? ` Risks: ${report.risks.join("; ")}` : "";
       const proposedUpdates =
         report.proposedUpdates.length > 0
           ? ` Proposed updates: ${report.proposedUpdates
@@ -161,7 +175,10 @@ function roleLabel(role: InternalSpecialistRole): string {
   return labels[role];
 }
 
-export function buildSpecialistPrompt(role: InternalSpecialistRole, contextSlice: unknown): string {
+export function buildSpecialistPrompt(
+  role: InternalSpecialistRole,
+  contextSlice: unknown,
+): string {
   return [
     `${roleLabel(role)}.`,
     currentDateLine(),
@@ -198,12 +215,13 @@ export function buildSpecialistPrompt(role: InternalSpecialistRole, contextSlice
 
 export function buildLeadCoachPrompt(
   context: AthleteContextBundle,
-  specialistReports: SpecialistReport[] = []
+  specialistReports: SpecialistReport[] = [],
 ): string {
   const sports = listOrFallback(context.profile.primary_sports, "unknown");
   const goals = context.goals.map(goalSummary).join("; ") || "none recorded";
   const load = loadLine(context);
-  const age = context.computed_age === null ? "unknown" : String(context.computed_age);
+  const age =
+    context.computed_age === null ? "unknown" : String(context.computed_age);
   const ceiling = context.ctl_ceiling_guidance;
 
   return [
@@ -221,6 +239,7 @@ export function buildLeadCoachPrompt(
     "Synthesize specialist reports into one concise user-facing response. Resolve conflicts conservatively.",
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
     "After any tool call, continue with a concise user-facing response that explains what changed, what was saved, or what you need next.",
+    "Never end a turn with only tool calls or tool output. End with one context-aware prompt to continue the conversation, based on the athlete's latest ask and the current coaching state.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",
   ].join("\n\n");
 }
