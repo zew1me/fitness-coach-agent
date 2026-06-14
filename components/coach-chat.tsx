@@ -40,6 +40,42 @@ type LocalAttachment = {
   status: "error" | "uploaded" | "uploading";
 };
 
+type StarterPrompt = {
+  label: string;
+  prompt: string;
+};
+
+const ONBOARDING_STARTERS: StarterPrompt[] = [
+  {
+    label: "Running base and consistency",
+    prompt: "I'm training for running and want help building consistency.",
+  },
+  {
+    label: "Cycling race prep",
+    prompt:
+      "I'm training for a cycling race and want help balancing intensity and recovery.",
+  },
+  {
+    label: "Triathlon build",
+    prompt:
+      "I'm training for triathlon and want help building toward my next event.",
+  },
+];
+const COACHING_STARTERS: StarterPrompt[] = [
+  {
+    label: "Log a training session",
+    prompt: "I just finished a training session and want to log how it felt.",
+  },
+  {
+    label: "Generate next plan",
+    prompt: "Build my next 14-day training plan.",
+  },
+  {
+    label: "Adapt around fatigue",
+    prompt: "I have some soreness and travel coming up this week.",
+  },
+];
+
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
 const MESSAGE_RENDER_BATCH_SIZE = 60;
 const WAITING_STATUS_INTERVAL_MS = 1600;
@@ -248,6 +284,17 @@ function fileTypeBadge(attachment: {
   }
   const suffix = attachment.filename.split(".").pop()?.toUpperCase();
   return suffix && ["GPX", "FIT", "TCX"].includes(suffix) ? suffix : "FILE";
+}
+
+function composerPlaceholderFor(
+  messages: ChatMessage[],
+  profileComplete: boolean,
+): string {
+  if (profileComplete) return "Ask your coach...";
+  if (onlyWelcomeMessage(messages)) {
+    return "Tell your coach your sport and goal...";
+  }
+  return "Reply to your coach...";
 }
 
 function SendIcon(): JSX.Element {
@@ -545,50 +592,41 @@ function MessageList({
 }
 
 function EmptyChatLandingCard({
+  variant,
   onPrefill,
   children,
 }: Readonly<{
+  variant: "coaching" | "onboarding";
   onPrefill: (_text: string) => void;
   children: ReactNode;
 }>): JSX.Element {
+  const starters =
+    variant === "onboarding" ? ONBOARDING_STARTERS : COACHING_STARTERS;
+  const title =
+    variant === "onboarding"
+      ? "Start with your sport and goal"
+      : "What should we work on next?";
+  const body =
+    variant === "onboarding"
+      ? "Tell me what you are training for and what you want coaching around. A short answer is enough."
+      : "Use this thread for quick training updates, image-backed check-ins, and your next 14-day plan. I’ll keep the details in the background and keep the surface focused.";
   return (
     <div className={styles.emptyState}>
       <div className={styles.emptyCard}>
         <p className={styles.eyebrow}>Coach Chat</p>
-        <h1 className={styles.emptyTitle}>What should we work on next?</h1>
-        <p className={styles.emptyText}>
-          Use this thread for quick training updates, image-backed check-ins,
-          and your next 14-day plan. I’ll keep the details in the background and
-          keep the surface focused.
-        </p>
+        <h1 className={styles.emptyTitle}>{title}</h1>
+        <p className={styles.emptyText}>{body}</p>
         <div className={styles.starterRow}>
-          <button
-            className={styles.starterButton}
-            onClick={() =>
-              onPrefill(
-                "I just finished a training session and want to log how it felt.",
-              )
-            }
-            type="button"
-          >
-            Log a training session
-          </button>
-          <button
-            className={styles.starterButton}
-            onClick={() => onPrefill("Build my next 14-day training plan.")}
-            type="button"
-          >
-            Generate next plan
-          </button>
-          <button
-            className={styles.starterButton}
-            onClick={() =>
-              onPrefill("I have some soreness and travel coming up this week.")
-            }
-            type="button"
-          >
-            Adapt around fatigue
-          </button>
+          {starters.map((starter) => (
+            <button
+              className={styles.starterButton}
+              key={starter.label}
+              onClick={() => onPrefill(starter.prompt)}
+              type="button"
+            >
+              {starter.label}
+            </button>
+          ))}
         </div>
         {children}
       </div>
@@ -602,30 +640,32 @@ function MessagesSection({
   onShowMore,
   onPrefillStarter,
   messageEndRef,
+  profileComplete,
 }: Readonly<{
   messages: ChatMessage[];
   hiddenMessageCount: number;
   onShowMore: () => void;
   onPrefillStarter: (_text: string) => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
+  profileComplete: boolean;
 }>): JSX.Element {
   const messageList = (
     <MessageList
-      messages={messages}
       hiddenMessageCount={hiddenMessageCount}
-      onShowMore={onShowMore}
       messageEndRef={messageEndRef}
+      messages={messages}
+      onShowMore={onShowMore}
     />
   );
+  if (!onlyWelcomeMessage(messages)) {
+    return <section className={styles.messagesPane}>{messageList}</section>;
+  }
+  const variant = profileComplete ? "coaching" : "onboarding";
   return (
     <section className={styles.messagesPane}>
-      {onlyWelcomeMessage(messages) ? (
-        <EmptyChatLandingCard onPrefill={onPrefillStarter}>
-          {messageList}
-        </EmptyChatLandingCard>
-      ) : (
-        messageList
-      )}
+      <EmptyChatLandingCard onPrefill={onPrefillStarter} variant={variant}>
+        {messageList}
+      </EmptyChatLandingCard>
     </section>
   );
 }
@@ -839,6 +879,7 @@ function Composer({
   threadError,
   isMobile,
   waitingStatus,
+  placeholder,
   onSend,
   onFilesAdded,
 }: Readonly<{
@@ -851,6 +892,7 @@ function Composer({
   threadError: string | null;
   isMobile: boolean;
   waitingStatus: string | undefined;
+  placeholder: string;
   onSend: () => void;
   onFilesAdded: (_files: File[]) => void;
 }>): JSX.Element {
@@ -953,7 +995,7 @@ function Composer({
               }
             }}
             onPaste={handlePaste}
-            placeholder="Ask your coach..."
+            placeholder={placeholder}
             rows={1}
             value={composer}
           />
@@ -1450,6 +1492,10 @@ function CoachChatBody({
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageCount);
   const visibleMessages =
     hiddenMessageCount > 0 ? messages.slice(hiddenMessageCount) : messages;
+  const composerPlaceholder = composerPlaceholderFor(
+    visibleMessages,
+    threadData.profile_complete,
+  );
 
   return (
     <main className={styles.page}>
@@ -1474,6 +1520,7 @@ function CoachChatBody({
                 (current) => current + MESSAGE_RENDER_BATCH_SIZE,
               )
             }
+            profileComplete={threadData.profile_complete}
           />
 
           <Composer
@@ -1488,6 +1535,7 @@ function CoachChatBody({
             onSend={() => {
               void handleSend();
             }}
+            placeholder={composerPlaceholder}
             sending={sending}
             syncingThread={syncingThread}
             threadError={threadError}
