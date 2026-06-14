@@ -175,4 +175,32 @@ describe("streamCoachTurn", () => {
     expect(nextStep?.system).toContain("tell the athlete what changed");
     expect(nextStep?.system).toContain("continue the conversation");
   });
+
+  it("requires a user-facing follow-up after unlisted tool calls", async () => {
+    await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: [
+        {
+          id: "63ff9606-9158-43d7-a82b-d31ef9788b7d",
+          parts: [{ text: "Look up today's weather.", type: "text" }],
+          role: "user",
+        },
+      ],
+    });
+
+    const streamOptions = (
+      orchestratorMocks.streamText.mock.calls as unknown as [
+        [StreamTextOptions],
+      ]
+    )[0][0];
+
+    const nextStep = streamOptions.prepareStep?.({
+      steps: [{ toolCalls: [{ toolName: "external_search" }] }],
+    });
+
+    expect(nextStep).toMatchObject({ activeTools: [] });
+    expect(nextStep?.system).toContain("Write the final user-facing response");
+  });
 });

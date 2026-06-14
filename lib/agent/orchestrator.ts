@@ -31,22 +31,8 @@ export type StreamCoachTurnOptions = {
 };
 
 const MAX_COACH_STEPS = 4;
-const RESPONSE_REQUIRED_TOOL_NAMES = new Set([
-  "adjust_plan",
-  "calculate_zones",
-  "estimate_thresholds",
-  "generate_training_plan",
-  "process_uploaded_file",
-  "recalibrate_thresholds",
-  "save_activity_from_text",
-  "save_recovery_data",
-  "update_athlete_profile",
-  "update_goals",
-  "update_schedule",
-]);
-
 const FINAL_RESPONSE_INSTRUCTION = [
-  "You just completed a persistence or deterministic tool call.",
+  "You just completed a tool call.",
   "Do not call another tool in this step.",
   "Write the final user-facing response now: tell the athlete what changed, what was saved, or what result you used.",
   "End with one concise, context-aware prompt to continue the conversation.",
@@ -77,9 +63,7 @@ function filterLeadTools(coachTools: ToolSet): ToolSet {
 function stepRequiresUserFacingResponse(step: {
   toolCalls: Array<{ toolName: string }>;
 }): boolean {
-  return step.toolCalls.some((toolCall) =>
-    RESPONSE_REQUIRED_TOOL_NAMES.has(toolCall.toolName),
-  );
+  return step.toolCalls.length > 0;
 }
 
 function generateUuid(): string {
