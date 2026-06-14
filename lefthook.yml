@@ -47,7 +47,7 @@ pre-push:
     cpd:
       run: ./node_modules/.bin/cpd app components lib api backend -t 1 -k 50 -r ai --no-tips
     knip:
-      run: ./node_modules/.bin/knip --production --max-issues 3
+      run: ./node_modules/.bin/knip
     playwright:
       run: |
         if [ "${LEFTHOOK_SKIP_UI:-0}" = "1" ] || git log -1 --pretty=%s | grep -q "lefthook-skip-ui"; then
