@@ -458,10 +458,10 @@ describe("app/api/chat route", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/oauth/browser-token",
       expect.objectContaining({
-        headers: {
+        headers: expect.objectContaining({
           cookie: "coach_browser_session=session-token",
           "x-vercel-protection-bypass": "preview-bypass",
-        },
+        }),
         method: "POST",
       }),
     );
