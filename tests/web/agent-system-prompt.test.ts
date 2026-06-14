@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCoachSystemPrompt, buildLeadCoachPrompt, buildSpecialistPrompt } from "../../lib/agent/system-prompt";
+import {
+  buildCoachSystemPrompt,
+  buildLeadCoachPrompt,
+  buildSpecialistPrompt,
+} from "../../lib/agent/system-prompt";
 import type { AthleteContextBundle } from "../../lib/agent/types";
 
 const context: AthleteContextBundle = {
@@ -9,7 +13,7 @@ const context: AthleteContextBundle = {
     display_name: "Sam",
     primary_sports: ["running", "cycling"],
     coaching_state: "onboarding",
-    weekly_available_hours: 6
+    weekly_available_hours: 6,
   },
   computed_age: 39,
   thresholds: [],
@@ -24,8 +28,8 @@ const context: AthleteContextBundle = {
       course_distance_meters: 14000,
       course_elevation_gain_meters: 700,
       priority: 1,
-      status: "active"
-    }
+      status: "active",
+    },
   ],
   current_load: {
     user_id: "athlete-1",
@@ -33,7 +37,7 @@ const context: AthleteContextBundle = {
     daily_tss: 60,
     ctl: 42,
     atl: 50,
-    tsb: -8
+    tsb: -8,
   },
   recent_recovery: [],
   schedule: null,
@@ -44,8 +48,8 @@ const context: AthleteContextBundle = {
     committed_amateur_ctl: 85,
     recreational_ctl: 45,
     recovery_week_frequency: "every 3-4 weeks",
-    notes: "Recovery starts to matter more."
-  }
+    notes: "Recovery starts to matter more.",
+  },
 };
 
 describe("buildCoachSystemPrompt", () => {
@@ -61,7 +65,9 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("sport context");
     expect(prompt).toContain("coaching objective");
     expect(prompt).toContain("one or two natural follow-up questions");
-    expect(prompt).toContain("Nutrition should wait until after the opening exchange");
+    expect(prompt).toContain(
+      "Nutrition should wait until after the opening exchange",
+    );
     // Age-specific balance guidance must not appear for under-65 athletes.
     expect(prompt).not.toContain("balance and fall-prevention");
   });
@@ -69,10 +75,14 @@ describe("buildCoachSystemPrompt", () => {
   it("includes current-date guidance and requires a response after tool use", () => {
     const prompt = buildCoachSystemPrompt(context);
 
-    expect(prompt).toContain(`Current date: ${new Date().toISOString().slice(0, 10)}`);
+    expect(prompt).toContain(
+      `Current date: ${new Date().toISOString().slice(0, 10)}`,
+    );
     expect(prompt).toContain("Do not guess the current date");
     expect(prompt).toContain("After any tool call");
     expect(prompt).toContain("user-facing response");
+    expect(prompt).toContain("Never end a turn with only tool calls");
+    expect(prompt).toContain("context-aware prompt to continue");
   });
 
   it("includes both training models and age-specific balance note for classification by the LLM", () => {
@@ -82,7 +92,7 @@ describe("buildCoachSystemPrompt", () => {
       profile: {
         ...context.profile,
         coaching_state: "active",
-        primary_sports: ["walking", "strength"]
+        primary_sports: ["walking", "strength"],
       },
       goals: [
         {
@@ -92,9 +102,9 @@ describe("buildCoachSystemPrompt", () => {
           sport: "general",
           title: "Longevity and aging well",
           priority: 1,
-          status: "active"
-        }
-      ]
+          status: "active",
+        },
+      ],
     };
 
     const prompt = buildCoachSystemPrompt(longevityContext);
@@ -108,7 +118,9 @@ describe("buildCoachSystemPrompt", () => {
     // Age-based balance note is still injected server-side for 65+ athletes.
     expect(prompt).toContain("balance and fall-prevention work");
     // LLM is instructed to classify rather than having it pre-decided.
-    expect(prompt).toContain("read the athlete's goals and profile, then choose");
+    expect(prompt).toContain(
+      "read the athlete's goals and profile, then choose",
+    );
     // Ambiguous goals must prompt clarification, not a silent default.
     expect(prompt).toContain("mixed or ambiguous");
     expect(prompt).toContain("ask the athlete which matters more");
@@ -133,8 +145,8 @@ describe("buildCoachSystemPrompt", () => {
       profile: {
         ...context.profile,
         dietary_restrictions: ["vegetarian", "lactose intolerant"],
-        nutrition_notes: "Prefers gels over real food during races"
-      }
+        nutrition_notes: "Prefers gels over real food during races",
+      },
     };
     const prompt = buildCoachSystemPrompt(nutritionContext);
 
@@ -154,7 +166,7 @@ describe("buildCoachSystemPrompt", () => {
   it("includes nutrition principles for female athletes without explicit nutrition context", () => {
     const femaleContext: AthleteContextBundle = {
       ...context,
-      profile: { ...context.profile, biological_sex: "female" }
+      profile: { ...context.profile, biological_sex: "female" },
     };
     const prompt = buildCoachSystemPrompt(femaleContext);
 
@@ -165,7 +177,7 @@ describe("buildCoachSystemPrompt", () => {
   it("does not include nutrition principles for male athletes without nutrition context", () => {
     const maleContext: AthleteContextBundle = {
       ...context,
-      profile: { ...context.profile, biological_sex: "male" }
+      profile: { ...context.profile, biological_sex: "male" },
     };
     const prompt = buildCoachSystemPrompt(maleContext);
 
@@ -173,13 +185,17 @@ describe("buildCoachSystemPrompt", () => {
   });
 
   it("builds role-specific specialist prompts that forbid user-facing prose and persistence", () => {
-    const prompt = buildSpecialistPrompt("recovery", { recent_recovery: context.recent_recovery });
+    const prompt = buildSpecialistPrompt("recovery", {
+      recent_recovery: context.recent_recovery,
+    });
 
     expect(prompt).toContain("Recovery specialist");
     expect(prompt).toContain("structured report only");
     expect(prompt).toContain("Do not write user-facing prose");
     expect(prompt).toContain("Do not call tools or persist data");
-    expect(prompt).toContain("Use empty arrays for proposedUpdates and risks when none apply");
+    expect(prompt).toContain(
+      "Use empty arrays for proposedUpdates and risks when none apply",
+    );
   });
 
   it("builds a lead coach prompt that includes specialist reports and final-response guidance", () => {
@@ -189,7 +205,8 @@ describe("buildCoachSystemPrompt", () => {
         proposedUpdates: [],
         risks: ["Keep intensity conservative."],
         role: "workout",
-        summary: "Workout specialist suggests moving intervals after poor sleep.",
+        summary:
+          "Workout specialist suggests moving intervals after poor sleep.",
       },
     ]);
 

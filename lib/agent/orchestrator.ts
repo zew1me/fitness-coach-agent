@@ -1,11 +1,20 @@
 import { openai } from "@ai-sdk/openai";
-import { convertToModelMessages, streamText, type ToolSet, type UIMessage } from "ai";
+import {
+  convertToModelMessages,
+  stepCountIs,
+  streamText,
+  type ToolSet,
+  type UIMessage,
+} from "ai";
 
 import { createCoachTools } from "./coach-tools";
 import { buildContextSlices } from "./context-slices";
 import { routeTurnIntent } from "./intent-router";
 import { selectMessagesForModel } from "./message-context";
-import { specialistReportsSchema, type SpecialistReport } from "./orchestration-types";
+import {
+  specialistReportsSchema,
+  type SpecialistReport,
+} from "./orchestration-types";
 import { runSpecialists } from "./specialists";
 import { buildLeadCoachPrompt } from "./system-prompt";
 import type { AthleteContextBundle } from "./types";
@@ -21,8 +30,32 @@ export type StreamCoachTurnOptions = {
   tavilyTools?: ToolSet;
 };
 
+const MAX_COACH_STEPS = 4;
+const RESPONSE_REQUIRED_TOOL_NAMES = new Set([
+  "adjust_plan",
+  "calculate_zones",
+  "estimate_thresholds",
+  "generate_training_plan",
+  "process_uploaded_file",
+  "recalibrate_thresholds",
+  "save_activity_from_text",
+  "save_recovery_data",
+  "update_athlete_profile",
+  "update_goals",
+  "update_schedule",
+]);
+
+const FINAL_RESPONSE_INSTRUCTION = [
+  "You just completed a persistence or deterministic tool call.",
+  "Do not call another tool in this step.",
+  "Write the final user-facing response now: tell the athlete what changed, what was saved, or what result you used.",
+  "End with one concise, context-aware prompt to continue the conversation.",
+].join(" ");
+
 function latestUserText(messages: UIMessage[]): string {
-  const latest = [...messages].reverse().find((message) => message.role === "user");
+  const latest = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
   if (!latest) return "";
 
   return latest.parts
@@ -31,12 +64,22 @@ function latestUserText(messages: UIMessage[]): string {
     .join("\n");
 }
 
-function validateSpecialistReports(reports: SpecialistReport[]): SpecialistReport[] {
+function validateSpecialistReports(
+  reports: SpecialistReport[],
+): SpecialistReport[] {
   return specialistReportsSchema.parse(reports);
 }
 
 function filterLeadTools(coachTools: ToolSet): ToolSet {
   return coachTools;
+}
+
+function stepRequiresUserFacingResponse(step: {
+  toolCalls: Array<{ toolName: string }>;
+}): boolean {
+  return step.toolCalls.some((toolCall) =>
+    RESPONSE_REQUIRED_TOOL_NAMES.has(toolCall.toolName),
+  );
 }
 
 function generateUuid(): string {
@@ -54,7 +97,9 @@ export async function streamCoachTurn({
   tavilyTools = {},
 }: StreamCoachTurnOptions): Promise<Response> {
   const model = openai("gpt-5-mini");
-  const selectedMessages = messagesAreModelSelected ? messages : selectMessagesForModel(messages);
+  const selectedMessages = messagesAreModelSelected
+    ? messages
+    : selectMessagesForModel(messages);
   const intent = routeTurnIntent(latestUserText(selectedMessages), context);
   const slices = buildContextSlices(context);
   const specialistReports = validateSpecialistReports(
@@ -64,27 +109,42 @@ export async function streamCoachTurn({
       model,
       roles: intent.specialists,
       slices,
-    })
+    }),
   );
   const coachTools = filterLeadTools(
     createCoachTools({
       accessToken,
       baseUrl,
       ...(extraHeaders ? { extraHeaders } : {}),
-    })
+    }),
   );
+  const systemPrompt = buildLeadCoachPrompt(context, specialistReports);
 
   const result = streamText({
     messages: await convertToModelMessages(selectedMessages),
     model,
-    system: buildLeadCoachPrompt(context, specialistReports),
+    system: systemPrompt,
     tools: {
       ...coachTools,
       ...tavilyTools,
     },
+    stopWhen: stepCountIs(MAX_COACH_STEPS),
+    prepareStep: ({ steps }) => {
+      if (!steps.some(stepRequiresUserFacingResponse)) {
+        return undefined;
+      }
+
+      return {
+        activeTools: [],
+        system: `${systemPrompt}\n\n${FINAL_RESPONSE_INSTRUCTION}`,
+      };
+    },
     onError: ({ error }) => {
       const msg = error instanceof Error ? error.message : String(error);
-      console.error("[chat] stream error:", msg.replace(/key=[^&\s]+/g, "key=***"));
+      console.error(
+        "[chat] stream error:",
+        msg.replace(/key=[^&\s]+/g, "key=***"),
+      );
     },
   });
 
@@ -118,7 +178,10 @@ export async function streamCoachTurn({
           }),
         });
         if (!response.ok) {
-          console.error("[chat] persist assistant reply failed:", response.status);
+          console.error(
+            "[chat] persist assistant reply failed:",
+            response.status,
+          );
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);

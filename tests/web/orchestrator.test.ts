@@ -6,10 +6,13 @@ import { streamCoachTurn } from "../../lib/agent/orchestrator";
 import { athleteContextFixture } from "./agent-fixtures";
 
 const orchestratorMocks = vi.hoisted(() => {
-  const toUIMessageStreamResponse = vi.fn(() => new Response("stream", { status: 200 }));
+  const toUIMessageStreamResponse = vi.fn(
+    () => new Response("stream", { status: 200 }),
+  );
   const streamText = vi.fn(() => ({ toUIMessageStreamResponse }));
+  const stepCountIs = vi.fn((count: number) => `step-count-${count}`);
 
-  return { streamText, toUIMessageStreamResponse };
+  return { stepCountIs, streamText, toUIMessageStreamResponse };
 });
 
 vi.mock("@ai-sdk/openai", () => ({
@@ -17,7 +20,10 @@ vi.mock("@ai-sdk/openai", () => ({
 }));
 
 vi.mock("ai", () => ({
-  convertToModelMessages: vi.fn((messages: UIMessage[]) => Promise.resolve(messages)),
+  convertToModelMessages: vi.fn((messages: UIMessage[]) =>
+    Promise.resolve(messages),
+  ),
+  stepCountIs: orchestratorMocks.stepCountIs,
   streamText: orchestratorMocks.streamText,
 }));
 
@@ -58,6 +64,16 @@ type UIStreamOptions = {
   originalMessages: UIMessage[];
 };
 
+type StreamTextOptions = {
+  prepareStep?: (options: {
+    steps: Array<{ toolCalls: Array<{ toolName: string }> }>;
+  }) => {
+    activeTools?: string[];
+    system?: string;
+  };
+  stopWhen?: unknown;
+};
+
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -75,7 +91,9 @@ describe("streamCoachTurn", () => {
       },
     ];
     const fetchMock = vi.fn(() =>
-      Promise.resolve(new Response(JSON.stringify({ id: "reply-row" }), { status: 200 }))
+      Promise.resolve(
+        new Response(JSON.stringify({ id: "reply-row" }), { status: 200 }),
+      ),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -87,12 +105,14 @@ describe("streamCoachTurn", () => {
     });
 
     expect(response.status).toBe(200);
-    const streamOptions = (orchestratorMocks.toUIMessageStreamResponse.mock.calls as unknown as [
-      [UIStreamOptions],
-    ])[0][0];
+    const streamOptions = (
+      orchestratorMocks.toUIMessageStreamResponse.mock.calls as unknown as [
+        [UIStreamOptions],
+      ]
+    )[0][0];
     expect(streamOptions.originalMessages).toBe(messages);
     expect(streamOptions.generateMessageId()).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     );
 
     await streamOptions.onFinish({
@@ -119,7 +139,40 @@ describe("streamCoachTurn", () => {
           },
         }),
         method: "POST",
-      })
+      }),
     );
+  });
+
+  it("continues after tool calls and forces the next step to be user-facing text", async () => {
+    await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: [
+        {
+          id: "63ff9606-9158-43d7-a82b-d31ef9788b7d",
+          parts: [{ text: "I can train 7 hours per week.", type: "text" }],
+          role: "user",
+        },
+      ],
+    });
+
+    const streamOptions = (
+      orchestratorMocks.streamText.mock.calls as unknown as [
+        [StreamTextOptions],
+      ]
+    )[0][0];
+
+    expect(orchestratorMocks.stepCountIs).toHaveBeenCalledWith(4);
+    expect(streamOptions.stopWhen).toBe("step-count-4");
+    expect(streamOptions.prepareStep).toBeTypeOf("function");
+
+    const nextStep = streamOptions.prepareStep?.({
+      steps: [{ toolCalls: [{ toolName: "update_athlete_profile" }] }],
+    });
+
+    expect(nextStep).toMatchObject({ activeTools: [] });
+    expect(nextStep?.system).toContain("tell the athlete what changed");
+    expect(nextStep?.system).toContain("continue the conversation");
   });
 });
