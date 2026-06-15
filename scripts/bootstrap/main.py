@@ -206,7 +206,7 @@ def _setup_r2(
             print(f"  Using R2 public base URL from .env.bootstrap: {configured_public_base_url}")
             public_base_url = configured_public_base_url
         else:
-            public_base_url = cf.get_public_base_url(bucket_name)
+            public_base_url = cf.ensure_public_access(bucket_name)
         endpoint_url = cf.endpoint_url()
     finally:
         cf.close()
@@ -290,8 +290,12 @@ def _build_env_vars(  # noqa: PLR0913
         "R2_SECRET_ACCESS_KEY": r2["secret_access_key"],
         "R2_BUCKET": r2["bucket_name"],
         "R2_ENDPOINT_URL": r2["endpoint_url"],
-        "R2_PUBLIC_BASE_URL": r2["public_base_url"],
     }
+    # Only set R2_PUBLIC_BASE_URL when we actually have one. An empty value is
+    # silently accepted by Vercel but yields a null public_url at upload time,
+    # which surfaces to users as "couldn't get a shareable link back" (#163).
+    if r2["public_base_url"]:
+        vars["R2_PUBLIC_BASE_URL"] = r2["public_base_url"]
     if app_base_url:
         vars["APP_BASE_URL"] = app_base_url
     return vars
@@ -325,8 +329,9 @@ def _print_summary(
     print("Next steps:")
     print("  • Run `vercel env ls` to confirm vars are set.")
     print(
-        "  • If R2 public URL is empty, enable 'Public Access' on the bucket in the\n"
-        "    Cloudflare dashboard, then re-run to update R2_PUBLIC_BASE_URL."
+        "  • The R2 bucket's public dev URL (r2.dev) is enabled automatically and is\n"
+        "    rate-limited / non-production. For prod traffic, attach a custom domain and\n"
+        "    set R2_PUBLIC_BASE_URL_PROD in .env.bootstrap, then re-run."
     )
     print("  • Redeploy to pick up the new env vars: `vercel deploy` (or push a commit).")
     if env == "preview":
