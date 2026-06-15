@@ -21,7 +21,9 @@ _EMAIL_OTP_TEMPLATE = """<h2>Your sign-in code</h2>
 <p><a href="{{ .ConfirmationURL }}">Sign in</a></p>"""
 
 
-def _print_auth_config_instructions(site_url: str, extra_redirect_urls: list[str]) -> None:
+def _print_auth_config_instructions(
+    site_url: str, extra_redirect_urls: list[str], smtp: dict | None = None
+) -> None:
     all_urls = ([site_url] if site_url else []) + extra_redirect_urls
     redirect_list = ", ".join(all_urls) if all_urls else "(your app URL)/**"
     print(
@@ -34,6 +36,13 @@ def _print_auth_config_instructions(site_url: str, extra_redirect_urls: list[str
         "  Dashboard → Authentication → Email Templates:\n"
         "    Include {{ .Token }} and {{ .ConfirmationURL }} in Magic Link and Confirm Signup."
     )
+    if smtp:
+        print(
+            "  Dashboard → Authentication → Emails → SMTP Settings:\n"
+            f"    Host: {smtp['host']}  Port: {smtp['port']}  Username: {smtp['user']}\n"
+            f"    Sender email: {smtp['admin_email']}  Sender name: {smtp['sender_name']}\n"
+            "    Password: <your Resend API key>"
+        )
 
 
 class SupabaseClient:
@@ -245,13 +254,17 @@ class SupabaseClient:
         ref: str,
         site_url: str,
         extra_redirect_urls: list[str],
+        smtp: dict | None = None,
     ) -> None:
-        """Configure Supabase auth redirect URLs and OTP behavior.
+        """Configure Supabase auth redirect URLs, OTP behavior, and (optional) SMTP.
 
         Sets site_url, uri_allow_list, and mailer_autoconfirm=True so that magic-link
         emails point to the right host and first-time signups receive OTP codes rather
-        than email-confirmation links. Requires SUPABASE_ACCESS_TOKEN; prints manual
-        instructions if the token is absent or the call is rejected.
+        than email-confirmation links. When ``smtp`` is provided, the project's custom
+        SMTP sender (e.g. Resend) is configured in the same call so email delivery is
+        identical across environments rather than left as a manual, drift-prone step.
+        Requires SUPABASE_ACCESS_TOKEN; prints manual instructions if the token is
+        absent or the call is rejected.
         """
         all_urls = ([site_url] if site_url else []) + extra_redirect_urls
         allow_list = ",".join(all_urls)
@@ -266,24 +279,40 @@ class SupabaseClient:
             body["site_url"] = site_url
         if allow_list:
             body["uri_allow_list"] = allow_list
+        if smtp:
+            body.update(
+                {
+                    "smtp_host": smtp["host"],
+                    "smtp_port": smtp["port"],
+                    "smtp_user": smtp["user"],
+                    "smtp_pass": smtp["pass"],
+                    "smtp_admin_email": smtp["admin_email"],
+                    "smtp_sender_name": smtp["sender_name"],
+                }
+            )
 
         if not self._token:
-            _print_auth_config_instructions(site_url, extra_redirect_urls)
+            _print_auth_config_instructions(site_url, extra_redirect_urls, smtp)
             return
 
         if self._dry_run:
+            smtp_note = f", smtp_host={smtp['host']!r}" if smtp else ""
             print(
                 f"  [dry-run] Would configure auth: site_url={site_url!r}, "
-                f"mailer_autoconfirm=True, uri_allow_list={allow_list!r}"
+                f"mailer_autoconfirm=True, uri_allow_list={allow_list!r}{smtp_note}"
             )
             return
 
         try:
             self._patch(f"/projects/{ref}/config/auth", body)
-            print(f"  Auth settings configured: site_url={site_url!r}, mailer_autoconfirm=True")
+            smtp_note = f", smtp_host={smtp['host']!r}" if smtp else ""
+            print(
+                f"  Auth settings configured: site_url={site_url!r}, "
+                f"mailer_autoconfirm=True{smtp_note}"
+            )
         except (RuntimeError, httpx.HTTPError) as exc:
             print(f"  Warning: could not configure auth settings via API: {exc}")
-            _print_auth_config_instructions(site_url, extra_redirect_urls)
+            _print_auth_config_instructions(site_url, extra_redirect_urls, smtp)
 
     def close(self) -> None:
         self._http.close()
