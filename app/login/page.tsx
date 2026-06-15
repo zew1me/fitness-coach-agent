@@ -4,7 +4,9 @@ import { useSearchParams } from "next/navigation";
 import type { JSX } from "react";
 import { FormEvent, Suspense, useEffect, useState } from "react";
 
+import { BrandMark } from "../../components/brand-mark";
 import { normalizeReturnTo } from "../../lib/auth";
+import { siteConfig } from "../../lib/site";
 import { getBrowserSupabaseClient } from "../../lib/supabase";
 
 function classifySupabaseErrorCode(code: string): string {
@@ -24,10 +26,16 @@ function classifySupabaseErrorCode(code: string): string {
 
 function classifyQueryError(raw: string): string {
   const lower = raw.toLowerCase();
-  if (lower.includes("missing auth code") || lower.includes("already been used")) {
+  if (
+    lower.includes("missing auth code") ||
+    lower.includes("already been used")
+  ) {
     return "Your sign-in link is missing or has already been used. Enter your email to get a new one.";
   }
-  if (lower.includes("unable to finish login") || lower.includes("unable to finish")) {
+  if (
+    lower.includes("unable to finish login") ||
+    lower.includes("unable to finish")
+  ) {
     return "Something went wrong completing your sign-in. Try again.";
   }
   return "There was a problem signing you in. Try requesting a new link.";
@@ -35,7 +43,9 @@ function classifyQueryError(raw: string): string {
 
 /** Returns true for error codes that indicate an expired / invalid link. */
 function isLinkError(code: string): boolean {
-  return code === "otp_expired" || code === "bad_otp" || code === "access_denied";
+  return (
+    code === "otp_expired" || code === "bad_otp" || code === "access_denied"
+  );
 }
 
 function LoginPageContent(): JSX.Element {
@@ -73,11 +83,17 @@ function LoginPageContent(): JSX.Element {
         setOtpSent(false);
       }
       // Remove the hash so it doesn't persist on refresh.
-      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + window.location.search,
+      );
     }
   }, []);
 
-  async function handleSendLink(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function handleSendLink(
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> {
     event.preventDefault();
     setSubmitting(true);
     setStatus(null);
@@ -90,8 +106,8 @@ function LoginPageContent(): JSX.Element {
         body: JSON.stringify({
           email,
           inviteCode: inviteRequired ? inviteCode : null,
-          returnTo
-        })
+          returnTo,
+        }),
       });
 
       const payload = (await response.json()) as {
@@ -104,7 +120,10 @@ function LoginPageContent(): JSX.Element {
       if (!response.ok) {
         if (payload.error === "invite_required") {
           setInviteRequired(true);
-          setStatus(payload.message ?? "This coach is currently accepting referred athletes only. Enter your invite code to get started.");
+          setStatus(
+            payload.message ??
+              "This coach is currently accepting referred athletes only. Enter your invite code to get started.",
+          );
           setIsError(false);
           return;
         }
@@ -116,14 +135,18 @@ function LoginPageContent(): JSX.Element {
       setOtpSent(true);
       setStatus("Check your email for a magic link or 6-digit code.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Unable to start login.");
+      setStatus(
+        error instanceof Error ? error.message : "Unable to start login.",
+      );
       setIsError(true);
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function handleVerifyOtp(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function handleVerifyOtp(
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> {
     event.preventDefault();
     setSubmitting(true);
     setStatus(null);
@@ -131,7 +154,11 @@ function LoginPageContent(): JSX.Element {
 
     try {
       const supabase = getBrowserSupabaseClient();
-      const { data, error } = await supabase.auth.verifyOtp({ email, token: otp, type: "email" });
+      const { data, error } = await supabase.auth.verifyOtp({
+        email,
+        token: otp,
+        type: "email",
+      });
 
       if (error !== null) {
         throw error;
@@ -153,7 +180,9 @@ function LoginPageContent(): JSX.Element {
 
       window.location.href = returnTo;
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Invalid code. Try again.");
+      setStatus(
+        error instanceof Error ? error.message : "Invalid code. Try again.",
+      );
       setIsError(true);
     } finally {
       setSubmitting(false);
@@ -163,8 +192,13 @@ function LoginPageContent(): JSX.Element {
   return (
     <main className="page">
       <section className="page-card">
-        <h1>Login</h1>
-        <p>Sign in with a magic link</p>
+        <div className="brand-lockup login-brand">
+          <BrandMark />
+          <div className="brand-title">
+            <h1>{siteConfig.appName}</h1>
+            <span>Sign in with a magic link</span>
+          </div>
+        </div>
         {!otpSent ? (
           <form
             onSubmit={(event) => {

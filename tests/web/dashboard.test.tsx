@@ -661,7 +661,7 @@ describe("CoachChat", () => {
     expect(screen.queryByText(userId)).toBeNull();
   });
 
-  it("prefills the composer when a starter prompt is chosen", async () => {
+  it("frames the first onboarding welcome around sport and coaching goal", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/oauth/browser-token") {
@@ -704,7 +704,89 @@ describe("CoachChat", () => {
                     id: "message-1",
                     attachments: [],
                     content:
-                      "What are your main goals for the next training block?",
+                      "Welcome. Let's start with just two things: what sport or sports are you training for, and what would you like coaching around?",
+                    created_at: "2026-04-04T09:00:00Z",
+                    metadata: {
+                      message_kind: "welcome",
+                    },
+                    role: "assistant",
+                    thread_id: "thread-1",
+                    user_id: "athlete-1",
+                  },
+                ],
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByRole("heading", {
+      name: /Start with your sport and goal/i,
+    });
+    expect(screen.getByText(/A short answer is enough/i)).toBeTruthy();
+    expect(
+      screen.getByText(/what sport or sports are you training for/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByPlaceholderText(/Tell your coach your sport and goal/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/What should we work on next/i)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /Generate next plan/i }),
+    ).toBeNull();
+  });
+
+  it("prefills the onboarding composer when a starter prompt is chosen", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: [
+                "profile:read",
+                "profile:write",
+                "plans:read",
+                "plans:write",
+                "metrics:write",
+              ],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: false,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {
+                  pending_profile_field: "goals",
+                },
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [
+                  {
+                    id: "message-1",
+                    attachments: [],
+                    content:
+                      "Welcome. Let's start with just two things: what sport or sports are you training for, and what would you like coaching around?",
                     created_at: "2026-04-04T09:00:00Z",
                     metadata: {
                       message_kind: "welcome",
@@ -728,7 +810,7 @@ describe("CoachChat", () => {
     render(<CoachChat />);
 
     const starter = await screen.findByRole("button", {
-      name: /Generate next plan/i,
+      name: /Running base and consistency/i,
     });
     fireEvent.click(starter);
 
@@ -736,10 +818,10 @@ describe("CoachChat", () => {
       expect(
         (
           screen.getByPlaceholderText(
-            /Ask anything about your training/i,
+            /Tell your coach your sport and goal/i,
           ) as HTMLTextAreaElement
         ).value,
-      ).toBe("Build my next 14-day training plan.");
+      ).toBe("I'm training for running and want help building consistency.");
     });
   });
 
@@ -1055,9 +1137,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     render(<CoachChat />);
 
-    const input = await screen.findByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, { target: { value: "I ran easy today." } });
     fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
 
@@ -1144,9 +1224,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     render(<CoachChat />);
 
-    const input = await screen.findByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, { target: { value: "I ran easy today." } });
     fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
 
@@ -1231,9 +1309,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     render(<CoachChat />);
 
-    const input = await screen.findByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
     vi.useFakeTimers();
     fireEvent.change(input, {
       target: { value: "This is a longer training update." },
@@ -1576,7 +1652,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     const { container } = render(<CoachChat />);
 
-    await screen.findByPlaceholderText(/Ask anything about your training/i);
+    await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
@@ -1594,9 +1670,7 @@ describe("CoachChat", () => {
     );
     expect(presignCall).toBeDefined();
 
-    const input = screen.getByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const input = screen.getByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, {
       target: { value: "Please analyze this workout." },
     });
@@ -1706,7 +1780,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     const { container } = render(<CoachChat />);
 
-    await screen.findByPlaceholderText(/Ask anything about your training/i);
+    await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
@@ -1719,22 +1793,24 @@ describe("CoachChat", () => {
     });
 
     await screen.findByText(/couldn't get a shareable link back/i);
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: /^Send$/i })
+        .disabled,
+    ).toBe(true);
 
-    const input = screen.getByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const input = screen.getByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, {
       target: { value: "Please analyze this workout." },
     });
     fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
 
-    // The strict equality on parts is the real regression guard for #163: it
-    // proves the failed-upload attachment was dropped and no base64 data: URL
-    // sneaked into chat_messages.parts.
+    // The strict equality on parts is the regression guard for #163: the
+    // failed-upload attachment was dropped and no base64 data: URL leaked into
+    // chat_messages.parts.
     await waitFor(() => {
       expect(chatMocks.sendMessage).toHaveBeenCalledWith({
         id: expect.stringMatching(uuidPattern),
-        parts: [{ type: "text", text: "Please analyze this workout." }],
+        parts: [{ text: "Please analyze this workout.", type: "text" }],
       });
     });
   });
@@ -1827,7 +1903,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     const { container } = render(<CoachChat />);
 
-    await screen.findByPlaceholderText(/Ask anything about your training/i);
+    await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
@@ -1853,9 +1929,7 @@ describe("CoachChat", () => {
     });
     await screen.findByText("Ready");
 
-    const input = screen.getByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const input = screen.getByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, {
       target: { value: "Please parse this activity." },
     });
@@ -1976,9 +2050,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     render(<CoachChat />);
 
-    const textarea = await screen.findByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const textarea = await screen.findByPlaceholderText(/Ask your coach/i);
 
     const imageFile = new File(["png-data"], "screenshot.png", {
       type: "image/png",
@@ -2063,9 +2135,7 @@ describe("CoachChat", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     render(<CoachChat />);
 
-    const textarea = await screen.findByPlaceholderText(
-      /Ask anything about your training/i,
-    );
+    const textarea = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.paste(textarea, {
       clipboardData: {
         items: [

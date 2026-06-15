@@ -71,6 +71,8 @@ declare const styles: {
   readonly rowUser: string;
   readonly secondaryButton: string;
   readonly sendButton: string;
+  readonly sendButtonText: string;
+  readonly sendIcon: string;
   readonly settingsButton: string;
   readonly shell: string;
   readonly starterButton: string;

@@ -24,6 +24,7 @@ export default defineConfig([
   ...compat.extends("next/core-web-vitals"),
   globalIgnores([
     ".cache/**",
+    ".claude/**",
     ".next/**",
     ".remember/**",
     ".uv-cache/**",
