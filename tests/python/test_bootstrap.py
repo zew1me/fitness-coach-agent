@@ -782,6 +782,12 @@ def test_build_auth_redirect_urls_prod_without_custom_domain_uses_vercel_alias()
     assert urls.count("https://fitness-coach-agent-phi.vercel.app/**") == 1
 
 
+def test_build_auth_redirect_urls_rejects_unknown_env() -> None:
+    # Guard against a typo'd env silently inheriting the production allow-list.
+    with pytest.raises(ValueError, match="Unknown env"):
+        bootstrap_main._build_auth_redirect_urls(_settings(), "staging", "example.vercel.app")
+
+
 def test_build_smtp_settings_returns_none_without_credentials() -> None:
     assert bootstrap_main._build_smtp_settings(_settings()) is None
     # Sender address alone is not enough — the password (Resend key) is required.
