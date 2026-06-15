@@ -150,12 +150,12 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | `pytest`            | `uv run pytest`                                                               |
 | `cpd`               | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
 | `knip`              | Dead-code / unused-export detection (production code only)                    |
-| `playwright`        | Full Playwright UI suite
+| `playwright`        | Full Playwright UI suite                                                      |
 
 ### Changes that don't impact the UI layer
 
-Playwright is slow (~2–3 min). Only in cases where you are absolutely sure a change does not impact 
-the UI layer or interface UI layer interacts with or anything that will manifest only in rendering 
+Playwright is slow (~2–3 min). Only in cases where you are absolutely sure a change does not impact
+the UI layer or interface UI layer interacts with or anything that will manifest only in rendering
 lever type of tests, it may be skipped. Skip it on a given push using **either** method:
 
 ```bash
