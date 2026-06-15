@@ -788,6 +788,8 @@ def test_build_smtp_settings_returns_none_without_credentials() -> None:
     assert (
         bootstrap_main._build_smtp_settings(_settings(smtp_admin_email="login@example.com")) is None
     )
+    # ...and the password alone is not enough either — the sender address is required.
+    assert bootstrap_main._build_smtp_settings(_settings(smtp_pass="re_secret")) is None
 
 
 def test_build_smtp_settings_returns_resend_config_when_present() -> None:
@@ -855,3 +857,36 @@ def test_configure_auth_settings_omits_smtp_when_absent(monkeypatch) -> None:
 
     _, body = patched[0]
     assert not any(key.startswith("smtp_") for key in body)
+
+
+def test_configure_auth_settings_falls_back_to_smtp_instructions_on_api_error(
+    monkeypatch, capsys
+) -> None:
+    def fake_patch(self, path: str, body: dict) -> dict:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(SupabaseClient, "_patch", fake_patch)
+
+    client = SupabaseClient("my-access-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "Coach",
+        },
+    )
+    client.close()
+
+    out = capsys.readouterr().out
+    assert "could not configure auth settings" in out
+    # The manual fallback prints the SMTP block so the operator can finish by hand...
+    assert "SMTP Settings" in out
+    assert "smtp.resend.com" in out
+    # ...but never echoes the Resend API key.
+    assert "re_secret" not in out

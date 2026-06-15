@@ -9,7 +9,7 @@ Usage:
 
 import argparse
 import sys
-from typing import Protocol
+from typing import Any, Protocol
 
 from scripts.bootstrap.cloudflare_client import CloudflareClient
 from scripts.bootstrap.config import BootstrapSettings, load_settings
@@ -79,6 +79,9 @@ def _build_auth_redirect_urls(
             urls.append(f"https://{vercel_domain}/**")
         return urls
 
+    if env != "prod":
+        raise ValueError(f"Unknown env {env!r}; expected 'preview' or 'prod'")
+
     # Production: allow the canonical site origin and the Vercel-assigned alias.
     prod_origin = _build_auth_site_url(settings, env, vercel_domain)
     if prod_origin:
@@ -89,7 +92,7 @@ def _build_auth_redirect_urls(
     return urls
 
 
-def _build_smtp_settings(settings: BootstrapSettings) -> dict | None:
+def _build_smtp_settings(settings: BootstrapSettings) -> dict[str, Any] | None:
     """Return shared custom SMTP (Resend) settings, or None to use built-in mail.
 
     The same SMTP server is applied to both preview and production so email
@@ -105,7 +108,7 @@ def _build_smtp_settings(settings: BootstrapSettings) -> dict | None:
         "user": settings.smtp_user,
         "pass": settings.smtp_pass,
         "admin_email": settings.smtp_admin_email,
-        "sender_name": settings.smtp_sender_name or "",
+        "sender_name": settings.smtp_sender_name,
     }
 
 
