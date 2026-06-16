@@ -4,8 +4,10 @@
   "ignoreDependencies": [
     "@next/eslint-plugin-next",
     "@testing-library/jest-dom",
-    "eslint-config-next"
+    "eslint-config-next",
+    "jscpd"
   ],
   "ignore": [".uv-cache/**"],
-  "ignoreBinaries": ["uv"]
+  "ignoreBinaries": ["uv"],
+  "lefthook": false
 }
