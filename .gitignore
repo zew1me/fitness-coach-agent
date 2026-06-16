@@ -72,9 +72,8 @@ __pycache__/
 .apdisk
 .com.apple.timemachine.donotpresent
 .env
-.env.local
-.env.*.local
-.env.bootstrap
+.env.*
+!.env.example
 .envrc
 scripts/bootstrap/.state.*.json
 .fseventsd
@@ -86,12 +85,7 @@ tsconfig.tsbuildinfo
 .vercel
 .worktrees/
 test-results/
-
-
-## garage S3 Emulation
-
 .dev/garage/data/*
 .dev/garage/meta/*
-.env*.local
 preview
 production
