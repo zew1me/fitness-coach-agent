@@ -1,7 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip/schema.json",
   "ignoreExportsUsedInFile": true,
-  "ignore": [".uv-cache/**"],
   "ignoreDependencies": [
     "@next/eslint-plugin-next",
     "@testing-library/jest-dom",

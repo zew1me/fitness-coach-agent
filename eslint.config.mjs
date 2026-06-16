@@ -31,7 +31,6 @@ export default defineConfig([
     ".venv/**",
     ".vercel/**",
     ".worktrees/**",
-    ".claude/**",
     "node_modules/**",
     "tests/ui/**",
   ]),
