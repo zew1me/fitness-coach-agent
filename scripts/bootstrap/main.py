@@ -81,8 +81,15 @@ def _build_auth_redirect_urls(
 
     # Production: allow the canonical site origin and the Vercel-assigned alias.
     prod_origin = _build_auth_site_url(settings, env, vercel_domain)
-    if prod_origin:
-        urls.append(f"{prod_origin}/**")
+    if not prod_origin:
+        # Fail loud rather than write a localhost-only allow-list to production,
+        # which would silently break the magic-link flow this change exists to fix.
+        raise RuntimeError(
+            "Could not resolve the production auth origin. Set PRODUCTION_DOMAIN in "
+            ".env.bootstrap, or ensure the Vercel production domain lookup succeeds, "
+            "then rerun bootstrap."
+        )
+    urls.append(f"{prod_origin}/**")
     vercel_origin = f"https://{vercel_domain}" if vercel_domain else ""
     if vercel_origin and vercel_origin != prod_origin:
         urls.append(f"{vercel_origin}/**")
