@@ -42,6 +42,18 @@ class BootstrapSettings(BaseSettings):
     # Vercel — authentication comes from the local `vercel` CLI; no token needed.
     production_domain: str = ""
 
+    # Custom SMTP (Resend) for auth emails. Applied identically to preview and
+    # production so magic-link / OTP delivery is at parity across environments.
+    # Leave smtp_pass and smtp_admin_email blank to keep Supabase's built-in
+    # email sender (rate-limited, not for production). smtp_pass is the Resend
+    # API key; the Resend SMTP username is the literal string "resend".
+    smtp_host: str = "smtp.resend.com"
+    smtp_port: int = 465
+    smtp_user: str = "resend"
+    smtp_pass: str = ""
+    smtp_admin_email: str = ""
+    smtp_sender_name: str = ""
+
     # App secrets passed through to Vercel env vars
     openai_api_key: str
     tavily_api_key: str

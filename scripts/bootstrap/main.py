@@ -9,7 +9,7 @@ Usage:
 
 import argparse
 import sys
-from typing import Protocol
+from typing import Any, Protocol
 
 from scripts.bootstrap.cloudflare_client import CloudflareClient
 from scripts.bootstrap.config import BootstrapSettings, load_settings
@@ -58,14 +58,65 @@ def _build_auth_site_url(settings: BootstrapSettings, env: str, vercel_domain: s
     return f"https://{vercel_domain}" if vercel_domain else ""
 
 
-def _build_auth_redirect_urls(env: str, vercel_domain: str) -> list[str]:
-    """Return extra allowed redirect URLs for Supabase auth configuration."""
+def _build_auth_redirect_urls(
+    settings: BootstrapSettings, env: str, vercel_domain: str
+) -> list[str]:
+    """Return extra allowed redirect URLs for Supabase auth configuration.
+
+    The magic-link / OTP flow redirects to ``/auth/callback`` on the deployment
+    origin. Supabase only honours a ``redirect_to`` whose full path matches an
+    entry in the allow-list, and the bare ``site_url`` origin does not cover its
+    own sub-paths — a ``/**`` wildcard is required. Production must therefore get
+    a wildcard entry for its origin just like preview does; omitting it makes
+    Supabase drop ``redirect_to`` and bounce to the site root without the auth
+    ``code``, which surfaces as "Your sign-in link is missing or has already
+    been used" (issue #172).
+    """
     urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
     if env == "preview":
         urls.append("https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**")
         if vercel_domain:
             urls.append(f"https://{vercel_domain}/**")
+        return urls
+
+    if env != "prod":
+        raise ValueError(f"Unknown env {env!r}; expected 'preview' or 'prod'")
+
+    # Production: allow the canonical site origin and the Vercel-assigned alias.
+    prod_origin = _build_auth_site_url(settings, env, vercel_domain)
+    if not prod_origin:
+        # Fail loud rather than write a localhost-only allow-list to production,
+        # which would silently break the magic-link flow this change exists to fix.
+        raise RuntimeError(
+            "Could not resolve the production auth origin. Set PRODUCTION_DOMAIN in "
+            ".env.bootstrap, or ensure the Vercel production domain lookup succeeds, "
+            "then rerun bootstrap."
+        )
+    urls.append(f"{prod_origin}/**")
+    vercel_origin = f"https://{vercel_domain}" if vercel_domain else ""
+    if vercel_origin and vercel_origin != prod_origin:
+        urls.append(f"{vercel_origin}/**")
     return urls
+
+
+def _build_smtp_settings(settings: BootstrapSettings) -> dict[str, Any] | None:
+    """Return shared custom SMTP (Resend) settings, or None to use built-in mail.
+
+    The same SMTP server is applied to both preview and production so email
+    delivery is at parity. Custom SMTP is only configured when a password
+    (Resend API key) and a sender address are both present; otherwise Supabase's
+    built-in, rate-limited sender is left in place.
+    """
+    if not settings.smtp_pass or not settings.smtp_admin_email:
+        return None
+    return {
+        "host": settings.smtp_host,
+        "port": settings.smtp_port,
+        "user": settings.smtp_user,
+        "pass": settings.smtp_pass,
+        "admin_email": settings.smtp_admin_email,
+        "sender_name": settings.smtp_sender_name,
+    }
 
 
 def _setup_supabase(  # noqa: PLR0913
@@ -104,7 +155,8 @@ def _setup_supabase(  # noqa: PLR0913
         sb.configure_auth_settings(
             project_ref,
             site_url=_build_auth_site_url(settings, env, vercel_domain),
-            extra_redirect_urls=_build_auth_redirect_urls(env, vercel_domain),
+            extra_redirect_urls=_build_auth_redirect_urls(settings, env, vercel_domain),
+            smtp=_build_smtp_settings(settings),
         )
         migration_db_password = db_pass or state.get("supabase_db_password") or env_db_password
         keys = configured_keys or sb.get_api_keys(project_ref, use_cli=bool(existing_ref))
@@ -206,7 +258,7 @@ def _setup_r2(
             print(f"  Using R2 public base URL from .env.bootstrap: {configured_public_base_url}")
             public_base_url = configured_public_base_url
         else:
-            public_base_url = cf.get_public_base_url(bucket_name)
+            public_base_url = cf.ensure_public_access(bucket_name)
         endpoint_url = cf.endpoint_url()
     finally:
         cf.close()
@@ -290,8 +342,12 @@ def _build_env_vars(  # noqa: PLR0913
         "R2_SECRET_ACCESS_KEY": r2["secret_access_key"],
         "R2_BUCKET": r2["bucket_name"],
         "R2_ENDPOINT_URL": r2["endpoint_url"],
-        "R2_PUBLIC_BASE_URL": r2["public_base_url"],
     }
+    # Only set R2_PUBLIC_BASE_URL when we actually have one. An empty value is
+    # silently accepted by Vercel but yields a null public_url at upload time,
+    # which surfaces to users as "couldn't get a shareable link back" (#163).
+    if r2["public_base_url"]:
+        vars["R2_PUBLIC_BASE_URL"] = r2["public_base_url"]
     if app_base_url:
         vars["APP_BASE_URL"] = app_base_url
     return vars
@@ -325,8 +381,9 @@ def _print_summary(
     print("Next steps:")
     print("  • Run `vercel env ls` to confirm vars are set.")
     print(
-        "  • If R2 public URL is empty, enable 'Public Access' on the bucket in the\n"
-        "    Cloudflare dashboard, then re-run to update R2_PUBLIC_BASE_URL."
+        "  • The R2 bucket's public dev URL (r2.dev) is enabled automatically and is\n"
+        "    rate-limited / non-production. For prod traffic, attach a custom domain and\n"
+        "    set R2_PUBLIC_BASE_URL_PROD in .env.bootstrap, then re-run."
     )
     print("  • Redeploy to pick up the new env vars: `vercel deploy` (or push a commit).")
     if env == "preview":
