@@ -191,10 +191,10 @@ class CloudflareClient:
             return ""
 
         print(f"  Enabling public dev URL on {bucket_name!r}…")
-        domain = self._put(path, {"enabled": True}).get("result", {}).get("domain", "")
+        domain = (self._put(path, {"enabled": True}).get("result", {}) or {}).get("domain", "")
         if not domain:
             # Some API versions omit the domain on the PUT response; read it back.
-            domain = self._get(path).get("result", {}).get("domain", "")
+            domain = (self._get(path).get("result", {}) or {}).get("domain", "")
         if not domain:
             raise RuntimeError(
                 f"Enabled public access on {bucket_name!r} but Cloudflare returned no "
