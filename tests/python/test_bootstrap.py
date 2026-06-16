@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -356,9 +357,9 @@ def test_setup_r2_creates_bucket_then_requests_runtime_credentials(monkeypatch) 
             calls.append(f"ensure_r2_token:{bucket_name}:{env}")
             return {"access_key_id": "minted-id", "secret_access_key": "minted-secret"}
 
-        def get_public_base_url(self, bucket_name: str) -> str:
-            calls.append(f"get_public_base_url:{bucket_name}")
-            return ""
+        def ensure_public_access(self, bucket_name: str) -> str:
+            calls.append(f"ensure_public_access:{bucket_name}")
+            return "https://pub-test.r2.dev"
 
         def endpoint_url(self) -> str:
             return "https://account-id.r2.cloudflarestorage.com"
@@ -372,10 +373,11 @@ def test_setup_r2_creates_bucket_then_requests_runtime_credentials(monkeypatch) 
 
     assert result["access_key_id"] == "minted-id"
     assert result["secret_access_key"] == "minted-secret"
+    assert result["public_base_url"] == "https://pub-test.r2.dev"
     assert calls == [
         "ensure_bucket:preview",
         "ensure_r2_token:fitness-coach-agent-preview:preview",
-        "get_public_base_url:fitness-coach-agent-preview",
+        "ensure_public_access:fitness-coach-agent-preview",
         "close",
     ]
 
@@ -394,9 +396,9 @@ def test_setup_r2_uses_configured_credentials_without_creating_token(monkeypatch
         def ensure_r2_token(self, *_args, **_kwargs) -> dict:
             raise AssertionError("dashboard-provided credentials should skip token creation")
 
-        def get_public_base_url(self, bucket_name: str) -> str:
-            calls.append(f"get_public_base_url:{bucket_name}")
-            return ""
+        def ensure_public_access(self, bucket_name: str) -> str:
+            calls.append(f"ensure_public_access:{bucket_name}")
+            return "https://pub-test.r2.dev"
 
         def endpoint_url(self) -> str:
             return "https://account-id.r2.cloudflarestorage.com"
@@ -418,14 +420,14 @@ def test_setup_r2_uses_configured_credentials_without_creating_token(monkeypatch
 
     assert calls == [
         "ensure_bucket:preview",
-        "get_public_base_url:fitness-coach-agent-preview",
+        "ensure_public_access:fitness-coach-agent-preview",
         "close",
     ]
     assert r2 == {
         "bucket_name": "fitness-coach-agent-preview",
         "access_key_id": "configured-access",
         "secret_access_key": "configured-secret",
-        "public_base_url": "",
+        "public_base_url": "https://pub-test.r2.dev",
         "endpoint_url": "https://account-id.r2.cloudflarestorage.com",
     }
 
@@ -519,6 +521,106 @@ def test_cloudflare_r2_token_uses_user_token_api_and_hashes_token_value() -> Non
             },
         ),
     ]
+
+
+def test_ensure_public_access_enables_managed_domain_and_returns_url() -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeHTTP:
+        def put(self, url: str, json: dict) -> httpx.Response:
+            calls.append(("PUT", url, json))
+            request = httpx.Request("PUT", url)
+            return httpx.Response(
+                200,
+                json={"result": {"domain": "pub-abc123.r2.dev", "enabled": True}},
+                request=request,
+            )
+
+        def close(self) -> None:
+            pass
+
+    client = CloudflareClient("token", "account-id")
+    client._http = FakeHTTP()
+
+    url = client.ensure_public_access("fitness-coach-agent-preview")
+    client.close()
+
+    assert url == "https://pub-abc123.r2.dev"
+    assert calls == [
+        (
+            "PUT",
+            "https://api.cloudflare.com/client/v4/accounts/account-id/r2/buckets/"
+            "fitness-coach-agent-preview/domains/managed",
+            {"enabled": True},
+        ),
+    ]
+
+
+def test_ensure_public_access_fallback_get_when_put_returns_no_domain() -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeHTTP:
+        def put(self, url: str, json: dict) -> httpx.Response:
+            calls.append(("PUT", url, json))
+            request = httpx.Request("PUT", url)
+            # PUT succeeds but omits domain field (only returns enabled)
+            return httpx.Response(200, json={"result": {"enabled": True}}, request=request)
+
+        def get(self, url: str, **_kwargs) -> httpx.Response:
+            calls.append(("GET", url, None))
+            request = httpx.Request("GET", url)
+            # GET returns both enabled and domain
+            return httpx.Response(
+                200,
+                json={"result": {"domain": "pub-fallback.r2.dev", "enabled": True}},
+                request=request,
+            )
+
+        def close(self) -> None:
+            pass
+
+    client = CloudflareClient("token", "account-id")
+    client._http = FakeHTTP()
+
+    url = client.ensure_public_access("fitness-coach-agent-preview")
+    client.close()
+
+    assert url == "https://pub-fallback.r2.dev"
+    assert calls == [
+        (
+            "PUT",
+            "https://api.cloudflare.com/client/v4/accounts/account-id/r2/buckets/"
+            "fitness-coach-agent-preview/domains/managed",
+            {"enabled": True},
+        ),
+        (
+            "GET",
+            "https://api.cloudflare.com/client/v4/accounts/account-id/r2/buckets/"
+            "fitness-coach-agent-preview/domains/managed",
+            None,
+        ),
+    ]
+
+
+def test_ensure_public_access_raises_when_no_domain_returned() -> None:
+    class FakeHTTP:
+        def put(self, url: str, json: dict) -> httpx.Response:
+            request = httpx.Request("PUT", url)
+            return httpx.Response(200, json={"result": {"enabled": True}}, request=request)
+
+        def get(self, url: str, **_kwargs) -> httpx.Response:
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"result": {"enabled": True}}, request=request)
+
+        def close(self) -> None:
+            pass
+
+    client = CloudflareClient("token", "account-id")
+    client._http = FakeHTTP()
+
+    with pytest.raises(RuntimeError, match="returned no"):
+        client.ensure_public_access("fitness-coach-agent-preview")
+    client.close()
 
 
 def test_vercel_remove_env_vars_deletes_matching_preview_key(monkeypatch) -> None:
@@ -674,17 +776,14 @@ def _make_fake_vercel_run(
         body = kwargs.get("input")
         body_dict = None
         if body is not None:
-            import json as _json
-
-            body_dict = _json.loads(body)
+            body_dict = json.loads(body)
         if capture_body:
             calls.append((method, path, body_dict))
         else:
             calls.append((method, path))
         payload = responses.get((method, path), {})
-        import json as _json
 
-        return SimpleNamespace(returncode=0, stdout=_json.dumps(payload), stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
     return fake_run
 
