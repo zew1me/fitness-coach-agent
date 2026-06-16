@@ -16,10 +16,18 @@ type LocalStorageMock = {
 const localStorageMock: LocalStorageMock = ((): LocalStorageMock => {
   let store: Record<string, string> = {};
   return {
-    getItem(key: string): string | null { return store[key] ?? null; },
-    setItem(key: string, value: string): void { store[key] = value; },
-    removeItem(key: string): void { delete store[key]; },
-    clear(): void { store = {}; },
+    getItem(key: string): string | null {
+      return store[key] ?? null;
+    },
+    setItem(key: string, value: string): void {
+      store[key] = value;
+    },
+    removeItem(key: string): void {
+      delete store[key];
+    },
+    clear(): void {
+      store = {};
+    },
   };
 })();
 
@@ -92,5 +100,23 @@ describe("useTheme", () => {
       result.current.setTheme("system");
     });
     expect(document.documentElement.dataset["theme"]).toBe("dark");
+  });
+
+  it("updates the resolved theme when the system preference changes in system mode", () => {
+    let mediaListener: ((event: MediaQueryListEvent) => void) | undefined;
+    vi.spyOn(window, "matchMedia").mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn((_eventName, listener) => {
+        mediaListener = listener as (event: MediaQueryListEvent) => void;
+      }),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList);
+
+    renderHook(() => useTheme());
+
+    mediaListener?.({ matches: true } as MediaQueryListEvent);
+
+    expect(document.documentElement.dataset["theme"]).toBe("dark");
+    expect(document.documentElement.dataset["themeMode"]).toBe("system");
   });
 });
