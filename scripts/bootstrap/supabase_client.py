@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -22,7 +23,7 @@ _EMAIL_OTP_TEMPLATE = """<h2>Your sign-in code</h2>
 
 
 def _print_auth_config_instructions(
-    site_url: str, extra_redirect_urls: list[str], smtp: dict | None = None
+    site_url: str, extra_redirect_urls: list[str], smtp: dict[str, Any] | None = None
 ) -> None:
     all_urls = ([site_url] if site_url else []) + extra_redirect_urls
     redirect_list = ", ".join(all_urls) if all_urls else "(your app URL)/**"
@@ -254,7 +255,7 @@ class SupabaseClient:
         ref: str,
         site_url: str,
         extra_redirect_urls: list[str],
-        smtp: dict | None = None,
+        smtp: dict[str, Any] | None = None,
     ) -> None:
         """Configure Supabase auth redirect URLs, OTP behavior, and (optional) SMTP.
 

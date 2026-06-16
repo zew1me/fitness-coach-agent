@@ -54,8 +54,9 @@ Management API call can patch the project. Add `SMTP_PASS` (your Resend API key)
 and `SMTP_ADMIN_EMAIL` (an address on a Resend-verified domain) to also push the
 SMTP sender; leave them blank to keep Supabase's built-in, rate-limited sender.
 
-The expected production values (canonical alias `fitness-coach-agent-phi.vercel.app`,
-or your custom `PRODUCTION_DOMAIN`):
+The expected production values (the bootstrap auto-detects the canonical Vercel
+alias — `fitness-coach-agent-phi.vercel.app` as of 2026-06-15, found under the
+Vercel project's Domains — or uses your custom `PRODUCTION_DOMAIN`):
 
 | Setting                        | Value                                                                                                                               |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
