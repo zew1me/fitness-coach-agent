@@ -9,7 +9,7 @@ Usage:
 
 import argparse
 import sys
-from typing import Protocol
+from typing import Any, Protocol
 
 from scripts.bootstrap.cloudflare_client import CloudflareClient
 from scripts.bootstrap.config import BootstrapSettings, load_settings
@@ -58,14 +58,58 @@ def _build_auth_site_url(settings: BootstrapSettings, env: str, vercel_domain: s
     return f"https://{vercel_domain}" if vercel_domain else ""
 
 
-def _build_auth_redirect_urls(env: str, vercel_domain: str) -> list[str]:
-    """Return extra allowed redirect URLs for Supabase auth configuration."""
+def _build_auth_redirect_urls(
+    settings: BootstrapSettings, env: str, vercel_domain: str
+) -> list[str]:
+    """Return extra allowed redirect URLs for Supabase auth configuration.
+
+    The magic-link / OTP flow redirects to ``/auth/callback`` on the deployment
+    origin. Supabase only honours a ``redirect_to`` whose full path matches an
+    entry in the allow-list, and the bare ``site_url`` origin does not cover its
+    own sub-paths — a ``/**`` wildcard is required. Production must therefore get
+    a wildcard entry for its origin just like preview does; omitting it makes
+    Supabase drop ``redirect_to`` and bounce to the site root without the auth
+    ``code``, which surfaces as "Your sign-in link is missing or has already
+    been used" (issue #172).
+    """
     urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
     if env == "preview":
         urls.append("https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**")
         if vercel_domain:
             urls.append(f"https://{vercel_domain}/**")
+        return urls
+
+    if env != "prod":
+        raise ValueError(f"Unknown env {env!r}; expected 'preview' or 'prod'")
+
+    # Production: allow the canonical site origin and the Vercel-assigned alias.
+    prod_origin = _build_auth_site_url(settings, env, vercel_domain)
+    if prod_origin:
+        urls.append(f"{prod_origin}/**")
+    vercel_origin = f"https://{vercel_domain}" if vercel_domain else ""
+    if vercel_origin and vercel_origin != prod_origin:
+        urls.append(f"{vercel_origin}/**")
     return urls
+
+
+def _build_smtp_settings(settings: BootstrapSettings) -> dict[str, Any] | None:
+    """Return shared custom SMTP (Resend) settings, or None to use built-in mail.
+
+    The same SMTP server is applied to both preview and production so email
+    delivery is at parity. Custom SMTP is only configured when a password
+    (Resend API key) and a sender address are both present; otherwise Supabase's
+    built-in, rate-limited sender is left in place.
+    """
+    if not settings.smtp_pass or not settings.smtp_admin_email:
+        return None
+    return {
+        "host": settings.smtp_host,
+        "port": settings.smtp_port,
+        "user": settings.smtp_user,
+        "pass": settings.smtp_pass,
+        "admin_email": settings.smtp_admin_email,
+        "sender_name": settings.smtp_sender_name,
+    }
 
 
 def _setup_supabase(  # noqa: PLR0913
@@ -104,7 +148,8 @@ def _setup_supabase(  # noqa: PLR0913
         sb.configure_auth_settings(
             project_ref,
             site_url=_build_auth_site_url(settings, env, vercel_domain),
-            extra_redirect_urls=_build_auth_redirect_urls(env, vercel_domain),
+            extra_redirect_urls=_build_auth_redirect_urls(settings, env, vercel_domain),
+            smtp=_build_smtp_settings(settings),
         )
         migration_db_password = db_pass or state.get("supabase_db_password") or env_db_password
         keys = configured_keys or sb.get_api_keys(project_ref, use_cli=bool(existing_ref))

@@ -645,6 +645,12 @@ def _settings(**overrides: str) -> BootstrapSettings:
         "openai_api_key": "openai-key",
         "tavily_api_key": "tavily-key",
         "production_domain": "",
+        "smtp_host": "smtp.resend.com",
+        "smtp_port": 465,
+        "smtp_user": "resend",
+        "smtp_pass": "",
+        "smtp_admin_email": "",
+        "smtp_sender_name": "",
     }
     defaults.update(overrides)
     return BootstrapSettings.model_construct(**defaults)
@@ -750,7 +756,143 @@ def test_configure_auth_settings_dry_run(monkeypatch, capsys) -> None:
 
 def test_build_auth_redirect_urls_preview_includes_scoped_wildcard_and_domain() -> None:
     domain = "fitness-coach-agent.vercel.app"
-    urls = bootstrap_main._build_auth_redirect_urls("preview", domain)
+    urls = bootstrap_main._build_auth_redirect_urls(_settings(), "preview", domain)
     assert "https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**" in urls
     assert "https://fitness-coach-agent.vercel.app/**" in urls
     assert "http://localhost:3000/**" in urls
+
+
+def test_build_auth_redirect_urls_prod_includes_site_origin_wildcard() -> None:
+    # Regression for issue #172: production must allow-list its own /auth/callback
+    # path via a /** wildcard, or Supabase drops redirect_to and the magic link
+    # arrives without the auth code. The Vercel-assigned alias is allowed too.
+    domain = "fitness-coach-agent-phi.vercel.app"
+    urls = bootstrap_main._build_auth_redirect_urls(
+        _settings(production_domain="coach.example.com"), "prod", domain
+    )
+    assert "https://coach.example.com/**" in urls
+    assert "https://fitness-coach-agent-phi.vercel.app/**" in urls
+    assert "http://localhost:3000/**" in urls
+
+
+def test_build_auth_redirect_urls_prod_without_custom_domain_uses_vercel_alias() -> None:
+    domain = "fitness-coach-agent-phi.vercel.app"
+    urls = bootstrap_main._build_auth_redirect_urls(_settings(), "prod", domain)
+    # Only one wildcard for the origin — no duplicate when site URL == alias.
+    assert urls.count("https://fitness-coach-agent-phi.vercel.app/**") == 1
+
+
+def test_build_auth_redirect_urls_rejects_unknown_env() -> None:
+    # Guard against a typo'd env silently inheriting the production allow-list.
+    with pytest.raises(ValueError, match="Unknown env"):
+        bootstrap_main._build_auth_redirect_urls(_settings(), "staging", "example.vercel.app")
+
+
+def test_build_smtp_settings_returns_none_without_credentials() -> None:
+    assert bootstrap_main._build_smtp_settings(_settings()) is None
+    # Sender address alone is not enough — the password (Resend key) is required.
+    assert (
+        bootstrap_main._build_smtp_settings(_settings(smtp_admin_email="login@example.com")) is None
+    )
+    # ...and the password alone is not enough either — the sender address is required.
+    assert bootstrap_main._build_smtp_settings(_settings(smtp_pass="re_secret")) is None
+
+
+def test_build_smtp_settings_returns_resend_config_when_present() -> None:
+    smtp = bootstrap_main._build_smtp_settings(
+        _settings(smtp_pass="re_secret", smtp_admin_email="login@example.com")
+    )
+    assert smtp == {
+        "host": "smtp.resend.com",
+        "port": 465,
+        "user": "resend",
+        "pass": "re_secret",
+        "admin_email": "login@example.com",
+        "sender_name": "",
+    }
+
+
+def test_configure_auth_settings_includes_smtp_when_provided(monkeypatch) -> None:
+    patched: list[tuple[str, dict]] = []
+
+    def fake_patch(self, path: str, body: dict) -> dict:
+        patched.append((path, body))
+        return {}
+
+    monkeypatch.setattr(SupabaseClient, "_patch", fake_patch)
+
+    client = SupabaseClient("my-access-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "Coach",
+        },
+    )
+    client.close()
+
+    _, body = patched[0]
+    assert body["smtp_host"] == "smtp.resend.com"
+    assert body["smtp_port"] == 465
+    assert body["smtp_user"] == "resend"
+    assert body["smtp_pass"] == "re_secret"
+    assert body["smtp_admin_email"] == "login@example.com"
+    assert body["smtp_sender_name"] == "Coach"
+
+
+def test_configure_auth_settings_omits_smtp_when_absent(monkeypatch) -> None:
+    patched: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(
+        SupabaseClient, "_patch", lambda self, path, body: patched.append((path, body)) or {}
+    )
+
+    client = SupabaseClient("my-access-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+    )
+    client.close()
+
+    _, body = patched[0]
+    assert not any(key.startswith("smtp_") for key in body)
+
+
+def test_configure_auth_settings_falls_back_to_smtp_instructions_on_api_error(
+    monkeypatch, capsys
+) -> None:
+    def fake_patch(self, path: str, body: dict) -> dict:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(SupabaseClient, "_patch", fake_patch)
+
+    client = SupabaseClient("my-access-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "Coach",
+        },
+    )
+    client.close()
+
+    out = capsys.readouterr().out
+    assert "could not configure auth settings" in out
+    # The manual fallback prints the SMTP block so the operator can finish by hand...
+    assert "SMTP Settings" in out
+    assert "smtp.resend.com" in out
+    # ...but never echoes the Resend API key.
+    assert "re_secret" not in out
