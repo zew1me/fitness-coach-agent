@@ -74,9 +74,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
-.env.local
-.env.*.local
-.env.bootstrap
 .envrc
 scripts/bootstrap/.state.*.json
 .fseventsd
@@ -88,12 +85,7 @@ tsconfig.tsbuildinfo
 .vercel
 .worktrees/
 test-results/
-
-
-## garage S3 Emulation
-
 .dev/garage/data/*
 .dev/garage/meta/*
-.env*.local
 preview
 production
