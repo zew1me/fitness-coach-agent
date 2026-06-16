@@ -1434,10 +1434,12 @@ function CoachChatBody({
         ],
       });
       // Clear the draft only after the send succeeds so a failed send leaves the
-      // composer text and attachments intact for the user to retry.
+      // composer text and attachments intact for the user to retry. The textarea
+      // stays editable while the request is in flight, so only clear the text if
+      // it still matches what we sent — otherwise we'd wipe newly typed input.
       removePreviewUrls(pendingAttachments);
       setAttachments([]);
-      setComposer("");
+      setComposer((current) => (current === pendingComposer ? "" : current));
       setSending(false);
       setSyncingThread(true);
       try {
