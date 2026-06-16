@@ -1426,10 +1426,6 @@ function CoachChatBody({
       const pendingComposer = composer;
       const pendingAttachments = attachments;
       const messageId = crypto.randomUUID();
-      // Clear immediately so the composer feels responsive before the network call.
-      removePreviewUrls(pendingAttachments);
-      setAttachments([]);
-      setComposer("");
       await sendMessage({
         id: messageId,
         parts: [
@@ -1437,6 +1433,13 @@ function CoachChatBody({
           ...uploadedFileParts(pendingAttachments),
         ],
       });
+      // Clear the draft only after the send succeeds so a failed send leaves the
+      // composer text and attachments intact for the user to retry. The textarea
+      // stays editable while the request is in flight, so only clear the text if
+      // it still matches what we sent — otherwise we'd wipe newly typed input.
+      removePreviewUrls(pendingAttachments);
+      setAttachments([]);
+      setComposer((current) => (current === pendingComposer ? "" : current));
       setSending(false);
       setSyncingThread(true);
       try {
