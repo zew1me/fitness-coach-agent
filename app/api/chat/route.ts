@@ -29,7 +29,7 @@ type LatestUserTurn = {
 const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
 const COACH_UNAVAILABLE_MESSAGE =
-  "Coach is unavailable right now. Please try again.";
+  "Coach is out to lunch. Please try again later.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
