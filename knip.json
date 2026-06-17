@@ -7,7 +7,20 @@
     "eslint-config-next",
     "jscpd"
   ],
-  "ignore": [".uv-cache/**"],
+  "ignore": [
+    ".worktrees/**",
+    ".codex/**",
+    ".agents/**",
+    ".claude/**",
+    ".serena/**",
+    ".remember/**",
+    ".cache/**",
+    ".dev/**",
+    ".uv-cache/**",
+    ".venv/**",
+    ".vercel/**",
+    ".next/**"
+  ],
   "ignoreBinaries": ["uv"],
   "lefthook": false
 }
