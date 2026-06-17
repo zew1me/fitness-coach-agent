@@ -1,6 +1,7 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
+import * as Sentry from "@sentry/nextjs";
 import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
 import Link from "next/link";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -1363,15 +1364,20 @@ function CoachChatBody({
               : attachment,
           ),
         );
-        console.error("Chat attachment upload returned no public_url", {
-          filename: file.name,
-          object_key: uploaded.object_key,
+        Sentry.logger.error("chat: attachment upload returned no public_url", {
+          filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+          content_type: contentType,
         });
         setThreadError(
           "We uploaded the file but couldn't get a shareable link back. Ask an admin to check the storage configuration.",
         );
         return;
       }
+      Sentry.logger.info("chat attachment ready", {
+        filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+        content_type: contentType,
+        has_public_url: true,
+      });
       setAttachments((current) =>
         current.map((attachment) =>
           attachment.filename === file.name && attachment.object_key === ""
@@ -1385,6 +1391,10 @@ function CoachChatBody({
         ),
       );
     } catch (error) {
+      Sentry.logger.error("chat attachment upload failed", {
+        filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+        content_type: contentType,
+      });
       setAttachments((current) =>
         current.map((attachment) =>
           attachment.filename === file.name && attachment.object_key === ""
@@ -1422,6 +1432,10 @@ function CoachChatBody({
 
     for (const file of files) {
       if (!isSupportedAttachment(file)) {
+        Sentry.logger.warn("unsupported attachment rejected", {
+          filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+          content_type: file.type,
+        });
         setThreadError(
           "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
         );
@@ -1441,6 +1455,11 @@ function CoachChatBody({
       const pendingComposer = composer;
       const pendingAttachments = attachments;
       const messageId = crypto.randomUUID();
+      Sentry.logger.info("user turn submitted", {
+        has_text: pendingComposer.trim().length > 0,
+        attachment_count: pendingAttachments.length,
+        message_id: messageId,
+      });
       await sendMessage({
         id: messageId,
         parts: [
@@ -1461,6 +1480,7 @@ function CoachChatBody({
         const refreshed = await loadChatThread();
         setThreadData(refreshed);
       } catch (refreshError) {
+        Sentry.logger.warn("chat thread refresh failed after send");
         console.error("Chat thread refresh failed after send", refreshError);
         setThreadError(
           "Message sent, but the thread failed to refresh. Reload to see the latest.",
@@ -1469,6 +1489,7 @@ function CoachChatBody({
         setSyncingThread(false);
       }
     } catch (error) {
+      Sentry.logger.error("message send failed");
       console.error("Sending coach message failed", error);
       setSyncingThread(false);
       setThreadError(errorMessage(error, "Unable to send your message."));
@@ -1489,7 +1510,7 @@ function CoachChatBody({
       const refreshed = await loadChatThread();
       setThreadData(refreshed);
     } catch (refreshError) {
-      // Profile saved; thread refresh is best-effort.
+      Sentry.logger.warn("chat thread refresh failed after profile save");
       console.warn(
         "Profile saved but chat thread refresh failed",
         refreshError,

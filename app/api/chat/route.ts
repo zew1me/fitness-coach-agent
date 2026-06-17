@@ -1,9 +1,10 @@
 import { createMCPClient } from "@ai-sdk/mcp";
+import * as Sentry from "@sentry/nextjs";
 import { type ToolSet, type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
-  selectMessagesForModel
+  selectMessagesForModel,
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
@@ -27,7 +28,8 @@ type LatestUserTurn = {
 
 const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
-const COACH_UNAVAILABLE_MESSAGE = "Coach is unavailable right now. Please try again.";
+const COACH_UNAVAILABLE_MESSAGE =
+  "Coach is unavailable right now. Please try again.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
@@ -48,37 +50,51 @@ function safeErrorMessage(error: unknown): string {
   return msg.replace(/key=[^&\s]+/g, "key=***");
 }
 
-async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse | null> {
+async function loadBrowserToken(
+  request: Request,
+): Promise<BrowserTokenResponse | null> {
   const cookie = request.headers.get("cookie");
   if (!cookie?.includes("coach_browser_session=")) {
     return null;
   }
 
-  const response = await fetch(`${requestOrigin(request)}/api/oauth/browser-token`, {
-    method: "POST",
-    headers: { cookie, ...vercelProtectionBypassHeaders() }
-  });
+  const response = await fetch(
+    `${requestOrigin(request)}/api/oauth/browser-token`,
+    {
+      method: "POST",
+      headers: { cookie, ...vercelProtectionBypassHeaders() },
+    },
+  );
   if (!response.ok) {
-    return null;
+    Sentry.logger.error("chat: browser token fetch failed", {
+      status: response.status,
+    });
+    throw new Error(`Browser token fetch failed with status ${response.status}`);
   }
   return (await response.json()) as BrowserTokenResponse;
 }
 
 async function loadAthleteContext(
   request: Request,
-  token: BrowserTokenResponse
+  token: BrowserTokenResponse,
 ): Promise<AthleteContextBundle> {
-  const response = await fetch(`${requestOrigin(request)}/api/engine/get-athlete-summary`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token.access_token}`,
-      "Content-Type": "application/json",
-      ...vercelProtectionBypassHeaders()
+  const response = await fetch(
+    `${requestOrigin(request)}/api/engine/get-athlete-summary`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        "Content-Type": "application/json",
+        ...vercelProtectionBypassHeaders(),
+      },
+      body: JSON.stringify({}),
     },
-    body: JSON.stringify({})
-  });
+  );
 
   if (!response.ok) {
+    Sentry.logger.error("chat: athlete context load failed", {
+      status: response.status,
+    });
     throw new Error("Unable to load athlete context.");
   }
 
@@ -100,58 +116,77 @@ function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
 async function persistUserMessage(
   request: Request,
   token: BrowserTokenResponse,
-  turn: LatestUserTurn
+  turn: LatestUserTurn,
 ): Promise<void> {
   if (turn.parts.length === 0) return;
   try {
-    const response = await fetch(`${requestOrigin(request)}/api/chat/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token.access_token}`,
-        "Content-Type": "application/json",
-        ...vercelProtectionBypassHeaders(),
+    const response = await fetch(
+      `${requestOrigin(request)}/api/chat/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token.access_token}`,
+          "Content-Type": "application/json",
+          ...vercelProtectionBypassHeaders(),
+        },
+        body: JSON.stringify({
+          id: turn.id,
+          role: "user",
+          parts: turn.parts,
+          metadata: { message_kind: "user_turn", client_message_id: turn.id },
+        }),
       },
-      body: JSON.stringify({
-        id: turn.id,
-        role: "user",
-        parts: turn.parts,
-        metadata: { message_kind: "user_turn", client_message_id: turn.id },
-      }),
-    });
+    );
     if (!response.ok) {
-      console.error("[chat] persist user message failed:", response.status);
+      Sentry.logger.warn("chat: persist user message failed", {
+        status: response.status,
+      });
     }
   } catch (error) {
-    console.error("[chat] persist user message error:", safeErrorMessage(error));
+    Sentry.logger.error("chat: persist user message error", {
+      error: safeErrorMessage(error),
+    });
   }
 }
 
 async function extractImageContent(
   request: Request,
   token: BrowserTokenResponse,
-  imageUrl: string
+  imageUrl: string,
 ): Promise<{ data: unknown; screenshot_type: string } | null> {
   try {
-    const response = await fetch(`${requestOrigin(request)}/api/engine/analyze-screenshot`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token.access_token}`,
-        "Content-Type": "application/json",
-        ...vercelProtectionBypassHeaders()
+    const response = await fetch(
+      `${requestOrigin(request)}/api/engine/analyze-screenshot`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token.access_token}`,
+          "Content-Type": "application/json",
+          ...vercelProtectionBypassHeaders(),
+        },
+        body: JSON.stringify({ image_url: imageUrl }),
       },
-      body: JSON.stringify({ image_url: imageUrl })
-    });
+    );
 
     if (!response.ok) {
       return null;
     }
 
-    const payload = (await response.json()) as { data?: unknown; screenshot_type?: unknown };
+    const payload = (await response.json()) as {
+      data?: unknown;
+      screenshot_type?: unknown;
+    };
     return {
       data: payload.data ?? {},
-      screenshot_type: typeof payload.screenshot_type === "string" ? payload.screenshot_type : "unknown"
+      screenshot_type:
+        typeof payload.screenshot_type === "string"
+          ? payload.screenshot_type
+          : "unknown",
     };
-  } catch {
+  } catch (error) {
+    Sentry.logger.warn("chat: screenshot extraction failed", {
+      error: safeErrorMessage(error),
+    });
     return null;
   }
 }
@@ -165,15 +200,20 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   if (token === null) {
+    Sentry.logger.warn("chat: missing browser session cookie");
     return jsonError("Missing browser session cookie.", 401);
   }
 
   try {
     const body = (await request.json()) as ChatRequestBody;
     const messages = body.messages ?? [];
+    Sentry.logger.info("chat turn start", {
+      user_id: token.user_id,
+      message_count: messages.length,
+    });
     const modelMessages = await appendImageExtractionsToMessages(
       selectMessagesForModel(messages),
-      ({ imageUrl }) => extractImageContent(request, token, imageUrl)
+      ({ imageUrl }) => extractImageContent(request, token, imageUrl),
     );
     const latestUserTurn = summarizeLatestUserTurn(messages);
     if (latestUserTurn !== null) {
@@ -187,6 +227,11 @@ export async function POST(request: Request): Promise<Response> {
           transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
         }).then((c) => c.tools())
       : {};
+    if (tavilyApiKey) {
+      Sentry.logger.info("chat: tavily tools loaded", {
+        count: Object.keys(tavilyTools).length,
+      });
+    }
 
     return await streamCoachTurn({
       accessToken: token.access_token,
@@ -199,7 +244,7 @@ export async function POST(request: Request): Promise<Response> {
       tavilyTools,
     });
   } catch (error) {
-    console.error("[chat] POST error:", safeErrorMessage(error));
+    Sentry.logger.error("chat: POST error", { error: safeErrorMessage(error) });
     return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });
   }
 }

@@ -215,6 +215,12 @@ class AuthService:
             client_id=grant.client_id,
             scopes=code_record.scopes,
         )
+        logger.info(
+            "oauth code exchanged user_id=%s client_id=%s scopes=%s",
+            grant.user_id,
+            grant.client_id,
+            code_record.scopes,
+        )
         return TokenBundle(
             access_token=self._issue_access_token(
                 user_id=grant.user_id,
@@ -242,6 +248,11 @@ class AuthService:
         grant = self._oauth_repo.get_grant_by_id(refresh_record.grant_id)
         if grant is None or grant.revoked_at is not None:
             raise OAuthInvalidGrantError("The associated OAuth grant is no longer active.")
+        logger.info(
+            "oauth token refreshed user_id=%s client_id=%s",
+            refresh_record.user_id,
+            refresh_record.client_id,
+        )
         return TokenBundle(
             access_token=self._issue_access_token(
                 user_id=refresh_record.user_id,
@@ -333,6 +344,7 @@ class AuthService:
             raise OAuthInvalidGrantError("Access token is missing a grant id.")
         grant = self._oauth_repo.get_grant_by_id(grant_id)
         if grant is None or grant.revoked_at is not None:
+            logger.warning("bearer auth: grant revoked or missing grant_id=%s", grant_id)
             raise OAuthInvalidGrantError("The OAuth grant for this token has been revoked.")
         return UserContext(
             user_id=str(claims["sub"]),
@@ -362,6 +374,7 @@ class AuthService:
                 "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
             )
         url = f"{settings.supabase_url.rstrip('/')}/auth/v1/user"
+        logger.debug("supabase user fetch start")
         response = httpx.get(
             url,
             headers={
@@ -370,6 +383,7 @@ class AuthService:
             },
             timeout=10.0,
         )
+        logger.debug("supabase user fetch status=%d", response.status_code)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):

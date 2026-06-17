@@ -34,7 +34,11 @@
     "tests/ui",
     "tests/web",
     "vitest.config.ts",
-    ".next/types/**/*.ts"
+    ".next/types/**/*.ts",
+    "instrumentation.ts",
+    "instrumentation-client.ts",
+    "sentry.server.config.ts",
+    "sentry.edge.config.ts"
   ],
   "exclude": ["node_modules"]
 }
