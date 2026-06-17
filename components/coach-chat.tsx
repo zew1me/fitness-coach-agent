@@ -77,6 +77,7 @@ const COACHING_STARTERS: StarterPrompt[] = [
 
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
 const MESSAGE_RENDER_BATCH_SIZE = 60;
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20_000;
 const WAITING_STATUS_INTERVAL_MS = 1600;
 const WAITING_STATUSES = [
   "Thinking...",
@@ -1343,7 +1344,12 @@ function CoachChatBody({
         filename: file.name,
         purpose: "chat-attachment",
       });
-      const uploaded = await uploadFile(intent.object_key, file);
+      const uploaded = await uploadFile(
+        intent.object_key,
+        file,
+        undefined,
+        AbortSignal.timeout(ATTACHMENT_UPLOAD_TIMEOUT_MS),
+      );
       if (uploaded.public_url === null) {
         setAttachments((current) =>
           current.map((attachment) =>
@@ -1357,6 +1363,10 @@ function CoachChatBody({
               : attachment,
           ),
         );
+        console.error("Chat attachment upload returned no public_url", {
+          filename: file.name,
+          object_key: uploaded.object_key,
+        });
         setThreadError(
           "We uploaded the file but couldn't get a shareable link back. Ask an admin to check the storage configuration.",
         );
@@ -1382,7 +1392,14 @@ function CoachChatBody({
             : attachment,
         ),
       );
-      setThreadError(errorMessage(error, "Unable to upload that attachment."));
+      const timedOut =
+        error instanceof DOMException && error.name === "TimeoutError";
+      console.error("Chat attachment upload failed", error);
+      setThreadError(
+        timedOut
+          ? "That upload took too long and was cancelled. Check your connection and try again."
+          : errorMessage(error, "Unable to upload that attachment."),
+      );
     }
   }
 
