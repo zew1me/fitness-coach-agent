@@ -254,10 +254,14 @@ function hasSendableContent(
   composer: string,
   attachments: LocalAttachment[],
 ): boolean {
-  return (
-    composer.trim().length > 0 ||
-    attachments.some((attachment) => attachment.status === "uploaded")
+  const hasText = composer.trim().length > 0;
+  const hasPendingAttachment = attachments.some(
+    (attachment) => attachment.status === "uploading",
   );
+
+  return hasText
+    ? !hasPendingAttachment
+    : attachments.some((attachment) => attachment.status === "uploaded");
 }
 
 function activityContentType(file: File): string {
@@ -1441,12 +1445,13 @@ function CoachChatBody({
       const pendingComposer = composer;
       const pendingAttachments = attachments;
       const messageId = crypto.randomUUID();
+      const messageParts =
+        pendingComposer.trim().length > 0
+          ? [{ type: "text", text: pendingComposer }]
+          : [];
       await sendMessage({
         id: messageId,
-        parts: [
-          { type: "text", text: pendingComposer },
-          ...uploadedFileParts(pendingAttachments),
-        ],
+        parts: [...messageParts, ...uploadedFileParts(pendingAttachments)],
       });
       // Clear the draft only after the send succeeds so a failed send leaves the
       // composer text and attachments intact for the user to retry. The textarea
