@@ -1032,14 +1032,16 @@ def test_build_auth_redirect_urls_preview_without_domain_omits_domain_wildcard()
 
 def test_build_auth_redirect_urls_always_includes_localhost_3001() -> None:
     urls_preview = bootstrap_main._build_auth_redirect_urls(_settings(), "preview", "")
-    urls_prod = bootstrap_main._build_auth_redirect_urls(_settings(), "prod", "")
+    urls_prod = bootstrap_main._build_auth_redirect_urls(
+        _settings(), "prod", "fitness-coach-agent-phi.vercel.app"
+    )
     assert "http://localhost:3001/**" in urls_preview
     assert "http://localhost:3001/**" in urls_prod
 
 
-def test_build_auth_redirect_urls_prod_with_empty_domain_only_has_localhost() -> None:
-    urls = bootstrap_main._build_auth_redirect_urls(_settings(), "prod", "")
-    assert urls == ["http://localhost:3000/**", "http://localhost:3001/**"]
+def test_build_auth_redirect_urls_prod_with_empty_domain_requires_origin() -> None:
+    with pytest.raises(RuntimeError, match="production auth origin"):
+        bootstrap_main._build_auth_redirect_urls(_settings(), "prod", "")
 
 
 def test_build_auth_redirect_urls_prod_with_only_vercel_domain() -> None:
