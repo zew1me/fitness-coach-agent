@@ -104,6 +104,51 @@ function inferActivityContentType(filename: string | null): string | null {
   return null;
 }
 
+function isGenericOrInvalidContentType(contentType: string | null): boolean {
+  if (contentType === null) {
+    return true;
+  }
+
+  const normalizedContentType = contentType.trim().toLowerCase();
+
+  return (
+    normalizedContentType.length === 0 ||
+    normalizedContentType === "application/octet-stream" ||
+    !normalizedContentType.includes("/")
+  );
+}
+
+function resolveContentType(
+  contentType: string | null,
+  filename: string | null,
+): string | null {
+  if (contentType !== null && !isGenericOrInvalidContentType(contentType)) {
+    return contentType;
+  }
+
+  return inferActivityContentType(filename) ?? contentType;
+}
+
+function shouldAnalyzeScreenshot(
+  contentType: string | null,
+  publicUrl: string | null,
+): boolean {
+  return publicUrl !== null && contentType?.startsWith("image/") === true;
+}
+
+function isValidActivityUpload(
+  contentType: string | null,
+  filename: string | null,
+  objectKey: string | null,
+): boolean {
+  return (
+    contentType !== null &&
+    filename !== null &&
+    objectKey !== null &&
+    isActivityFile(contentType, filename)
+  );
+}
+
 function processUploadedFile(
   input: unknown,
   context: CoachToolContext,
@@ -113,21 +158,16 @@ function processUploadedFile(
   const filename = stringField(payload, "filename");
   const objectKey = stringField(payload, "object_key");
   const publicUrl = stringField(payload, "public_url");
-  const resolvedContentType = contentType ?? inferActivityContentType(filename);
 
-  if (resolvedContentType?.startsWith("image/") && publicUrl !== null) {
+  const resolvedContentType = resolveContentType(contentType, filename);
+
+  if (shouldAnalyzeScreenshot(resolvedContentType, publicUrl)) {
     return postEngine(context, "/api/engine/analyze-screenshot", {
       image_url: publicUrl,
     });
   }
 
-  const validActivityFile =
-    isActivityFile(resolvedContentType, filename) &&
-    resolvedContentType !== null &&
-    filename !== null &&
-    objectKey !== null;
-
-  if (validActivityFile) {
+  if (isValidActivityUpload(resolvedContentType, filename, objectKey)) {
     const payload = {
       content_type: resolvedContentType,
       filename,
