@@ -86,6 +86,69 @@ function isActivityFile(
   );
 }
 
+function inferActivityContentType(filename: string | null): string | null {
+  const lowerFilename = filename?.toLowerCase() ?? "";
+
+  if (lowerFilename.endsWith(".gpx")) {
+    return "application/gpx+xml";
+  }
+
+  if (lowerFilename.endsWith(".fit")) {
+    return "application/vnd.garmin.fit";
+  }
+
+  if (lowerFilename.endsWith(".tcx")) {
+    return "application/vnd.garmin.tcx+xml";
+  }
+
+  return null;
+}
+
+function isGenericOrInvalidContentType(contentType: string | null): boolean {
+  if (contentType === null) {
+    return true;
+  }
+
+  const normalizedContentType = contentType.trim().toLowerCase();
+
+  return (
+    normalizedContentType.length === 0 ||
+    normalizedContentType === "application/octet-stream" ||
+    !normalizedContentType.includes("/")
+  );
+}
+
+function resolveContentType(
+  contentType: string | null,
+  filename: string | null,
+): string | null {
+  if (contentType !== null && !isGenericOrInvalidContentType(contentType)) {
+    return contentType;
+  }
+
+  return inferActivityContentType(filename) ?? contentType;
+}
+
+function shouldAnalyzeScreenshot(
+  contentType: string | null,
+  publicUrl: string | null,
+): boolean {
+  return publicUrl !== null && contentType?.startsWith("image/") === true;
+}
+
+function isValidActivityUpload(
+  contentType: string | null,
+  filename: string | null,
+  objectKey: string | null,
+): boolean {
+  return (
+    contentType !== null &&
+    filename !== null &&
+    objectKey !== null &&
+    isActivityFile(contentType, filename)
+  );
+}
+
 function processUploadedFile(
   input: unknown,
   context: CoachToolContext,
@@ -96,24 +159,23 @@ function processUploadedFile(
   const objectKey = stringField(payload, "object_key");
   const publicUrl = stringField(payload, "public_url");
 
-  if (contentType?.startsWith("image/") && publicUrl !== null) {
+  const resolvedContentType = resolveContentType(contentType, filename);
+
+  if (shouldAnalyzeScreenshot(resolvedContentType, publicUrl)) {
     return postEngine(context, "/api/engine/analyze-screenshot", {
       image_url: publicUrl,
     });
   }
 
-  if (
-    isActivityFile(contentType, filename) &&
-    contentType !== null &&
-    filename !== null &&
-    objectKey !== null
-  ) {
-    return postEngine(context, "/api/engine/process-uploaded-file", {
-      content_type: contentType,
+  if (isValidActivityUpload(resolvedContentType, filename, objectKey)) {
+    const payload = {
+      content_type: resolvedContentType,
       filename,
       object_key: objectKey,
       public_url: publicUrl,
-    });
+    };
+
+    return postEngine(context, "/api/engine/process-uploaded-file", payload);
   }
 
   return null;

@@ -31,10 +31,11 @@ import type { ThemeMode } from "../lib/use-theme";
 import styles from "./coach-chat.module.css";
 
 type LocalAttachment = {
+  id: string;
   content_type: string;
   filename: string;
   object_key: string;
-  previewUrl: string | null;
+  preview_url: string | null;
   public_url: string | null;
   status: "error" | "uploaded" | "uploading";
 };
@@ -105,8 +106,8 @@ function readableTime(timestamp: string): string {
 
 function removePreviewUrls(attachments: LocalAttachment[]): void {
   for (const attachment of attachments) {
-    if (attachment.previewUrl !== null) {
-      URL.revokeObjectURL(attachment.previewUrl);
+    if (attachment.preview_url !== null) {
+      URL.revokeObjectURL(attachment.preview_url);
     }
   }
 }
@@ -254,10 +255,14 @@ function hasSendableContent(
   composer: string,
   attachments: LocalAttachment[],
 ): boolean {
-  return (
-    composer.trim().length > 0 ||
-    attachments.some((attachment) => attachment.status === "uploaded")
+  const hasText = composer.trim().length > 0;
+  const hasPendingAttachment = attachments.some(
+    (attachment) => attachment.status === "uploading",
   );
+
+  return hasText
+    ? !hasPendingAttachment
+    : attachments.some((attachment) => attachment.status === "uploaded");
 }
 
 function activityContentType(file: File): string {
@@ -796,10 +801,7 @@ function UploadChips({
   return (
     <div className={styles.uploadRow}>
       {attachments.map((attachment) => (
-        <UploadChip
-          attachment={attachment}
-          key={`${attachment.filename}-${attachment.previewUrl ?? ""}`}
-        />
+        <UploadChip attachment={attachment} key={attachment.id} />
       ))}
     </div>
   );
@@ -1335,7 +1337,10 @@ function CoachChatBody({
     };
   }, [attachments]);
 
-  async function uploadOneAttachment(file: File): Promise<void> {
+  async function uploadOneAttachment(
+    attachmentId: string,
+    file: File,
+  ): Promise<void> {
     const contentType = activityContentType(file);
     try {
       const intent = await createChatUploadIntent({
@@ -1353,7 +1358,7 @@ function CoachChatBody({
       if (uploaded.public_url === null) {
         setAttachments((current) =>
           current.map((attachment) =>
-            attachment.filename === file.name && attachment.object_key === ""
+            attachment.id === attachmentId
               ? {
                   ...attachment,
                   object_key: uploaded.object_key,
@@ -1374,7 +1379,7 @@ function CoachChatBody({
       }
       setAttachments((current) =>
         current.map((attachment) =>
-          attachment.filename === file.name && attachment.object_key === ""
+          attachment.id === attachmentId
             ? {
                 ...attachment,
                 object_key: uploaded.object_key,
@@ -1387,7 +1392,7 @@ function CoachChatBody({
     } catch (error) {
       setAttachments((current) =>
         current.map((attachment) =>
-          attachment.filename === file.name && attachment.object_key === ""
+          attachment.id === attachmentId
             ? { ...attachment, status: "error" }
             : attachment,
         ),
@@ -1406,19 +1411,8 @@ function CoachChatBody({
   async function handleFilesAdded(files: File[]): Promise<void> {
     if (files.length === 0) return;
 
-    const nextLocalAttachments = files
-      .filter(isSupportedAttachment)
-      .map<LocalAttachment>((file) => ({
-        content_type: activityContentType(file),
-        filename: file.name,
-        object_key: "",
-        previewUrl: file.type.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : null,
-        public_url: null,
-        status: "uploading",
-      }));
-    setAttachments((current) => [...current, ...nextLocalAttachments]);
+    const uploadQueue: Array<{ attachmentId: string; file: File }> = [];
+    const nextLocalAttachments: LocalAttachment[] = [];
 
     for (const file of files) {
       if (!isSupportedAttachment(file)) {
@@ -1427,7 +1421,24 @@ function CoachChatBody({
         );
         continue;
       }
-      await uploadOneAttachment(file);
+      const attachmentId = crypto.randomUUID();
+      uploadQueue.push({ attachmentId, file });
+      nextLocalAttachments.push({
+        id: attachmentId,
+        content_type: activityContentType(file),
+        filename: file.name,
+        object_key: "",
+        preview_url: file.type.startsWith("image/")
+          ? URL.createObjectURL(file)
+          : null,
+        public_url: null,
+        status: "uploading",
+      });
+    }
+    setAttachments((current) => [...current, ...nextLocalAttachments]);
+
+    for (const { attachmentId, file } of uploadQueue) {
+      await uploadOneAttachment(attachmentId, file);
     }
   }
 
@@ -1441,12 +1452,13 @@ function CoachChatBody({
       const pendingComposer = composer;
       const pendingAttachments = attachments;
       const messageId = crypto.randomUUID();
+      const messageParts: UIMessage["parts"] =
+        pendingComposer.trim().length > 0
+          ? [{ type: "text" as const, text: pendingComposer }]
+          : [];
       await sendMessage({
         id: messageId,
-        parts: [
-          { type: "text", text: pendingComposer },
-          ...uploadedFileParts(pendingAttachments),
-        ],
+        parts: [...messageParts, ...uploadedFileParts(pendingAttachments)],
       });
       // Clear the draft only after the send succeeds so a failed send leaves the
       // composer text and attachments intact for the user to retry. The textarea

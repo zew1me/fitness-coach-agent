@@ -1815,6 +1815,127 @@ describe("CoachChat", () => {
     });
   });
 
+  it("sends attachment-only messages without injecting an empty text part", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: [
+                "profile:read",
+                "profile:write",
+                "plans:read",
+                "plans:write",
+                "metrics:write",
+              ],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: true,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [],
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/attachments/presign") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "x-upload": "1" },
+              method: "PUT",
+              object_key: "uploads/morning-run.gpx",
+              public_url: "https://example.com/morning-run.gpx",
+              upload_url: "https://upload.example/morning-run.gpx",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/attachments/upload") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "Content-Type": "application/gpx+xml" },
+              method: "POST",
+              object_key: "uploads/morning-run.gpx",
+              public_url: "https://example.com/morning-run.gpx",
+              upload_url: "",
+            }),
+            { status: 201 },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const { container } = render(<CoachChat />);
+
+    await screen.findByPlaceholderText(/Ask your coach/i);
+    const fileInput = container.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(["<gpx>activity</gpx>"], "morning-run.gpx", {
+            type: "application/gpx+xml",
+          }),
+        ],
+      },
+    });
+
+    await screen.findByText("morning-run.gpx");
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/chat/attachments/upload",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    await screen.findByText("Ready");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        id: expect.stringMatching(uuidPattern),
+        parts: [
+          {
+            filename: "morning-run.gpx",
+            mediaType: "application/gpx+xml",
+            type: "file",
+            url: "https://example.com/morning-run.gpx",
+          },
+        ],
+      });
+    });
+  });
+
   it("uploads GPX attachments through the chat attachment endpoint and shows a file badge", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
