@@ -65,7 +65,7 @@ export type AgentModelPolicy = {
 };
 
 export function loadAgentModelPolicy(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Readonly<Record<string, string | undefined>> = process.env,
 ): AgentModelPolicy;
 ```
 

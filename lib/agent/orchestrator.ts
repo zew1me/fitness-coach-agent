@@ -14,6 +14,7 @@ import {
   convertUnsupportedFilePartsToText,
   selectMessagesForModel,
 } from "./message-context";
+import { loadAgentModelPolicy } from "./model-policy";
 import {
   specialistReportsSchema,
   type SpecialistReport,
@@ -83,7 +84,9 @@ export async function streamCoachTurn({
   streamErrorMessage = "Coach is unavailable right now. Please try again.",
   tavilyTools = {},
 }: StreamCoachTurnOptions): Promise<Response> {
-  const model = openai("gpt-5-mini");
+  const modelPolicy = loadAgentModelPolicy();
+  const model = openai(modelPolicy.leadModel);
+  const specialistModel = openai(modelPolicy.specialistModel);
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
@@ -95,7 +98,8 @@ export async function streamCoachTurn({
     await runSpecialists({
       messages: selectedMessages,
       messagesAreModelSelected: true,
-      model,
+      model: specialistModel,
+      modelPolicy,
       roles: intent.specialists,
       slices,
     }),
@@ -110,6 +114,8 @@ export async function streamCoachTurn({
   const systemPrompt = buildLeadCoachPrompt(context, specialistReports);
 
   const result = streamText({
+    maxOutputTokens: 2048,
+    maxRetries: 2,
     messages: await convertToModelMessages(normalizedMessages),
     model,
     system: systemPrompt,
@@ -134,6 +140,18 @@ export async function streamCoachTurn({
         "[chat] stream error:",
         msg.replace(/key=[^&\s]+/g, "key=***"),
       );
+    },
+    providerOptions: {
+      openai: {
+        reasoningEffort: modelPolicy.leadReasoningEffort,
+        store: true,
+        textVerbosity: modelPolicy.textVerbosity,
+      },
+    },
+    timeout: {
+      chunkMs: 15_000,
+      stepMs: 45_000,
+      totalMs: 90_000,
     },
   });
 

@@ -10,6 +10,7 @@ import {
   convertUnsupportedFilePartsToText,
   selectMessagesForModel,
 } from "./message-context";
+import type { AgentModelPolicy } from "./model-policy";
 import {
   type ContextSlices,
   type InternalSpecialistRole,
@@ -29,6 +30,7 @@ type RunSpecialistsOptions = {
   messagesAreModelSelected?: boolean;
   messages: UIMessage[];
   model: LanguageModel;
+  modelPolicy: AgentModelPolicy;
   roles: InternalSpecialistRole[];
   slices: ContextSlices;
 };
@@ -42,6 +44,7 @@ export async function runSpecialists({
   messagesAreModelSelected = false,
   messages,
   model,
+  modelPolicy,
   roles,
   slices,
 }: RunSpecialistsOptions): Promise<SpecialistReport[]> {
@@ -55,12 +58,24 @@ export async function runSpecialists({
 
   for (const role of orderedRoles) {
     const { output } = await generateText({
+      maxOutputTokens: 1024,
+      maxRetries: 2,
       messages: await convertToModelMessages(normalizedMessages),
       model,
       output: Output.object({
         schema: specialistReportSchema,
       }),
       system: buildSpecialistPrompt(role, slices[role]),
+      providerOptions: {
+        openai: {
+          reasoningEffort: modelPolicy.specialistReasoningEffort,
+          store: true,
+          textVerbosity: "low",
+        },
+      },
+      timeout: {
+        totalMs: 30_000,
+      },
     });
 
     reports.push(specialistReportSchema.parse(output));

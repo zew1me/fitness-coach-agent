@@ -71,13 +71,27 @@ type UIStreamOptions = {
 };
 
 type StreamTextOptions = {
+  maxOutputTokens?: number;
+  maxRetries?: number;
   prepareStep?: (options: {
     steps: Array<{ toolCalls: Array<{ toolName: string }> }>;
   }) => {
     activeTools?: string[];
     system?: string;
   };
+  providerOptions?: {
+    openai?: {
+      reasoningEffort?: string;
+      store?: boolean;
+      textVerbosity?: string;
+    };
+  };
   stopWhen?: unknown;
+  timeout?: {
+    chunkMs?: number;
+    stepMs?: number;
+    totalMs?: number;
+  };
 };
 
 const originalFetch = globalThis.fetch;
@@ -88,6 +102,46 @@ afterEach(() => {
 });
 
 describe("streamCoachTurn", () => {
+  it("uses bounded GPT-5.5 lead settings", async () => {
+    await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: [
+        {
+          id: "63ff9606-9158-43d7-a82b-d31ef9788b7d",
+          parts: [{ text: "How should I train tomorrow?", type: "text" }],
+          role: "user",
+        },
+      ],
+    });
+
+    const options = (
+      orchestratorMocks.streamText.mock.calls as unknown as [
+        [StreamTextOptions],
+      ]
+    )[0][0];
+    const { openai } = await import("@ai-sdk/openai");
+
+    expect(openai).toHaveBeenCalledWith("gpt-5.5");
+    expect(options).toMatchObject({
+      maxOutputTokens: 2048,
+      maxRetries: 2,
+      providerOptions: {
+        openai: {
+          reasoningEffort: "medium",
+          store: true,
+          textVerbosity: "low",
+        },
+      },
+      timeout: {
+        chunkMs: 15_000,
+        stepMs: 45_000,
+        totalMs: 90_000,
+      },
+    });
+  });
+
   it("persists assistant replies with the UI response message id", async () => {
     const messages: UIMessage[] = [
       {

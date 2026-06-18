@@ -228,7 +228,7 @@ async def _call_vision(prompt: str, image_url: str) -> str:
         return "{}"
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=settings.openai_vision_timeout_seconds) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/responses",
                 headers={
@@ -236,13 +236,17 @@ async def _call_vision(prompt: str, image_url: str) -> str:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "gpt-5-mini",
+                    "model": settings.openai_vision_model,
                     "input": [
                         {
                             "role": "user",
                             "content": [
                                 {"type": "input_text", "text": prompt},
-                                {"type": "input_image", "image_url": image_url},
+                                {
+                                    "type": "input_image",
+                                    "image_url": image_url,
+                                    "detail": "high",
+                                },
                             ],
                         }
                     ],

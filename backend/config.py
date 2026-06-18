@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     app_base_url: str = ""  # leave blank on Vercel preview; set explicitly for production
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None
+    openai_vision_model: str = "gpt-5.4-mini"
+    openai_vision_timeout_seconds: float = 45.0
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None
     r2_bucket: str | None = None
