@@ -31,6 +31,7 @@ import type { ThemeMode } from "../lib/use-theme";
 import styles from "./coach-chat.module.css";
 
 type LocalAttachment = {
+  id: string;
   content_type: string;
   filename: string;
   object_key: string;
@@ -800,10 +801,7 @@ function UploadChips({
   return (
     <div className={styles.uploadRow}>
       {attachments.map((attachment) => (
-        <UploadChip
-          attachment={attachment}
-          key={`${attachment.filename}-${attachment.previewUrl ?? ""}`}
-        />
+        <UploadChip attachment={attachment} key={attachment.id} />
       ))}
     </div>
   );
@@ -1413,6 +1411,7 @@ function CoachChatBody({
     const nextLocalAttachments = files
       .filter(isSupportedAttachment)
       .map<LocalAttachment>((file) => ({
+        id: crypto.randomUUID(),
         content_type: activityContentType(file),
         filename: file.name,
         object_key: "",

@@ -185,7 +185,11 @@ export async function POST(request: Request): Promise<Response> {
   let token: BrowserTokenResponse | null;
   try {
     token = await loadBrowserToken(request);
-  } catch {
+  } catch (error) {
+    console.error("[chat] loadBrowserToken failed", {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     return jsonError(AUTH_UNAVAILABLE_MESSAGE, 503);
   }
 
