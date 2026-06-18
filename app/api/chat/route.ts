@@ -216,46 +216,53 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    const body = (await request.json()) as ChatRequestBody;
-    const messages = body.messages ?? [];
-    Sentry.logger.info("chat turn start", {
-      user_id: token.user_id,
-      message_count: messages.length,
-    });
-    const modelMessages = await appendImageExtractionsToMessages(
-      selectMessagesForModel(messages),
-      ({ imageUrl }) => extractImageContent(request, token, imageUrl),
-    );
-    const latestUserTurn = summarizeLatestUserTurn(messages);
-    if (latestUserTurn !== null) {
-      await persistUserMessage(request, token, latestUserTurn);
-    }
-    const context = await loadAthleteContext(request, token);
-
-    const tavilyApiKey = process.env["TAVILY_API_KEY"];
-    const tavilyTools: ToolSet = tavilyApiKey
-      ? await createMCPClient({
-          transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
-        }).then((c) => c.tools())
-      : {};
-    if (tavilyApiKey) {
-      Sentry.logger.info("chat: tavily tools loaded", {
-        count: Object.keys(tavilyTools).length,
-      });
-    }
-
-    return await streamCoachTurn({
-      accessToken: token.access_token,
-      baseUrl: requestOrigin(request),
-      context,
-      extraHeaders: vercelProtectionBypassHeaders(),
-      messages: modelMessages,
-      messagesAreModelSelected: true,
-      streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
-      tavilyTools,
-    });
+    return await streamCoachTurnWithContext(request, token);
   } catch (error) {
     Sentry.logger.error("chat: POST error", { error: safeErrorMessage(error) });
     return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });
   }
+}
+
+async function streamCoachTurnWithContext(
+  request: Request,
+  token: BrowserTokenResponse,
+): Promise<Response> {
+  const body = (await request.json()) as ChatRequestBody;
+  const messages = body.messages ?? [];
+  Sentry.logger.info("chat turn start", {
+    user_id: token.user_id,
+    message_count: messages.length,
+  });
+  const modelMessages = await appendImageExtractionsToMessages(
+    selectMessagesForModel(messages),
+    ({ imageUrl }) => extractImageContent(request, token, imageUrl),
+  );
+  const latestUserTurn = summarizeLatestUserTurn(messages);
+  if (latestUserTurn !== null) {
+    await persistUserMessage(request, token, latestUserTurn);
+  }
+  const context = await loadAthleteContext(request, token);
+
+  const tavilyApiKey = process.env["TAVILY_API_KEY"];
+  const tavilyTools: ToolSet = tavilyApiKey
+    ? await createMCPClient({
+        transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
+      }).then((c) => c.tools())
+    : {};
+  if (tavilyApiKey) {
+    Sentry.logger.info("chat: tavily tools loaded", {
+      count: Object.keys(tavilyTools).length,
+    });
+  }
+
+  return await streamCoachTurn({
+    accessToken: token.access_token,
+    baseUrl: requestOrigin(request),
+    context,
+    extraHeaders: vercelProtectionBypassHeaders(),
+    messages: modelMessages,
+    messagesAreModelSelected: true,
+    streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+    tavilyTools,
+  });
 }
