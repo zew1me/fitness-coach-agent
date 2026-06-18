@@ -201,6 +201,7 @@ export async function uploadFile(
   objectKey: string,
   file: File,
   fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<PresignUploadResponse> {
   const formData = new FormData();
   formData.append("object_key", objectKey);
@@ -211,6 +212,7 @@ export async function uploadFile(
     {
       method: "POST",
       body: formData,
+      signal: signal ?? null,
     },
     fetchImpl,
   );

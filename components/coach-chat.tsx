@@ -32,7 +32,6 @@ import styles from "./coach-chat.module.css";
 
 type LocalAttachment = {
   content_type: string;
-  dataUrl: string | null;
   filename: string;
   object_key: string;
   previewUrl: string | null;
@@ -78,6 +77,7 @@ const COACHING_STARTERS: StarterPrompt[] = [
 
 const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
 const MESSAGE_RENDER_BATCH_SIZE = 60;
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20_000;
 const WAITING_STATUS_INTERVAL_MS = 1600;
 const WAITING_STATUSES = [
   "Thinking...",
@@ -236,11 +236,7 @@ function toLiveChatMessage(
 
 function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
   return attachments.flatMap((attachment) => {
-    if (attachment.status !== "uploaded") {
-      return [];
-    }
-    const url = attachment.public_url ?? attachment.dataUrl;
-    if (url === null) {
+    if (attachment.status !== "uploaded" || attachment.public_url === null) {
       return [];
     }
     return [
@@ -248,10 +244,20 @@ function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
         filename: attachment.filename,
         mediaType: attachment.content_type,
         type: "file",
-        url,
+        url: attachment.public_url,
       },
     ];
   });
+}
+
+function hasSendableContent(
+  composer: string,
+  attachments: LocalAttachment[],
+): boolean {
+  return (
+    composer.trim().length > 0 ||
+    attachments.some((attachment) => attachment.status === "uploaded")
+  );
 }
 
 function activityContentType(file: File): string {
@@ -814,8 +820,7 @@ function SendButton({
   syncingThread: boolean;
   onSend: () => void;
 }>): JSX.Element {
-  const disabled =
-    composerBusy || (composer.trim().length === 0 && attachments.length === 0);
+  const disabled = composerBusy || !hasSendableContent(composer, attachments);
   const label = syncingThread ? "Syncing" : sending ? "Sending..." : "Send";
   return (
     <button
@@ -1206,25 +1211,6 @@ function ProfileDrawerBody({
   );
 }
 
-async function tryReadDataUrl(
-  file: File,
-  contentType: string,
-): Promise<string | null> {
-  try {
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i] as number);
-    }
-    return `data:${contentType};base64,${btoa(binary)}`;
-  } catch (error) {
-    // Non-critical: data URL is only a fallback when public_url is unavailable.
-    console.warn("Failed to build data URL for attachment fallback", error);
-    return null;
-  }
-}
-
 export function CoachChat(): JSX.Element {
   const session = useBrowserSession();
   if (session.loading) {
@@ -1358,16 +1344,39 @@ function CoachChatBody({
         filename: file.name,
         purpose: "chat-attachment",
       });
-      const uploaded = await uploadFile(intent.object_key, file);
-      const dataUrl = contentType.startsWith("image/")
-        ? await tryReadDataUrl(file, contentType)
-        : null;
+      const uploaded = await uploadFile(
+        intent.object_key,
+        file,
+        undefined,
+        AbortSignal.timeout(ATTACHMENT_UPLOAD_TIMEOUT_MS),
+      );
+      if (uploaded.public_url === null) {
+        setAttachments((current) =>
+          current.map((attachment) =>
+            attachment.filename === file.name && attachment.object_key === ""
+              ? {
+                  ...attachment,
+                  object_key: uploaded.object_key,
+                  public_url: null,
+                  status: "error",
+                }
+              : attachment,
+          ),
+        );
+        console.error("Chat attachment upload returned no public_url", {
+          filename: file.name,
+          object_key: uploaded.object_key,
+        });
+        setThreadError(
+          "We uploaded the file but couldn't get a shareable link back. Ask an admin to check the storage configuration.",
+        );
+        return;
+      }
       setAttachments((current) =>
         current.map((attachment) =>
           attachment.filename === file.name && attachment.object_key === ""
             ? {
                 ...attachment,
-                dataUrl,
                 object_key: uploaded.object_key,
                 public_url: uploaded.public_url,
                 status: "uploaded",
@@ -1383,7 +1392,14 @@ function CoachChatBody({
             : attachment,
         ),
       );
-      setThreadError(errorMessage(error, "Unable to upload that attachment."));
+      const timedOut =
+        error instanceof DOMException && error.name === "TimeoutError";
+      console.error("Chat attachment upload failed", error);
+      setThreadError(
+        timedOut
+          ? "That upload took too long and was cancelled. Check your connection and try again."
+          : errorMessage(error, "Unable to upload that attachment."),
+      );
     }
   }
 
@@ -1394,7 +1410,6 @@ function CoachChatBody({
       .filter(isSupportedAttachment)
       .map<LocalAttachment>((file) => ({
         content_type: activityContentType(file),
-        dataUrl: null,
         filename: file.name,
         object_key: "",
         previewUrl: file.type.startsWith("image/")
@@ -1418,7 +1433,7 @@ function CoachChatBody({
 
   async function handleSend(): Promise<void> {
     if (composerBusy) return;
-    if (composer.trim().length === 0 && attachments.length === 0) return;
+    if (!hasSendableContent(composer, attachments)) return;
 
     setSending(true);
     setThreadError(null);
