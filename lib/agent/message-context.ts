@@ -178,7 +178,8 @@ function uploadedFileText(file: NonImageFilePart): string {
   }
 
   return (
-    `Uploaded file: ${file.filename} (${file.mediaType})\n` +
+    `Uploaded file: ${file.filename}\n` +
+    `content_type=${file.mediaType}\n` +
     `public_url=${file.url}\n` +
     `object_key=${objectKey}`
   );

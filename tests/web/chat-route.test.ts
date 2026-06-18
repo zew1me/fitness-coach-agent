@@ -450,12 +450,12 @@ describe("app/api/chat route", () => {
       const textPart = result[0]?.parts[1] as { type: string; text: string };
       expect(textPart.type).toBe("text");
       expect(textPart.text).toContain("morning-run.gpx");
-      expect(textPart.text).toContain("application/gpx+xml");
+      expect(textPart.text).toContain("content_type=application/gpx+xml");
       expect(textPart.text).toContain(
-        "https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+        "public_url=https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
       );
       expect(textPart.text).toContain(
-        "users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+        "object_key=users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
       );
     });
 
