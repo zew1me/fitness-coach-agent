@@ -6,6 +6,11 @@
     },
     "Sentry": {
       "url": "https://mcp.sentry.dev/mcp/large-language-music-llc/javascript-nextjs"
+      "type": "http"
+    },
+    "supabase-prod": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=ejogxwyxmjbnnlvxzmji"
     }
   }
 }
