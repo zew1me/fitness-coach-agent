@@ -5,7 +5,7 @@
       "url": "https://mcp.supabase.com/mcp?project_ref=psbteexygkspyotkyflc"
     },
     "Sentry": {
-      "url": "https://mcp.sentry.dev/mcp/large-language-music-llc/javascript-nextjs"
+      "url": "https://mcp.sentry.dev/mcp/large-language-music-llc/javascript-nextjs",
       "type": "http"
     },
     "supabase-prod": {
