@@ -1444,9 +1444,9 @@ function CoachChatBody({
       const pendingComposer = composer;
       const pendingAttachments = attachments;
       const messageId = crypto.randomUUID();
-      const messageParts =
+      const messageParts: UIMessage["parts"] =
         pendingComposer.trim().length > 0
-          ? [{ type: "text", text: pendingComposer }]
+          ? [{ type: "text" as const, text: pendingComposer }]
           : [];
       await sendMessage({
         id: messageId,
