@@ -76,8 +76,11 @@ Configure:
 Recommended local setup:
 
 - Put app secrets in `.env`.
-- Put your Supabase personal access token in `.envrc` as `SUPABASE_ACCESS_TOKEN=...` if you want
-  to run Supabase CLI or management API commands locally.
+- For direct Supabase CLI or Management API commands, you may put your personal access token in
+  `.envrc` as `SUPABASE_ACCESS_TOKEN=...`.
+- For `bun run setup:preview` or `bun run setup:prod`, put the token in `.env.bootstrap` and run
+  `unset SUPABASE_ACCESS_TOKEN` first. Bootstrap warns immediately if a conflicting or shell-only
+  token is present.
 - Replace the placeholder `APP_JWT_SECRET` with a strong random value before any shared or deployed use.
 
 Environment contract:

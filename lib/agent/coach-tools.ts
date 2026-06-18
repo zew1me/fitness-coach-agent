@@ -12,17 +12,20 @@ export type CoachToolContext = {
 async function postEngine<TInput extends object>(
   context: CoachToolContext,
   path: string,
-  input: TInput
+  input: TInput,
 ): Promise<unknown> {
-  const response = await (context.fetchImpl ?? fetch)(`${context.baseUrl}${path}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${context.accessToken}`,
-      "Content-Type": "application/json",
-      ...(context.extraHeaders ?? {}),
+  const response = await (context.fetchImpl ?? fetch)(
+    `${context.baseUrl}${path}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${context.accessToken}`,
+        "Content-Type": "application/json",
+        ...(context.extraHeaders ?? {}),
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+  );
 
   if (!response.ok) {
     throw new Error(`Engine request failed for ${path}.`);
@@ -31,10 +34,18 @@ async function postEngine<TInput extends object>(
   return response.json();
 }
 
-async function getAthleteSummary(context: CoachToolContext): Promise<Record<string, unknown>> {
-  const summary = await postEngine(context, "/api/engine/get-athlete-summary", {});
+async function getAthleteSummary(
+  context: CoachToolContext,
+): Promise<Record<string, unknown>> {
+  const summary = await postEngine(
+    context,
+    "/api/engine/get-athlete-summary",
+    {},
+  );
 
-  return summary !== null && typeof summary === "object" && !Array.isArray(summary)
+  return summary !== null &&
+    typeof summary === "object" &&
+    !Array.isArray(summary)
     ? (summary as Record<string, unknown>)
     : {};
 }
@@ -45,15 +56,25 @@ function engineInput(input: unknown): Record<string, unknown> {
   }
 
   // Strip any user_id the LLM might include — the backend derives user identity from the bearer token.
-  return Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([key]) => key !== "user_id"));
+  return Object.fromEntries(
+    Object.entries(input as Record<string, unknown>).filter(
+      ([key]) => key !== "user_id",
+    ),
+  );
 }
 
-function stringField(input: Record<string, unknown>, key: string): string | null {
+function stringField(
+  input: Record<string, unknown>,
+  key: string,
+): string | null {
   const value = input[key];
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function isActivityFile(contentType: string | null, filename: string | null): boolean {
+function isActivityFile(
+  contentType: string | null,
+  filename: string | null,
+): boolean {
   const lowerFilename = filename?.toLowerCase() ?? "";
   return (
     contentType === "application/gpx+xml" ||
@@ -65,7 +86,10 @@ function isActivityFile(contentType: string | null, filename: string | null): bo
   );
 }
 
-function processUploadedFile(input: unknown, context: CoachToolContext): unknown {
+function processUploadedFile(
+  input: unknown,
+  context: CoachToolContext,
+): unknown {
   const payload = engineInput(input);
   const contentType = stringField(payload, "content_type");
   const filename = stringField(payload, "filename");
@@ -78,7 +102,12 @@ function processUploadedFile(input: unknown, context: CoachToolContext): unknown
     });
   }
 
-  if (isActivityFile(contentType, filename) && contentType !== null && filename !== null && objectKey !== null) {
+  if (
+    isActivityFile(contentType, filename) &&
+    contentType !== null &&
+    filename !== null &&
+    objectKey !== null
+  ) {
     return postEngine(context, "/api/engine/process-uploaded-file", {
       content_type: contentType,
       filename,
@@ -90,11 +119,16 @@ function processUploadedFile(input: unknown, context: CoachToolContext): unknown
   return null;
 }
 
-function updateAthleteProfile(input: unknown, context: CoachToolContext): unknown {
+function updateAthleteProfile(
+  input: unknown,
+  context: CoachToolContext,
+): unknown {
   const payload = engineInput(input);
   const inputFields = payload["fields"];
   const fields =
-    inputFields !== null && typeof inputFields === "object" && !Array.isArray(inputFields)
+    inputFields !== null &&
+    typeof inputFields === "object" &&
+    !Array.isArray(inputFields)
       ? (inputFields as Record<string, unknown>)
       : payload;
 
@@ -106,24 +140,40 @@ function updateAthleteProfile(input: unknown, context: CoachToolContext): unknow
 function executeDeterministicEngineTool(
   name: string,
   input: unknown,
-  context: CoachToolContext
+  context: CoachToolContext,
 ): unknown {
   if (name === "calculate_zones") {
-    return postEngine(context, "/api/engine/calculate-zones", engineInput(input));
+    return postEngine(
+      context,
+      "/api/engine/calculate-zones",
+      engineInput(input),
+    );
   }
 
   if (name === "estimate_thresholds") {
-    return postEngine(context, "/api/engine/estimate-thresholds", engineInput(input));
+    return postEngine(
+      context,
+      "/api/engine/estimate-thresholds",
+      engineInput(input),
+    );
   }
 
   if (name === "generate_training_plan") {
-    return postEngine(context, "/api/engine/generate-plan-structure", engineInput(input));
+    return postEngine(
+      context,
+      "/api/engine/generate-plan-structure",
+      engineInput(input),
+    );
   }
 
   return null;
 }
 
-function executeCoachTool(name: string, input: unknown, context: CoachToolContext): unknown {
+function executeCoachTool(
+  name: string,
+  input: unknown,
+  context: CoachToolContext,
+): unknown {
   if (name === "get_athlete_context") {
     return getAthleteSummary(context);
   }
@@ -135,7 +185,11 @@ function executeCoachTool(name: string, input: unknown, context: CoachToolContex
   }
 
   if (name === "get_recent_activities") {
-    return postEngine(context, "/api/engine/get-recent-activities", engineInput(input));
+    return postEngine(
+      context,
+      "/api/engine/get-recent-activities",
+      engineInput(input),
+    );
   }
 
   if (name === "update_athlete_profile") {
@@ -154,11 +208,7 @@ function executeCoachTool(name: string, input: unknown, context: CoachToolContex
     return engineResult;
   }
 
-  return {
-    input,
-    status: "pending_implementation",
-    tool: name,
-  };
+  throw new Error(`Unknown coach tool: ${name}`);
 }
 
 export function createCoachTools(context: CoachToolContext): ToolSet {
@@ -168,8 +218,9 @@ export function createCoachTools(context: CoachToolContext): ToolSet {
       {
         description: definition.description,
         inputSchema: definition.inputSchema,
-        execute: (input: unknown): unknown => executeCoachTool(name, input, context),
-      }
-    ])
+        execute: (input: unknown): unknown =>
+          executeCoachTool(name, input, context),
+      },
+    ]),
   ) as ToolSet;
 }

@@ -27,14 +27,8 @@ export type TurnIntent = {
 };
 
 const proposedWriteToolNameSchema = z.enum([
-  "save_activity_from_text",
-  "save_recovery_data",
-  "update_schedule",
-  "update_goals",
   "update_athlete_profile",
   "generate_training_plan",
-  "adjust_plan",
-  "recalibrate_thresholds",
 ]);
 
 function hasUserIdKey(value: unknown): boolean {

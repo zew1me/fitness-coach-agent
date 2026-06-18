@@ -25,9 +25,9 @@ after loading configuration and before any Vercel, Supabase, or Cloudflare reque
 
 ## Implementation Boundary
 
-Add a small, pure warning helper in `scripts/bootstrap/config.py`. It will accept the loaded settings,
-the raw shell environment, and the configured dotenv path so its behavior is deterministic and easy
-to test. `scripts/bootstrap/main.py` will invoke it immediately after `load_settings()` returns.
+Add a small, pure warning helper in `scripts/bootstrap/config.py`. It will accept the raw shell
+environment and configured dotenv path so its behavior is deterministic and easy to test.
+`scripts/bootstrap/main.py` will invoke it immediately after `load_settings()` returns.
 
 The helper will inspect `.env.bootstrap` using the dotenv parser already supplied through the
 settings dependency rather than implementing a second ad hoc parser. It will distinguish absent or

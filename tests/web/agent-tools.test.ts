@@ -10,7 +10,9 @@ function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
   }
 
   if (Array.isArray(schema)) {
-    schema.forEach((item, index) => assertTypedAdditionalProperties(item, `${path}[${index}]`));
+    schema.forEach((item, index) =>
+      assertTypedAdditionalProperties(item, `${path}[${index}]`),
+    );
     return;
   }
 
@@ -22,7 +24,7 @@ function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
     additionalProperties !== true
   ) {
     expect(additionalProperties, `${path}.additionalProperties`).toEqual(
-      expect.objectContaining({ type: expect.anything() })
+      expect.objectContaining({ type: expect.anything() }),
     );
   }
 
@@ -32,52 +34,41 @@ function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
 }
 
 describe("coachToolDefinitions", () => {
-  it("exposes the planned coaching tool surface", () => {
+  it("exposes only coach tools with real execution paths", () => {
     expect(Object.keys(coachToolDefinitions)).toEqual([
       "get_athlete_context",
       "get_recent_activities",
       "get_active_plan",
-      "get_compliance_summary",
-      "save_activity_from_text",
       "process_uploaded_file",
-      "save_recovery_data",
-      "update_schedule",
-      "update_goals",
       "update_athlete_profile",
       "calculate_zones",
       "estimate_thresholds",
       "generate_training_plan",
-      "adjust_plan",
-      "recalibrate_thresholds"
     ]);
-  });
-
-  it("validates a goal update payload with course details", () => {
-    const parsed = coachToolDefinitions.update_goals.inputSchema.parse({
-      action: "create",
-      goal: {
-        title: "Hill climb",
-        goal_type: "event",
-        sport: "running",
-        target_date: "2026-07-01",
-        course_distance_meters: 14000,
-        course_elevation_gain_meters: 700
-      }
-    });
-
-    expect(parsed.goal.title).toBe("Hill climb");
-    expect(parsed.goal.course_elevation_gain_meters).toBe(700);
+    expect(Object.keys(coachToolDefinitions)).not.toEqual(
+      expect.arrayContaining([
+        "get_compliance_summary",
+        "save_activity_from_text",
+        "save_recovery_data",
+        "update_schedule",
+        "update_goals",
+        "adjust_plan",
+        "recalibrate_thresholds",
+      ]),
+    );
   });
 
   it("emits OpenAI-compatible schemas for all coach tools", async () => {
     for (const [name, definition] of Object.entries(coachToolDefinitions)) {
       const jsonSchema = await zodSchema(definition.inputSchema).jsonSchema;
 
-      expect(() => assertTypedAdditionalProperties(jsonSchema, name)).not.toThrow();
+      expect(() =>
+        assertTypedAdditionalProperties(jsonSchema, name),
+      ).not.toThrow();
     }
   });
 
-  it("validates profile onboarding, recovery, and schedule domain field names", () => {
+  it("validates profile onboarding domain field names", () => {
     expect(
       coachToolDefinitions.update_athlete_profile.inputSchema.parse({
         fields: {
@@ -86,7 +77,7 @@ describe("coachToolDefinitions", () => {
           hormone_status: "not_specified",
           onboarding_collected: { nutrition: true },
         },
-      })
+      }),
     ).toMatchObject({
       fields: {
         biological_sex: "not_specified",
@@ -100,43 +91,16 @@ describe("coachToolDefinitions", () => {
         fields: {
           hormone_status: "not_provided",
         },
-      })
+      }),
     ).toThrow();
-
-    expect(
-      coachToolDefinitions.save_recovery_data.inputSchema.parse({
-        entries: [
-          {
-            body_battery: 55,
-            hrv_ms: 48,
-            log_date: "2026-05-30",
-            sleep_duration_hours: 7.5,
-            stress_score: 22,
-            subjective_energy: 4,
-          },
-        ],
-      })
-    ).toMatchObject({
-      entries: [{ hrv_ms: 48, sleep_duration_hours: 7.5 }],
-    });
-
-    expect(
-      coachToolDefinitions.update_schedule.inputSchema.parse({
-        overrides: [{ available: false, max_hours: 0, override_date: "2026-06-01", reason: "travel" }],
-        weekly_pattern: {
-          monday: { available: true, max_hours: 1.5 },
-        },
-      })
-    ).toMatchObject({
-      weekly_pattern: {
-        monday: { available: true, max_hours: 1.5 },
-      },
-    });
   });
 
   it("routes athlete profile updates to the engine with nutrition fields", async () => {
     const requests: Array<{ body: unknown; url: string }> = [];
-    const fetchImpl = (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
       requests.push({
         body: JSON.parse(String(init?.body)),
         url: String(url),
@@ -146,7 +110,7 @@ describe("coachToolDefinitions", () => {
         new Response(JSON.stringify({ status: "ok" }), {
           headers: { "Content-Type": "application/json" },
           status: 200,
-        })
+        }),
       );
     };
     const tools = createCoachTools({
@@ -182,7 +146,10 @@ describe("coachToolDefinitions", () => {
 
   it("forwards extra internal headers to engine tool calls", async () => {
     const requests: Array<{ headers: Headers; url: string }> = [];
-    const fetchImpl = (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
       requests.push({
         headers: new Headers(init?.headers),
         url: String(url),
@@ -192,7 +159,7 @@ describe("coachToolDefinitions", () => {
         new Response(JSON.stringify({ status: "ok" }), {
           headers: { "Content-Type": "application/json" },
           status: 200,
-        })
+        }),
       );
     };
     const tools = createCoachTools({
@@ -213,9 +180,13 @@ describe("coachToolDefinitions", () => {
     if (request === undefined) {
       throw new Error("Expected one engine request.");
     }
-    expect(request.url).toBe("https://coach.test/api/engine/get-recent-activities");
+    expect(request.url).toBe(
+      "https://coach.test/api/engine/get-recent-activities",
+    );
     expect(request.headers.get("authorization")).toBe("Bearer token");
     expect(request.headers.get("content-type")).toBe("application/json");
-    expect(request.headers.get("x-vercel-protection-bypass")).toBe("preview-bypass");
+    expect(request.headers.get("x-vercel-protection-bypass")).toBe(
+      "preview-bypass",
+    );
   });
 });

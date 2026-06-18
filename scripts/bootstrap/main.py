@@ -12,7 +12,11 @@ import sys
 from typing import Any, Protocol
 
 from scripts.bootstrap.cloudflare_client import CloudflareClient
-from scripts.bootstrap.config import BootstrapSettings, load_settings
+from scripts.bootstrap.config import (
+    BootstrapSettings,
+    load_settings,
+    warn_about_supabase_token_source,
+)
 from scripts.bootstrap.state import get_or_generate_jwt_secret, load_state, save_state
 from scripts.bootstrap.supabase_client import SupabaseClient
 from scripts.bootstrap.vercel_client import VercelClient
@@ -400,6 +404,7 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
 
     print("Loading configuration…")
     settings, vercel_project_id, vercel_team_id = load_settings()
+    warn_about_supabase_token_source()
     state = load_state(env)
 
     vercel_domain = _fetch_vercel_domain(vercel_project_id, vercel_team_id, dry_run)

@@ -7,19 +7,6 @@ const recentActivitiesInputSchema = z.object({
   sport: z.string().min(1).optional(),
 });
 
-const goalSchema = z.object({
-  course_distance_meters: z.number().positive().optional(),
-  course_elevation_gain_meters: z.number().nonnegative().optional(),
-  course_profile_notes: z.string().min(1).optional(),
-  goal_type: z.string().min(1),
-  improvement_baseline_value: z.number().optional(),
-  improvement_metric: z.string().min(1).optional(),
-  improvement_target_value: z.number().optional(),
-  sport: z.string().min(1).optional(),
-  target_date: z.string().optional(),
-  title: z.string().min(1),
-});
-
 const thresholdInputSchema = z.object({
   race_distance_meters: z.number().positive().optional(),
   race_time_seconds: z.number().int().positive().optional(),
@@ -39,50 +26,11 @@ const zonesInputSchema = z.object({
   sport: z.string().min(1),
 });
 
-const activityTextInputSchema = z.object({
-  text: z.string().min(1),
-});
-
 const uploadedFileInputSchema = z.object({
   content_type: z.string().min(1),
   filename: z.string().min(1),
   object_key: z.string().min(1),
   public_url: z.string().url().nullable().optional(),
-});
-
-const recoveryEntrySchema = z.object({
-  body_battery: z.number().int().min(0).max(100).optional(),
-  hrv_ms: z.number().positive().optional(),
-  log_date: z.string().min(1).optional(),
-  notes: z.string().min(1).optional(),
-  resting_hr_bpm: z.number().int().positive().optional(),
-  sleep_consistency_pct: z.number().min(0).max(100).optional(),
-  sleep_duration_hours: z.number().nonnegative().optional(),
-  sleep_score: z.number().nonnegative().optional(),
-  stress_score: z.number().nonnegative().optional(),
-  subjective_energy: z.number().int().min(1).max(5).optional(),
-});
-
-const recoveryInputSchema = z.object({
-  entries: z.array(recoveryEntrySchema).min(1),
-});
-
-const weeklyPatternDaySchema = z.object({
-  available: z.boolean().optional(),
-  max_hours: z.number().nonnegative().optional(),
-  notes: z.string().min(1).optional(),
-});
-
-const scheduleOverrideSchema = z.object({
-  available: z.boolean().optional(),
-  max_hours: z.number().nonnegative().optional(),
-  override_date: z.string().min(1).optional(),
-  reason: z.string().min(1).optional(),
-});
-
-const scheduleInputSchema = z.object({
-  overrides: z.array(scheduleOverrideSchema).optional(),
-  weekly_pattern: z.record(weeklyPatternDaySchema).optional(),
 });
 
 const onboardingCollectedSchema = z.object({
@@ -132,11 +80,6 @@ const planInputSchema = z.object({
   goal_id: z.string().min(1).optional(),
 });
 
-const adjustPlanInputSchema = z.object({
-  plan_id: z.string().min(1),
-  reason: z.string().min(1),
-});
-
 type ToolDefinition<TSchema extends z.ZodTypeAny> = {
   description: string;
   inputSchema: TSchema;
@@ -162,33 +105,9 @@ export const coachToolDefinitions = {
     "Load the active plan and upcoming workouts.",
     userInputSchema,
   ),
-  get_compliance_summary: defineTool(
-    "Summarize planned versus actual completion over recent weeks.",
-    userInputSchema,
-  ),
-  save_activity_from_text: defineTool(
-    "Persist an activity described in natural language after deterministic scoring.",
-    activityTextInputSchema,
-  ),
   process_uploaded_file: defineTool(
     "Process GPX, FIT, or screenshot uploads through the engine.",
     uploadedFileInputSchema,
-  ),
-  save_recovery_data: defineTool(
-    "Persist recovery and wellness observations.",
-    recoveryInputSchema,
-  ),
-  update_schedule: defineTool(
-    "Persist weekly availability or date overrides.",
-    scheduleInputSchema,
-  ),
-  update_goals: defineTool(
-    "Create, update, complete, or abandon athlete goals.",
-    z.object({
-      action: z.enum(["abandon", "complete", "create", "update"]),
-      goal: goalSchema,
-      goal_id: z.string().min(1).optional(),
-    }),
   ),
   update_athlete_profile: defineTool(
     "Persist extracted athlete profile fields.",
@@ -205,13 +124,5 @@ export const coachToolDefinitions = {
   generate_training_plan: defineTool(
     "Generate and persist a training plan.",
     planInputSchema,
-  ),
-  adjust_plan: defineTool(
-    "Adjust existing plan prescriptions.",
-    adjustPlanInputSchema,
-  ),
-  recalibrate_thresholds: defineTool(
-    "Re-estimate thresholds from recent performance evidence.",
-    userInputSchema,
   ),
 } as const;
