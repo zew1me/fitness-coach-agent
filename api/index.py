@@ -391,7 +391,7 @@ async def presign_chat_upload(
             user_id=user_context.user_id, request=payload
         )
     except Exception as exc:
-        logger.error("chat presign failed error_type=%s", type(exc).__name__)
+        logger.exception("chat presign failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Storage service unavailable") from exc
     logger.info(
         "chat attachment presign issued user_id=%s content_type=%s",
@@ -410,7 +410,7 @@ async def presign_upload(
             user_id=user_context.user_id, request=payload
         )
     except Exception as exc:
-        logger.error("file presign failed error_type=%s", type(exc).__name__)
+        logger.exception("file presign failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Storage service unavailable") from exc
     logger.info(
         "file presign issued user_id=%s content_type=%s",
