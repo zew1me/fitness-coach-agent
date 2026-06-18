@@ -3,7 +3,8 @@ import { type ToolSet, type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
-  selectMessagesForModel
+  convertUnsupportedFilePartsToText,
+  selectMessagesForModel,
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
@@ -27,7 +28,8 @@ type LatestUserTurn = {
 
 const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
-const COACH_UNAVAILABLE_MESSAGE = "Coach is unavailable right now. Please try again.";
+const COACH_UNAVAILABLE_MESSAGE =
+  "Coach is unavailable right now. Please try again.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
@@ -48,16 +50,21 @@ function safeErrorMessage(error: unknown): string {
   return msg.replace(/key=[^&\s]+/g, "key=***");
 }
 
-async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse | null> {
+async function loadBrowserToken(
+  request: Request,
+): Promise<BrowserTokenResponse | null> {
   const cookie = request.headers.get("cookie");
   if (!cookie?.includes("coach_browser_session=")) {
     return null;
   }
 
-  const response = await fetch(`${requestOrigin(request)}/api/oauth/browser-token`, {
-    method: "POST",
-    headers: { cookie, ...vercelProtectionBypassHeaders() }
-  });
+  const response = await fetch(
+    `${requestOrigin(request)}/api/oauth/browser-token`,
+    {
+      method: "POST",
+      headers: { cookie, ...vercelProtectionBypassHeaders() },
+    },
+  );
   if (!response.ok) {
     return null;
   }
@@ -66,17 +73,20 @@ async function loadBrowserToken(request: Request): Promise<BrowserTokenResponse 
 
 async function loadAthleteContext(
   request: Request,
-  token: BrowserTokenResponse
+  token: BrowserTokenResponse,
 ): Promise<AthleteContextBundle> {
-  const response = await fetch(`${requestOrigin(request)}/api/engine/get-athlete-summary`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token.access_token}`,
-      "Content-Type": "application/json",
-      ...vercelProtectionBypassHeaders()
+  const response = await fetch(
+    `${requestOrigin(request)}/api/engine/get-athlete-summary`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        "Content-Type": "application/json",
+        ...vercelProtectionBypassHeaders(),
+      },
+      body: JSON.stringify({}),
     },
-    body: JSON.stringify({})
-  });
+  );
 
   if (!response.ok) {
     throw new Error("Unable to load athlete context.");
@@ -100,56 +110,71 @@ function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
 async function persistUserMessage(
   request: Request,
   token: BrowserTokenResponse,
-  turn: LatestUserTurn
+  turn: LatestUserTurn,
 ): Promise<void> {
   if (turn.parts.length === 0) return;
   try {
-    const response = await fetch(`${requestOrigin(request)}/api/chat/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token.access_token}`,
-        "Content-Type": "application/json",
-        ...vercelProtectionBypassHeaders(),
+    const response = await fetch(
+      `${requestOrigin(request)}/api/chat/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token.access_token}`,
+          "Content-Type": "application/json",
+          ...vercelProtectionBypassHeaders(),
+        },
+        body: JSON.stringify({
+          id: turn.id,
+          role: "user",
+          parts: turn.parts,
+          metadata: { message_kind: "user_turn", client_message_id: turn.id },
+        }),
       },
-      body: JSON.stringify({
-        id: turn.id,
-        role: "user",
-        parts: turn.parts,
-        metadata: { message_kind: "user_turn", client_message_id: turn.id },
-      }),
-    });
+    );
     if (!response.ok) {
       console.error("[chat] persist user message failed:", response.status);
     }
   } catch (error) {
-    console.error("[chat] persist user message error:", safeErrorMessage(error));
+    console.error(
+      "[chat] persist user message error:",
+      safeErrorMessage(error),
+    );
   }
 }
 
 async function extractImageContent(
   request: Request,
   token: BrowserTokenResponse,
-  imageUrl: string
+  imageUrl: string,
 ): Promise<{ data: unknown; screenshot_type: string } | null> {
   try {
-    const response = await fetch(`${requestOrigin(request)}/api/engine/analyze-screenshot`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token.access_token}`,
-        "Content-Type": "application/json",
-        ...vercelProtectionBypassHeaders()
+    const response = await fetch(
+      `${requestOrigin(request)}/api/engine/analyze-screenshot`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token.access_token}`,
+          "Content-Type": "application/json",
+          ...vercelProtectionBypassHeaders(),
+        },
+        body: JSON.stringify({ image_url: imageUrl }),
       },
-      body: JSON.stringify({ image_url: imageUrl })
-    });
+    );
 
     if (!response.ok) {
       return null;
     }
 
-    const payload = (await response.json()) as { data?: unknown; screenshot_type?: unknown };
+    const payload = (await response.json()) as {
+      data?: unknown;
+      screenshot_type?: unknown;
+    };
     return {
       data: payload.data ?? {},
-      screenshot_type: typeof payload.screenshot_type === "string" ? payload.screenshot_type : "unknown"
+      screenshot_type:
+        typeof payload.screenshot_type === "string"
+          ? payload.screenshot_type
+          : "unknown",
     };
   } catch {
     return null;
@@ -172,8 +197,8 @@ export async function POST(request: Request): Promise<Response> {
     const body = (await request.json()) as ChatRequestBody;
     const messages = body.messages ?? [];
     const modelMessages = await appendImageExtractionsToMessages(
-      selectMessagesForModel(messages),
-      ({ imageUrl }) => extractImageContent(request, token, imageUrl)
+      convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
+      ({ imageUrl }) => extractImageContent(request, token, imageUrl),
     );
     const latestUserTurn = summarizeLatestUserTurn(messages);
     if (latestUserTurn !== null) {

@@ -14,19 +14,27 @@ type ImageExtractionRequest = {
   mediaType: string;
 };
 
-type ImageExtractor = (request: ImageExtractionRequest) => Promise<ImageExtraction | null>;
+type ImageExtractor = (
+  request: ImageExtractionRequest,
+) => Promise<ImageExtraction | null>;
 
 function partRecord(part: UIMessage["parts"][number]): Record<string, unknown> {
   return part as unknown as Record<string, unknown>;
 }
 
-function imageFilePart(part: UIMessage["parts"][number]): ImageExtractionRequest | null {
+function imageFilePart(
+  part: UIMessage["parts"][number],
+): ImageExtractionRequest | null {
   const record = partRecord(part);
   const type = record["type"];
   const mediaType = record["mediaType"];
   const url = record["url"];
 
-  if (type !== "file" || typeof mediaType !== "string" || !mediaType.startsWith("image/")) {
+  if (
+    type !== "file" ||
+    typeof mediaType !== "string" ||
+    !mediaType.startsWith("image/")
+  ) {
     return null;
   }
 
@@ -34,28 +42,37 @@ function imageFilePart(part: UIMessage["parts"][number]): ImageExtractionRequest
     return null;
   }
 
-  const filename = typeof record["filename"] === "string" && record["filename"].length > 0
-    ? record["filename"]
-    : "uploaded image";
+  const filename =
+    typeof record["filename"] === "string" && record["filename"].length > 0
+      ? record["filename"]
+      : "uploaded image";
 
   return { filename, imageUrl: url, mediaType };
 }
 
-function hasExtractionForFilename(message: UIMessage, filename: string): boolean {
+function hasExtractionForFilename(
+  message: UIMessage,
+  filename: string,
+): boolean {
   const expectedPrefix = `${EXTRACTED_IMAGE_PREFIX}${filename} `;
   return message.parts.some((part) => {
     const record = partRecord(part);
-    return record["type"] === "text" &&
+    return (
+      record["type"] === "text" &&
       typeof record["text"] === "string" &&
-      record["text"].startsWith(expectedPrefix);
+      record["text"].startsWith(expectedPrefix)
+    );
   });
 }
 
-function extractedImageText(filename: string, extraction: ImageExtraction): string {
+function extractedImageText(
+  filename: string,
+  extraction: ImageExtraction,
+): string {
   return `${EXTRACTED_IMAGE_PREFIX}${filename} (${extraction.screenshot_type}):\n${JSON.stringify(
     extraction.data,
     null,
-    2
+    2,
   )}`;
 }
 
@@ -85,7 +102,7 @@ export function selectMessagesForModel(messages: UIMessage[]): UIMessage[] {
 
 export async function appendImageExtractionsToMessages(
   messages: UIMessage[],
-  extractImage: ImageExtractor
+  extractImage: ImageExtractor,
 ): Promise<UIMessage[]> {
   return Promise.all(
     messages.map(async (message) => {
@@ -93,7 +110,10 @@ export async function appendImageExtractionsToMessages(
 
       for (const part of message.parts) {
         const image = imageFilePart(part);
-        if (image === null || hasExtractionForFilename(message, image.filename)) {
+        if (
+          image === null ||
+          hasExtractionForFilename(message, image.filename)
+        ) {
           continue;
         }
 
@@ -108,7 +128,79 @@ export async function appendImageExtractionsToMessages(
         });
       }
 
-      return nextParts.length === message.parts.length ? message : { ...message, parts: nextParts };
-    })
+      return nextParts.length === message.parts.length
+        ? message
+        : { ...message, parts: nextParts };
+    }),
   );
+}
+
+type NonImageFilePart = {
+  filename: string;
+  url: string;
+  mediaType: string;
+};
+
+function nonImageFilePart(
+  part: UIMessage["parts"][number],
+): NonImageFilePart | null {
+  const record = partRecord(part);
+  const type = record["type"];
+  const mediaType = record["mediaType"];
+  const url = record["url"];
+
+  if (
+    type !== "file" ||
+    typeof mediaType !== "string" ||
+    mediaType.startsWith("image/")
+  ) {
+    return null;
+  }
+
+  if (typeof url !== "string" || url.length === 0) {
+    return null;
+  }
+
+  const filename =
+    typeof record["filename"] === "string" && record["filename"].length > 0
+      ? record["filename"]
+      : "uploaded file";
+
+  return { filename, url, mediaType };
+}
+
+function uploadedFileText(file: NonImageFilePart): string {
+  let objectKey: string;
+  try {
+    objectKey = new URL(file.url).pathname.replace(/^\//, "");
+  } catch {
+    objectKey = file.url;
+  }
+
+  return (
+    `Uploaded file: ${file.filename} (${file.mediaType})\n` +
+    `public_url=${file.url}\n` +
+    `object_key=${objectKey}`
+  );
+}
+
+export function convertUnsupportedFilePartsToText(
+  messages: UIMessage[],
+): UIMessage[] {
+  return messages.map((message) => {
+    const nextParts: UIMessage["parts"] = [];
+    let changed = false;
+
+    for (const part of message.parts) {
+      const file = nonImageFilePart(part);
+      if (file !== null) {
+        nextParts.push({ type: "text", text: uploadedFileText(file) });
+        changed = true;
+      } else {
+        nextParts.push(part);
+      }
+    }
+
+    return changed ? { ...message, parts: nextParts } : message;
+  });
 }
