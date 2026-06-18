@@ -54,32 +54,45 @@ export async function runSpecialists({
   const normalizedMessages =
     convertUnsupportedFilePartsToText(selectedMessages);
   const orderedRoles = orderRoles(roles);
-  const reports: SpecialistReport[] = [];
-
-  for (const role of orderedRoles) {
-    const { output } = await generateText({
-      maxOutputTokens: 1024,
-      maxRetries: 2,
-      messages: await convertToModelMessages(normalizedMessages),
-      model,
-      output: Output.object({
-        schema: specialistReportSchema,
-      }),
-      system: buildSpecialistPrompt(role, slices[role]),
-      providerOptions: {
-        openai: {
-          reasoningEffort: modelPolicy.specialistReasoningEffort,
-          store: true,
-          textVerbosity: "low",
+  const modelMessages = await convertToModelMessages(normalizedMessages);
+  const settledReports = await Promise.allSettled(
+    orderedRoles.map(async (role) => {
+      const { output } = await generateText({
+        maxOutputTokens: 1024,
+        maxRetries: 2,
+        messages: modelMessages,
+        model,
+        output: Output.object({
+          schema: specialistReportSchema,
+        }),
+        system: buildSpecialistPrompt(role, slices[role]),
+        providerOptions: {
+          openai: {
+            reasoningEffort: modelPolicy.specialistReasoningEffort,
+            store: true,
+            textVerbosity: "low",
+          },
         },
-      },
-      timeout: {
-        totalMs: 30_000,
-      },
-    });
+        timeout: {
+          totalMs: 30_000,
+        },
+      });
 
-    reports.push(specialistReportSchema.parse(output));
-  }
+      return specialistReportSchema.parse(output);
+    }),
+  );
 
-  return reports;
+  return settledReports.flatMap((result, index) => {
+    if (result.status === "fulfilled") {
+      return [result.value];
+    }
+
+    const role = orderedRoles[index] ?? "unknown";
+    const errorType =
+      result.reason instanceof Error
+        ? result.reason.name
+        : typeof result.reason;
+    console.error("[chat] specialist failed:", role, errorType);
+    return [];
+  });
 }
