@@ -4,6 +4,7 @@ import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import {
   appendImageExtractionsToMessages,
+  convertUnsupportedFilePartsToText,
   selectMessagesForModel,
 } from "../../lib/agent/message-context";
 import { streamCoachTurn } from "../../lib/agent/orchestrator";
@@ -421,6 +422,217 @@ describe("app/api/chat route", () => {
     });
   });
 
+  describe("convertUnsupportedFilePartsToText", () => {
+    it("converts a GPX file part to a text descriptor", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [
+            { type: "text" as const, text: "Here is my run" },
+            {
+              type: "file" as const,
+              mediaType: "application/gpx+xml",
+              filename: "morning-run.gpx",
+              url: "https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+            },
+          ],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]?.parts).toHaveLength(2);
+      expect(result[0]?.parts[0]).toEqual({
+        type: "text",
+        text: "Here is my run",
+      });
+      const textPart = result[0]?.parts[1] as { type: string; text: string };
+      expect(textPart.type).toBe("text");
+      expect(textPart.text).toContain("morning-run.gpx");
+      expect(textPart.text).toContain("content_type=application/gpx+xml");
+      expect(textPart.text).toContain(
+        "public_url=https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+      );
+      expect(textPart.text).toContain(
+        "object_key=users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+      );
+    });
+
+    it("leaves image file parts unchanged", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [
+            {
+              type: "file" as const,
+              mediaType: "image/png",
+              filename: "chart.png",
+              url: "https://example.com/chart.png",
+            },
+          ],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]?.parts).toEqual(messages[0]?.parts);
+      expect(result[0]).toBe(messages[0]); // reference equality — unchanged
+    });
+
+    it("leaves text parts unchanged", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [{ type: "text" as const, text: "Hello coach" }],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]).toBe(messages[0]);
+    });
+
+    it("converts multiple non-image file parts in the same message", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [
+            {
+              type: "file" as const,
+              mediaType: "application/gpx+xml",
+              filename: "run.gpx",
+              url: "https://r2.example.com/path/run.gpx",
+            },
+            {
+              type: "file" as const,
+              mediaType: "application/vnd.garmin.fit",
+              filename: "ride.fit",
+              url: "https://r2.example.com/path/ride.fit",
+            },
+          ],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]?.parts).toHaveLength(2);
+      expect(result[0]?.parts[0]).toMatchObject({ type: "text" });
+      expect(result[0]?.parts[1]).toMatchObject({ type: "text" });
+      expect((result[0]?.parts[0] as { text: string }).text).toContain(
+        "run.gpx",
+      );
+      expect((result[0]?.parts[1] as { text: string }).text).toContain(
+        "ride.fit",
+      );
+    });
+
+    it("only modifies messages that contain non-image file parts", () => {
+      const textOnlyMessage = {
+        id: "msg-1",
+        role: "user" as const,
+        parts: [{ type: "text" as const, text: "hi" }],
+      };
+      const gpxMessage = {
+        id: "msg-2",
+        role: "user" as const,
+        parts: [
+          {
+            type: "file" as const,
+            mediaType: "application/gpx+xml",
+            filename: "run.gpx",
+            url: "https://r2.example.com/path/run.gpx",
+          },
+        ],
+      };
+
+      const result = convertUnsupportedFilePartsToText([
+        textOnlyMessage,
+        gpxMessage,
+      ]);
+
+      expect(result[0]).toBe(textOnlyMessage); // unchanged reference
+      expect(result[1]).not.toBe(gpxMessage); // new object
+      expect(result[1]?.parts[0]).toMatchObject({ type: "text" });
+    });
+  });
+
+  it("converts GPX file parts to text before passing messages to the model", async () => {
+    const gpxUrl =
+      "https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx";
+    const messages = [
+      {
+        id: "msg-with-gpx",
+        role: "user" as const,
+        parts: [
+          { type: "text" as const, text: "Here is my run file" },
+          {
+            type: "file" as const,
+            mediaType: "application/gpx+xml",
+            filename: "morning-run.gpx",
+            url: gpxUrl,
+          },
+        ],
+      },
+    ];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(streamCoachTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            id: "msg-with-gpx",
+            parts: [
+              { type: "text", text: "Here is my run file" },
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("morning-run.gpx"),
+              }),
+            ],
+          }),
+        ],
+      }),
+    );
+
+    // The raw GPX file part must NOT reach the model
+    const calledMessages = (streamCoachTurn as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0]?.messages as Array<{ parts: unknown[] }>;
+    const allParts = calledMessages.flatMap((m) => m.parts);
+    expect(allParts).not.toContainEqual(
+      expect.objectContaining({
+        type: "file",
+        mediaType: "application/gpx+xml",
+      }),
+    );
+  });
+
   it("returns 401 when the browser session cookie is absent", async () => {
     const response = await POST(
       new Request("http://localhost/api/chat", {
@@ -818,6 +1030,105 @@ describe("app/api/chat route", () => {
 
     const result = processUploadedFile.execute({
       content_type: "application/gpx+xml",
+      filename: "morning-run.gpx",
+      object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+      public_url: "https://example.com/morning-run.gpx",
+      user_id: "attacker-controlled-user",
+    });
+
+    await expect(Promise.resolve(result)).resolves.toEqual({
+      activity: { sport: "running", distance_meters: 5000 },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/process-uploaded-file",
+      expect.objectContaining({
+        body: JSON.stringify({
+          content_type: "application/gpx+xml",
+          filename: "morning-run.gpx",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+          public_url: "https://example.com/morning-run.gpx",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("falls back to filename inference when content_type is missing for activity files", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            activity: { sport: "running", distance_meters: 5000 },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = processUploadedFile.execute({
+      filename: "morning-run.gpx",
+      object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+      public_url: "https://example.com/morning-run.gpx",
+      user_id: "attacker-controlled-user",
+    });
+
+    await expect(Promise.resolve(result)).resolves.toEqual({
+      activity: { sport: "running", distance_meters: 5000 },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/process-uploaded-file",
+      expect.objectContaining({
+        body: JSON.stringify({
+          content_type: "application/gpx+xml",
+          filename: "morning-run.gpx",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+          public_url: "https://example.com/morning-run.gpx",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("prefers filename inference when content_type is a generic fallback", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            activity: { sport: "running", distance_meters: 5000 },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = processUploadedFile.execute({
+      content_type: "application/octet-stream",
       filename: "morning-run.gpx",
       object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
       public_url: "https://example.com/morning-run.gpx",
