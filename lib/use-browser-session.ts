@@ -33,6 +33,7 @@ export function useBrowserSession(): BrowserSessionState {
         setState({ token, error: null, loading: false });
       } catch (error) {
         if (cancelled) return;
+        Sentry.setUser(null);
         Sentry.logger.warn("browser session failed", {
           reason: errorMessage(error, "unknown"),
         });

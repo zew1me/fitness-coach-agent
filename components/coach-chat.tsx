@@ -32,6 +32,7 @@ import type { ThemeMode } from "../lib/use-theme";
 import styles from "./coach-chat.module.css";
 
 type LocalAttachment = {
+  id: string;
   content_type: string;
   filename: string;
   object_key: string;
@@ -1336,7 +1337,10 @@ function CoachChatBody({
     };
   }, [attachments]);
 
-  async function uploadOneAttachment(file: File): Promise<void> {
+  async function uploadOneAttachment(
+    file: File,
+    attachmentId: string,
+  ): Promise<void> {
     const contentType = activityContentType(file);
     try {
       const intent = await createChatUploadIntent({
@@ -1354,7 +1358,7 @@ function CoachChatBody({
       if (uploaded.public_url === null) {
         setAttachments((current) =>
           current.map((attachment) =>
-            attachment.filename === file.name && attachment.object_key === ""
+            attachment.id === attachmentId
               ? {
                   ...attachment,
                   object_key: uploaded.object_key,
@@ -1365,7 +1369,9 @@ function CoachChatBody({
           ),
         );
         Sentry.logger.error("chat: attachment upload returned no public_url", {
-          filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+          filename_suffix: file.name.includes(".")
+            ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+            : "",
           content_type: contentType,
         });
         setThreadError(
@@ -1374,13 +1380,15 @@ function CoachChatBody({
         return;
       }
       Sentry.logger.info("chat attachment ready", {
-        filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+        filename_suffix: file.name.includes(".")
+          ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+          : "",
         content_type: contentType,
         has_public_url: true,
       });
       setAttachments((current) =>
         current.map((attachment) =>
-          attachment.filename === file.name && attachment.object_key === ""
+          attachment.id === attachmentId
             ? {
                 ...attachment,
                 object_key: uploaded.object_key,
@@ -1392,12 +1400,14 @@ function CoachChatBody({
       );
     } catch (error) {
       Sentry.logger.error("chat attachment upload failed", {
-        filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+        filename_suffix: file.name.includes(".")
+          ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+          : "",
         content_type: contentType,
       });
       setAttachments((current) =>
         current.map((attachment) =>
-          attachment.filename === file.name && attachment.object_key === ""
+          attachment.id === attachmentId
             ? { ...attachment, status: "error" }
             : attachment,
         ),
@@ -1416,9 +1426,15 @@ function CoachChatBody({
   async function handleFilesAdded(files: File[]): Promise<void> {
     if (files.length === 0) return;
 
-    const nextLocalAttachments = files
-      .filter(isSupportedAttachment)
-      .map<LocalAttachment>((file) => ({
+    const fileEntries = files.map((file) => ({
+      file,
+      id: crypto.randomUUID(),
+    }));
+
+    const nextLocalAttachments = fileEntries
+      .filter(({ file }) => isSupportedAttachment(file))
+      .map<LocalAttachment>(({ file, id }) => ({
+        id,
         content_type: activityContentType(file),
         filename: file.name,
         object_key: "",
@@ -1430,10 +1446,12 @@ function CoachChatBody({
       }));
     setAttachments((current) => [...current, ...nextLocalAttachments]);
 
-    for (const file of files) {
+    for (const { file, id } of fileEntries) {
       if (!isSupportedAttachment(file)) {
         Sentry.logger.warn("unsupported attachment rejected", {
-          filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+          filename_suffix: file.name.includes(".")
+            ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+            : "",
           content_type: file.type,
         });
         setThreadError(
@@ -1441,7 +1459,7 @@ function CoachChatBody({
         );
         continue;
       }
-      await uploadOneAttachment(file);
+      await uploadOneAttachment(file, id);
     }
   }
 
