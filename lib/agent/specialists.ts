@@ -1,6 +1,15 @@
-import { convertToModelMessages, generateText, Output, type LanguageModel, type UIMessage } from "ai";
+import {
+  convertToModelMessages,
+  generateText,
+  Output,
+  type LanguageModel,
+  type UIMessage,
+} from "ai";
 
-import { selectMessagesForModel } from "./message-context";
+import {
+  convertUnsupportedFilePartsToText,
+  selectMessagesForModel,
+} from "./message-context";
 import {
   type ContextSlices,
   type InternalSpecialistRole,
@@ -9,7 +18,12 @@ import {
 } from "./orchestration-types";
 import { buildSpecialistPrompt } from "./system-prompt";
 
-const SPECIALIST_ORDER: InternalSpecialistRole[] = ["intake", "nutrition", "recovery", "workout"];
+const SPECIALIST_ORDER: InternalSpecialistRole[] = [
+  "intake",
+  "nutrition",
+  "recovery",
+  "workout",
+];
 
 type RunSpecialistsOptions = {
   messagesAreModelSelected?: boolean;
@@ -31,13 +45,17 @@ export async function runSpecialists({
   roles,
   slices,
 }: RunSpecialistsOptions): Promise<SpecialistReport[]> {
-  const selectedMessages = messagesAreModelSelected ? messages : selectMessagesForModel(messages);
+  const selectedMessages = messagesAreModelSelected
+    ? messages
+    : selectMessagesForModel(messages);
+  const normalizedMessages =
+    convertUnsupportedFilePartsToText(selectedMessages);
   const orderedRoles = orderRoles(roles);
   const reports: SpecialistReport[] = [];
 
   for (const role of orderedRoles) {
     const { output } = await generateText({
-      messages: await convertToModelMessages(selectedMessages),
+      messages: await convertToModelMessages(normalizedMessages),
       model,
       output: Output.object({
         schema: specialistReportSchema,

@@ -39,9 +39,15 @@ vi.mock("../../lib/agent/intent-router", () => ({
   routeTurnIntent: vi.fn(() => ({ specialists: [] })),
 }));
 
-vi.mock("../../lib/agent/message-context", () => ({
-  selectMessagesForModel: vi.fn((messages: UIMessage[]) => messages),
-}));
+vi.mock("../../lib/agent/message-context", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../lib/agent/message-context")>();
+
+  return {
+    ...actual,
+    selectMessagesForModel: vi.fn((messages: UIMessage[]) => messages),
+  };
+});
 
 vi.mock("../../lib/agent/specialists", () => ({
   runSpecialists: vi.fn(() => Promise.resolve([])),

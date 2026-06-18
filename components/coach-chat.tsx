@@ -36,7 +36,7 @@ type LocalAttachment = {
   content_type: string;
   filename: string;
   object_key: string;
-  previewUrl: string | null;
+  preview_url: string | null;
   public_url: string | null;
   status: "error" | "uploaded" | "uploading";
 };
@@ -107,8 +107,8 @@ function readableTime(timestamp: string): string {
 
 function removePreviewUrls(attachments: LocalAttachment[]): void {
   for (const attachment of attachments) {
-    if (attachment.previewUrl !== null) {
-      URL.revokeObjectURL(attachment.previewUrl);
+    if (attachment.preview_url !== null) {
+      URL.revokeObjectURL(attachment.preview_url);
     }
   }
 }
@@ -256,10 +256,14 @@ function hasSendableContent(
   composer: string,
   attachments: LocalAttachment[],
 ): boolean {
-  return (
-    composer.trim().length > 0 ||
-    attachments.some((attachment) => attachment.status === "uploaded")
+  const hasText = composer.trim().length > 0;
+  const hasPendingAttachment = attachments.some(
+    (attachment) => attachment.status === "uploading",
   );
+
+  return hasText
+    ? !hasPendingAttachment
+    : attachments.some((attachment) => attachment.status === "uploaded");
 }
 
 function activityContentType(file: File): string {
@@ -798,10 +802,7 @@ function UploadChips({
   return (
     <div className={styles.uploadRow}>
       {attachments.map((attachment) => (
-        <UploadChip
-          attachment={attachment}
-          key={`${attachment.filename}-${attachment.previewUrl ?? ""}`}
-        />
+        <UploadChip attachment={attachment} key={attachment.id} />
       ))}
     </div>
   );
@@ -1338,8 +1339,8 @@ function CoachChatBody({
   }, [attachments]);
 
   async function uploadOneAttachment(
-    file: File,
     attachmentId: string,
+    file: File,
   ): Promise<void> {
     const contentType = activityContentType(file);
     try {
@@ -1426,40 +1427,34 @@ function CoachChatBody({
   async function handleFilesAdded(files: File[]): Promise<void> {
     if (files.length === 0) return;
 
-    const fileEntries = files.map((file) => ({
-      file,
-      id: crypto.randomUUID(),
-    }));
+    const uploadQueue: Array<{ attachmentId: string; file: File }> = [];
+    const nextLocalAttachments: LocalAttachment[] = [];
 
-    const nextLocalAttachments = fileEntries
-      .filter(({ file }) => isSupportedAttachment(file))
-      .map<LocalAttachment>(({ file, id }) => ({
-        id,
-        content_type: activityContentType(file),
-        filename: file.name,
-        object_key: "",
-        previewUrl: file.type.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : null,
-        public_url: null,
-        status: "uploading",
-      }));
-    setAttachments((current) => [...current, ...nextLocalAttachments]);
-
-    for (const { file, id } of fileEntries) {
+    for (const file of files) {
       if (!isSupportedAttachment(file)) {
-        Sentry.logger.warn("unsupported attachment rejected", {
-          filename_suffix: file.name.includes(".")
-            ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
-            : "",
-          content_type: file.type,
-        });
         setThreadError(
           "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
         );
         continue;
       }
-      await uploadOneAttachment(file, id);
+      const attachmentId = crypto.randomUUID();
+      uploadQueue.push({ attachmentId, file });
+      nextLocalAttachments.push({
+        id: attachmentId,
+        content_type: activityContentType(file),
+        filename: file.name,
+        object_key: "",
+        preview_url: file.type.startsWith("image/")
+          ? URL.createObjectURL(file)
+          : null,
+        public_url: null,
+        status: "uploading",
+      });
+    }
+    setAttachments((current) => [...current, ...nextLocalAttachments]);
+
+    for (const { attachmentId, file } of uploadQueue) {
+      await uploadOneAttachment(attachmentId, file);
     }
   }
 
@@ -1478,12 +1473,13 @@ function CoachChatBody({
         attachment_count: pendingAttachments.length,
         message_id: messageId,
       });
+      const messageParts: UIMessage["parts"] =
+        pendingComposer.trim().length > 0
+          ? [{ type: "text" as const, text: pendingComposer }]
+          : [];
       await sendMessage({
         id: messageId,
-        parts: [
-          { type: "text", text: pendingComposer },
-          ...uploadedFileParts(pendingAttachments),
-        ],
+        parts: [...messageParts, ...uploadedFileParts(pendingAttachments)],
       });
       // Clear the draft only after the send succeeds so a failed send leaves the
       // composer text and attachments intact for the user to retry. The textarea
