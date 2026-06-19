@@ -754,7 +754,7 @@ describe("app/api/chat route", () => {
 
     expect(response.status).toBe(503);
     await expect(response.text()).resolves.toBe(
-      "Coach is unavailable right now. Please try again.",
+      "Coach is out to lunch. Please try again later.",
     );
   });
 
