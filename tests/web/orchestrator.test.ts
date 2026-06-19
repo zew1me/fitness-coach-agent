@@ -123,7 +123,8 @@ describe("streamCoachTurn", () => {
     )[0][0];
     const { openai } = await import("@ai-sdk/openai");
 
-    expect(openai).toHaveBeenCalledWith("gpt-5.5");
+    expect(openai).toHaveBeenCalledTimes(1);
+    expect(openai).toHaveBeenNthCalledWith(1, "gpt-5.5");
     expect(options).toMatchObject({
       maxOutputTokens: 2048,
       maxRetries: 2,

@@ -33,6 +33,7 @@ export function createTavilyToolProvider({
   createClient = (config): Promise<TavilyClient> => createMCPClient(config),
 }: TavilyToolProviderOptions = {}): TavilyToolProvider {
   let active: ActiveTavilyClient | null = null;
+  let initializationLock: Promise<void> | null = null;
 
   async function close(): Promise<void> {
     const current = active;
@@ -55,9 +56,22 @@ export function createTavilyToolProvider({
     }
   }
 
-  async function getTools(apiKey: string | undefined): Promise<ToolSet> {
-    if (!apiKey) return {};
-    if (active?.apiKey === apiKey) return active.toolsPromise;
+  async function acquireLockIfNeeded(
+    apiKey: string,
+  ): Promise<(() => void) | ToolSet> {
+    while (initializationLock !== null) {
+      await initializationLock;
+      if (active?.apiKey === apiKey) return active.toolsPromise;
+    }
+
+    let releaseLock = (): void => {};
+    initializationLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    return releaseLock;
+  }
+
+  async function initializeTools(apiKey: string): Promise<ToolSet> {
     await closeUntilKeyMatches(apiKey);
     if (active?.apiKey === apiKey) return active.toolsPromise;
 
@@ -79,6 +93,22 @@ export function createTavilyToolProvider({
         // Initialization failures may not yield a client.
       }
       throw error;
+    }
+  }
+
+  async function getTools(apiKey: string | undefined): Promise<ToolSet> {
+    if (!apiKey) return {};
+    if (active?.apiKey === apiKey) return active.toolsPromise;
+
+    const lockOrTools = await acquireLockIfNeeded(apiKey);
+    if (typeof lockOrTools !== "function") return lockOrTools;
+    const releaseLock = lockOrTools;
+
+    try {
+      return await initializeTools(apiKey);
+    } finally {
+      initializationLock = null;
+      releaseLock();
     }
   }
 

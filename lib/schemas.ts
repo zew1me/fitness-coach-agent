@@ -21,6 +21,41 @@ export const uploadRequestSchema = z.object({
   purpose: z.string().trim().min(1).default("check-in-image"),
 });
 
+const messagePartSchema = z.union([
+  z.object({
+    type: z.literal("text"),
+    text: z.string(),
+  }),
+  z.object({
+    type: z.literal("image"),
+    url: z.string(),
+    mimeType: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal("file"),
+    url: z.string(),
+    mimeType: z.string(),
+  }),
+  z.object({
+    type: z.literal("tool-call"),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    args: z.unknown(),
+  }),
+  z.object({
+    type: z.literal("tool-result"),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    result: z.unknown(),
+  }),
+]);
+
+const uiMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant"]),
+  parts: z.array(messagePartSchema),
+});
+
 export const chatRequestBodySchema = z.object({
-  messages: z.array(z.record(z.string(), z.unknown())).optional(),
+  messages: z.array(uiMessageSchema).optional(),
 });

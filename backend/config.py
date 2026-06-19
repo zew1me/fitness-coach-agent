@@ -1,5 +1,6 @@
 import os
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +11,21 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_vision_model: str = "gpt-5.4-mini"
     openai_vision_timeout_seconds: float = 45.0
+
+    @field_validator("openai_vision_model")
+    @classmethod
+    def validate_vision_model(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("openai_vision_model must not be empty or whitespace")
+        return v
+
+    @field_validator("openai_vision_timeout_seconds")
+    @classmethod
+    def validate_vision_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("openai_vision_timeout_seconds must be > 0")
+        return v
+
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None
     r2_bucket: str | None = None
