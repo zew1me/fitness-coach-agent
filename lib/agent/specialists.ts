@@ -55,6 +55,9 @@ export async function runSpecialists({
       maxTurns: 1,
     });
 
+    if (!result.finalOutput) {
+      throw new Error(`Agent ${role} failed to produce output`);
+    }
     reports.push(specialistReportSchema.parse(result.finalOutput));
   }
 

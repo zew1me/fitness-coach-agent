@@ -7,6 +7,7 @@ import {
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
+import { chatRequestBodySchema } from "../../../lib/schemas";
 import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
@@ -14,10 +15,6 @@ export const runtime = "nodejs";
 type BrowserTokenResponse = {
   access_token: string;
   user_id: string;
-};
-
-type ChatRequestBody = {
-  messages?: UIMessage[];
 };
 
 type LatestUserTurn = {
@@ -184,8 +181,13 @@ async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  const body = (await request.json()) as ChatRequestBody;
-  const messages = body.messages ?? [];
+  let parsedBody: { messages?: unknown[] | undefined };
+  try {
+    parsedBody = chatRequestBodySchema.parse(await request.json());
+  } catch {
+    return jsonError("Invalid request body.", 400);
+  }
+  const messages = (parsedBody.messages ?? []) as UIMessage[];
   const modelMessages = await appendImageExtractionsToMessages(
     convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
     ({ imageUrl }) => extractImageContent(request, token, imageUrl),
@@ -197,7 +199,9 @@ async function handleChatRequest(
   const context = await loadAthleteContext(request, token);
 
   const tavilyApiKey = process.env["TAVILY_API_KEY"];
-  const tavilyMcpUrl = tavilyApiKey ? buildTavilyMcpUrl(tavilyApiKey) : undefined;
+  const tavilyMcpUrl = tavilyApiKey
+    ? buildTavilyMcpUrl(tavilyApiKey)
+    : undefined;
 
   return streamCoachTurn({
     accessToken: token.access_token,

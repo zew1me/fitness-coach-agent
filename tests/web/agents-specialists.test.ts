@@ -34,24 +34,6 @@ vi.mock("@openai/agents", () => ({
   run: agentsMocks.run,
 }));
 
-vi.mock("ai", () => ({
-  convertToModelMessages: vi.fn((messages: UIMessage[]) =>
-    Promise.resolve(messages),
-  ),
-  generateText: vi.fn(() =>
-    Promise.resolve({
-      output: {
-        confidence: "high",
-        proposedUpdates: [],
-        risks: [],
-        role: "recovery",
-        summary: "Legacy report",
-      },
-    }),
-  ),
-  Output: { object: vi.fn((value: unknown) => value) },
-}));
-
 beforeEach(() => {
   agentsMocks.constructedAgents.length = 0;
   vi.clearAllMocks();

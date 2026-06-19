@@ -17,7 +17,7 @@ function parseToolInput(value: unknown): unknown {
   try {
     return JSON.parse(value) as unknown;
   } catch {
-    return { raw: value };
+    return {};
   }
 }
 
@@ -68,7 +68,7 @@ function handleRunItem(
     writer.write({
       type: "tool-output-available",
       toolCallId: identity.callId,
-      output: record(event.item)?.["output"],
+      output: record(event.item)?.["output"] ?? null,
     });
   }
 }

@@ -10,6 +10,10 @@ export const athleteProfileSchema = z.object({
   weekly_available_hours: z.number().positive().nullable().optional(),
 });
 
+export const chatRequestBodySchema = z.object({
+  messages: z.array(z.unknown()).optional(),
+});
+
 export const uploadRequestSchema = z.object({
   content_length: z
     .number()

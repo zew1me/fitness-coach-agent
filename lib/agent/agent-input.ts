@@ -1,6 +1,7 @@
 import type { AgentInputItem } from "@openai/agents";
 import type { UIMessage } from "ai";
 
+// Safe: every UIMessage part is a plain object with a discriminant `type` field.
 function partRecord(part: UIMessage["parts"][number]): Record<string, unknown> {
   return part as unknown as Record<string, unknown>;
 }
@@ -9,6 +10,13 @@ type UserContent = Exclude<
   Extract<AgentInputItem, { role: "user" }>["content"],
   string
 >;
+
+const SUPPORTED_IMAGE_TYPES = new Set([
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
 
 function fileContentItem(
   value: Record<string, unknown>,
@@ -20,7 +28,7 @@ function fileContentItem(
   ) {
     return null;
   }
-  if (value["mediaType"].startsWith("image/")) {
+  if (SUPPORTED_IMAGE_TYPES.has(value["mediaType"])) {
     return { type: "input_image", image: value["url"] };
   }
   return {
@@ -46,6 +54,35 @@ function userContent(message: UIMessage): UserContent {
   return content;
 }
 
+function toolResultItem(
+  callId: string,
+  name: string,
+  state: unknown,
+  value: Record<string, unknown>,
+): AgentInputItem | null {
+  if (state === "output-available") {
+    return {
+      type: "function_call_result",
+      callId,
+      name,
+      output: JSON.stringify(value["output"] ?? null),
+      status: "completed",
+    };
+  }
+  if (state === "output-error") {
+    return {
+      type: "function_call_result",
+      callId,
+      name,
+      output: JSON.stringify({
+        error: value["errorText"] ?? "Tool call failed",
+      }),
+      status: "completed",
+    };
+  }
+  return null;
+}
+
 function toolPartItems(value: Record<string, unknown>): AgentInputItem[] {
   const type = value["type"];
   const callId = value["toolCallId"];
@@ -57,24 +94,19 @@ function toolPartItems(value: Record<string, unknown>): AgentInputItem[] {
     return [];
   }
   const name = type.slice("tool-".length);
+  const state = value["state"];
+  const isComplete = state === "output-available" || state === "output-error";
   const items: AgentInputItem[] = [
     {
       type: "function_call",
       callId,
       name,
       arguments: JSON.stringify(value["input"] ?? {}),
-      status: "completed",
+      status: isComplete ? "completed" : "in_progress",
     },
   ];
-  if (value["state"] === "output-available") {
-    items.push({
-      type: "function_call_result",
-      callId,
-      name,
-      output: JSON.stringify(value["output"] ?? null),
-      status: "completed",
-    });
-  }
+  const result = toolResultItem(callId, name, state, value);
+  if (result !== null) items.push(result);
   return items;
 }
 

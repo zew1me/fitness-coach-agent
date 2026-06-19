@@ -35,6 +35,95 @@ describe("toAgentInputItems", () => {
     ]);
   });
 
+  it("returns an empty array for an empty message list", () => {
+    expect(toAgentInputItems([])).toEqual([]);
+  });
+
+  it("skips user messages whose text parts are all empty", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "message-1",
+        role: "user",
+        parts: [{ type: "text", text: "" }],
+      },
+    ];
+    expect(toAgentInputItems(messages)).toEqual([]);
+  });
+
+  it("converts a non-image file attachment to input_file", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "message-1",
+        role: "user",
+        parts: [
+          {
+            type: "file",
+            filename: "activity.gpx",
+            mediaType: "application/gpx+xml",
+            url: "https://files.example/activity.gpx",
+          },
+        ],
+      },
+    ];
+
+    expect(toAgentInputItems(messages)).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_file",
+            file: { url: "https://files.example/activity.gpx" },
+            filename: "activity.gpx",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("concatenates multiple text parts in a system message", () => {
+    const messages = [
+      {
+        id: "system-1",
+        role: "system",
+        parts: [
+          { type: "text", text: "You are a coach." },
+          { type: "text", text: "Be concise." },
+        ],
+      },
+    ] as UIMessage[];
+
+    expect(toAgentInputItems(messages)).toEqual([
+      { role: "system", content: "You are a coach.\nBe concise." },
+    ]);
+  });
+
+  it("emits only function_call (in_progress) for tool parts without output", () => {
+    const messages = [
+      {
+        id: "message-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-get_active_plan",
+            toolCallId: "call-1",
+            state: "input-available",
+            input: {},
+          },
+        ],
+      },
+    ] as UIMessage[];
+
+    expect(toAgentInputItems(messages)).toEqual([
+      {
+        type: "function_call",
+        callId: "call-1",
+        name: "get_active_plan",
+        arguments: "{}",
+        status: "in_progress",
+      },
+    ]);
+  });
+
   it("replays completed assistant tool calls and outputs", () => {
     const messages = [
       {

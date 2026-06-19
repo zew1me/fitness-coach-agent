@@ -10,29 +10,39 @@ export type CoachToolContext = {
   fetchImpl?: typeof fetch;
 };
 
+const ENGINE_TIMEOUT_MS = 30_000;
+
 async function postEngine<TInput extends object>(
   context: CoachToolContext,
   path: string,
   input: TInput,
 ): Promise<unknown> {
-  const response = await (context.fetchImpl ?? fetch)(
-    `${context.baseUrl}${path}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${context.accessToken}`,
-        "Content-Type": "application/json",
-        ...(context.extraHeaders ?? {}),
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ENGINE_TIMEOUT_MS);
+
+  try {
+    const response = await (context.fetchImpl ?? fetch)(
+      `${context.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${context.accessToken}`,
+          "Content-Type": "application/json",
+          ...(context.extraHeaders ?? {}),
+        },
+        body: JSON.stringify(input),
+        signal: controller.signal,
       },
-      body: JSON.stringify(input),
-    },
-  );
+    );
 
-  if (!response.ok) {
-    throw new Error(`Engine request failed for ${path}.`);
+    if (!response.ok) {
+      throw new Error(`Engine request failed for ${path}.`);
+    }
+
+    return response.json();
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  return response.json();
 }
 
 async function getAthleteSummary(
@@ -149,7 +159,6 @@ function isValidActivityUpload(
     isActivityFile(contentType, filename)
   );
 }
-
 
 function processUploadedFile(
   input: unknown,
