@@ -39,7 +39,7 @@ async function postEngine<TInput extends object>(
       throw new Error(`Engine request failed for ${path}.`);
     }
 
-    return response.json();
+    return await response.json();
   } finally {
     clearTimeout(timeoutId);
   }
