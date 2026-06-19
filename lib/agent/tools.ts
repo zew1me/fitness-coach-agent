@@ -82,7 +82,7 @@ const scheduleOverrideSchema = z.object({
 
 const scheduleInputSchema = z.object({
   overrides: z.array(scheduleOverrideSchema).optional(),
-  weekly_pattern: z.record(weeklyPatternDaySchema).optional(),
+  weekly_pattern: z.record(z.string(), weeklyPatternDaySchema).optional(),
 });
 
 const onboardingCollectedSchema = z.object({

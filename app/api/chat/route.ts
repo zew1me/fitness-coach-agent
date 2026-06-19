@@ -1,5 +1,4 @@
-import { createMCPClient } from "@ai-sdk/mcp";
-import { type ToolSet, type UIMessage } from "ai";
+import { type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
@@ -181,6 +180,38 @@ async function extractImageContent(
   }
 }
 
+async function handleChatRequest(
+  request: Request,
+  token: BrowserTokenResponse,
+): Promise<Response> {
+  const body = (await request.json()) as ChatRequestBody;
+  const messages = body.messages ?? [];
+  const modelMessages = await appendImageExtractionsToMessages(
+    convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
+    ({ imageUrl }) => extractImageContent(request, token, imageUrl),
+  );
+  const latestUserTurn = summarizeLatestUserTurn(messages);
+  if (latestUserTurn !== null) {
+    await persistUserMessage(request, token, latestUserTurn);
+  }
+  const context = await loadAthleteContext(request, token);
+
+  const tavilyApiKey = process.env["TAVILY_API_KEY"];
+  const tavilyMcpUrl = tavilyApiKey ? buildTavilyMcpUrl(tavilyApiKey) : undefined;
+
+  return streamCoachTurn({
+    accessToken: token.access_token,
+    baseUrl: requestOrigin(request),
+    context,
+    extraHeaders: vercelProtectionBypassHeaders(),
+    messages: modelMessages,
+    messagesAreModelSelected: true,
+    signal: request.signal,
+    streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+    ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),
+  });
+}
+
 export async function POST(request: Request): Promise<Response> {
   let token: BrowserTokenResponse | null;
   try {
@@ -198,35 +229,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    const body = (await request.json()) as ChatRequestBody;
-    const messages = body.messages ?? [];
-    const modelMessages = await appendImageExtractionsToMessages(
-      convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
-      ({ imageUrl }) => extractImageContent(request, token, imageUrl),
-    );
-    const latestUserTurn = summarizeLatestUserTurn(messages);
-    if (latestUserTurn !== null) {
-      await persistUserMessage(request, token, latestUserTurn);
-    }
-    const context = await loadAthleteContext(request, token);
-
-    const tavilyApiKey = process.env["TAVILY_API_KEY"];
-    const tavilyTools: ToolSet = tavilyApiKey
-      ? await createMCPClient({
-          transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
-        }).then((c) => c.tools())
-      : {};
-
-    return await streamCoachTurn({
-      accessToken: token.access_token,
-      baseUrl: requestOrigin(request),
-      context,
-      extraHeaders: vercelProtectionBypassHeaders(),
-      messages: modelMessages,
-      messagesAreModelSelected: true,
-      streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
-      tavilyTools,
-    });
+    return await handleChatRequest(request, token);
   } catch (error) {
     console.error("[chat] POST error:", safeErrorMessage(error));
     return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });

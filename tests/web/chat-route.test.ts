@@ -25,6 +25,7 @@ vi.mock("../../lib/agent/orchestrator", () => ({
 const originalFetch = globalThis.fetch;
 const originalVercelBypassSecret =
   process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
+const originalTavilyApiKey = process.env["TAVILY_API_KEY"];
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -33,10 +34,48 @@ afterEach(() => {
   } else {
     process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] = originalVercelBypassSecret;
   }
+  if (originalTavilyApiKey === undefined) {
+    delete process.env["TAVILY_API_KEY"];
+  } else {
+    process.env["TAVILY_API_KEY"] = originalTavilyApiKey;
+  }
   vi.clearAllMocks();
 });
 
 describe("app/api/chat route", () => {
+  it("passes the configured Tavily MCP URL to the Agents SDK orchestrator", async () => {
+    process.env["TAVILY_API_KEY"] = "tavily-test-key";
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), { status: 200 }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ id: "thread-1", messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(streamCoachTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tavilyMcpUrl:
+          "https://mcp.tavily.com/mcp/?tavilyApiKey=tavily-test-key",
+      }),
+    );
+  });
+
   it("delegates authenticated chat turns to the orchestrator", async () => {
     const messages = [
       {

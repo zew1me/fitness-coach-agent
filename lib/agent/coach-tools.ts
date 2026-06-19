@@ -1,3 +1,4 @@
+import { tool, type Tool } from "@openai/agents";
 import { type ToolSet } from "ai";
 
 import { coachToolDefinitions } from "./tools";
@@ -149,6 +150,7 @@ function isValidActivityUpload(
   );
 }
 
+
 function processUploadedFile(
   input: unknown,
   context: CoachToolContext,
@@ -231,7 +233,7 @@ function executeDeterministicEngineTool(
   return null;
 }
 
-function executeCoachTool(
+export function executeCoachTool(
   name: string,
   input: unknown,
   context: CoachToolContext,
@@ -275,6 +277,24 @@ function executeCoachTool(
     status: "pending_implementation",
     tool: name,
   };
+}
+
+export type CoachAgentRunContext = {
+  toolCalled: boolean;
+};
+
+export function createAgentCoachTools(
+  context: CoachToolContext,
+): Tool<CoachAgentRunContext>[] {
+  return Object.entries(coachToolDefinitions).map(([name, definition]) =>
+    tool({
+      name,
+      description: definition.description,
+      parameters: definition.inputSchema,
+      isEnabled: ({ runContext }) => !runContext.context.toolCalled,
+      execute: (input: unknown) => executeCoachTool(name, input, context),
+    }),
+  );
 }
 
 export function createCoachTools(context: CoachToolContext): ToolSet {
