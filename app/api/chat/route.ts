@@ -49,7 +49,7 @@ function vercelProtectionBypassHeaders(): Record<string, string> {
 
 function safeErrorMessage(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
-  return msg.replace(/key=[^&\s]+/g, "key=***");
+  return msg.replace(/((?:tavilyApiKey|api[_-]?key|key)=)[^&\s]+/gi, "$1***");
 }
 
 async function loadBrowserToken(
