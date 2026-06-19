@@ -161,6 +161,15 @@ async def classify_screenshot(image_url: str) -> ScreenshotClassification:
             confidence=0.0,
         )
 
+    if not isinstance(parsed, dict):
+        logger.warning("screenshot classification: vision response was not a JSON object")
+        return ScreenshotClassification(
+            screenshot_type="unknown",
+            source_app_hint=None,
+            date_range_hint=None,
+            confidence=0.0,
+        )
+
     classification = ScreenshotClassification(
         screenshot_type=parsed.get("screenshot_type", "unknown"),
         source_app_hint=parsed.get("source_app_hint"),
@@ -201,6 +210,12 @@ async def extract_from_screenshot(
 
     try:
         data = json.loads(response)
+        if not isinstance(data, dict):
+            logger.warning(
+                "screenshot extraction: vision response was not a JSON object type=%s",
+                screenshot_type,
+            )
+            data = {"raw_text": response}
     except json.JSONDecodeError:
         logger.warning(
             "screenshot extraction: vision response was not valid JSON type=%s", screenshot_type

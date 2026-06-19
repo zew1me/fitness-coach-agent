@@ -37,7 +37,7 @@ describe("loadAgentModelPolicy", () => {
   );
 
   it.each(["high", "xhigh", "unsupported"])(
-    "caps unsupported specialist reasoning effort %s at medium",
+    "caps unsupported specialist reasoning effort %s at low",
     (configuredEffort) => {
       expect(
         loadAgentModelPolicy({

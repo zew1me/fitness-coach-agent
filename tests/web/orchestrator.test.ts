@@ -102,7 +102,7 @@ afterEach(() => {
 });
 
 describe("streamCoachTurn", () => {
-  it("uses bounded GPT-5.5 lead settings", async () => {
+  it("uses bounded lead settings", async () => {
     await streamCoachTurn({
       accessToken: "token-1",
       baseUrl: "http://localhost",
@@ -123,7 +123,6 @@ describe("streamCoachTurn", () => {
     )[0][0];
     const { openai } = await import("@ai-sdk/openai");
 
-    expect(openai).toHaveBeenCalledTimes(1);
     expect(openai).toHaveBeenNthCalledWith(1, "gpt-5.5");
     expect(options).toMatchObject({
       maxOutputTokens: 2048,

@@ -34,7 +34,8 @@ const messagePartSchema = z.union([
   z.object({
     type: z.literal("file"),
     url: z.string(),
-    mimeType: z.string(),
+    mediaType: z.string().optional(),
+    filename: z.string().optional(),
   }),
   z.object({
     type: z.literal("tool-call"),

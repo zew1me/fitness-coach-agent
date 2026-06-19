@@ -15,9 +15,10 @@ class Settings(BaseSettings):
     @field_validator("openai_vision_model")
     @classmethod
     def validate_vision_model(cls, v: str) -> str:
-        if not v or not v.strip():
+        stripped = v.strip()
+        if not stripped:
             raise ValueError("openai_vision_model must not be empty or whitespace")
-        return v
+        return stripped
 
     @field_validator("openai_vision_timeout_seconds")
     @classmethod
