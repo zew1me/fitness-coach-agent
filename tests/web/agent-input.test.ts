@@ -4,6 +4,40 @@ import { describe, expect, it } from "vitest";
 import { toAgentInputItems } from "../../lib/agent/agent-input";
 
 describe("toAgentInputItems", () => {
+  it("replays errored assistant tool calls with error payload", () => {
+    const messages = [
+      {
+        id: "message-err",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-get_active_plan",
+            toolCallId: "call-err-1",
+            state: "output-error",
+            input: {},
+            errorText: "Upstream timeout",
+          },
+        ],
+      },
+    ] as UIMessage[];
+    +expect(toAgentInputItems(messages)).toEqual([
+      {
+        type: "function_call",
+        callId: "call-err-1",
+        name: "get_active_plan",
+        arguments: "{}",
+        status: "completed",
+      },
+      {
+        type: "function_call_result",
+        callId: "call-err-1",
+        name: "get_active_plan",
+        output: JSON.stringify({ error: "Upstream timeout" }),
+        status: "completed",
+      },
+    ]);
+  });
+
   it("preserves text and image attachments in user input", () => {
     const messages: UIMessage[] = [
       {
