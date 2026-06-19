@@ -89,9 +89,15 @@ async function persistAssistantMessage(
       }),
     });
     if (!response.ok) {
+      Sentry.logger.error("coach: persist assistant reply failed", {
+        status: response.status,
+      });
       console.error("[chat] persist assistant reply failed:", response.status);
     }
   } catch (error) {
+    Sentry.captureException(error, {
+      tags: { subsystem: "persist-assistant" },
+    });
     const message = error instanceof Error ? error.message : String(error);
     console.error("[chat] persist assistant reply error:", message);
   }
@@ -209,6 +215,10 @@ export function streamCoachTurn({
           },
         );
         finishAgentText(writer, textState);
+        Sentry.logger.info("coach turn complete", {
+          textStarted: textState.textStarted,
+          user_id: context.profile.user_id,
+        });
         writer.write({ type: "finish-step" });
         writer.write({ type: "finish", finishReason: "stop" });
       } catch (error) {

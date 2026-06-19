@@ -1,4 +1,5 @@
 import type { RunStreamEvent } from "@openai/agents";
+import * as Sentry from "@sentry/nextjs";
 import type { UIMessageStreamWriter } from "ai";
 
 type StreamState = {
@@ -34,16 +35,31 @@ function callIdentity(rawItem: Record<string, unknown>): {
     : null;
 }
 
+function warnUnhandledTextLikeType(data: Record<string, unknown> | null): void {
+  const t = data?.["type"];
+  if (typeof t === "string" && (t.includes("text") || t.includes("delta"))) {
+    Sentry.logger.warn("coach-stream: unhandled text-like event type", {
+      type: t,
+    });
+  }
+}
+
 function handleModelDelta(
   event: Extract<RunStreamEvent, { type: "raw_model_stream_event" }>,
   writer: UIMessageStreamWriter,
   state: StreamState,
 ): void {
   const data = record(event.data);
-  if (data?.["type"] !== "output_text_delta") return;
+  if (data?.["type"] !== "output_text_delta") {
+    warnUnhandledTextLikeType(data);
+    return;
+  }
   const delta = data["delta"];
   if (typeof delta !== "string" || delta.length === 0) return;
   if (!state.textStarted) {
+    Sentry.logger.info("coach-stream: text streaming started", {
+      id: state.textId,
+    });
     writer.write({ type: "text-start", id: state.textId });
     state.textStarted = true;
   }
