@@ -47,7 +47,7 @@ const uploadedFileInputSchema = z.object({
   content_type: z.string().min(1),
   filename: z.string().min(1),
   object_key: z.string().min(1),
-  public_url: z.string().url().nullable().optional(),
+  public_url: z.string().nullable().optional(),
 });
 
 const recoveryEntrySchema = z.object({
