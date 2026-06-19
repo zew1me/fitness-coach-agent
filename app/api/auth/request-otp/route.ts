@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
+import * as Sentry from "@sentry/nextjs";
 import { NextResponse } from "next/server";
 
 import { normalizeReturnTo } from "../../../../lib/auth";
@@ -49,7 +50,7 @@ function buildEmailRedirectTo(request: Request, returnTo: unknown): string {
   const callbackUrl = new URL("/auth/callback", request.url);
   callbackUrl.searchParams.set(
     "return_to",
-    normalizeReturnTo(typeof returnTo === "string" ? returnTo : null)
+    normalizeReturnTo(typeof returnTo === "string" ? returnTo : null),
   );
   return callbackUrl.toString();
 }
@@ -81,14 +82,17 @@ function looksLikeNewUserError(error: { message?: string } | null): boolean {
   );
 }
 
-async function sendOtp(email: string, emailRedirectTo: string): Promise<OtpResult> {
+async function sendOtp(
+  email: string,
+  emailRedirectTo: string,
+): Promise<OtpResult> {
   const supabase = getSupabaseAdminClient();
   return supabase.auth.signInWithOtp({
     email,
     options: {
       emailRedirectTo,
-      shouldCreateUser: false
-    }
+      shouldCreateUser: false,
+    },
   });
 }
 
@@ -97,32 +101,38 @@ async function parseRequest(request: Request): Promise<ParsedRequest> {
   try {
     body = (await request.json()) as RequestOtpBody;
   } catch {
-    return jsonResponse({ error: "invalid_request", message: "Request body must be JSON." }, 400);
+    return jsonResponse(
+      { error: "invalid_request", message: "Request body must be JSON." },
+      400,
+    );
   }
 
   const email = normalizeEmail(body.email);
   if (email === null) {
-    return jsonResponse({ error: "invalid_email", message: "Enter a valid email address." }, 400);
+    return jsonResponse(
+      { error: "invalid_email", message: "Enter a valid email address." },
+      400,
+    );
   }
 
   return {
     body,
     email,
-    emailRedirectTo: buildEmailRedirectTo(request, body.returnTo)
+    emailRedirectTo: buildEmailRedirectTo(request, body.returnTo),
   };
 }
 
 function inviteRequiredResponse(): NextResponse {
   return jsonResponse(
     { error: "invite_required", message: "Invite code required." },
-    409
+    409,
   );
 }
 
 function invalidInviteResponse(): NextResponse {
   return jsonResponse(
     { error: "invalid_invite_code", message: "That invite code is not valid." },
-    403
+    403,
   );
 }
 
@@ -134,9 +144,9 @@ function otpFailureResponse(error: { message?: string } | null): NextResponse {
   return jsonResponse(
     {
       error: "otp_send_failed",
-      message: error?.message || "Unable to send a login code."
+      message: error?.message || "Unable to send a login code.",
     },
-    502
+    502,
   );
 }
 
@@ -144,7 +154,7 @@ async function createInvitedUser(email: string): Promise<NextResponse | null> {
   const supabase = getSupabaseAdminClient();
   const createResult = await supabase.auth.admin.createUser({
     email,
-    email_confirm: true
+    email_confirm: true,
   });
 
   if (createResult.error === null) {
@@ -154,29 +164,41 @@ async function createInvitedUser(email: string): Promise<NextResponse | null> {
   return jsonResponse(
     {
       error: "user_create_failed",
-      message: createResult.error.message || "Unable to create your account."
+      message: createResult.error.message || "Unable to create your account.",
     },
-    502
+    502,
   );
 }
 
-async function handleNewUser(body: RequestOtpBody, email: string, emailRedirectTo: string): Promise<NextResponse> {
+async function handleNewUser(
+  body: RequestOtpBody,
+  email: string,
+  emailRedirectTo: string,
+): Promise<NextResponse> {
   const inviteCode = normalizeInviteCode(body.inviteCode);
   if (inviteCode === null) {
+    Sentry.logger.info("otp: invite code required for new user");
     return inviteRequiredResponse();
   }
 
   if (!isInviteCodeValid(inviteCode)) {
+    Sentry.logger.warn("otp: invalid invite code submitted");
     return invalidInviteResponse();
   }
 
   const createErrorResponse = await createInvitedUser(email);
   if (createErrorResponse !== null) {
+    Sentry.logger.error("otp: invited user creation failed");
     return createErrorResponse;
   }
 
+  Sentry.logger.info("otp: new user created via invite");
   const invitedOtpResult = await sendOtp(email, emailRedirectTo);
-  return invitedOtpResult.error === null ? otpSentResponse() : otpFailureResponse(invitedOtpResult.error);
+  if (invitedOtpResult.error !== null) {
+    Sentry.logger.error("otp: send failed for new invited user");
+    return otpFailureResponse(invitedOtpResult.error);
+  }
+  return otpSentResponse();
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -188,10 +210,14 @@ export async function POST(request: Request): Promise<NextResponse> {
   const { body, email, emailRedirectTo } = parsedRequest;
   const initialOtpResult = await sendOtp(email, emailRedirectTo);
   if (initialOtpResult.error === null) {
+    Sentry.logger.info("otp: sent to existing user");
     return otpSentResponse();
   }
 
   if (!looksLikeNewUserError(initialOtpResult.error)) {
+    Sentry.logger.error("otp: send failed", {
+      error_message: initialOtpResult.error.message ?? "unknown",
+    });
     return otpFailureResponse(initialOtpResult.error);
   }
 
