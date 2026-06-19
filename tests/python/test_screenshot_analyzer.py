@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -76,7 +77,7 @@ async def test_analyze_screenshot_returns_unknown_when_vision_rejects_image(
 async def test_call_vision_uses_configured_model_timeout_and_high_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class FakeAsyncClient:
         def __init__(self, *_args: object, **kwargs: object) -> None:

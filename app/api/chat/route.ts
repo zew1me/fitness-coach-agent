@@ -1,14 +1,12 @@
-import { createMCPClient } from "@ai-sdk/mcp";
-import { type ToolSet, type UIMessage } from "ai";
+import { type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
-  convertUnsupportedFilePartsToText,
   selectMessagesForModel,
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
+import { createTavilyToolProvider } from "../../../lib/agent/tavily-tools";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
-import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
 
@@ -30,6 +28,7 @@ const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
 const COACH_UNAVAILABLE_MESSAGE =
   "Coach is unavailable right now. Please try again.";
+const tavilyToolProvider = createTavilyToolProvider();
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
@@ -201,7 +200,7 @@ export async function POST(request: Request): Promise<Response> {
     const body = (await request.json()) as ChatRequestBody;
     const messages = body.messages ?? [];
     const modelMessages = await appendImageExtractionsToMessages(
-      convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
+      selectMessagesForModel(messages),
       ({ imageUrl }) => extractImageContent(request, token, imageUrl),
     );
     const latestUserTurn = summarizeLatestUserTurn(messages);
@@ -210,12 +209,9 @@ export async function POST(request: Request): Promise<Response> {
     }
     const context = await loadAthleteContext(request, token);
 
-    const tavilyApiKey = process.env["TAVILY_API_KEY"];
-    const tavilyTools: ToolSet = tavilyApiKey
-      ? await createMCPClient({
-          transport: { type: "http", url: buildTavilyMcpUrl(tavilyApiKey) },
-        }).then((c) => c.tools())
-      : {};
+    const tavilyTools = await tavilyToolProvider.getTools(
+      process.env["TAVILY_API_KEY"],
+    );
 
     return await streamCoachTurn({
       accessToken: token.access_token,
