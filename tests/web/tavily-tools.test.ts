@@ -71,4 +71,29 @@ describe("createTavilyToolProvider", () => {
 
     expect(tavilyClient.close).toHaveBeenCalledOnce();
   });
+
+  it("handles concurrent key rotation by closing the old client", async () => {
+    const tools1 = { search: { description: "search1" } } as unknown as ToolSet;
+    const tools2 = { search: { description: "search2" } } as unknown as ToolSet;
+    const client1 = client(tools1);
+    const client2 = client(tools2);
+    const createClient = vi
+      .fn()
+      .mockResolvedValueOnce(client1)
+      .mockResolvedValueOnce(client2);
+    const provider = createTavilyToolProvider({
+      createClient: createClient as never,
+    });
+
+    const firstCall = provider.getTools("key-1");
+    const secondCall = provider.getTools("key-2");
+
+    await expect(Promise.all([firstCall, secondCall])).resolves.toEqual([
+      tools1,
+      tools2,
+    ]);
+    expect(createClient).toHaveBeenCalledTimes(2);
+    expect(client1.close).toHaveBeenCalledOnce();
+    expect(client2.close).not.toHaveBeenCalled();
+  });
 });

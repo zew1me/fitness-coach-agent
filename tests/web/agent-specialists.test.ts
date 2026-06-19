@@ -58,7 +58,7 @@ function deferred<T>(): {
 }
 
 afterEach(() => {
-  vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
 
 describe("runSpecialists", () => {
@@ -79,6 +79,34 @@ describe("runSpecialists", () => {
 
     await vi.waitFor(() => {
       expect(specialistMocks.generateText).toHaveBeenCalledTimes(2);
+    });
+
+    // Verify specialist policy settings are forwarded
+    const firstCall = specialistMocks.generateText.mock.calls[0]?.[0];
+    const secondCall = specialistMocks.generateText.mock.calls[1]?.[0];
+    expect(firstCall).toMatchObject({
+      maxRetries: 2,
+      providerOptions: {
+        openai: {
+          reasoningEffort: "low",
+          textVerbosity: "low",
+        },
+      },
+      timeout: {
+        totalMs: 30_000,
+      },
+    });
+    expect(secondCall).toMatchObject({
+      maxRetries: 2,
+      providerOptions: {
+        openai: {
+          reasoningEffort: "low",
+          textVerbosity: "low",
+        },
+      },
+      timeout: {
+        totalMs: 30_000,
+      },
     });
 
     workout.resolve({ output: report("workout") });

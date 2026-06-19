@@ -33,6 +33,7 @@ export function createTavilyToolProvider({
   createClient = (config): Promise<TavilyClient> => createMCPClient(config),
 }: TavilyToolProviderOptions = {}): TavilyToolProvider {
   let active: ActiveTavilyClient | null = null;
+  let initializationLock: Promise<void> | null = null;
 
   async function close(): Promise<void> {
     const current = active;
@@ -58,27 +59,45 @@ export function createTavilyToolProvider({
   async function getTools(apiKey: string | undefined): Promise<ToolSet> {
     if (!apiKey) return {};
     if (active?.apiKey === apiKey) return active.toolsPromise;
-    await closeUntilKeyMatches(apiKey);
-    if (active?.apiKey === apiKey) return active.toolsPromise;
 
-    const clientPromise = createClient({
-      transport: { type: "http", url: buildUrl(apiKey) },
+    // Wait for any in-progress initialization to complete
+    while (initializationLock !== null) {
+      await initializationLock;
+      if (active?.apiKey === apiKey) return active.toolsPromise;
+    }
+
+    // Acquire the lock for this initialization
+    let releaseLock: () => void;
+    initializationLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
     });
-    const toolsPromise = clientPromise.then((client) => client.tools());
-    const next: ActiveTavilyClient = { apiKey, clientPromise, toolsPromise };
-    active = next;
 
     try {
-      return await toolsPromise;
-    } catch (error) {
-      if (active === next) active = null;
+      await closeUntilKeyMatches(apiKey);
+      if (active?.apiKey === apiKey) return active.toolsPromise;
+
+      const clientPromise = createClient({
+        transport: { type: "http", url: buildUrl(apiKey) },
+      });
+      const toolsPromise = clientPromise.then((client) => client.tools());
+      const next: ActiveTavilyClient = { apiKey, clientPromise, toolsPromise };
+      active = next;
+
       try {
-        const client = await clientPromise;
-        await client.close();
-      } catch {
-        // Initialization failures may not yield a client.
+        return await toolsPromise;
+      } catch (error) {
+        if (active === next) active = null;
+        try {
+          const client = await clientPromise;
+          await client.close();
+        } catch {
+          // Initialization failures may not yield a client.
+        }
+        throw error;
       }
-      throw error;
+    } finally {
+      initializationLock = null;
+      releaseLock!();
     }
   }
 

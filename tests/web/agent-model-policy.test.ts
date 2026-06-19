@@ -9,6 +9,7 @@ describe("loadAgentModelPolicy", () => {
       leadReasoningEffort: "medium",
       specialistModel: "gpt-5.4-mini",
       specialistReasoningEffort: "low",
+      specialistTextVerbosity: "low",
       textVerbosity: "low",
     });
   });
@@ -34,4 +35,45 @@ describe("loadAgentModelPolicy", () => {
       ).toBe(configuredEffort);
     },
   );
+
+  it.each(["high", "xhigh", "unsupported"])(
+    "caps unsupported specialist reasoning effort %s at medium",
+    (configuredEffort) => {
+      expect(
+        loadAgentModelPolicy({
+          OPENAI_SPECIALIST_REASONING_EFFORT: configuredEffort,
+        }).specialistReasoningEffort,
+      ).toBe("low");
+    },
+  );
+
+  it.each(["none", "low", "medium"] as const)(
+    "accepts bounded specialist reasoning effort %s",
+    (configuredEffort) => {
+      expect(
+        loadAgentModelPolicy({
+          OPENAI_SPECIALIST_REASONING_EFFORT: configuredEffort,
+        }).specialistReasoningEffort,
+      ).toBe(configuredEffort);
+    },
+  );
+
+  it.each(["high", "unsupported", ""])(
+    "caps unsupported specialist text verbosity %s at low",
+    (configuredVerbosity) => {
+      expect(
+        loadAgentModelPolicy({
+          OPENAI_SPECIALIST_TEXT_VERBOSITY: configuredVerbosity,
+        }).specialistTextVerbosity,
+      ).toBe("low");
+    },
+  );
+
+  it("accepts medium specialist text verbosity", () => {
+    expect(
+      loadAgentModelPolicy({
+        OPENAI_SPECIALIST_TEXT_VERBOSITY: "medium",
+      }).specialistTextVerbosity,
+    ).toBe("medium");
+  });
 });

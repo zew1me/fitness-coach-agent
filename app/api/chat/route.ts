@@ -229,7 +229,13 @@ async function streamCoachTurnWithContext(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  const parseResult = chatRequestBodySchema.safeParse(await request.json());
+  let requestBody: unknown;
+  try {
+    requestBody = await request.json();
+  } catch {
+    return jsonError("Invalid request body.", 400);
+  }
+  const parseResult = chatRequestBodySchema.safeParse(requestBody);
   if (!parseResult.success) {
     return jsonError("Invalid request body.", 400);
   }
