@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
-import { type UIMessage } from "ai";
+import { type ToolSet, type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
@@ -237,9 +237,12 @@ async function streamCoachTurnWithContext(
   }
   const parseResult = chatRequestBodySchema.safeParse(requestBody);
   if (!parseResult.success) {
+    Sentry.logger.warn("chat: invalid request body", {
+      issues: parseResult.error.issues,
+    });
     return jsonError("Invalid request body.", 400);
   }
-  const messages = (parseResult.data.messages ?? []) as unknown as UIMessage[];
+  const messages = (parseResult.data.messages ?? []) as UIMessage[];
   Sentry.logger.info("chat turn start", {
     message_count: messages.length,
   });
@@ -253,12 +256,22 @@ async function streamCoachTurnWithContext(
   }
   const context = await loadAthleteContext(request, token);
 
-  const tavilyTools = await tavilyToolProvider.getTools(
-    process.env["TAVILY_API_KEY"],
-  );
-  Sentry.logger.info("chat: tavily tools loaded", {
-    count: Object.keys(tavilyTools).length,
-  });
+  let tavilyTools: ToolSet = {};
+  try {
+    tavilyTools = await tavilyToolProvider.getTools(
+      process.env["TAVILY_API_KEY"],
+    );
+    Sentry.logger.info("chat: tavily tools loaded", {
+      count: Object.keys(tavilyTools).length,
+    });
+  } catch (error) {
+    Sentry.logger.warn(
+      "chat: tavily tool discovery failed, proceeding without web search",
+      {
+        error: safeErrorMessage(error),
+      },
+    );
+  }
 
   return await streamCoachTurn({
     accessToken: token.access_token,

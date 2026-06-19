@@ -13,6 +13,17 @@ import { athleteContextFixture } from "./agent-fixtures";
 
 const specialistMocks = vi.hoisted(() => ({
   generateText: vi.fn(),
+  sentryWarn: vi.fn(),
+}));
+
+vi.mock("@ai-sdk/openai", () => ({
+  openai: vi.fn(() => "specialist-model"),
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  logger: {
+    warn: specialistMocks.sentryWarn,
+  },
 }));
 
 vi.mock("ai", () => ({
@@ -71,7 +82,6 @@ describe("runSpecialists", () => {
 
     const pendingReports = runSpecialists({
       messages,
-      model: "model" as never,
       modelPolicy: loadAgentModelPolicy({}),
       roles: ["workout", "recovery"],
       slices: buildContextSlices(athleteContextFixture),
@@ -122,21 +132,18 @@ describe("runSpecialists", () => {
     specialistMocks.generateText
       .mockRejectedValueOnce(new Error("upstream unavailable"))
       .mockResolvedValueOnce({ output: report("workout") });
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await expect(
       runSpecialists({
         messages,
-        model: "model" as never,
         modelPolicy: loadAgentModelPolicy({}),
         roles: ["recovery", "workout"],
         slices: buildContextSlices(athleteContextFixture),
       }),
     ).resolves.toEqual([report("workout")]);
-    expect(errorSpy).toHaveBeenCalledWith(
-      "[chat] specialist failed:",
-      "recovery",
-      "Error",
+    expect(specialistMocks.sentryWarn).toHaveBeenCalledWith(
+      "chat: specialist failed",
+      expect.objectContaining({ role: "recovery", errorType: "Error" }),
     );
   });
 });

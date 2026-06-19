@@ -1,8 +1,9 @@
+import { openai } from "@ai-sdk/openai";
+import * as Sentry from "@sentry/nextjs";
 import {
   convertToModelMessages,
   generateText,
   Output,
-  type LanguageModel,
   type UIMessage,
 } from "ai";
 
@@ -26,7 +27,6 @@ const SPECIALIST_ORDER: InternalSpecialistRole[] = [
 type RunSpecialistsOptions = {
   messagesAreModelSelected?: boolean;
   messages: UIMessage[];
-  model: LanguageModel;
   modelPolicy: AgentModelPolicy;
   roles: InternalSpecialistRole[];
   slices: ContextSlices;
@@ -40,11 +40,11 @@ function orderRoles(roles: InternalSpecialistRole[]): InternalSpecialistRole[] {
 export async function runSpecialists({
   messagesAreModelSelected = false,
   messages,
-  model,
   modelPolicy,
   roles,
   slices,
 }: RunSpecialistsOptions): Promise<SpecialistReport[]> {
+  const model = openai(modelPolicy.specialistModel);
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
@@ -87,7 +87,14 @@ export async function runSpecialists({
       result.reason instanceof Error
         ? result.reason.name
         : typeof result.reason;
-    console.error("[chat] specialist failed:", role, errorType);
+    Sentry.logger.warn("chat: specialist failed", {
+      role,
+      errorType,
+      error:
+        result.reason instanceof Error
+          ? result.reason.message
+          : String(result.reason),
+    });
     return [];
   });
 }

@@ -43,15 +43,20 @@ export function createTavilyToolProvider({
     try {
       const client = await current.clientPromise;
       await client.close();
-    } catch {
-      // A failed initialization has no usable client to close.
+    } catch (error) {
+      // clientPromise may have rejected (no client to close), or close() itself
+      // threw (connection already gone). Either way the resource is released.
+      console.warn(
+        "[tavily] client close error:",
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
   // Close until active is null or matches apiKey — guards against a concurrent
   // call installing a new client during the await inside close().
   async function closeUntilKeyMatches(apiKey: string): Promise<void> {
-    while (active !== null && active.apiKey !== apiKey) {
+    if (active !== null && active.apiKey !== apiKey) {
       await close();
     }
   }

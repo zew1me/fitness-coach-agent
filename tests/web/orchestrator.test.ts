@@ -83,7 +83,7 @@ type StreamTextOptions = {
     openai?: {
       reasoningEffort?: string;
       store?: boolean;
-      textVerbosity?: string;
+      leadTextVerbosity?: string;
     };
   };
   stopWhen?: unknown;

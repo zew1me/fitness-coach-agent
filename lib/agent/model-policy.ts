@@ -1,12 +1,13 @@
 export type BoundedReasoningEffort = "none" | "low" | "medium";
+export type TextVerbosity = "low" | "medium";
 
 export type AgentModelPolicy = {
   leadModel: string;
   leadReasoningEffort: BoundedReasoningEffort;
+  leadTextVerbosity: TextVerbosity;
   specialistModel: string;
   specialistReasoningEffort: BoundedReasoningEffort;
-  specialistTextVerbosity: "low" | "medium";
-  textVerbosity: "low" | "medium";
+  specialistTextVerbosity: TextVerbosity;
 };
 
 type AgentEnvironment = Readonly<Record<string, string | undefined>>;
@@ -26,8 +27,12 @@ function boundedReasoningEffort(
     : fallback;
 }
 
-function textVerbosity(value: string | undefined): "low" | "medium" {
-  return value === "medium" ? "medium" : "low";
+const TEXT_VERBOSITIES = new Set<TextVerbosity>(["low", "medium"]);
+
+function textVerbosity(value: string | undefined): TextVerbosity {
+  return TEXT_VERBOSITIES.has(value as TextVerbosity)
+    ? (value as TextVerbosity)
+    : "low";
 }
 
 export function loadAgentModelPolicy(
@@ -47,6 +52,6 @@ export function loadAgentModelPolicy(
     specialistTextVerbosity: textVerbosity(
       env["OPENAI_SPECIALIST_TEXT_VERBOSITY"],
     ),
-    textVerbosity: textVerbosity(env["OPENAI_TEXT_VERBOSITY"]),
+    leadTextVerbosity: textVerbosity(env["OPENAI_TEXT_VERBOSITY"]),
   };
 }

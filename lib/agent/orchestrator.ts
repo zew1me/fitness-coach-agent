@@ -1,4 +1,5 @@
 import { openai } from "@ai-sdk/openai";
+import * as Sentry from "@sentry/nextjs";
 import {
   convertToModelMessages,
   stepCountIs,
@@ -83,7 +84,6 @@ export async function streamCoachTurn({
 }: StreamCoachTurnOptions): Promise<Response> {
   const modelPolicy = loadAgentModelPolicy();
   const model = openai(modelPolicy.leadModel);
-  const specialistModel = openai(modelPolicy.specialistModel);
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
@@ -93,7 +93,6 @@ export async function streamCoachTurn({
     await runSpecialists({
       messages: selectedMessages,
       messagesAreModelSelected: true,
-      model: specialistModel,
       modelPolicy,
       roles: intent.specialists,
       slices,
@@ -131,16 +130,15 @@ export async function streamCoachTurn({
     },
     onError: ({ error }) => {
       const msg = error instanceof Error ? error.message : String(error);
-      console.error(
-        "[chat] stream error:",
-        msg.replace(/key=[^&\s]+/g, "key=***"),
-      );
+      Sentry.logger.error("chat: stream error", {
+        error: msg.replace(/key=[^&\s]+/g, "key=***"),
+      });
     },
     providerOptions: {
       openai: {
         reasoningEffort: modelPolicy.leadReasoningEffort,
         store: true,
-        textVerbosity: modelPolicy.textVerbosity,
+        textVerbosity: modelPolicy.leadTextVerbosity,
       },
     },
     timeout: {

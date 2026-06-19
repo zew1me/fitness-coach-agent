@@ -49,6 +49,9 @@ const messagePartSchema = z.union([
     toolName: z.string(),
     result: z.unknown(),
   }),
+  // Catch-all for AI SDK v5 part types not enumerated above (reasoning, step-start,
+  // dynamic tool parts like tool-tavilySearch, etc.) — validates envelope only.
+  z.object({ type: z.string() }).passthrough(),
 ]);
 
 const uiMessageSchema = z.object({

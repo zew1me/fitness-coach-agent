@@ -10,7 +10,7 @@ describe("loadAgentModelPolicy", () => {
       specialistModel: "gpt-5.4-mini",
       specialistReasoningEffort: "low",
       specialistTextVerbosity: "low",
-      textVerbosity: "low",
+      leadTextVerbosity: "low",
     });
   });
 
