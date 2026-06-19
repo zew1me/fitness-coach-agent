@@ -5,6 +5,7 @@ import {
   withTrace,
   type MCPServer,
 } from "@openai/agents";
+import * as Sentry from "@sentry/nextjs";
 import {
   createUIMessageStream,
   createUIMessageStreamResponse,
@@ -219,6 +220,10 @@ export function streamCoachTurn({
         writer.write({ type: "error", errorText: streamErrorMessage });
         writer.write({ type: "finish-step" });
         writer.write({ type: "finish", finishReason: "error" });
+        Sentry.captureException(error, {
+          tags: { subsystem: "coach-stream" },
+          extra: { textStarted: textState.textStarted },
+        });
         const message = error instanceof Error ? error.message : String(error);
         console.error(
           "[chat] stream error:",

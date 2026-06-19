@@ -210,6 +210,10 @@ async function handleChatRequest(
     return jsonError("Invalid request body.", 400);
   }
   const messages = (parsedBody.messages ?? []) as UIMessage[];
+  Sentry.logger.info("chat turn start", {
+    user_id: token.user_id,
+    message_count: messages.length,
+  });
   const modelMessages = await appendImageExtractionsToMessages(
     convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
     ({ imageUrl }) => extractImageContent(request, token, imageUrl),
