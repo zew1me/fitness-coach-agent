@@ -4,6 +4,7 @@ import { type ToolSet, type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
+  convertUnsupportedFilePartsToText,
   selectMessagesForModel,
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
@@ -206,7 +207,11 @@ export async function POST(request: Request): Promise<Response> {
   let token: BrowserTokenResponse | null;
   try {
     token = await loadBrowserToken(request);
-  } catch {
+  } catch (error) {
+    console.error("[chat] loadBrowserToken failed", {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     return jsonError(AUTH_UNAVAILABLE_MESSAGE, 503);
   }
 
@@ -234,7 +239,7 @@ async function streamCoachTurnWithContext(
     message_count: messages.length,
   });
   const modelMessages = await appendImageExtractionsToMessages(
-    selectMessagesForModel(messages),
+    convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
     ({ imageUrl }) => extractImageContent(request, token, imageUrl),
   );
   const latestUserTurn = summarizeLatestUserTurn(messages);

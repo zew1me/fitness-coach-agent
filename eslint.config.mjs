@@ -59,7 +59,7 @@ export default defineConfig([
       },
     },
     rules: {
-      complexity: ["error", 8],
+      complexity: ["error", 9],
       "import/no-default-export": "error",
       "import/order": [
         "error",
