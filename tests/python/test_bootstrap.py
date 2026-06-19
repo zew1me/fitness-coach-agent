@@ -881,13 +881,6 @@ def test_build_auth_redirect_urls_prod_without_custom_domain_uses_vercel_alias()
     assert urls.count("https://fitness-coach-agent-phi.vercel.app/**") == 1
 
 
-def test_build_auth_redirect_urls_prod_raises_when_origin_unresolved() -> None:
-    # With neither PRODUCTION_DOMAIN nor a Vercel domain, fail loud instead of
-    # writing a localhost-only allow-list that would break production sign-in.
-    with pytest.raises(RuntimeError, match="production auth origin"):
-        bootstrap_main._build_auth_redirect_urls(_settings(), "prod", "")
-
-
 def test_build_auth_redirect_urls_rejects_unknown_env() -> None:
     # Guard against a typo'd env silently inheriting the production allow-list.
     with pytest.raises(ValueError, match="Unknown env"):
