@@ -31,7 +31,7 @@ const ATHLETE_CONTEXT_TIMEOUT_MS = 20_000;
 const PERSIST_MESSAGE_TIMEOUT_MS = 10_000;
 const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 90_000;
 const COACH_UNAVAILABLE_MESSAGE =
-  "Coach is unavailable right now. Please try again.";
+  "Coach is out to lunch. Please try again later.";
 const tavilyToolProvider = createTavilyToolProvider();
 
 function jsonError(message: string, status: number): Response {

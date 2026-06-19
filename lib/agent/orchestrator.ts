@@ -78,7 +78,7 @@ export async function streamCoachTurn({
   extraHeaders,
   messages,
   messagesAreModelSelected = false,
-  streamErrorMessage = "Coach is unavailable right now. Please try again.",
+  streamErrorMessage = "The coach stepped out for a quick workout. Please try again.",
   tavilyTools = {},
 }: StreamCoachTurnOptions): Promise<Response> {
   const modelPolicy = loadAgentModelPolicy();
