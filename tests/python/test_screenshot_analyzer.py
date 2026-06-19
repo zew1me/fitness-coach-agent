@@ -1,4 +1,5 @@
 import json
+from typing import cast
 
 import httpx
 import pytest
@@ -44,6 +45,8 @@ async def test_extract_training_load_chart_to_series(monkeypatch: pytest.MonkeyP
 async def test_analyze_screenshot_returns_unknown_when_vision_rejects_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    requests: list[dict[str, object]] = []
+
     class FakeAsyncClient:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -54,7 +57,8 @@ async def test_analyze_screenshot_returns_unknown_when_vision_rejects_image(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def post(self, url: str, **_kwargs: object) -> httpx.Response:
+        async def post(self, url: str, **kwargs: object) -> httpx.Response:
+            requests.append(kwargs)
             request = httpx.Request("POST", url)
             return httpx.Response(
                 400,
@@ -70,3 +74,5 @@ async def test_analyze_screenshot_returns_unknown_when_vision_rejects_image(
     assert result.screenshot_type == "unknown"
     assert result.raw_response == "Could not confidently classify this screenshot."
     assert result.data["classification"]["confidence"] == 0.0
+    request_json = cast(dict[str, object], requests[0]["json"])
+    assert request_json["model"] == "gpt-5.4-mini"

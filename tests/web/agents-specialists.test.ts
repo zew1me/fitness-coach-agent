@@ -51,7 +51,7 @@ describe("runSpecialists with the Agents SDK", () => {
 
     const reports = await runSpecialists({
       messages,
-      model: "gpt-5-mini",
+      model: "gpt-5.4-mini",
       roles: ["workout", "recovery"],
       slices: {
         intake: {

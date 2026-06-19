@@ -250,7 +250,7 @@ async def _call_vision(prompt: str, image_url: str) -> str:
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            logger.debug("openai vision call start model=gpt-5-mini")
+            logger.debug("openai vision call start model=gpt-5.4-mini")
             resp = await client.post(
                 "https://api.openai.com/v1/responses",
                 headers={
@@ -258,7 +258,7 @@ async def _call_vision(prompt: str, image_url: str) -> str:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "gpt-5-mini",
+                    "model": "gpt-5.4-mini",
                     "input": [
                         {
                             "role": "user",
