@@ -111,7 +111,7 @@ def _normalize_profile_enum_value(field: str, value: object) -> object:
 
 
 def _safe_athlete_profile_fields(fields: dict) -> dict[str, object]:
-    safe_fields = {k: v for k, v in fields.items() if k in _PROFILE_FIELDS}
+    safe_fields = {k: v for k, v in fields.items() if k in _PROFILE_FIELDS and v is not None}
     for array_field in ("primary_sports", "constraints", "injuries_rehab", "dietary_restrictions"):
         if array_field in safe_fields and isinstance(safe_fields[array_field], str):
             safe_fields[array_field] = [safe_fields[array_field]]
