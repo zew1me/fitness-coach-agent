@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/nextjs";
 import { type UIMessage } from "ai";
 
 import {
@@ -24,6 +25,11 @@ type LatestUserTurn = {
 
 const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
+
+const BROWSER_TOKEN_TIMEOUT_MS = 5_000;
+const ATHLETE_CONTEXT_TIMEOUT_MS = 20_000;
+const PERSIST_MESSAGE_TIMEOUT_MS = 10_000;
+const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 90_000;
 const COACH_UNAVAILABLE_MESSAGE =
   "Coach is unavailable right now. Please try again.";
 const tavilyToolProvider = createTavilyToolProvider();
@@ -60,10 +66,16 @@ async function loadBrowserToken(
     {
       method: "POST",
       headers: { cookie, ...vercelProtectionBypassHeaders() },
+      signal: AbortSignal.timeout(BROWSER_TOKEN_TIMEOUT_MS),
     },
   );
   if (!response.ok) {
-    return null;
+    Sentry.logger.error("chat: browser token fetch failed", {
+      status: response.status,
+    });
+    throw new Error(
+      `Browser token fetch failed with status ${response.status}`,
+    );
   }
   return (await response.json()) as BrowserTokenResponse;
 }
@@ -82,10 +94,14 @@ async function loadAthleteContext(
         ...vercelProtectionBypassHeaders(),
       },
       body: JSON.stringify({}),
+      signal: AbortSignal.timeout(ATHLETE_CONTEXT_TIMEOUT_MS),
     },
   );
 
   if (!response.ok) {
+    Sentry.logger.error("chat: athlete context load failed", {
+      status: response.status,
+    });
     throw new Error("Unable to load athlete context.");
   }
 
@@ -126,16 +142,18 @@ async function persistUserMessage(
           parts: turn.parts,
           metadata: { message_kind: "user_turn", client_message_id: turn.id },
         }),
+        signal: AbortSignal.timeout(PERSIST_MESSAGE_TIMEOUT_MS),
       },
     );
     if (!response.ok) {
-      console.error("[chat] persist user message failed:", response.status);
+      Sentry.logger.warn("chat: persist user message failed", {
+        status: response.status,
+      });
     }
   } catch (error) {
-    console.error(
-      "[chat] persist user message error:",
-      safeErrorMessage(error),
-    );
+    Sentry.logger.error("chat: persist user message error", {
+      error: safeErrorMessage(error),
+    });
   }
 }
 
@@ -155,6 +173,7 @@ async function extractImageContent(
           ...vercelProtectionBypassHeaders(),
         },
         body: JSON.stringify({ image_url: imageUrl }),
+        signal: AbortSignal.timeout(SCREENSHOT_ANALYSIS_TIMEOUT_MS),
       },
     );
 
@@ -173,7 +192,10 @@ async function extractImageContent(
           ? payload.screenshot_type
           : "unknown",
     };
-  } catch {
+  } catch (error) {
+    Sentry.logger.warn("chat: screenshot extraction failed", {
+      error: safeErrorMessage(error),
+    });
     return null;
   }
 }
@@ -191,42 +213,55 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   if (token === null) {
+    Sentry.logger.warn("chat: missing browser session cookie");
     return jsonError("Missing browser session cookie.", 401);
   }
 
   try {
-    const parseResult = chatRequestBodySchema.safeParse(await request.json());
-    if (!parseResult.success) {
-      return jsonError("Invalid request body.", 400);
-    }
-    const messages = (parseResult.data.messages ??
-      []) as unknown as UIMessage[];
-    const modelMessages = await appendImageExtractionsToMessages(
-      convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
-      ({ imageUrl }) => extractImageContent(request, token, imageUrl),
-    );
-    const latestUserTurn = summarizeLatestUserTurn(messages);
-    if (latestUserTurn !== null) {
-      await persistUserMessage(request, token, latestUserTurn);
-    }
-    const context = await loadAthleteContext(request, token);
-
-    const tavilyTools = await tavilyToolProvider.getTools(
-      process.env["TAVILY_API_KEY"],
-    );
-
-    return await streamCoachTurn({
-      accessToken: token.access_token,
-      baseUrl: requestOrigin(request),
-      context,
-      extraHeaders: vercelProtectionBypassHeaders(),
-      messages: modelMessages,
-      messagesAreModelSelected: true,
-      streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
-      tavilyTools,
-    });
+    return await streamCoachTurnWithContext(request, token);
   } catch (error) {
-    console.error("[chat] POST error:", safeErrorMessage(error));
+    Sentry.logger.error("chat: POST error", { error: safeErrorMessage(error) });
     return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });
   }
+}
+
+async function streamCoachTurnWithContext(
+  request: Request,
+  token: BrowserTokenResponse,
+): Promise<Response> {
+  const parseResult = chatRequestBodySchema.safeParse(await request.json());
+  if (!parseResult.success) {
+    return jsonError("Invalid request body.", 400);
+  }
+  const messages = (parseResult.data.messages ?? []) as unknown as UIMessage[];
+  Sentry.logger.info("chat turn start", {
+    message_count: messages.length,
+  });
+  const modelMessages = await appendImageExtractionsToMessages(
+    convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
+    ({ imageUrl }) => extractImageContent(request, token, imageUrl),
+  );
+  const latestUserTurn = summarizeLatestUserTurn(messages);
+  if (latestUserTurn !== null) {
+    await persistUserMessage(request, token, latestUserTurn);
+  }
+  const context = await loadAthleteContext(request, token);
+
+  const tavilyTools = await tavilyToolProvider.getTools(
+    process.env["TAVILY_API_KEY"],
+  );
+  Sentry.logger.info("chat: tavily tools loaded", {
+    count: Object.keys(tavilyTools).length,
+  });
+
+  return await streamCoachTurn({
+    accessToken: token.access_token,
+    baseUrl: requestOrigin(request),
+    context,
+    extraHeaders: vercelProtectionBypassHeaders(),
+    messages: modelMessages,
+    messagesAreModelSelected: true,
+    streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+    tavilyTools,
+  });
 }

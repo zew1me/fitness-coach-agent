@@ -1,3 +1,5 @@
+import * as Sentry from "@sentry/nextjs";
+
 import { athleteProfileSchema, uploadRequestSchema } from "./schemas";
 import type {
   AthleteProfile,
@@ -53,6 +55,10 @@ async function readErrorDetail(response: Response): Promise<string> {
 async function readJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const detail = await readErrorDetail(response);
+    Sentry.logger.warn("api request failed", {
+      status: response.status,
+      url: response.url,
+    });
     throw new Error(detail || `Request failed with status ${response.status}`);
   }
   return (await response.json()) as T;
@@ -65,7 +71,9 @@ export async function fetchBrowserToken(
     method: "POST",
     credentials: "include",
   });
-  return readJson<BrowserTokenResponse>(response);
+  const token = await readJson<BrowserTokenResponse>(response);
+  Sentry.logger.debug("browser token fetched", { user_id: token.user_id });
+  return token;
 }
 
 async function authorizedFetch<T>(
@@ -173,13 +181,16 @@ export async function saveProfile(
 export async function loadChatThread(
   fetchImpl: FetchLike = fetch,
 ): Promise<ChatThreadResponse> {
-  return authorizedFetch<ChatThreadResponse>(
+  const thread = await authorizedFetch<ChatThreadResponse>(
     "/api/chat/thread",
-    {
-      method: "GET",
-    },
+    { method: "GET" },
     fetchImpl,
   );
+  Sentry.logger.debug("chat thread loaded", {
+    message_count: thread.thread.messages.length,
+    thread_id: thread.thread.id,
+  });
+  return thread;
 }
 
 export async function createChatUploadIntent(
@@ -207,7 +218,14 @@ export async function uploadFile(
   formData.append("object_key", objectKey);
   formData.append("file", file);
 
-  return authorizedFetch<PresignUploadResponse>(
+  Sentry.logger.debug("attachment upload started", {
+    filename_suffix: file.name.includes(".")
+      ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+      : "",
+    content_type: file.type,
+    size_bytes: file.size,
+  });
+  const result = await authorizedFetch<PresignUploadResponse>(
     "/api/chat/attachments/upload",
     {
       method: "POST",
@@ -216,4 +234,12 @@ export async function uploadFile(
     },
     fetchImpl,
   );
+  Sentry.logger.info("attachment upload complete", {
+    filename_suffix: file.name.includes(".")
+      ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+      : "",
+    object_key_suffix: result.object_key.slice(-12),
+    has_public_url: result.public_url !== null,
+  });
+  return result;
 }
