@@ -10,8 +10,18 @@ export const athleteProfileSchema = z.object({
   weekly_available_hours: z.number().positive().nullable().optional(),
 });
 
+const chatMessagePartSchema = z.looseObject({
+  type: z.string().trim().min(1),
+});
+
+export const chatRequestMessageSchema = z.looseObject({
+  id: z.string().min(1),
+  role: z.enum(["system", "user", "assistant"]),
+  parts: z.array(chatMessagePartSchema),
+});
+
 export const chatRequestBodySchema = z.object({
-  messages: z.array(z.unknown()).optional(),
+  messages: z.array(chatRequestMessageSchema).optional(),
 });
 
 export const uploadRequestSchema = z.object({
