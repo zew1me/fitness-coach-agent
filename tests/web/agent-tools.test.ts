@@ -64,6 +64,10 @@ describe("coachToolDefinitions", () => {
         target_date: "2026-07-01",
         course_distance_meters: 14000,
         course_elevation_gain_meters: 700,
+        course_profile_notes: null,
+        improvement_baseline_value: null,
+        improvement_metric: null,
+        improvement_target_value: null,
       },
     });
 
@@ -82,14 +86,29 @@ describe("coachToolDefinitions", () => {
   });
 
   it("validates profile onboarding, recovery, and schedule domain field names", () => {
+    const fullProfileFields = {
+      biological_sex: "not_specified" as const,
+      birth_date: null,
+      coaching_state: null,
+      constraints: null,
+      dietary_restrictions: ["vegetarian"],
+      display_name: null,
+      height_cm: null,
+      hormone_status: "not_specified" as const,
+      injuries_rehab: null,
+      max_hr_bpm: null,
+      notes: null,
+      nutrition_notes: null,
+      onboarding_collected: { nutrition: true },
+      primary_sports: null,
+      resting_hr_bpm: null,
+      specialization_pct: null,
+      weekly_available_hours: null,
+      weight_kg: null,
+    };
     expect(
       coachToolDefinitions.update_athlete_profile.inputSchema.parse({
-        fields: {
-          biological_sex: "not_specified",
-          dietary_restrictions: ["vegetarian"],
-          hormone_status: "not_specified",
-          onboarding_collected: { nutrition: true },
-        },
+        fields: fullProfileFields,
       }),
     ).toMatchObject({
       fields: {
@@ -101,9 +120,7 @@ describe("coachToolDefinitions", () => {
 
     expect(() =>
       coachToolDefinitions.update_athlete_profile.inputSchema.parse({
-        fields: {
-          hormone_status: "not_provided",
-        },
+        fields: { ...fullProfileFields, hormone_status: "not_provided" },
       }),
     ).toThrow();
 
@@ -114,7 +131,11 @@ describe("coachToolDefinitions", () => {
             body_battery: 55,
             hrv_ms: 48,
             log_date: "2026-05-30",
+            notes: null,
+            resting_hr_bpm: null,
+            sleep_consistency_pct: null,
             sleep_duration_hours: 7.5,
+            sleep_score: null,
             stress_score: 22,
             subjective_energy: 4,
           },
@@ -135,7 +156,7 @@ describe("coachToolDefinitions", () => {
           },
         ],
         weekly_pattern: {
-          monday: { available: true, max_hours: 1.5 },
+          monday: { available: true, max_hours: 1.5, notes: null },
         },
       }),
     ).toMatchObject({
