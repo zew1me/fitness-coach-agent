@@ -15,6 +15,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "check": "bun run lint && bun run typecheck && bun run test",
+    "test:oai": "vitest run --config vitest.oai.config.ts",
     "test:ui": "playwright test",
     "format": "prettier --write .",
     "db:start": "bash scripts/db-start.sh",

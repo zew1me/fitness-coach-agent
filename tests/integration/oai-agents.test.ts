@@ -1,0 +1,130 @@
+/**
+ * OpenAI Agents SDK integration tests — run with `bun run test:oai`.
+ *
+ * These tests call the real OpenAI Responses API so they require
+ * OPENAI_API_KEY to be set (loaded from .env.local automatically by Vitest
+ * via the dotenv plugin configured in vitest.oai.config.ts).
+ *
+ * They validate that our schema, model name, and input format are all accepted
+ * by the Responses API before we ship changes. Each test is narrow:
+ *   1. Specialist structured-output call (most likely 400 source)
+ *   2. Streaming lead-coach text turn
+ *   3. End-to-end: specialists → lead coach text
+ */
+import { Agent, Runner, run } from "@openai/agents";
+import { describe, expect, it } from "vitest";
+
+import { specialistReportSchema } from "../../lib/agent/orchestration-types";
+
+const MODEL = "gpt-5-mini-2025-08-07";
+
+const MINIMAL_USER_INPUT = [
+  {
+    role: "user" as const,
+    content: [
+      { type: "input_text" as const, text: "I ran 5km today at easy pace." },
+    ],
+  },
+];
+
+describe("OpenAI Agents SDK — Responses API integration", () => {
+  it("accepts the specialist structured-output schema without a 400", async () => {
+    const agent = new Agent({
+      name: "Intake specialist",
+      instructions:
+        "You are an endurance coaching intake specialist. Analyse the athlete message and return a structured report. Keep summary under 50 words and proposedUpdates empty.",
+      model: MODEL,
+      outputType: specialistReportSchema,
+    });
+
+    let result: Awaited<ReturnType<typeof run>>;
+    try {
+      result = await run(agent, MINIMAL_USER_INPUT, { maxTurns: 1 });
+    } catch (error) {
+      throw new Error(
+        `Specialist run threw — full error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    expect(result.finalOutput).toBeTruthy();
+    const parsed = specialistReportSchema.safeParse(result.finalOutput);
+    expect(
+      parsed.success,
+      `Schema parse failed: ${JSON.stringify(parsed)}`,
+    ).toBe(true);
+  }, 60_000);
+
+  it("streams text from the lead coach without a 400", async () => {
+    const agent = new Agent({
+      name: "Lead coach",
+      instructions:
+        "You are a friendly endurance coach. Reply in one short sentence.",
+      model: MODEL,
+    });
+
+    const runner = new Runner({ tracingDisabled: true });
+
+    const chunks: string[] = [];
+    let caughtError: Error | null = null;
+
+    try {
+      const result = await runner.run(agent, MINIMAL_USER_INPUT, {
+        maxTurns: 1,
+        stream: true,
+      });
+
+      for await (const event of result) {
+        if (
+          event.type === "raw_model_stream_event" &&
+          typeof (event.data as Record<string, unknown>)["type"] === "string" &&
+          (event.data as Record<string, unknown>)["type"] ===
+            "output_text_delta"
+        ) {
+          const delta = (event.data as Record<string, unknown>)["delta"];
+          if (typeof delta === "string") chunks.push(delta);
+        }
+      }
+      await result.completed;
+    } catch (error) {
+      caughtError = error instanceof Error ? error : new Error(String(error));
+    }
+
+    expect(
+      caughtError,
+      `Lead coach streaming threw — full error: ${caughtError?.message}`,
+    ).toBeNull();
+    expect(
+      chunks.join("").length,
+      "Expected non-empty streamed text",
+    ).toBeGreaterThan(0);
+  }, 60_000);
+
+  it("emits output_text_delta events (not response.output_text.delta)", async () => {
+    const agent = new Agent({
+      name: "Delta type probe",
+      instructions: "Reply with exactly: OK",
+      model: MODEL,
+    });
+
+    const runner = new Runner({ tracingDisabled: true });
+    const result = await runner.run(agent, MINIMAL_USER_INPUT, {
+      maxTurns: 1,
+      stream: true,
+    });
+
+    const eventTypes = new Set<string>();
+    for await (const event of result) {
+      if (event.type === "raw_model_stream_event") {
+        const t = (event.data as Record<string, unknown>)["type"];
+        if (typeof t === "string") eventTypes.add(t);
+      }
+    }
+    await result.completed;
+
+    expect(
+      eventTypes.has("output_text_delta"),
+      `Saw event types: ${[...eventTypes].join(", ")}`,
+    ).toBe(true);
+    expect(eventTypes.has("response.output_text.delta")).toBe(false);
+  }, 60_000);
+});
