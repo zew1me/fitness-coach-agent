@@ -165,7 +165,7 @@ describe("streamCoachTurn", () => {
       ),
     ).toMatchObject({
       instructions: "system prompt",
-      model: "gpt-5-mini-2025-08-07",
+      model: "gpt-5-mini",
       name: "Lead coach",
     });
     expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(

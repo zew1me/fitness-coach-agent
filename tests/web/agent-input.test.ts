@@ -20,7 +20,7 @@ describe("toAgentInputItems", () => {
         ],
       },
     ] as UIMessage[];
-    +expect(toAgentInputItems(messages)).toEqual([
+    expect(toAgentInputItems(messages)).toEqual([
       {
         type: "function_call",
         callId: "call-err-1",

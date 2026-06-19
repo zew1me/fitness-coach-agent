@@ -12,8 +12,10 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+// Non-string values are already parsed JS objects — pass through as-is.
+// Strings are JSON-decoded; unparseable strings fall back to {}.
 function parseToolInput(value: unknown): unknown {
-  if (typeof value !== "string") return value ?? {};
+  if (typeof value !== "string") return value;
   try {
     return JSON.parse(value) as unknown;
   } catch {
@@ -38,7 +40,7 @@ function handleModelDelta(
   state: StreamState,
 ): void {
   const data = record(event.data);
-  if (data?.["type"] !== "response.output_text.delta") return;
+  if (data?.["type"] !== "output_text_delta") return;
   const delta = data["delta"];
   if (typeof delta !== "string" || delta.length === 0) return;
   if (!state.textStarted) {
