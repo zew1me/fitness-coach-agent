@@ -41,7 +41,7 @@ export type StreamCoachTurnOptions = {
 };
 
 const MAX_COACH_STEPS = 4;
-const MODEL = "gpt-5-mini";
+const MODEL = "gpt-5-mini-2025-08-07";
 
 function latestUserText(messages: UIMessage[]): string {
   const latest = [...messages]

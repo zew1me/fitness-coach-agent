@@ -129,7 +129,7 @@ beforeEach(() => {
   orchestratorMocks.events.length = 0;
   orchestratorMocks.events.push({
     type: "raw_model_stream_event",
-    data: { type: "response.output_text.delta", delta: "Keep tomorrow easy." },
+    data: { type: "output_text_delta", delta: "Keep tomorrow easy." },
   });
   globalThis.fetch = vi.fn(() =>
     Promise.resolve(new Response("{}", { status: 200 })),
@@ -165,7 +165,7 @@ describe("streamCoachTurn", () => {
       ),
     ).toMatchObject({
       instructions: "system prompt",
-      model: "gpt-5-mini",
+      model: "gpt-5-mini-2025-08-07",
       name: "Lead coach",
     });
     expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(
