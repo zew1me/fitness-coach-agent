@@ -37,14 +37,13 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       outputType: specialistReportSchema,
     });
 
-    let result: Awaited<ReturnType<typeof run>>;
-    try {
-      result = await run(agent, MINIMAL_USER_INPUT, { maxTurns: 1 });
-    } catch (error) {
-      throw new Error(
-        `Specialist run threw — full error: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    const result = await run(agent, MINIMAL_USER_INPUT, { maxTurns: 1 }).catch(
+      (error: unknown) => {
+        throw new Error(
+          `Specialist run threw — full error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
 
     expect(result.finalOutput).toBeTruthy();
     const parsed = specialistReportSchema.safeParse(result.finalOutput);
