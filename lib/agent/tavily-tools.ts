@@ -47,10 +47,19 @@ export function createTavilyToolProvider({
     }
   }
 
+  // Close until active is null or matches apiKey — guards against a concurrent
+  // call installing a new client during the await inside close().
+  async function closeUntilKeyMatches(apiKey: string): Promise<void> {
+    while (active !== null && active.apiKey !== apiKey) {
+      await close();
+    }
+  }
+
   async function getTools(apiKey: string | undefined): Promise<ToolSet> {
     if (!apiKey) return {};
     if (active?.apiKey === apiKey) return active.toolsPromise;
-    if (active !== null) await close();
+    await closeUntilKeyMatches(apiKey);
+    if (active?.apiKey === apiKey) return active.toolsPromise;
 
     const clientPromise = createClient({
       transport: { type: "http", url: buildUrl(apiKey) },

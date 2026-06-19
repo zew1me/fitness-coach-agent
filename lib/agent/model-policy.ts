@@ -5,6 +5,7 @@ export type AgentModelPolicy = {
   leadReasoningEffort: BoundedReasoningEffort;
   specialistModel: string;
   specialistReasoningEffort: BoundedReasoningEffort;
+  specialistTextVerbosity: "low" | "medium";
   textVerbosity: "low" | "medium";
 };
 
@@ -42,6 +43,9 @@ export function loadAgentModelPolicy(
     specialistReasoningEffort: boundedReasoningEffort(
       env["OPENAI_SPECIALIST_REASONING_EFFORT"],
       "low",
+    ),
+    specialistTextVerbosity: textVerbosity(
+      env["OPENAI_SPECIALIST_TEXT_VERBOSITY"],
     ),
     textVerbosity: textVerbosity(env["OPENAI_TEXT_VERBOSITY"]),
   };

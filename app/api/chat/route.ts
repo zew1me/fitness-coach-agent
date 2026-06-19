@@ -2,21 +2,19 @@ import { type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
+  convertUnsupportedFilePartsToText,
   selectMessagesForModel,
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import { createTavilyToolProvider } from "../../../lib/agent/tavily-tools";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
+import { chatRequestBodySchema } from "../../../lib/schemas";
 
 export const runtime = "nodejs";
 
 type BrowserTokenResponse = {
   access_token: string;
   user_id: string;
-};
-
-type ChatRequestBody = {
-  messages?: UIMessage[];
 };
 
 type LatestUserTurn = {
@@ -197,10 +195,14 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    const body = (await request.json()) as ChatRequestBody;
-    const messages = body.messages ?? [];
+    const parseResult = chatRequestBodySchema.safeParse(await request.json());
+    if (!parseResult.success) {
+      return jsonError("Invalid request body.", 400);
+    }
+    const messages = (parseResult.data.messages ??
+      []) as unknown as UIMessage[];
     const modelMessages = await appendImageExtractionsToMessages(
-      selectMessagesForModel(messages),
+      convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
       ({ imageUrl }) => extractImageContent(request, token, imageUrl),
     );
     const latestUserTurn = summarizeLatestUserTurn(messages);

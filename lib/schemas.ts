@@ -20,3 +20,7 @@ export const uploadRequestSchema = z.object({
   filename: z.string().trim().min(1),
   purpose: z.string().trim().min(1).default("check-in-image"),
 });
+
+export const chatRequestBodySchema = z.object({
+  messages: z.array(z.record(z.string(), z.unknown())).optional(),
+});

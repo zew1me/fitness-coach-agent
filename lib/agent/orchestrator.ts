@@ -10,10 +10,7 @@ import {
 import { createCoachTools } from "./coach-tools";
 import { buildContextSlices } from "./context-slices";
 import { routeTurnIntent } from "./intent-router";
-import {
-  convertUnsupportedFilePartsToText,
-  selectMessagesForModel,
-} from "./message-context";
+import { selectMessagesForModel } from "./message-context";
 import { loadAgentModelPolicy } from "./model-policy";
 import {
   specialistReportsSchema,
@@ -90,8 +87,6 @@ export async function streamCoachTurn({
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
-  const normalizedMessages =
-    convertUnsupportedFilePartsToText(selectedMessages);
   const intent = routeTurnIntent(latestUserText(selectedMessages), context);
   const slices = buildContextSlices(context);
   const specialistReports = validateSpecialistReports(
@@ -116,7 +111,7 @@ export async function streamCoachTurn({
   const result = streamText({
     maxOutputTokens: 2048,
     maxRetries: 2,
-    messages: await convertToModelMessages(normalizedMessages),
+    messages: await convertToModelMessages(selectedMessages),
     model,
     system: systemPrompt,
     tools: {

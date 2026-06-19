@@ -35,7 +35,9 @@ The target architecture keeps those boundaries but makes five changes:
 4. Tavily tool discovery is lazy and reused per warm process through a focused provider abstraction.
 5. Home and browser timezone context is available without silently changing profile data.
 
-## Task 1: Centralize OpenAI model and request policy
+> **Status summary:** Tasks 1–3 are committed to `codex/openai-api-quality-latency`. Tasks 4–7 are deferred and not yet implemented.
+
+## Task 1: Centralize OpenAI model and request policy `[COMPLETED]`
 
 **Files:**
 
@@ -74,7 +76,7 @@ export function loadAgentModelPolicy(
 - [ ] Run the targeted TypeScript and Python tests and confirm they pass.
 - [ ] Commit as `feat(agent): configure OpenAI model policy`.
 
-## Task 2: Make specialist execution parallel and failure-tolerant
+## Task 2: Make specialist execution parallel and failure-tolerant `[COMPLETED]`
 
 **Files:**
 
@@ -90,7 +92,7 @@ export function loadAgentModelPolicy(
 - [ ] Run specialist, orchestrator, prompt, and schema tests.
 - [ ] Commit as `perf(agent): parallelize specialist reports`.
 
-## Task 3: Reuse Tavily MCP tool discovery safely
+## Task 3: Reuse Tavily MCP tool discovery safely `[COMPLETED]`
 
 **Files:**
 
@@ -107,7 +109,7 @@ export function loadAgentModelPolicy(
 - [ ] Run route and provider tests.
 - [ ] Commit as `perf(chat): reuse Tavily MCP tools`.
 
-## Task 4: Make screenshot extraction strict and reusable
+## Task 4: Make screenshot extraction strict and reusable `[DEFERRED]`
 
 **Files:**
 
@@ -132,7 +134,7 @@ export function loadAgentModelPolicy(
 - [ ] Run targeted Python and web tests, then `bun run check` and the full Python suite.
 - [ ] Commit as `perf(vision): cache structured screenshot extraction`.
 
-## Task 5: Add athlete home timezone and browser-turn context
+## Task 5: Add athlete home timezone and browser-turn context `[DEFERRED]`
 
 **Files:**
 
@@ -165,7 +167,7 @@ export function loadAgentModelPolicy(
 - [ ] Run targeted web and Python tests, followed by full checks.
 - [ ] Commit as `feat(profile): add athlete home timezone`.
 
-## Task 6: Parallelize independent route preparation and improve bounded errors
+## Task 6: Parallelize independent route preparation and improve bounded errors `[DEFERRED]`
 
 **Files:**
 
@@ -185,7 +187,7 @@ export function loadAgentModelPolicy(
 - [ ] Run all targeted tests and full repository checks.
 - [ ] Commit as `perf(chat): reduce pre-stream latency`.
 
-## Task 7: Evaluate stateful Responses API adoption without changing the source of truth
+## Task 7: Evaluate stateful Responses API adoption without changing the source of truth `[DEFERRED]`
 
 **Files:**
 

@@ -6,10 +6,7 @@ import {
   type UIMessage,
 } from "ai";
 
-import {
-  convertUnsupportedFilePartsToText,
-  selectMessagesForModel,
-} from "./message-context";
+import { selectMessagesForModel } from "./message-context";
 import type { AgentModelPolicy } from "./model-policy";
 import {
   type ContextSlices,
@@ -51,10 +48,8 @@ export async function runSpecialists({
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
-  const normalizedMessages =
-    convertUnsupportedFilePartsToText(selectedMessages);
   const orderedRoles = orderRoles(roles);
-  const modelMessages = await convertToModelMessages(normalizedMessages);
+  const modelMessages = await convertToModelMessages(selectedMessages);
   const settledReports = await Promise.allSettled(
     orderedRoles.map(async (role) => {
       const { output } = await generateText({
@@ -70,7 +65,7 @@ export async function runSpecialists({
           openai: {
             reasoningEffort: modelPolicy.specialistReasoningEffort,
             store: true,
-            textVerbosity: "low",
+            textVerbosity: modelPolicy.specialistTextVerbosity,
           },
         },
         timeout: {
