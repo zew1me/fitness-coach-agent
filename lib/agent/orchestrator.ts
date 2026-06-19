@@ -113,6 +113,16 @@ export async function streamCoachTurn({
     messages: await convertToModelMessages(normalizedMessages),
     model,
     system: systemPrompt,
+    experimental_telemetry: {
+      isEnabled: true,
+      functionId: "fitness-coach-agent/streamCoachTurn",
+      recordInputs: true,
+      recordOutputs: true,
+      metadata: {
+        intent: intent.kind,
+        specialistRoles: intent.specialists,
+      },
+    },
     tools: {
       ...coachTools,
       ...tavilyTools,

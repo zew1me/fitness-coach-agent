@@ -61,6 +61,12 @@ export async function runSpecialists({
         schema: specialistReportSchema,
       }),
       system: buildSpecialistPrompt(role, slices[role]),
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: `fitness-coach-agent/runSpecialists/${role}`,
+        recordInputs: true,
+        recordOutputs: true,
+      },
     });
 
     reports.push(specialistReportSchema.parse(output));
