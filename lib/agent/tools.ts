@@ -7,35 +7,40 @@ const recentActivitiesInputSchema = z.object({
   sport: z.string().min(1).optional(),
 });
 
+// Nested object schemas: all fields are nullable (not optional) so that the
+// generated JSON Schema includes every key in `required`. The OpenAI Responses
+// API rejects tool schemas where `required` is missing or incomplete, even for
+// objects nested inside arrays or additionalProperties.
+
 const goalSchema = z.object({
-  course_distance_meters: z.number().positive().optional(),
-  course_elevation_gain_meters: z.number().nonnegative().optional(),
-  course_profile_notes: z.string().min(1).optional(),
+  course_distance_meters: z.number().positive().nullable(),
+  course_elevation_gain_meters: z.number().nonnegative().nullable(),
+  course_profile_notes: z.string().min(1).nullable(),
   goal_type: z.string().min(1),
-  improvement_baseline_value: z.number().optional(),
-  improvement_metric: z.string().min(1).optional(),
-  improvement_target_value: z.number().optional(),
-  sport: z.string().min(1).optional(),
-  target_date: z.string().optional(),
+  improvement_baseline_value: z.number().nullable(),
+  improvement_metric: z.string().min(1).nullable(),
+  improvement_target_value: z.number().nullable(),
+  sport: z.string().min(1).nullable(),
+  target_date: z.string().nullable(),
   title: z.string().min(1),
 });
 
 const thresholdInputSchema = z.object({
-  race_distance_meters: z.number().positive().optional(),
-  race_time_seconds: z.number().int().positive().optional(),
+  race_distance_meters: z.number().positive().nullable(),
+  race_time_seconds: z.number().int().positive().nullable(),
   sport: z.string().min(1),
-  test_duration_minutes: z.number().int().positive().optional(),
-  test_power_watts: z.number().int().positive().optional(),
+  test_duration_minutes: z.number().int().positive().nullable(),
+  test_power_watts: z.number().int().positive().nullable(),
 });
 
 const zonesInputSchema = z.object({
-  ftp_watts: z.number().int().positive().optional(),
-  lt1_hr: z.number().int().positive().optional(),
-  lt1_pace_sec_km: z.number().int().positive().optional(),
-  lt1_power_watts: z.number().int().positive().optional(),
-  lt2_hr: z.number().int().positive().optional(),
-  lt2_pace_sec_km: z.number().int().positive().optional(),
-  max_hr: z.number().int().positive().optional(),
+  ftp_watts: z.number().int().positive().nullable(),
+  lt1_hr: z.number().int().positive().nullable(),
+  lt1_pace_sec_km: z.number().int().positive().nullable(),
+  lt1_power_watts: z.number().int().positive().nullable(),
+  lt2_hr: z.number().int().positive().nullable(),
+  lt2_pace_sec_km: z.number().int().positive().nullable(),
+  max_hr: z.number().int().positive().nullable(),
   sport: z.string().min(1),
 });
 
@@ -47,20 +52,20 @@ const uploadedFileInputSchema = z.object({
   content_type: z.string().min(1),
   filename: z.string().min(1),
   object_key: z.string().min(1),
-  public_url: z.string().nullable().optional(),
+  public_url: z.string().nullable(),
 });
 
 const recoveryEntrySchema = z.object({
-  body_battery: z.number().int().min(0).max(100).optional(),
-  hrv_ms: z.number().positive().optional(),
-  log_date: z.string().min(1).optional(),
-  notes: z.string().min(1).optional(),
-  resting_hr_bpm: z.number().int().positive().optional(),
-  sleep_consistency_pct: z.number().min(0).max(100).optional(),
-  sleep_duration_hours: z.number().nonnegative().optional(),
-  sleep_score: z.number().nonnegative().optional(),
-  stress_score: z.number().nonnegative().optional(),
-  subjective_energy: z.number().int().min(1).max(5).optional(),
+  body_battery: z.number().int().min(0).max(100).nullable(),
+  hrv_ms: z.number().positive().nullable(),
+  log_date: z.string().min(1).nullable(),
+  notes: z.string().min(1).nullable(),
+  resting_hr_bpm: z.number().int().positive().nullable(),
+  sleep_consistency_pct: z.number().min(0).max(100).nullable(),
+  sleep_duration_hours: z.number().nonnegative().nullable(),
+  sleep_score: z.number().nonnegative().nullable(),
+  stress_score: z.number().nonnegative().nullable(),
+  subjective_energy: z.number().int().min(1).max(5).nullable(),
 });
 
 const recoveryInputSchema = z.object({
@@ -68,16 +73,16 @@ const recoveryInputSchema = z.object({
 });
 
 const weeklyPatternDaySchema = z.object({
-  available: z.boolean().optional(),
-  max_hours: z.number().nonnegative().optional(),
-  notes: z.string().min(1).optional(),
+  available: z.boolean().nullable(),
+  max_hours: z.number().nonnegative().nullable(),
+  notes: z.string().min(1).nullable(),
 });
 
 const scheduleOverrideSchema = z.object({
-  available: z.boolean().optional(),
-  max_hours: z.number().nonnegative().optional(),
-  override_date: z.string().min(1).optional(),
-  reason: z.string().min(1).optional(),
+  available: z.boolean().nullable(),
+  max_hours: z.number().nonnegative().nullable(),
+  override_date: z.string().min(1).nullable(),
+  reason: z.string().min(1).nullable(),
 });
 
 const scheduleInputSchema = z.object({
@@ -86,7 +91,7 @@ const scheduleInputSchema = z.object({
 });
 
 const onboardingCollectedSchema = z.object({
-  nutrition: z.boolean().optional(),
+  nutrition: z.boolean().nullable(),
 });
 
 const biologicalSexSchema = z.enum(["male", "female", "not_specified"]);
@@ -104,24 +109,24 @@ const coachingStateSchema = z.enum([
 ]);
 
 const profileFieldsSchema = z.object({
-  biological_sex: biologicalSexSchema.optional(),
-  birth_date: z.string().min(1).optional(),
-  coaching_state: coachingStateSchema.optional(),
-  constraints: z.array(z.string().min(1)).optional(),
-  dietary_restrictions: z.array(z.string().min(1)).optional(),
-  display_name: z.string().min(1).optional(),
-  height_cm: z.number().positive().optional(),
-  hormone_status: hormoneStatusSchema.optional(),
-  injuries_rehab: z.array(z.string().min(1)).optional(),
-  max_hr_bpm: z.number().int().positive().optional(),
-  notes: z.string().min(1).optional(),
-  nutrition_notes: z.string().min(1).optional(),
-  onboarding_collected: onboardingCollectedSchema.optional(),
-  primary_sports: z.array(z.string().min(1)).optional(),
-  resting_hr_bpm: z.number().int().positive().optional(),
-  specialization_pct: z.number().int().min(0).max(100).optional(),
-  weekly_available_hours: z.number().positive().optional(),
-  weight_kg: z.number().positive().optional(),
+  biological_sex: biologicalSexSchema.nullable(),
+  birth_date: z.string().min(1).nullable(),
+  coaching_state: coachingStateSchema.nullable(),
+  constraints: z.array(z.string().min(1)).nullable(),
+  dietary_restrictions: z.array(z.string().min(1)).nullable(),
+  display_name: z.string().min(1).nullable(),
+  height_cm: z.number().positive().nullable(),
+  hormone_status: hormoneStatusSchema.nullable(),
+  injuries_rehab: z.array(z.string().min(1)).nullable(),
+  max_hr_bpm: z.number().int().positive().nullable(),
+  notes: z.string().min(1).nullable(),
+  nutrition_notes: z.string().min(1).nullable(),
+  onboarding_collected: onboardingCollectedSchema.nullable(),
+  primary_sports: z.array(z.string().min(1)).nullable(),
+  resting_hr_bpm: z.number().int().positive().nullable(),
+  specialization_pct: z.number().int().min(0).max(100).nullable(),
+  weekly_available_hours: z.number().positive().nullable(),
+  weight_kg: z.number().positive().nullable(),
 });
 
 const profileInputSchema = z.object({
