@@ -31,9 +31,9 @@ const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
 
 const BROWSER_TOKEN_TIMEOUT_MS = 5_000;
-const ATHLETE_CONTEXT_TIMEOUT_MS = 10_000;
-const PERSIST_MESSAGE_TIMEOUT_MS = 5_000;
-const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 30_000;
+const ATHLETE_CONTEXT_TIMEOUT_MS = 20_000;
+const PERSIST_MESSAGE_TIMEOUT_MS = 10_000;
+const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 90_000;
 const COACH_UNAVAILABLE_MESSAGE =
   "Coach is out to lunch. Please try again later.";
 
