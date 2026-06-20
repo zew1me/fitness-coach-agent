@@ -203,7 +203,7 @@ async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  let parsedBody: { messages?: unknown[] | undefined };
+  let parsedBody;
   try {
     parsedBody = chatRequestBodySchema.parse(await request.json());
   } catch {

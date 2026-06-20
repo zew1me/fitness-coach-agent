@@ -1,3 +1,4 @@
+import math
 import os
 
 from pydantic import field_validator
@@ -23,8 +24,8 @@ class Settings(BaseSettings):
     @field_validator("openai_vision_timeout_seconds")
     @classmethod
     def validate_vision_timeout(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError("openai_vision_timeout_seconds must be > 0")
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError("openai_vision_timeout_seconds must be a finite number > 0")
         return v
 
     r2_account_id: str | None = None
