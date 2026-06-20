@@ -1,14 +1,8 @@
-import { openai } from "@ai-sdk/openai";
-import * as Sentry from "@sentry/nextjs";
-import {
-  convertToModelMessages,
-  generateText,
-  Output,
-  type UIMessage,
-} from "ai";
+import { Agent, run } from "@openai/agents";
+import type { UIMessage } from "ai";
 
+import { toAgentInputItems } from "./agent-input";
 import { selectMessagesForModel } from "./message-context";
-import type { AgentModelPolicy } from "./model-policy";
 import {
   type ContextSlices,
   type InternalSpecialistRole,
@@ -27,7 +21,7 @@ const SPECIALIST_ORDER: InternalSpecialistRole[] = [
 type RunSpecialistsOptions = {
   messagesAreModelSelected?: boolean;
   messages: UIMessage[];
-  modelPolicy: AgentModelPolicy;
+  model: string;
   roles: InternalSpecialistRole[];
   slices: ContextSlices;
 };
@@ -40,61 +34,32 @@ function orderRoles(roles: InternalSpecialistRole[]): InternalSpecialistRole[] {
 export async function runSpecialists({
   messagesAreModelSelected = false,
   messages,
-  modelPolicy,
+  model,
   roles,
   slices,
 }: RunSpecialistsOptions): Promise<SpecialistReport[]> {
-  const model = openai(modelPolicy.specialistModel);
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
   const orderedRoles = orderRoles(roles);
-  const modelMessages = await convertToModelMessages(selectedMessages);
-  const settledReports = await Promise.allSettled(
-    orderedRoles.map(async (role) => {
-      const { output } = await generateText({
-        maxOutputTokens: 1024,
-        maxRetries: 2,
-        messages: modelMessages,
-        model,
-        output: Output.object({
-          schema: specialistReportSchema,
-        }),
-        system: buildSpecialistPrompt(role, slices[role]),
-        providerOptions: {
-          openai: {
-            reasoningEffort: modelPolicy.specialistReasoningEffort,
-            store: true,
-            textVerbosity: modelPolicy.specialistTextVerbosity,
-          },
-        },
-        timeout: {
-          totalMs: 30_000,
-        },
-      });
+  const reports: SpecialistReport[] = [];
 
-      return specialistReportSchema.parse(output);
-    }),
-  );
-
-  return settledReports.flatMap((result, index) => {
-    if (result.status === "fulfilled") {
-      return [result.value];
-    }
-
-    const role = orderedRoles[index] ?? "unknown";
-    const errorType =
-      result.reason instanceof Error
-        ? result.reason.name
-        : typeof result.reason;
-    Sentry.logger.warn("chat: specialist failed", {
-      role,
-      errorType,
-      error:
-        result.reason instanceof Error
-          ? result.reason.message
-          : String(result.reason),
+  for (const role of orderedRoles) {
+    const agent = new Agent({
+      name: `${role[0]?.toUpperCase()}${role.slice(1)} specialist`,
+      instructions: buildSpecialistPrompt(role, slices[role]),
+      model,
+      outputType: specialistReportSchema,
     });
-    return [];
-  });
+    const result = await run(agent, toAgentInputItems(selectedMessages), {
+      maxTurns: 1,
+    });
+
+    if (!result.finalOutput) {
+      throw new Error(`Agent ${role} failed to produce output`);
+    }
+    reports.push(specialistReportSchema.parse(result.finalOutput));
+  }
+
+  return reports;
 }

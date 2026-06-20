@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
-import { type ToolSet, type UIMessage } from "ai";
+import { type UIMessage } from "ai";
 
 import {
   appendImageExtractionsToMessages,
@@ -7,9 +7,9 @@ import {
   selectMessagesForModel,
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
-import { createTavilyToolProvider } from "../../../lib/agent/tavily-tools";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
 import { chatRequestBodySchema } from "../../../lib/schemas";
+import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
 
@@ -29,10 +29,9 @@ const AUTH_UNAVAILABLE_MESSAGE =
 const BROWSER_TOKEN_TIMEOUT_MS = 5_000;
 const ATHLETE_CONTEXT_TIMEOUT_MS = 20_000;
 const PERSIST_MESSAGE_TIMEOUT_MS = 10_000;
-const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 90_000;
+const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 180_000;
 const COACH_UNAVAILABLE_MESSAGE =
   "Coach is out to lunch. Please try again later.";
-const tavilyToolProvider = createTavilyToolProvider();
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
@@ -50,7 +49,7 @@ function vercelProtectionBypassHeaders(): Record<string, string> {
 
 function safeErrorMessage(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
-  return msg.replace(/key=[^&\s]+/g, "key=***");
+  return msg.replace(/((?:tavilyApiKey|api[_-]?key|key)=)[^&\s]+/gi, "$1***");
 }
 
 async function loadBrowserToken(
@@ -200,6 +199,49 @@ async function extractImageContent(
   }
 }
 
+async function handleChatRequest(
+  request: Request,
+  token: BrowserTokenResponse,
+): Promise<Response> {
+  let parsedBody: { messages?: unknown[] | undefined };
+  try {
+    parsedBody = chatRequestBodySchema.parse(await request.json());
+  } catch {
+    return jsonError("Invalid request body.", 400);
+  }
+  const messages = (parsedBody.messages ?? []) as UIMessage[];
+  Sentry.logger.info("chat turn start", {
+    user_id: token.user_id,
+    message_count: messages.length,
+  });
+  const modelMessages = await appendImageExtractionsToMessages(
+    convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
+    ({ imageUrl }) => extractImageContent(request, token, imageUrl),
+  );
+  const latestUserTurn = summarizeLatestUserTurn(messages);
+  if (latestUserTurn !== null) {
+    await persistUserMessage(request, token, latestUserTurn);
+  }
+  const context = await loadAthleteContext(request, token);
+
+  const tavilyApiKey = process.env["TAVILY_API_KEY"];
+  const tavilyMcpUrl = tavilyApiKey
+    ? buildTavilyMcpUrl(tavilyApiKey)
+    : undefined;
+
+  return streamCoachTurn({
+    accessToken: token.access_token,
+    baseUrl: requestOrigin(request),
+    context,
+    extraHeaders: vercelProtectionBypassHeaders(),
+    messages: modelMessages,
+    messagesAreModelSelected: true,
+    signal: request.signal,
+    streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+    ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),
+  });
+}
+
 export async function POST(request: Request): Promise<Response> {
   let token: BrowserTokenResponse | null;
   try {
@@ -218,69 +260,9 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    return await streamCoachTurnWithContext(request, token);
+    return await handleChatRequest(request, token);
   } catch (error) {
     Sentry.logger.error("chat: POST error", { error: safeErrorMessage(error) });
     return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });
   }
-}
-
-async function streamCoachTurnWithContext(
-  request: Request,
-  token: BrowserTokenResponse,
-): Promise<Response> {
-  let requestBody: unknown;
-  try {
-    requestBody = await request.json();
-  } catch {
-    return jsonError("Invalid request body.", 400);
-  }
-  const parseResult = chatRequestBodySchema.safeParse(requestBody);
-  if (!parseResult.success) {
-    Sentry.logger.warn("chat: invalid request body", {
-      issues: parseResult.error.issues,
-    });
-    return jsonError("Invalid request body.", 400);
-  }
-  const messages = (parseResult.data.messages ?? []) as UIMessage[];
-  Sentry.logger.info("chat turn start", {
-    message_count: messages.length,
-  });
-  const modelMessages = await appendImageExtractionsToMessages(
-    convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
-    ({ imageUrl }) => extractImageContent(request, token, imageUrl),
-  );
-  const latestUserTurn = summarizeLatestUserTurn(messages);
-  if (latestUserTurn !== null) {
-    await persistUserMessage(request, token, latestUserTurn);
-  }
-  const context = await loadAthleteContext(request, token);
-
-  let tavilyTools: ToolSet = {};
-  try {
-    tavilyTools = await tavilyToolProvider.getTools(
-      process.env["TAVILY_API_KEY"],
-    );
-    Sentry.logger.info("chat: tavily tools loaded", {
-      count: Object.keys(tavilyTools).length,
-    });
-  } catch (error) {
-    Sentry.logger.warn(
-      "chat: tavily tool discovery failed, proceeding without web search",
-      {
-        error: safeErrorMessage(error),
-      },
-    );
-  }
-
-  return await streamCoachTurn({
-    accessToken: token.access_token,
-    baseUrl: requestOrigin(request),
-    context,
-    extraHeaders: vercelProtectionBypassHeaders(),
-    messages: modelMessages,
-    messagesAreModelSelected: true,
-    streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
-    tavilyTools,
-  });
 }
