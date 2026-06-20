@@ -55,7 +55,7 @@ test.describe("Tavily web search", { tag: "@tavily" }, () => {
     const assistantBubble = page
       .locator('[data-role="assistant"]')
       .or(page.locator(".assistant-message"))
-      .first();
+      .last();
 
     await expect(assistantBubble).toBeVisible({ timeout: 60_000 });
 
