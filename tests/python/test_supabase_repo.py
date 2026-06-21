@@ -25,6 +25,8 @@ class FakeTableQuery:
         self._inserted_payload: dict[str, object] | None = None
         self._inserted_payloads: list[dict[str, object]] | None = None
         self._upserted_payload: dict[str, object] | None = None
+        self._upsert_conflict: str | None = None
+        self._ignore_duplicates = False
         self._update_payload: dict[str, object] | None = None
         self._limit: int | None = None
         self._in_filters: dict[str, set[object]] = {}
@@ -72,8 +74,9 @@ class FakeTableQuery:
         ignore_duplicates: bool = False,
     ) -> "FakeTableQuery":
         assert on_conflict
-        del ignore_duplicates
         self._upserted_payload = payload
+        self._upsert_conflict = on_conflict
+        self._ignore_duplicates = ignore_duplicates
         return self
 
     def update(self, payload: dict[str, object]) -> "FakeTableQuery":
@@ -88,6 +91,11 @@ class FakeTableQuery:
             self._rows.extend(self._inserted_payloads)
             return FakeResponse(self._inserted_payloads)
         if self._upserted_payload is not None:
+            if self._ignore_duplicates and any(
+                row.get(self._upsert_conflict) == self._upserted_payload.get(self._upsert_conflict)
+                for row in self._rows
+            ):
+                return FakeResponse([])
             self._rows.append(self._upserted_payload)
             return FakeResponse([self._upserted_payload])
         if self._update_payload is not None:

@@ -471,18 +471,8 @@ class SupabaseRepository:
         message_id: str | None = None,
     ) -> ChatMessage:
         client = self._require_client()
+        caller_supplied_id = message_id is not None
         message_id = message_id or str(uuid4())
-        if message_id:
-            existing = (
-                client.table("chat_messages")
-                .select("*")
-                .eq("id", message_id)
-                .eq("user_id", user_id)
-                .execute()
-            )
-            existing_rows = existing.data or []
-            if existing_rows:
-                return self._parse_chat_message(existing_rows[0])
         # `content` is denormalized plain text kept for one release window so
         # existing readers (exports, search) keep working until the follow-up
         # drop migration. Derive it from any text parts.
@@ -498,8 +488,22 @@ class SupabaseRepository:
             "metadata": metadata or {},
             "created_at": datetime.now(UTC).isoformat(),
         }
-        response = client.table("chat_messages").insert(payload).execute()
+        query = client.table("chat_messages")
+        response = (
+            query.upsert(payload, on_conflict="id", ignore_duplicates=True).execute()
+            if caller_supplied_id
+            else query.insert(payload).execute()
+        )
         rows = response.data or []
+        if caller_supplied_id and not rows:
+            existing = (
+                client.table("chat_messages")
+                .select("*")
+                .eq("id", message_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+            rows = existing.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted chat message row.")
         return self._parse_chat_message(rows[0])
