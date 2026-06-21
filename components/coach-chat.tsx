@@ -1266,7 +1266,11 @@ function CoachChatBody({
   token: BrowserTokenResponse;
   threadData: ChatThreadResponse;
   threadError: string | null;
-  setThreadData: (_thread: ChatThreadResponse) => void;
+  setThreadData: (
+    _update:
+      | ChatThreadResponse
+      | ((_current: ChatThreadResponse) => ChatThreadResponse),
+  ) => void;
   setThreadError: (_error: string | null) => void;
   athleteProfile: AthleteProfileHook;
 }>): JSX.Element {
@@ -1594,14 +1598,14 @@ function CoachChatBody({
               if (!threadData.next_cursor) return;
               void loadChatMessages(threadData.next_cursor)
                 .then((page) => {
-                  setThreadData({
-                    ...threadData,
+                  setThreadData((current) => ({
+                    ...current,
                     next_cursor: page.next_cursor,
                     thread: {
-                      ...threadData.thread,
-                      messages: [...page.messages, ...persistedMessages],
+                      ...current.thread,
+                      messages: [...page.messages, ...current.thread.messages],
                     },
-                  });
+                  }));
                   setVisibleMessageCount(
                     (current) => current + page.messages.length,
                   );

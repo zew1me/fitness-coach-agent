@@ -71,8 +71,12 @@ export type ChatThreadState = {
   loading: boolean;
 };
 
+type ChatThreadDataUpdate =
+  | ChatThreadResponse
+  | ((_current: ChatThreadResponse) => ChatThreadResponse);
+
 export type ChatThreadHook = ChatThreadState & {
-  setData: (_thread: ChatThreadResponse) => void;
+  setData: (_update: ChatThreadDataUpdate) => void;
   setError: (_error: string | null) => void;
 };
 
@@ -139,8 +143,18 @@ export function useChatThread(
     writeLocalChatThread(state.data, token.user_id);
   }, [token, state.data]);
 
-  const setData = useCallback((thread: ChatThreadResponse) => {
-    setState({ data: thread, error: null, loading: false });
+  const setData = useCallback((update: ChatThreadDataUpdate) => {
+    setState((current) => {
+      if (typeof update === "function") {
+        if (current.data === null) return current;
+        return {
+          data: update(current.data),
+          error: null,
+          loading: false,
+        };
+      }
+      return { data: update, error: null, loading: false };
+    });
   }, []);
 
   const setError = useCallback((error: string | null) => {

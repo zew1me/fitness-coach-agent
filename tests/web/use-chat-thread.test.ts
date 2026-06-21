@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadChatThread } from "../../lib/coach-api";
@@ -107,6 +107,27 @@ describe("useChatThread", () => {
     });
     expect(result.current.data).toEqual(thread);
     expect(result.current.error).toBeNull();
+  });
+
+  it("applies data updates to the latest thread state", async () => {
+    const thread = makeThread(1);
+    loadChatThreadMock.mockResolvedValueOnce(thread as never);
+    const { result } = renderHook(() => useChatThread(TOKEN));
+    await waitFor(() => expect(result.current.data).toEqual(thread));
+
+    act(() => {
+      result.current.setData((current) => ({
+        ...current,
+        thread: {
+          ...current.thread,
+          messages: [...current.thread.messages, { id: "m-new" } as never],
+        },
+      }));
+    });
+
+    expect(
+      result.current.data?.thread.messages.map((message) => message.id),
+    ).toEqual(["m-0", "m-new"]);
   });
 
   it("falls back to local storage when the remote load fails", async () => {
