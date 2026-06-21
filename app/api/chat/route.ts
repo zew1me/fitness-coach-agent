@@ -145,7 +145,7 @@ async function persistUserMessage(
       },
     );
     if (!response.ok) {
-      Sentry.logger.warn("chat: persist user message failed", {
+      Sentry.logger.error("chat: persist user message failed", {
         status: response.status,
       });
     }
@@ -203,7 +203,7 @@ async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  let parsedBody: { messages?: unknown[] | undefined };
+  let parsedBody;
   try {
     parsedBody = chatRequestBodySchema.parse(await request.json());
   } catch {

@@ -153,7 +153,16 @@ async def classify_screenshot(image_url: str) -> ScreenshotClassification:
     try:
         parsed = json.loads(response)
     except json.JSONDecodeError:
-        logger.warning("screenshot classification: vision response was not valid JSON")
+        logger.exception("screenshot classification: vision response was not valid JSON")
+        return ScreenshotClassification(
+            screenshot_type="unknown",
+            source_app_hint=None,
+            date_range_hint=None,
+            confidence=0.0,
+        )
+
+    if not isinstance(parsed, dict):
+        logger.error("screenshot classification: vision response was not a JSON object")
         return ScreenshotClassification(
             screenshot_type="unknown",
             source_app_hint=None,
@@ -201,6 +210,12 @@ async def extract_from_screenshot(
 
     try:
         data = json.loads(response)
+        if not isinstance(data, dict):
+            logger.warning(
+                "screenshot extraction: vision response was not a JSON object type=%s",
+                screenshot_type,
+            )
+            data = {"raw_text": response}
     except json.JSONDecodeError:
         logger.warning(
             "screenshot extraction: vision response was not valid JSON type=%s", screenshot_type
@@ -249,8 +264,8 @@ async def _call_vision(prompt: str, image_url: str) -> str:
         return "{}"
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            logger.debug("openai vision call start model=gpt-5.4-mini")
+        async with httpx.AsyncClient(timeout=settings.openai_vision_timeout_seconds) as client:
+            logger.debug("openai vision call start model=%s", settings.openai_vision_model)
             resp = await client.post(
                 "https://api.openai.com/v1/responses",
                 headers={
@@ -258,13 +273,17 @@ async def _call_vision(prompt: str, image_url: str) -> str:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "gpt-5.4-mini",
+                    "model": settings.openai_vision_model,
                     "input": [
                         {
                             "role": "user",
                             "content": [
                                 {"type": "input_text", "text": prompt},
-                                {"type": "input_image", "image_url": image_url},
+                                {
+                                    "type": "input_image",
+                                    "image_url": image_url,
+                                    "detail": "high",
+                                },
                             ],
                         }
                     ],

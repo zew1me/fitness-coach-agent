@@ -1,5 +1,7 @@
+import math
 import os
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +10,24 @@ class Settings(BaseSettings):
     app_base_url: str = ""  # leave blank on Vercel preview; set explicitly for production
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None
+    openai_vision_model: str = "gpt-5.4-mini"
+    openai_vision_timeout_seconds: float = 45.0
+
+    @field_validator("openai_vision_model")
+    @classmethod
+    def validate_vision_model(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("openai_vision_model must not be empty or whitespace")
+        return stripped
+
+    @field_validator("openai_vision_timeout_seconds")
+    @classmethod
+    def validate_vision_timeout(cls, v: float) -> float:
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError("openai_vision_timeout_seconds must be a finite number > 0")
+        return v
+
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None
     r2_bucket: str | None = None

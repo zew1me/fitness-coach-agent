@@ -218,8 +218,11 @@ export async function uploadFile(
   formData.append("object_key", objectKey);
   formData.append("file", file);
 
+  const filename_suffix = file.name.includes(".")
+    ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+    : "";
   Sentry.logger.debug("attachment upload started", {
-    filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+    filename_suffix,
     content_type: file.type,
     size_bytes: file.size,
   });
@@ -233,7 +236,7 @@ export async function uploadFile(
     fetchImpl,
   );
   Sentry.logger.info("attachment upload complete", {
-    filename_suffix: file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16) : "",
+    filename_suffix,
     object_key_suffix: result.object_key.slice(-12),
     has_public_url: result.public_url !== null,
   });
