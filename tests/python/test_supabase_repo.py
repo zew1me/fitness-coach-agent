@@ -381,7 +381,7 @@ async def test_create_chat_message_persists_json_attachments_with_honored_messag
 @pytest.mark.asyncio
 async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None:
     message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
-    existing = {
+    existing: dict[str, object] = {
         "id": message_id,
         "thread_id": "thread-1",
         "user_id": "athlete-1",
@@ -409,7 +409,7 @@ async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None
 
 @pytest.mark.asyncio
 async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
-    state_row = {
+    state_row: dict[str, object] = {
         "thread_id": "thread-1",
         "user_id": "athlete-1",
         "items": [{"role": "user", "content": "old"}],
@@ -422,7 +422,7 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
         "created_at": "2026-06-20T12:00:00+00:00",
         "updated_at": "2026-06-20T12:00:00+00:00",
     }
-    transcript = [{"id": "message-1", "thread_id": "thread-1"}]
+    transcript: list[dict[str, object]] = [{"id": "message-1", "thread_id": "thread-1"}]
     client = FakeSupabaseClient(
         chat_model_state_rows=[state_row],
         chat_message_rows=transcript,
