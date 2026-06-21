@@ -31,6 +31,8 @@ class FakeTableQuery:
         self._limit: int | None = None
         self._in_filters: dict[str, set[object]] = {}
         self._gt_filters: dict[str, object] = {}
+        self._cursor_before: tuple[str, str] | None = None
+        self._orders: list[tuple[str, bool]] = []
 
     def select(self, *_columns: str) -> "FakeTableQuery":
         return self
@@ -52,7 +54,16 @@ class FakeTableQuery:
         self._is_null.add(column)
         return self
 
-    def order(self, *_args: object, **_kwargs: object) -> "FakeTableQuery":
+    def or_(self, expression: str) -> "FakeTableQuery":
+        match = re.fullmatch(
+            r"created_at\.lt\.(.+),and\(created_at\.eq\.(.+),id\.lt\.(.+)\)", expression
+        )
+        assert match is not None and match.group(1) == match.group(2)
+        self._cursor_before = (match.group(1), match.group(3))
+        return self
+
+    def order(self, column: str, *, desc: bool = False) -> "FakeTableQuery":
+        self._orders.append((column, desc))
         return self
 
     def limit(self, count: int) -> "FakeTableQuery":
@@ -83,7 +94,7 @@ class FakeTableQuery:
         self._update_payload = payload
         return self
 
-    def execute(self) -> FakeResponse:
+    def execute(self) -> FakeResponse:  # noqa: C901
         if self._inserted_payload is not None:
             self._rows.append(self._inserted_payload)
             return FakeResponse([self._inserted_payload])
@@ -106,6 +117,8 @@ class FakeTableQuery:
             return FakeResponse(updated)
 
         rows = self._matching_rows()
+        for column, desc in reversed(self._orders):
+            rows.sort(key=lambda row: row.get(column), reverse=desc)
         if self._limit is not None:
             rows = rows[: self._limit]
         return FakeResponse(rows)
@@ -120,6 +133,14 @@ class FakeTableQuery:
             and all(
                 row.get(column) is not None and row[column] > value
                 for column, value in self._gt_filters.items()
+            )
+            and (
+                self._cursor_before is None
+                or str(row.get("created_at")) < self._cursor_before[0]
+                or (
+                    str(row.get("created_at")) == self._cursor_before[0]
+                    and str(row.get("id")) < self._cursor_before[1]
+                )
             )
         ]
 
@@ -429,6 +450,36 @@ async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None
 
     assert message.content == "Existing"
     assert len(client._tables["chat_messages"]._rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_message_pagination_is_stable_for_equal_timestamps() -> None:
+    created_at = "2026-06-20T12:00:00+00:00"
+    rows = [
+        {
+            "id": message_id,
+            "thread_id": "thread-1",
+            "user_id": "athlete-1",
+            "role": "user",
+            "content": message_id,
+            "parts": [{"type": "text", "text": message_id}],
+            "attachments": [],
+            "metadata": {},
+            "created_at": created_at,
+        }
+        for message_id in ("message-a", "message-b", "message-c")
+    ]
+    repo = SupabaseRepository(client=FakeSupabaseClient(chat_message_rows=rows))
+
+    newest = await repo.list_chat_messages("thread-1", limit=2)
+    older = await repo.list_chat_messages(
+        "thread-1",
+        limit=2,
+        before=(newest[0].created_at, newest[0].id),
+    )
+
+    assert [message.id for message in newest] == ["message-b", "message-c"]
+    assert [message.id for message in older] == ["message-a"]
 
 
 @pytest.mark.asyncio

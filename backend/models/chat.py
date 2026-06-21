@@ -48,14 +48,14 @@ class ChatThread(BaseModel):
 
 class ChatThreadBootstrap(BaseModel):
     attachments_enabled: bool
-    next_cursor: datetime | None = None
+    next_cursor: str | None = None
     profile_complete: bool
     thread: ChatThread
 
 
 class ChatMessagePage(BaseModel):
     messages: list[ChatMessage]
-    next_cursor: datetime | None = None
+    next_cursor: str | None = None
 
 
 class ChatModelState(BaseModel):

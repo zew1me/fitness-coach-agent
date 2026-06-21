@@ -19,6 +19,21 @@ from backend.services.r2 import R2Service
 CHAT_MESSAGE_PAGE_SIZE = 50
 
 
+def _encode_message_cursor(message: ChatMessage) -> str:
+    return f"{message.created_at.isoformat()}|{message.id}"
+
+
+def _decode_message_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        timestamp, message_id = cursor.rsplit("|", 1)
+        created_at = datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise ValueError("Invalid chat message cursor.") from exc
+    if not message_id:
+        raise ValueError("Invalid chat message cursor.")
+    return created_at, message_id
+
+
 class ChatUnavailableError(RuntimeError):
     """Raised when the conversational coach cannot be used in the current environment."""
 
@@ -56,7 +71,7 @@ class ChatService:
         return ChatThreadBootstrap(
             attachments_enabled=self.attachments_enabled,
             next_cursor=(
-                thread.messages[0].created_at
+                _encode_message_cursor(thread.messages[0])
                 if len(thread.messages) == CHAT_MESSAGE_PAGE_SIZE
                 else None
             ),
@@ -90,11 +105,15 @@ class ChatService:
         user_id: str,
         *,
         limit: int = CHAT_MESSAGE_PAGE_SIZE,
-        before: datetime | None = None,
+        before: str | None = None,
     ) -> ChatMessagePage:
         thread = await self._repo.get_or_create_chat_thread(user_id)
-        messages = await self._repo.list_chat_messages(thread.id, limit=limit, before=before)
-        next_cursor = messages[0].created_at if len(messages) == limit else None
+        messages = await self._repo.list_chat_messages(
+            thread.id,
+            limit=limit,
+            before=_decode_message_cursor(before) if before is not None else None,
+        )
+        next_cursor = _encode_message_cursor(messages[0]) if len(messages) == limit else None
         return ChatMessagePage(messages=messages, next_cursor=next_cursor)
 
     async def get_model_state(self, user_id: str) -> ChatModelState:

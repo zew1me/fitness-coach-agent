@@ -4,7 +4,7 @@ import logging
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
@@ -396,13 +396,15 @@ async def persist_chat_message(
 @app.get("/api/chat/messages")
 async def list_chat_messages(
     limit: int = 50,
-    before: datetime | None = None,
+    before: str | None = None,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     if limit < 1 or limit > MAX_CHAT_MESSAGE_PAGE_SIZE:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
     try:
         page = await chat_service.list_messages(user_context.user_id, limit=limit, before=before)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return page.model_dump(mode="json")
