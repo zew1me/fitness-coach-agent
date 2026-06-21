@@ -64,8 +64,15 @@ class FakeTableQuery:
             self._inserted_payload = payload
         return self
 
-    def upsert(self, payload: dict[str, object], on_conflict: str) -> "FakeTableQuery":
+    def upsert(
+        self,
+        payload: dict[str, object],
+        on_conflict: str,
+        *,
+        ignore_duplicates: bool = False,
+    ) -> "FakeTableQuery":
         assert on_conflict
+        del ignore_duplicates
         self._upserted_payload = payload
         return self
 
@@ -452,6 +459,59 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
     assert updated.version == 4
     assert updated.items == [{"role": "user", "content": "compacted"}]
     assert client._tables["chat_messages"]._rows == transcript
+
+
+@pytest.mark.asyncio
+async def test_chat_model_state_initialization_recovers_from_concurrent_insert() -> None:
+    now = datetime.now(UTC).isoformat()
+    concurrent_row: dict[str, object] = {
+        "thread_id": "thread-1",
+        "user_id": "athlete-1",
+        "items": [{"role": "user", "content": "concurrent"}],
+        "coaching_memory": [],
+        "compaction_metadata": {},
+        "schema_version": 1,
+        "version": 1,
+        "lease_id": None,
+        "lease_expires_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    class ConcurrentQuery:
+        def __init__(self, client: "ConcurrentClient") -> None:
+            self.client = client
+            self.operation = "select"
+
+        def select(self, *_columns: str) -> "ConcurrentQuery":
+            return self
+
+        def eq(self, *_args: object) -> "ConcurrentQuery":
+            return self
+
+        def upsert(self, *_args: object, **_kwargs: object) -> "ConcurrentQuery":
+            self.operation = "upsert"
+            return self
+
+        def execute(self) -> FakeResponse:
+            if self.operation == "upsert":
+                self.client.inserted = True
+                return FakeResponse([])
+            return FakeResponse([concurrent_row] if self.client.inserted else [])
+
+    class ConcurrentClient:
+        inserted = False
+
+        def table(self, table_name: str) -> ConcurrentQuery:
+            assert table_name == "chat_model_states"
+            return ConcurrentQuery(self)
+
+    state = await SupabaseRepository(client=ConcurrentClient()).get_or_create_chat_model_state(
+        thread_id="thread-1", user_id="athlete-1"
+    )
+
+    assert state.version == 1
+    assert state.items == [{"role": "user", "content": "concurrent"}]
 
 
 @pytest.mark.asyncio

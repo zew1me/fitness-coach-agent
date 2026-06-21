@@ -532,11 +532,25 @@ class SupabaseRepository:
             "created_at": now,
             "updated_at": now,
         }
-        created = client.table("chat_model_states").insert(payload).execute()
+        created = (
+            client.table("chat_model_states")
+            .upsert(payload, on_conflict="user_id", ignore_duplicates=True)
+            .execute()
+        )
         created_rows = created.data or []
-        if not created_rows:
-            raise RuntimeError("Supabase did not return the inserted chat model state row.")
-        return self._parse_chat_model_state(created_rows[0])
+        if created_rows:
+            return self._parse_chat_model_state(created_rows[0])
+        concurrent = (
+            client.table("chat_model_states")
+            .select("*")
+            .eq("thread_id", thread_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        concurrent_rows = concurrent.data or []
+        if not concurrent_rows:
+            raise RuntimeError("Supabase did not return the chat model state row.")
+        return self._parse_chat_model_state(concurrent_rows[0])
 
     async def replace_chat_model_state(  # noqa: PLR0913
         self,
