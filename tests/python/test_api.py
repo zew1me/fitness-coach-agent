@@ -24,6 +24,7 @@ from backend.models.auth import (
 from backend.models.chat import ChatModelState
 from backend.models.training import Activity, DailyLoadSnapshot, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
+from backend.repos.supabase_repo import RepositoryNotConfiguredError
 from backend.services.auth import AuthService
 
 
@@ -310,13 +311,14 @@ class ModelStateChatService:
 
     async def replace_model_state(self, user_id: str, **kwargs) -> ChatModelState:
         assert user_id == "athlete-1"
-        assert kwargs["expected_version"] == 2
+        if kwargs["expected_version"] != self.state.version:
+            raise ValueError("Chat model state version conflict.")
         self.state = self.state.model_copy(
             update={
                 "items": kwargs["items"],
                 "coaching_memory": kwargs["coaching_memory"],
                 "compaction_metadata": kwargs["compaction_metadata"],
-                "version": 3,
+                "version": self.state.version + 1,
             }
         )
         return self.state
@@ -1486,6 +1488,89 @@ async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoi
     assert initial.json()["version"] == 2
     assert replaced.status_code == 200
     assert replaced.json()["items"] == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_model_state_replace_rejects_stale_version(
+    model_state_chat_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.put(
+            "/api/chat/model-state",
+            json={
+                "expected_version": 1,
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+        )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "json"),
+    [
+        ("GET", "/api/chat/model-state", None),
+        ("PUT", "/api/chat/model-state", {"expected_version": 0}),
+        ("POST", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+        ("DELETE", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+    ],
+)
+async def test_chat_model_state_endpoints_require_authentication(
+    method: str, path: str, json: dict[str, object] | None
+) -> None:
+    api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.request(method, path, json=json)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "json"),
+    [
+        ("GET", "/api/chat/messages", None),
+        ("GET", "/api/chat/model-state", None),
+        (
+            "PUT",
+            "/api/chat/model-state",
+            {
+                "expected_version": 0,
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+        ),
+        ("POST", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+        ("DELETE", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+    ],
+)
+async def test_private_chat_state_endpoints_map_repository_configuration_errors_to_503(
+    method: str,
+    path: str,
+    json: dict[str, object] | None,
+    model_state_chat_service_fixture,
+) -> None:
+    service = model_state_chat_service_fixture
+
+    async def unavailable(*_args, **_kwargs):
+        raise RepositoryNotConfiguredError("Supabase unavailable")
+
+    service.list_messages = unavailable
+    service.get_model_state = unavailable
+    service.replace_model_state = unavailable
+    service.acquire_turn_lease = unavailable
+    service.release_turn_lease = unavailable
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.request(method, path, json=json)
+
+    assert response.status_code == 503
 
 
 @pytest.mark.asyncio

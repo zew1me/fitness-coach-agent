@@ -401,7 +401,10 @@ async def list_chat_messages(
 ) -> Mapping[str, object]:
     if limit < 1 or limit > MAX_CHAT_MESSAGE_PAGE_SIZE:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
-    page = await chat_service.list_messages(user_context.user_id, limit=limit, before=before)
+    try:
+        page = await chat_service.list_messages(user_context.user_id, limit=limit, before=before)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return page.model_dump(mode="json")
 
 
@@ -409,7 +412,10 @@ async def list_chat_messages(
 async def get_chat_model_state(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    state = await chat_service.get_model_state(user_context.user_id)
+    try:
+        state = await chat_service.get_model_state(user_context.user_id)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return state.model_dump(mode="json")
 
 
@@ -428,6 +434,8 @@ async def replace_chat_model_state(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return state.model_dump(mode="json")
 
 
@@ -442,6 +450,8 @@ async def acquire_chat_turn_lease(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return state.model_dump(mode="json")
 
 
@@ -454,6 +464,8 @@ async def release_chat_turn_lease(
         state = await chat_service.release_turn_lease(user_context.user_id, payload.lease_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return state.model_dump(mode="json")
 
 
