@@ -1,5 +1,17 @@
 # Supabase Migration History
 
+## Canonical migration sequence
+
+- `0001_schema.sql` — initial application schema
+- `0002_nutrition.sql` — nutrition tracking
+- `0003_fitness_thresholds.sql` — threshold provenance
+- `0004_chat_messages_parts.sql` — AI SDK message-parts persistence
+- `0005_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
+
+`0005` deliberately stores compactable model context separately from
+`chat_messages`. Applying or resetting model state must never rewrite the
+athlete-visible transcript.
+
 Supabase checks can fail with:
 
 ```text

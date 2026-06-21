@@ -40,7 +40,12 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.chat import ChatPersistRequest
+from backend.models.chat import (
+    ChatModelStateReplaceRequest,
+    ChatPersistRequest,
+    ChatTurnLeaseReleaseRequest,
+    ChatTurnLeaseRequest,
+)
 from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
@@ -385,6 +390,58 @@ async def persist_chat_message(
         len(payload.attachments),
     )
     return message.model_dump(mode="json")
+
+
+@app.get("/api/chat/model-state")
+async def get_chat_model_state(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    state = await chat_service.get_model_state(user_context.user_id)
+    return state.model_dump(mode="json")
+
+
+@app.put("/api/chat/model-state")
+async def replace_chat_model_state(
+    payload: ChatModelStateReplaceRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.replace_model_state(
+            user_context.user_id,
+            expected_version=payload.expected_version,
+            items=payload.items,
+            coaching_memory=payload.coaching_memory,
+            compaction_metadata=payload.compaction_metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return state.model_dump(mode="json")
+
+
+@app.post("/api/chat/model-state/lease")
+async def acquire_chat_turn_lease(
+    payload: ChatTurnLeaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.acquire_turn_lease(
+            user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return state.model_dump(mode="json")
+
+
+@app.delete("/api/chat/model-state/lease")
+async def release_chat_turn_lease(
+    payload: ChatTurnLeaseReleaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.release_turn_lease(user_context.user_id, payload.lease_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return state.model_dump(mode="json")
 
 
 @app.post("/api/chat/attachments/presign")

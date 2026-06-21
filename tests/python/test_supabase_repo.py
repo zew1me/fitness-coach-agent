@@ -1,5 +1,5 @@
 import re
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -110,6 +110,7 @@ class FakeSupabaseClient:
         chat_thread_rows: list[dict[str, object]] | None = None,
         chat_message_rows: list[dict[str, object]] | None = None,
         chat_attachment_rows: list[dict[str, object]] | None = None,
+        chat_model_state_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._tables = {
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
@@ -118,10 +119,12 @@ class FakeSupabaseClient:
             "chat_threads": FakeTableQuery(chat_thread_rows or []),
             "chat_messages": FakeTableQuery(chat_message_rows or []),
             "chat_attachments": FakeTableQuery(chat_attachment_rows or []),
+            "chat_model_states": FakeTableQuery(chat_model_state_rows or []),
         }
 
     def table(self, table_name: str) -> FakeTableQuery:
-        return self._tables[table_name]
+        # The real Supabase client returns a fresh query builder for each call.
+        return FakeTableQuery(self._tables[table_name]._rows)
 
 
 @pytest.mark.asyncio
@@ -373,3 +376,139 @@ async def test_create_chat_message_persists_json_attachments_with_honored_messag
             "url": "https://example.com/chart.png",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None:
+    message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
+    existing = {
+        "id": message_id,
+        "thread_id": "thread-1",
+        "user_id": "athlete-1",
+        "role": "user",
+        "content": "Existing",
+        "parts": [{"type": "text", "text": "Existing"}],
+        "attachments": [],
+        "metadata": {},
+        "created_at": "2026-06-20T12:00:00+00:00",
+    }
+    client = FakeSupabaseClient(chat_message_rows=[existing])
+    repo = SupabaseRepository(client=client)
+
+    message = await repo.create_chat_message(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        role="user",
+        parts=[{"type": "text", "text": "Retry"}],
+        message_id=message_id,
+    )
+
+    assert message.content == "Existing"
+    assert len(client._tables["chat_messages"]._rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
+    state_row = {
+        "thread_id": "thread-1",
+        "user_id": "athlete-1",
+        "items": [{"role": "user", "content": "old"}],
+        "coaching_memory": [],
+        "compaction_metadata": {},
+        "schema_version": 1,
+        "version": 3,
+        "lease_id": None,
+        "lease_expires_at": None,
+        "created_at": "2026-06-20T12:00:00+00:00",
+        "updated_at": "2026-06-20T12:00:00+00:00",
+    }
+    transcript = [{"id": "message-1", "thread_id": "thread-1"}]
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[state_row],
+        chat_message_rows=transcript,
+    )
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.replace_chat_model_state(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        expected_version=3,
+        items=[{"role": "user", "content": "compacted"}],
+        coaching_memory=[],
+        compaction_metadata={"trigger": "token_threshold"},
+    )
+
+    assert updated.version == 4
+    assert updated.items == [{"role": "user", "content": "compacted"}]
+    assert client._tables["chat_messages"]._rows == transcript
+
+
+@pytest.mark.asyncio
+async def test_chat_model_state_rejects_stale_version() -> None:
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 4,
+                "lease_id": None,
+                "lease_expires_at": None,
+                "created_at": "2026-06-20T12:00:00+00:00",
+                "updated_at": "2026-06-20T12:00:00+00:00",
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    with pytest.raises(ValueError, match="version conflict"):
+        await repo.replace_chat_model_state(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            expected_version=3,
+            items=[],
+            coaching_memory=[],
+            compaction_metadata={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_lease_rejects_active_owner_and_allows_expired_lease() -> None:
+    now = datetime.now(UTC)
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 1,
+                "lease_id": "old-lease",
+                "lease_expires_at": (now - timedelta(seconds=1)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    leased = await repo.acquire_chat_turn_lease(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        lease_id="new-lease",
+        ttl_seconds=60,
+    )
+
+    assert leased.lease_id == "new-lease"
+    with pytest.raises(ValueError, match="already in progress"):
+        await repo.acquire_chat_turn_lease(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            lease_id="other-lease",
+            ttl_seconds=60,
+        )

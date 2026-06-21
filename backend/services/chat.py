@@ -6,6 +6,7 @@ from backend.config import settings
 from backend.models.athlete import AthleteProfile
 from backend.models.chat import (
     ChatMessage,
+    ChatModelState,
     ChatThreadBootstrap,
     MessageAttachment,
     MessagePart,
@@ -73,6 +74,46 @@ class ChatService:
             metadata=metadata or {},
             attachments=attachments,
             message_id=message_id,
+        )
+
+    async def get_model_state(self, user_id: str) -> ChatModelState:
+        thread = await self._repo.get_or_create_chat_thread(user_id)
+        return await self._repo.get_or_create_chat_model_state(thread_id=thread.id, user_id=user_id)
+
+    async def replace_model_state(
+        self,
+        user_id: str,
+        *,
+        expected_version: int,
+        items: list[dict[str, Any]],
+        coaching_memory: list[dict[str, Any]],
+        compaction_metadata: dict[str, Any],
+    ) -> ChatModelState:
+        thread = await self._repo.get_or_create_chat_thread(user_id)
+        return await self._repo.replace_chat_model_state(
+            thread_id=thread.id,
+            user_id=user_id,
+            expected_version=expected_version,
+            items=items,
+            coaching_memory=coaching_memory,
+            compaction_metadata=compaction_metadata,
+        )
+
+    async def acquire_turn_lease(
+        self, user_id: str, lease_id: str, *, ttl_seconds: int
+    ) -> ChatModelState:
+        thread = await self._repo.get_or_create_chat_thread(user_id)
+        return await self._repo.acquire_chat_turn_lease(
+            thread_id=thread.id,
+            user_id=user_id,
+            lease_id=lease_id,
+            ttl_seconds=ttl_seconds,
+        )
+
+    async def release_turn_lease(self, user_id: str, lease_id: str) -> ChatModelState:
+        thread = await self._repo.get_or_create_chat_thread(user_id)
+        return await self._repo.release_chat_turn_lease(
+            thread_id=thread.id, user_id=user_id, lease_id=lease_id
         )
 
     @property

@@ -21,6 +21,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
+from backend.models.chat import ChatModelState
 from backend.models.training import Activity, DailyLoadSnapshot, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.services.auth import AuthService
@@ -290,6 +291,49 @@ class InMemoryOAuthRepository:
             return False
         grant["revoked_at"] = datetime.now().astimezone()
         return True
+
+
+class ModelStateChatService:
+    def __init__(self) -> None:
+        now = datetime(2026, 6, 20, tzinfo=UTC)
+        self.state = ChatModelState(
+            created_at=now,
+            thread_id="thread-1",
+            updated_at=now,
+            user_id="athlete-1",
+            version=2,
+        )
+
+    async def get_model_state(self, user_id: str) -> ChatModelState:
+        assert user_id == "athlete-1"
+        return self.state
+
+    async def replace_model_state(self, user_id: str, **kwargs) -> ChatModelState:
+        assert user_id == "athlete-1"
+        assert kwargs["expected_version"] == 2
+        self.state = self.state.model_copy(
+            update={
+                "items": kwargs["items"],
+                "coaching_memory": kwargs["coaching_memory"],
+                "compaction_metadata": kwargs["compaction_metadata"],
+                "version": 3,
+            }
+        )
+        return self.state
+
+    async def acquire_turn_lease(
+        self, user_id: str, lease_id: str, *, ttl_seconds: int
+    ) -> ChatModelState:
+        assert user_id == "athlete-1"
+        assert ttl_seconds == 60
+        self.state = self.state.model_copy(update={"lease_id": lease_id})
+        return self.state
+
+    async def release_turn_lease(self, user_id: str, lease_id: str) -> ChatModelState:
+        assert user_id == "athlete-1"
+        assert lease_id == self.state.lease_id
+        self.state = self.state.model_copy(update={"lease_id": None})
+        return self.state
 
 
 class FakeAuthService(AuthService):
@@ -1404,3 +1448,61 @@ async def test_get_athlete_summary_includes_nutrition_fields(monkeypatch) -> Non
     body = response.json()
     assert body["profile"]["dietary_restrictions"] == ["vegetarian"]
     assert body["profile"]["nutrition_notes"] == "Avoid dairy on race morning"
+
+
+@pytest.fixture
+def model_state_chat_service_fixture():
+    original = api_index.chat_service
+    service = ModelStateChatService()
+    api_index.chat_service = cast(Any, service)
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1", scopes=[]
+    )
+    try:
+        yield service
+    finally:
+        api_index.chat_service = original
+        api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
+
+
+@pytest.mark.asyncio
+async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoints(
+    model_state_chat_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        initial = await client.get("/api/chat/model-state")
+        replaced = await client.put(
+            "/api/chat/model-state",
+            json={
+                "expected_version": 2,
+                "items": [{"role": "user", "content": "hello"}],
+                "coaching_memory": [],
+                "compaction_metadata": {"reason": "seed"},
+            },
+        )
+
+    assert initial.status_code == 200
+    assert initial.json()["version"] == 2
+    assert replaced.status_code == 200
+    assert replaced.json()["items"] == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_lease_acquire_and_release(model_state_chat_service_fixture) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        acquired = await client.post(
+            "/api/chat/model-state/lease",
+            json={"lease_id": "lease-1", "ttl_seconds": 60},
+        )
+        released = await client.request(
+            "DELETE",
+            "/api/chat/model-state/lease",
+            json={"lease_id": "lease-1"},
+        )
+
+    assert acquired.status_code == 200
+    assert acquired.json()["lease_id"] == "lease-1"
+    assert released.status_code == 200
+    assert released.json()["lease_id"] is None

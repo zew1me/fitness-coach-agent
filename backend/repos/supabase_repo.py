@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -12,6 +12,7 @@ from backend.models.athlete import (
 )
 from backend.models.chat import (
     ChatMessage,
+    ChatModelState,
     ChatThread,
     MessageAttachment,
     MessagePart,
@@ -472,6 +473,17 @@ class SupabaseRepository:
     ) -> ChatMessage:
         client = self._require_client()
         message_id = message_id or str(uuid4())
+        if message_id:
+            existing = (
+                client.table("chat_messages")
+                .select("*")
+                .eq("id", message_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+            existing_rows = existing.data or []
+            if existing_rows:
+                return self._parse_chat_message(existing_rows[0])
         # `content` is denormalized plain text kept for one release window so
         # existing readers (exports, search) keep working until the follow-up
         # drop migration. Derive it from any text parts.
@@ -492,6 +504,132 @@ class SupabaseRepository:
         if not rows:
             raise RuntimeError("Supabase did not return the inserted chat message row.")
         return self._parse_chat_message(rows[0])
+
+    async def get_or_create_chat_model_state(
+        self, *, thread_id: str, user_id: str
+    ) -> ChatModelState:
+        client = self._require_client()
+        response = (
+            client.table("chat_model_states")
+            .select("*")
+            .eq("thread_id", thread_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        rows = response.data or []
+        if rows:
+            return self._parse_chat_model_state(rows[0])
+        now = datetime.now(UTC).isoformat()
+        payload = {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "items": [],
+            "coaching_memory": [],
+            "compaction_metadata": {},
+            "schema_version": 1,
+            "version": 0,
+            "lease_id": None,
+            "lease_expires_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        created = client.table("chat_model_states").insert(payload).execute()
+        created_rows = created.data or []
+        if not created_rows:
+            raise RuntimeError("Supabase did not return the inserted chat model state row.")
+        return self._parse_chat_model_state(created_rows[0])
+
+    async def replace_chat_model_state(  # noqa: PLR0913
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        expected_version: int,
+        items: list[dict[str, Any]],
+        coaching_memory: list[dict[str, Any]],
+        compaction_metadata: dict[str, Any],
+    ) -> ChatModelState:
+        client = self._require_client()
+        payload = {
+            "items": items,
+            "coaching_memory": coaching_memory,
+            "compaction_metadata": compaction_metadata,
+            "version": expected_version + 1,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        response = (
+            client.table("chat_model_states")
+            .update(payload)
+            .eq("thread_id", thread_id)
+            .eq("user_id", user_id)
+            .eq("version", expected_version)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise ValueError("Chat model state version conflict.")
+        return self._parse_chat_model_state(rows[0])
+
+    async def acquire_chat_turn_lease(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        lease_id: str,
+        ttl_seconds: int,
+    ) -> ChatModelState:
+        current = await self.get_or_create_chat_model_state(thread_id=thread_id, user_id=user_id)
+        now = datetime.now(UTC)
+        if (
+            current.lease_id is not None
+            and current.lease_id != lease_id
+            and current.lease_expires_at is not None
+            and current.lease_expires_at > now
+        ):
+            raise ValueError("A chat turn is already in progress.")
+        client = self._require_client()
+        response = (
+            client.table("chat_model_states")
+            .update(
+                {
+                    "lease_id": lease_id,
+                    "lease_expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(),
+                    "version": current.version + 1,
+                    "updated_at": now.isoformat(),
+                }
+            )
+            .eq("thread_id", thread_id)
+            .eq("user_id", user_id)
+            .eq("version", current.version)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise ValueError("A chat turn is already in progress.")
+        return self._parse_chat_model_state(rows[0])
+
+    async def release_chat_turn_lease(
+        self, *, thread_id: str, user_id: str, lease_id: str
+    ) -> ChatModelState:
+        client = self._require_client()
+        response = (
+            client.table("chat_model_states")
+            .update(
+                {
+                    "lease_id": None,
+                    "lease_expires_at": None,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("thread_id", thread_id)
+            .eq("user_id", user_id)
+            .eq("lease_id", lease_id)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise ValueError("Chat turn lease is no longer owned by this request.")
+        return self._parse_chat_model_state(rows[0])
 
     # ── Internal helpers ──────────────────────────────────────
 
@@ -518,3 +656,9 @@ class SupabaseRepository:
         if not isinstance(row, dict):
             raise TypeError("Supabase chat message rows must be objects.")
         return ChatMessage.model_validate(row)
+
+    @staticmethod
+    def _parse_chat_model_state(row: object) -> ChatModelState:
+        if not isinstance(row, dict):
+            raise TypeError("Supabase chat model state rows must be objects.")
+        return ChatModelState.model_validate(row)
