@@ -544,6 +544,7 @@ class SupabaseRepository:
         thread_id: str,
         user_id: str,
         expected_version: int,
+        lease_id: str,
         items: list[dict[str, Any]],
         coaching_memory: list[dict[str, Any]],
         compaction_metadata: dict[str, Any],
@@ -562,11 +563,13 @@ class SupabaseRepository:
             .eq("thread_id", thread_id)
             .eq("user_id", user_id)
             .eq("version", expected_version)
+            .eq("lease_id", lease_id)
+            .gt("lease_expires_at", datetime.now(UTC).isoformat())
             .execute()
         )
         rows = response.data or []
         if not rows:
-            raise ValueError("Chat model state version conflict.")
+            raise ValueError("Chat model state lease or version conflict.")
         return self._parse_chat_model_state(rows[0])
 
     async def acquire_chat_turn_lease(

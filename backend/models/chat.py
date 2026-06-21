@@ -87,6 +87,7 @@ class ChatModelStateReplaceRequest(BaseModel):
     compaction_metadata: dict[str, Any] = Field(default_factory=dict)
     expected_version: int = Field(ge=0)
     items: list[dict[str, Any]] = Field(default_factory=list)
+    lease_id: str = Field(min_length=1)
 
 
 class ChatTurnLeaseRequest(BaseModel):

@@ -1478,6 +1478,7 @@ async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoi
             "/api/chat/model-state",
             json={
                 "expected_version": 2,
+                "lease_id": "lease-1",
                 "items": [{"role": "user", "content": "hello"}],
                 "coaching_memory": [],
                 "compaction_metadata": {"reason": "seed"},
@@ -1500,6 +1501,7 @@ async def test_chat_model_state_replace_rejects_stale_version(
             "/api/chat/model-state",
             json={
                 "expected_version": 1,
+                "lease_id": "lease-1",
                 "items": [],
                 "coaching_memory": [],
                 "compaction_metadata": {},
@@ -1514,7 +1516,11 @@ async def test_chat_model_state_replace_rejects_stale_version(
     ("method", "path", "json"),
     [
         ("GET", "/api/chat/model-state", None),
-        ("PUT", "/api/chat/model-state", {"expected_version": 0}),
+        (
+            "PUT",
+            "/api/chat/model-state",
+            {"expected_version": 0, "lease_id": "lease-1"},
+        ),
         ("POST", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
         ("DELETE", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
     ],
@@ -1541,6 +1547,7 @@ async def test_chat_model_state_endpoints_require_authentication(
             "/api/chat/model-state",
             {
                 "expected_version": 0,
+                "lease_id": "lease-1",
                 "items": [],
                 "coaching_memory": [],
                 "compaction_metadata": {},

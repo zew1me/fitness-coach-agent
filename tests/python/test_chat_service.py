@@ -231,6 +231,7 @@ async def test_model_state_service_keeps_private_state_outside_thread_bootstrap(
     updated = await service.replace_model_state(
         "athlete-1",
         expected_version=state.version,
+        lease_id="lease-1",
         items=[{"role": "user", "content": "hello"}],
         coaching_memory=[],
         compaction_metadata={"reason": "seed"},

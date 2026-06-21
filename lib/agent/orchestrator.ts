@@ -232,6 +232,7 @@ export function streamCoachTurn({
           underlyingSession = new SupabaseAgentSession({
             accessToken,
             baseUrl,
+            leaseId,
             ...(extraHeaders ? { extraHeaders } : {}),
           });
           await initializeSessionFromTranscript({

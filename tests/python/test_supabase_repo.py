@@ -28,6 +28,7 @@ class FakeTableQuery:
         self._update_payload: dict[str, object] | None = None
         self._limit: int | None = None
         self._in_filters: dict[str, set[object]] = {}
+        self._gt_filters: dict[str, object] = {}
 
     def select(self, *_columns: str) -> "FakeTableQuery":
         return self
@@ -38,6 +39,10 @@ class FakeTableQuery:
 
     def in_(self, column: str, values: list[object]) -> "FakeTableQuery":
         self._in_filters[column] = set(values)
+        return self
+
+    def gt(self, column: str, value: object) -> "FakeTableQuery":
+        self._gt_filters[column] = value
         return self
 
     def is_(self, column: str, value: object) -> "FakeTableQuery":
@@ -97,6 +102,10 @@ class FakeTableQuery:
             if all(row.get(column) == value for column, value in self._filters.items())
             and all(row.get(column) in values for column, values in self._in_filters.items())
             and all(row.get(column) is None for column in self._is_null)
+            and all(
+                row.get(column) is not None and row[column] > value
+                for column, value in self._gt_filters.items()
+            )
         ]
 
 
@@ -409,6 +418,7 @@ async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None
 
 @pytest.mark.asyncio
 async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
+    now = datetime.now(UTC)
     state_row: dict[str, object] = {
         "thread_id": "thread-1",
         "user_id": "athlete-1",
@@ -417,8 +427,8 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
         "compaction_metadata": {},
         "schema_version": 1,
         "version": 3,
-        "lease_id": None,
-        "lease_expires_at": None,
+        "lease_id": "lease-1",
+        "lease_expires_at": (now + timedelta(minutes=5)).isoformat(),
         "created_at": "2026-06-20T12:00:00+00:00",
         "updated_at": "2026-06-20T12:00:00+00:00",
     }
@@ -433,6 +443,7 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
         thread_id="thread-1",
         user_id="athlete-1",
         expected_version=3,
+        lease_id="lease-1",
         items=[{"role": "user", "content": "compacted"}],
         coaching_memory=[],
         compaction_metadata={"trigger": "token_threshold"},
@@ -444,7 +455,45 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_model_state_replace_rejects_non_owner_lease() -> None:
+    now = datetime.now(UTC)
+    original_items = [{"role": "user", "content": "owned"}]
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": original_items,
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 3,
+                "lease_id": "lease-owner",
+                "lease_expires_at": (now + timedelta(minutes=5)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    with pytest.raises(ValueError, match="lease or version conflict"):
+        await repo.replace_chat_model_state(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            expected_version=3,
+            lease_id="other-lease",
+            items=[{"role": "user", "content": "intruder"}],
+            coaching_memory=[],
+            compaction_metadata={},
+        )
+
+    assert client._tables["chat_model_states"]._rows[0]["items"] == original_items
+
+
+@pytest.mark.asyncio
 async def test_chat_model_state_rejects_stale_version() -> None:
+    now = datetime.now(UTC)
     client = FakeSupabaseClient(
         chat_model_state_rows=[
             {
@@ -455,8 +504,8 @@ async def test_chat_model_state_rejects_stale_version() -> None:
                 "compaction_metadata": {},
                 "schema_version": 1,
                 "version": 4,
-                "lease_id": None,
-                "lease_expires_at": None,
+                "lease_id": "lease-1",
+                "lease_expires_at": (now + timedelta(minutes=5)).isoformat(),
                 "created_at": "2026-06-20T12:00:00+00:00",
                 "updated_at": "2026-06-20T12:00:00+00:00",
             }
@@ -464,11 +513,12 @@ async def test_chat_model_state_rejects_stale_version() -> None:
     )
     repo = SupabaseRepository(client=client)
 
-    with pytest.raises(ValueError, match="version conflict"):
+    with pytest.raises(ValueError, match="lease or version conflict"):
         await repo.replace_chat_model_state(
             thread_id="thread-1",
             user_id="athlete-1",
             expected_version=3,
+            lease_id="lease-1",
             items=[],
             coaching_memory=[],
             compaction_metadata={},

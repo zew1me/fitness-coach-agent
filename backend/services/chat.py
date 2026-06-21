@@ -101,11 +101,12 @@ class ChatService:
         thread = await self._repo.get_or_create_chat_thread(user_id)
         return await self._repo.get_or_create_chat_model_state(thread_id=thread.id, user_id=user_id)
 
-    async def replace_model_state(
+    async def replace_model_state(  # noqa: PLR0913
         self,
         user_id: str,
         *,
         expected_version: int,
+        lease_id: str,
         items: list[dict[str, Any]],
         coaching_memory: list[dict[str, Any]],
         compaction_metadata: dict[str, Any],
@@ -115,6 +116,7 @@ class ChatService:
             thread_id=thread.id,
             user_id=user_id,
             expected_version=expected_version,
+            lease_id=lease_id,
             items=items,
             coaching_memory=coaching_memory,
             compaction_metadata=compaction_metadata,

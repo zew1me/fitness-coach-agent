@@ -54,6 +54,7 @@ describe("SupabaseAgentSession", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
       baseUrl: "http://localhost",
+      leaseId: "lease-1",
       fetch: fetchMock,
       maxCasRetries: 2,
     });
@@ -66,6 +67,7 @@ describe("SupabaseAgentSession", () => {
     expect(puts).toHaveLength(2);
     expect(JSON.parse(String(puts[1]?.[1]?.body))).toMatchObject({
       expected_version: 2,
+      lease_id: "lease-1",
       items: [userItem("a"), userItem("b"), userItem("c")],
     });
   });
@@ -74,6 +76,7 @@ describe("SupabaseAgentSession", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
       baseUrl: "http://localhost",
+      leaseId: "lease-1",
     });
     const prepared = session.prepareHistoryItemForModelInput({
       role: "user",
@@ -109,12 +112,10 @@ describe("DurableCompactionSession", () => {
     ];
     const client = {
       responses: {
-        compact: vi
-          .fn()
-          .mockResolvedValue({
-            output,
-            usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
-          }),
+        compact: vi.fn().mockResolvedValue({
+          output,
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
       },
     };
     const session = new DurableCompactionSession({

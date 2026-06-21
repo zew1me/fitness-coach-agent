@@ -30,6 +30,7 @@ type SessionOptions = {
   baseUrl: string;
   extraHeaders?: Record<string, string>;
   fetch?: typeof fetch;
+  leaseId: string;
   maxCasRetries?: number;
 };
 
@@ -105,7 +106,11 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
         {
           method: "PUT",
           headers: this.headers(),
-          body: JSON.stringify({ expected_version: current.version, ...next }),
+          body: JSON.stringify({
+            expected_version: current.version,
+            lease_id: this.options.leaseId,
+            ...next,
+          }),
         },
       );
       if (response.ok) {
