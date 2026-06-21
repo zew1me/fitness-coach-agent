@@ -30,20 +30,6 @@ export const delegationPlanSchema = z
 export type SpecialistDelegation = z.infer<typeof specialistDelegationSchema>;
 export type DelegationPlan = z.infer<typeof delegationPlanSchema>;
 
-export type TurnIntentKind =
-  | "general"
-  | "intake"
-  | "mixed"
-  | "nutrition"
-  | "plan_change"
-  | "recovery"
-  | "workout";
-
-export type TurnIntent = {
-  kind: TurnIntentKind;
-  specialists: InternalSpecialistRole[];
-};
-
 const proposedWriteToolNameSchema = z.enum([
   "save_activity_from_text",
   "save_recovery_data",
