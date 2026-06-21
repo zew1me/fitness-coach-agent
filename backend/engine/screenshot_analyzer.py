@@ -17,7 +17,7 @@ from typing import Any, Literal, TypeVar
 
 from openai import AsyncOpenAI, OpenAIError
 from openai.types.shared_params import Reasoning
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.config import settings
 
@@ -68,6 +68,11 @@ entry per readable point). Use null when dates or labels are not visible. Approx
 value only when the axis/grid makes it clear, and lower the confidence for approximate
 points. Do not guess hidden values."""
 
+EXTRACT_GENERIC_PROMPT = """Capture any athlete-relevant information visible in this
+screenshot — a training plan, workout calendar, or anything else a coach might want to
+know. Give a brief summary, then list the concrete data points you can read as
+label/value observations. Use null/empty for anything not clearly visible. Do not guess."""
+
 
 class ConfidenceEntry(BaseModel):
     """Per-field extraction confidence. A list of these replaces a free-form
@@ -97,7 +102,7 @@ class ActivityExtraction(BaseModel):
     avg_pace_sec_per_km: int | None = None
     avg_cadence_rpm: int | None = None
     tss: float | None = None
-    confidence: list[ConfidenceEntry] = []
+    confidence: list[ConfidenceEntry] = Field(default_factory=list)
 
 
 class WellnessDayEntry(BaseModel):
@@ -112,7 +117,7 @@ class WellnessDayEntry(BaseModel):
 
 
 class WellnessMultiExtraction(BaseModel):
-    entries: list[WellnessDayEntry] = []
+    entries: list[WellnessDayEntry] = Field(default_factory=list)
 
 
 class WellnessSingleExtraction(BaseModel):
@@ -159,21 +164,43 @@ class TrainingLoadChartExtraction(BaseModel):
     source_app_hint: str | None = None
     x_axis_label: str | None = None
     y_axis_label: str | None = None
-    series: list[TrainingLoadPoint] = []
-    visible_annotations: list[str] = []
+    series: list[TrainingLoadPoint] = Field(default_factory=list)
+    visible_annotations: list[str] = Field(default_factory=list)
 
 
-_EXTRACTION_BY_TYPE: dict[str, tuple[str, type[BaseModel]]] = {
+class GenericObservation(BaseModel):
+    """A single label/value datum read off a screenshot we have no typed schema for."""
+
+    label: str
+    value: str | None = None
+
+
+class GenericExtraction(BaseModel):
+    """Catch-all capture for screenshots without a specialized schema (plans, calendars,
+    or unclassifiable images). Strict structured outputs cannot emit a truly open object,
+    so we hand the lead coach a summary plus free-form label/value observations to mine."""
+
+    summary: str | None = None
+    observations: list[GenericObservation] = Field(default_factory=list)
+
+
+# `plan_or_calendar` has no specialized schema, and `unknown` / low-confidence
+# classifications fall through to the same generic catch-all (see extract_from_screenshot),
+# so the lead coach still receives whatever was legible instead of an empty result.
+_GENERIC_EXTRACTION: tuple[str, type[BaseModel]] = (EXTRACT_GENERIC_PROMPT, GenericExtraction)
+
+_EXTRACTION_BY_TYPE: dict[ScreenshotType, tuple[str, type[BaseModel]]] = {
     "activity_single": (EXTRACT_ACTIVITY_PROMPT, ActivityExtraction),
     "training_load_chart": (EXTRACT_TRAINING_LOAD_CHART_PROMPT, TrainingLoadChartExtraction),
     "wellness_multi_day": (EXTRACT_WELLNESS_MULTI_PROMPT, WellnessMultiExtraction),
     "wellness_single_day": (EXTRACT_WELLNESS_SINGLE_PROMPT, WellnessSingleExtraction),
+    "plan_or_calendar": _GENERIC_EXTRACTION,
 }
 
 
 @dataclass
 class ScreenshotClassification:
-    screenshot_type: str
+    screenshot_type: ScreenshotType
     source_app_hint: str | None
     date_range_hint: str | None
     confidence: float
@@ -181,7 +208,7 @@ class ScreenshotClassification:
 
 @dataclass
 class ExtractionResult:
-    screenshot_type: str
+    screenshot_type: ScreenshotType
     data: dict[str, Any]
     raw_response: str
 
@@ -214,18 +241,14 @@ async def classify_screenshot(image_url: str) -> ScreenshotClassification:
 
 async def extract_from_screenshot(
     image_url: str,
-    screenshot_type: str,
+    screenshot_type: ScreenshotType,
 ) -> ExtractionResult:
-    """Step 2: Extract structured data based on classification."""
-    extraction = _EXTRACTION_BY_TYPE.get(screenshot_type)
-    if extraction is None:
-        return ExtractionResult(
-            screenshot_type=screenshot_type,
-            data={},
-            raw_response="Unsupported screenshot type for extraction.",
-        )
+    """Step 2: Extract structured data based on classification.
 
-    prompt, schema = extraction
+    Types without a specialized schema (`plan_or_calendar`, `unknown`) use the generic
+    catch-all extractor so the lead coach still gets whatever was legible.
+    """
+    prompt, schema = _EXTRACTION_BY_TYPE.get(screenshot_type, _GENERIC_EXTRACTION)
     parsed = await _call_vision(prompt, image_url, schema)
     if parsed is None:
         return ExtractionResult(
@@ -242,30 +265,27 @@ async def extract_from_screenshot(
 
 
 async def analyze_screenshot(image_url: str) -> ExtractionResult:
-    """Full pipeline: classify then extract."""
+    """Full pipeline: classify then extract.
+
+    When the classifier is confident we use the type-specific extractor; otherwise
+    (`unknown` or below the confidence floor) we still run the generic catch-all so the
+    lead coach receives whatever was legible rather than nothing.
+    """
     classification = await classify_screenshot(image_url)
 
-    if (
-        classification.screenshot_type == "unknown"
-        or classification.confidence < MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE
-    ):
-        logger.info(
-            "screenshot analysis skipped: low confidence type=%s confidence=%.2f",
-            classification.screenshot_type,
-            classification.confidence,
-        )
-        return ExtractionResult(
-            screenshot_type="unknown",
-            data={"classification": classification.__dict__},
-            raw_response="Could not confidently classify this screenshot.",
-        )
+    confident = (
+        classification.screenshot_type != "unknown"
+        and classification.confidence >= MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE
+    )
+    extract_type: ScreenshotType = classification.screenshot_type if confident else "unknown"
 
     logger.info(
-        "screenshot analysis extracting type=%s confidence=%.2f",
-        classification.screenshot_type,
+        "screenshot analysis extracting type=%s confidence=%.2f confident=%s",
+        extract_type,
         classification.confidence,
+        confident,
     )
-    result = await extract_from_screenshot(image_url, classification.screenshot_type)
+    result = await extract_from_screenshot(image_url, extract_type)
     result.data["classification"] = classification.__dict__
     return result
 
@@ -273,52 +293,46 @@ async def analyze_screenshot(image_url: str) -> ExtractionResult:
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
-async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> ModelT | None:
-    """Call the OpenAI vision model with an image and a strict response schema.
+_HTTP_CLIENT_ERROR_MIN = 400
+_HTTP_SERVER_ERROR_MIN = 500
+# 4xx codes that are still transient (worth a retry/warning, not a loud error): request
+# timeout and rate limit.
+_TRANSIENT_CLIENT_ERRORS = frozenset({408, 429})
 
-    Returns a validated `schema` instance, or `None` when the call cannot produce one
-    (no API key, transport/API error, truncated response, or model refusal). Callers
-    treat `None` as "unknown / no data" so a single screenshot never breaks the turn.
+
+def _is_permanent_openai_error(status_code: int | None) -> bool:
+    """4xx (other than 408/429) are client/config errors — a bad key, model, or schema —
+    that will recur on every screenshot, so surface them loudly. Timeouts, rate limits,
+    and 5xx are transient and only warrant a warning."""
+    if not isinstance(status_code, int):
+        return False
+    is_client_error = _HTTP_CLIENT_ERROR_MIN <= status_code < _HTTP_SERVER_ERROR_MIN
+    return is_client_error and status_code not in _TRANSIENT_CLIENT_ERRORS
+
+
+def _refusal_text(response: Any) -> str | None:
+    """Pull the refusal message out of the response's output parts.
+
+    A model refusal lives in a `refusal`-type content part, not in `output_text`
+    (which the SDK may leave as `None`), so we read it from the structured output.
     """
-    if not settings.openai_api_key:
-        return None
+    for item in getattr(response, "output", None) or []:
+        for part in getattr(item, "content", None) or []:
+            if getattr(part, "type", None) == "refusal":
+                return getattr(part, "refusal", None)
+    return None
 
-    client = AsyncOpenAI(
-        api_key=settings.openai_api_key,
-        timeout=settings.openai_vision_timeout_seconds,
-    )
-    try:
-        logger.debug("openai vision call start model=%s", settings.openai_vision_model)
-        response = await client.responses.parse(
-            model=settings.openai_vision_model,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                        {
-                            "type": "input_image",
-                            "image_url": image_url,
-                            "detail": "high",
-                        },
-                    ],
-                }
-            ],
-            text_format=schema,
-            max_output_tokens=settings.openai_vision_max_output_tokens,
-            reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
-        )
-    except OpenAIError as error:
-        status_code = getattr(error, "status_code", None)
-        logger.warning(
-            "screenshot vision request failed type=%s status=%s error=%s",
+
+def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
+    """Interpret a completed `responses.parse` call into a validated model or `None`."""
+    if response.status in ("failed", "cancelled"):
+        logger.error(
+            "screenshot vision response %s type=%s error=%s",
+            response.status,
             schema.__name__,
-            status_code,
-            error,
+            getattr(response, "error", None),
         )
         return None
-
-    logger.debug("openai vision call complete status=%s", response.status)
 
     if response.status == "incomplete":
         reason = response.incomplete_details.reason if response.incomplete_details else None
@@ -332,10 +346,61 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
     parsed = response.output_parsed
     if parsed is None:
         logger.warning(
-            "screenshot vision response had no parsed output (possible refusal) type=%s text=%s",
+            "screenshot vision response had no parsed output (possible refusal) type=%s refusal=%s",
             schema.__name__,
-            response.output_text[:500],
+            _refusal_text(response),
         )
         return None
 
     return parsed
+
+
+async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> ModelT | None:
+    """Call the OpenAI vision model with an image and a strict response schema.
+
+    Returns a validated `schema` instance, or `None` when the call cannot produce one
+    (no API key, transport/API error, a failed/cancelled/incomplete response, or no
+    parsed output such as a refusal or content filter). Callers treat `None` as
+    "unknown / no data" so a single screenshot never breaks the turn.
+    """
+    if not settings.openai_api_key:
+        return None
+
+    try:
+        async with AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            timeout=settings.openai_vision_timeout_seconds,
+        ) as client:
+            logger.debug("openai vision call start model=%s", settings.openai_vision_model)
+            response = await client.responses.parse(
+                model=settings.openai_vision_model,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                            {
+                                "type": "input_image",
+                                "image_url": image_url,
+                                "detail": "high",
+                            },
+                        ],
+                    }
+                ],
+                text_format=schema,
+                max_output_tokens=settings.openai_vision_max_output_tokens,
+                reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
+            )
+    except OpenAIError as error:
+        status_code = getattr(error, "status_code", None)
+        log = logger.error if _is_permanent_openai_error(status_code) else logger.warning
+        log(
+            "screenshot vision request failed type=%s status=%s error=%s",
+            schema.__name__,
+            status_code,
+            error,
+        )
+        return None
+
+    logger.debug("openai vision call complete status=%s", response.status)
+    return _parsed_or_none(response, schema)
