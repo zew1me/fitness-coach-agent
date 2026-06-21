@@ -11,6 +11,7 @@ Sentry.init({
   integrations: [Sentry.browserTracingIntegration()],
   tracePropagationTargets: [
     "localhost",
+    /^\/api\//,
     /^https:\/\/fitness-coach-agent(-.*)?\.vercel\.app\/api/,
   ],
   tracesSampleRate: 1.0,
