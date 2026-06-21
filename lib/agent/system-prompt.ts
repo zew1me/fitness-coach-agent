@@ -216,6 +216,7 @@ export function buildSpecialistPrompt(
 export function buildLeadCoachPrompt(
   context: AthleteContextBundle,
   specialistReports: SpecialistReport[] = [],
+  dueFollowUp?: string,
 ): string {
   const sports = listOrFallback(context.profile.primary_sports, "unknown");
   const goals = context.goals.map(goalSummary).join("; ") || "none recorded";
@@ -236,6 +237,9 @@ export function buildLeadCoachPrompt(
     ...buildContextualLines(context),
     stateInstructions(context.profile.coaching_state),
     specialistReportSection(specialistReports),
+    dueFollowUp
+      ? `One coaching-memory follow-up is due: ${dueFollowUp}. If the athlete already volunteered the outcome in this turn, call update_coaching_memory to resolve it and do not ask again; otherwise ask at most this one follow-up.`
+      : "No coaching-memory follow-up is due this turn.",
     "Synthesize specialist reports into one concise user-facing response. Resolve conflicts conservatively.",
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
     "After any tool call, continue with a concise user-facing response that explains what changed, what was saved, or what you need next.",

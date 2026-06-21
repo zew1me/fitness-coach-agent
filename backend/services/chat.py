@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from backend.config import settings
 from backend.models.athlete import AthleteProfile
 from backend.models.chat import (
     ChatMessage,
+    ChatMessagePage,
     ChatModelState,
     ChatThreadBootstrap,
     MessageAttachment,
@@ -13,6 +15,8 @@ from backend.models.chat import (
 )
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
 from backend.services.r2 import R2Service
+
+CHAT_MESSAGE_PAGE_SIZE = 50
 
 
 class ChatUnavailableError(RuntimeError):
@@ -51,6 +55,11 @@ class ChatService:
 
         return ChatThreadBootstrap(
             attachments_enabled=self.attachments_enabled,
+            next_cursor=(
+                thread.messages[0].created_at
+                if len(thread.messages) == CHAT_MESSAGE_PAGE_SIZE
+                else None
+            ),
             profile_complete=self._profile_complete(profile),
             thread=thread,
         )
@@ -75,6 +84,18 @@ class ChatService:
             attachments=attachments,
             message_id=message_id,
         )
+
+    async def list_messages(
+        self,
+        user_id: str,
+        *,
+        limit: int = CHAT_MESSAGE_PAGE_SIZE,
+        before: datetime | None = None,
+    ) -> ChatMessagePage:
+        thread = await self._repo.get_or_create_chat_thread(user_id)
+        messages = await self._repo.list_chat_messages(thread.id, limit=limit, before=before)
+        next_cursor = messages[0].created_at if len(messages) == limit else None
+        return ChatMessagePage(messages=messages, next_cursor=next_cursor)
 
     async def get_model_state(self, user_id: str) -> ChatModelState:
         thread = await self._repo.get_or_create_chat_thread(user_id)

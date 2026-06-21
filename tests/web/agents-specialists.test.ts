@@ -7,6 +7,7 @@ const agentsMocks = vi.hoisted(() => {
   const constructedAgents: Array<Record<string, unknown>> = [];
   const run = vi.fn((agent: { name: string }) =>
     Promise.resolve({
+      state: { usage: undefined },
       finalOutput: {
         confidence: "high",
         proposedUpdates: [],
@@ -53,6 +54,27 @@ describe("runSpecialists with the Agents SDK", () => {
       messages,
       model: "gpt-5.4-mini",
       roles: ["workout", "recovery"],
+      delegations: [
+        {
+          role: "recovery",
+          objective: "Assess whether soreness changes tomorrow's session",
+          conversationDetails: [
+            "Athlete said the soreness began after hill repeats",
+          ],
+          constraintsAndPriorDecisions: ["Keep Friday as a rest day"],
+          unresolvedQuestions: ["Is soreness focal or general?"],
+          relevantCoachingMemoryIds: ["memory-1"],
+        },
+        {
+          role: "workout",
+          objective: "Propose a safe adjustment",
+          conversationDetails: ["Athlete prefers cycling substitutions"],
+          constraintsAndPriorDecisions: [],
+          unresolvedQuestions: [],
+          relevantCoachingMemoryIds: [],
+        },
+      ],
+      coachingMemory: [{ id: "memory-1", statement: "Friday remains rest" }],
       slices: {
         intake: {
           goals: [],
@@ -125,5 +147,11 @@ describe("runSpecialists with the Agents SDK", () => {
       "recovery",
       "workout",
     ]);
+    expect(agentsMocks.constructedAgents[0]?.["instructions"]).toContain(
+      "Athlete said the soreness began after hill repeats",
+    );
+    expect(agentsMocks.constructedAgents[0]?.["instructions"]).toContain(
+      "Friday remains rest",
+    );
   });
 });

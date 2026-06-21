@@ -18,16 +18,24 @@ import {
   createAgentCoachTools,
   type CoachAgentRunContext,
 } from "./coach-tools";
+import { oldestDueFollowUp } from "./coaching-memory";
 import { buildContextSlices } from "./context-slices";
-import { routeTurnIntent } from "./intent-router";
+import { planSpecialistDelegation } from "./delegation-planner";
 import { selectMessagesForModel } from "./message-context";
 import {
   specialistReportsSchema,
+  type DelegationPlan,
   type SpecialistReport,
 } from "./orchestration-types";
 import { runSpecialists } from "./specialists";
+import {
+  DurableCompactionSession,
+  SupabaseAgentSession,
+  estimateStoredContext,
+} from "./supabase-agent-session";
 import { buildLeadCoachPrompt } from "./system-prompt";
 import type { AthleteContextBundle } from "./types";
+import { recordStageUsage } from "./usage-metrics";
 
 export type StreamCoachTurnOptions = {
   accessToken: string;
@@ -39,25 +47,66 @@ export type StreamCoachTurnOptions = {
   signal?: AbortSignal;
   streamErrorMessage?: string;
   tavilyMcpUrl?: string;
+  useDurableSession?: boolean;
 };
 
 const MAX_COACH_STEPS = 4;
 const MODEL = "gpt-5.4-mini";
-
-function latestUserText(messages: UIMessage[]): string {
-  const latest = [...messages]
-    .reverse()
-    .find((message) => message.role === "user");
-  if (!latest) return "";
-
-  return latest.parts
-    .map((part) => (part.type === "text" ? part.text : ""))
-    .filter(Boolean)
-    .join("\n");
-}
+const LAZY_SEED_TOKEN_BUDGET = 200_000;
 
 function generateUuid(): string {
   return crypto.randomUUID();
+}
+
+async function initializeSessionFromTranscript(options: {
+  session: SupabaseAgentSession;
+  accessToken: string;
+  baseUrl: string;
+  extraHeaders?: Record<string, string>;
+  currentMessageIds: Set<string>;
+}): Promise<void> {
+  if ((await options.session.getItems()).length > 0) return;
+  let before: string | null = null;
+  let selected: UIMessage[] = [];
+  do {
+    const url = new URL(`${options.baseUrl}/api/chat/messages`);
+    url.searchParams.set("limit", "100");
+    if (before) url.searchParams.set("before", before);
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${options.accessToken}`,
+        ...(options.extraHeaders ?? {}),
+      },
+    });
+    if (!response.ok)
+      throw new Error(`Unable to initialize model state (${response.status})`);
+    const page = (await response.json()) as {
+      messages: UIMessage[];
+      next_cursor: string | null;
+    };
+    const older = page.messages.filter(
+      (message) => !options.currentMessageIds.has(message.id),
+    );
+    const candidate = [...older, ...selected];
+    const candidateItems = toAgentInputItems(candidate).map((item) =>
+      options.session.prepareHistoryItemForModelInput(item),
+    );
+    if (
+      estimateStoredContext(candidateItems).estimatedTokens >
+      LAZY_SEED_TOKEN_BUDGET
+    )
+      break;
+    selected = candidate;
+    before = page.next_cursor;
+  } while (before !== null);
+
+  if (selected.length > 0) {
+    await options.session.addItems(
+      toAgentInputItems(selected).map((item) =>
+        options.session.prepareHistoryItemForModelInput(item),
+      ),
+    );
+  }
 }
 
 async function persistAssistantMessage(
@@ -122,6 +171,7 @@ export function streamCoachTurn({
   signal,
   streamErrorMessage = "Coach is unavailable right now. Please try again.",
   tavilyMcpUrl,
+  useDurableSession = false,
 }: StreamCoachTurnOptions): Response {
   const selectedMessages = messagesAreModelSelected
     ? messages
@@ -144,12 +194,78 @@ export function streamCoachTurn({
         finishReason,
       );
     },
+    // Lease, compaction, delegation, streaming, and cleanup form one turn transaction.
+    // eslint-disable-next-line complexity
     execute: async ({ writer }) => {
       writer.write({ type: "start" });
       writer.write({ type: "start-step" });
       const textState = { textId: "coach-response", textStarted: false };
 
+      const leaseId = crypto.randomUUID();
+      let leaseAcquired = false;
       try {
+        let durableSession: DurableCompactionSession | undefined;
+        let underlyingSession: SupabaseAgentSession | undefined;
+        let traceGroupId = context.profile.user_id;
+        if (useDurableSession) {
+          const leaseResponse = await fetch(
+            `${baseUrl}/api/chat/model-state/lease`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                "Content-Type": "application/json",
+                ...(extraHeaders ?? {}),
+              },
+              body: JSON.stringify({ lease_id: leaseId, ttl_seconds: 300 }),
+            },
+          );
+          if (!leaseResponse.ok)
+            throw new Error(
+              `Unable to acquire chat turn lease (${leaseResponse.status})`,
+            );
+          leaseAcquired = true;
+          const leaseState = (await leaseResponse.json()) as {
+            thread_id?: string;
+          };
+          traceGroupId = leaseState.thread_id ?? traceGroupId;
+          underlyingSession = new SupabaseAgentSession({
+            accessToken,
+            baseUrl,
+            ...(extraHeaders ? { extraHeaders } : {}),
+          });
+          await initializeSessionFromTranscript({
+            session: underlyingSession,
+            accessToken,
+            baseUrl,
+            ...(extraHeaders ? { extraHeaders } : {}),
+            currentMessageIds: new Set(
+              selectedMessages.map((message) => message.id),
+            ),
+          });
+          const projected = [
+            ...(await underlyingSession.getItems()),
+            ...toAgentInputItems(selectedMessages),
+          ];
+          const estimate = estimateStoredContext(projected);
+          durableSession = new DurableCompactionSession({ underlyingSession });
+          if (estimate.estimatedTokens >= 220_000) {
+            try {
+              await durableSession.runCompaction({
+                force: true,
+                compactionMode: "input",
+              });
+            } catch (error) {
+              if (estimate.estimatedTokens >= 260_000) throw error;
+              Sentry.logger.warn(
+                "coach: forced compaction failed below hard limit",
+                {
+                  estimated_tokens: estimate.estimatedTokens,
+                },
+              );
+            }
+          }
+        }
         await Sentry.startSpan(
           {
             name: "fitness-coach-turn",
@@ -162,17 +278,39 @@ export function streamCoachTurn({
           () =>
             withTrace(
               "fitness-coach-turn",
+              // The trace callback owns the complete model orchestration lifecycle.
+              // eslint-disable-next-line complexity
               async () => {
-                const intent = routeTurnIntent(
-                  latestUserText(selectedMessages),
-                  context,
-                );
+                let delegationPlan: DelegationPlan = { delegations: [] };
+                const coachingMemory = underlyingSession
+                  ? await underlyingSession.getCoachingMemory()
+                  : [];
+                try {
+                  delegationPlan = await planSpecialistDelegation({
+                    durableContext: underlyingSession
+                      ? await underlyingSession.getItems()
+                      : [],
+                    latestUserTurn: toAgentInputItems(selectedMessages),
+                    coachingMemory,
+                    athleteContext: context,
+                    model: MODEL,
+                  });
+                } catch (error) {
+                  Sentry.captureException(error, {
+                    tags: { subsystem: "delegation-planner" },
+                  });
+                  Sentry.logger.warn(
+                    "coach: delegation failed; continuing lead-only",
+                  );
+                }
                 const reports = specialistReportsSchema.parse(
                   await runSpecialists({
                     messages: selectedMessages,
                     messagesAreModelSelected: true,
                     model: MODEL,
-                    roles: intent.specialists,
+                    roles: delegationPlan.delegations.map((item) => item.role),
+                    delegations: delegationPlan.delegations,
+                    coachingMemory,
                     slices: buildContextSlices(context),
                   }),
                 ) as SpecialistReport[];
@@ -182,13 +320,20 @@ export function streamCoachTurn({
                 try {
                   const lead = new Agent<CoachAgentRunContext>({
                     name: "Lead coach",
-                    instructions: buildLeadCoachPrompt(context, reports),
+                    instructions: buildLeadCoachPrompt(
+                      context,
+                      reports,
+                      oldestDueFollowUp(coachingMemory)?.statement,
+                    ),
                     model: MODEL,
                     mcpServers: tavilyServer === null ? [] : [tavilyServer],
                     tools: createAgentCoachTools({
                       accessToken,
                       baseUrl,
                       ...(extraHeaders ? { extraHeaders } : {}),
+                      ...(underlyingSession
+                        ? { modelSession: underlyingSession }
+                        : {}),
                     }),
                   });
                   lead.on("agent_tool_start", (activeContext) => {
@@ -196,7 +341,7 @@ export function streamCoachTurn({
                   });
 
                   const runner = new Runner({
-                    traceIncludeSensitiveData: false,
+                    traceIncludeSensitiveData: true,
                     tracingDisabled: false,
                     workflowName: "fitness-coach-turn",
                   });
@@ -207,6 +352,7 @@ export function streamCoachTurn({
                       context: runContext,
                       maxTurns: MAX_COACH_STEPS,
                       ...(signal ? { signal } : {}),
+                      ...(durableSession ? { session: durableSession } : {}),
                       stream: true,
                     },
                   );
@@ -215,12 +361,13 @@ export function streamCoachTurn({
                     writeAgentStreamEvent(event, writer, textState);
                   }
                   await result.completed;
+                  recordStageUsage("lead", result.state.usage);
                 } finally {
                   if (tavilyServer !== null) await tavilyServer.close();
                 }
               },
               {
-                groupId: context.profile.user_id,
+                groupId: traceGroupId,
                 metadata: { model: MODEL },
               },
             ),
@@ -250,6 +397,24 @@ export function streamCoachTurn({
           "[chat] stream error:",
           message.replace(/key=[^&\s]+/g, "key=***"),
         );
+      } finally {
+        if (leaseAcquired) {
+          try {
+            await fetch(`${baseUrl}/api/chat/model-state/lease`, {
+              method: "DELETE",
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                "Content-Type": "application/json",
+                ...(extraHeaders ?? {}),
+              },
+              body: JSON.stringify({ lease_id: leaseId }),
+            });
+          } catch (error) {
+            Sentry.logger.warn("coach: lease release failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       }
     },
   });

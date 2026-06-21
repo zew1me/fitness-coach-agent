@@ -1,6 +1,8 @@
 import { tool, type Tool } from "@openai/agents";
 import { type ToolSet } from "ai";
 
+import { coachingMemoryToolSchema } from "./coaching-memory";
+import type { SupabaseAgentSession } from "./supabase-agent-session";
 import { coachToolDefinitions } from "./tools";
 
 export type CoachToolContext = {
@@ -8,6 +10,7 @@ export type CoachToolContext = {
   baseUrl: string;
   extraHeaders?: Record<string, string>;
   fetchImpl?: typeof fetch;
+  modelSession?: SupabaseAgentSession;
 };
 
 const ENGINE_TIMEOUT_MS = 30_000;
@@ -295,8 +298,10 @@ export type CoachAgentRunContext = {
 export function createAgentCoachTools(
   context: CoachToolContext,
 ): Tool<CoachAgentRunContext>[] {
-  return Object.entries(coachToolDefinitions).map(([name, definition]) =>
-    tool({
+  const tools: Tool<CoachAgentRunContext>[] = Object.entries(
+    coachToolDefinitions,
+  ).map(([name, definition]) =>
+    tool<typeof definition.inputSchema, CoachAgentRunContext>({
       name,
       description: definition.description,
       parameters: definition.inputSchema,
@@ -304,6 +309,22 @@ export function createAgentCoachTools(
       execute: (input: unknown) => executeCoachTool(name, input, context),
     }),
   );
+  if (context.modelSession) {
+    tools.push(
+      tool<typeof coachingMemoryToolSchema, CoachAgentRunContext>({
+        name: "update_coaching_memory",
+        description:
+          "Maintain non-authoritative coaching commitments, preferences, follow-ups, insights, and outcomes. Never duplicate profile, goal, schedule, plan, threshold, load, or recovery data.",
+        parameters: coachingMemoryToolSchema,
+        isEnabled: ({ runContext }) => !runContext.context.toolCalled,
+        execute: async (input) => {
+          await context.modelSession?.updateCoachingMemory(input.operation);
+          return { status: "updated" };
+        },
+      }),
+    );
+  }
+  return tools;
 }
 
 export function createCoachTools(context: CoachToolContext): ToolSet {

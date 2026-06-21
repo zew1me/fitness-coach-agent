@@ -448,17 +448,16 @@ class SupabaseRepository:
         messages = await self.list_chat_messages(thread.id)
         return thread.model_copy(update={"messages": messages})
 
-    async def list_chat_messages(self, thread_id: str) -> list[ChatMessage]:
+    async def list_chat_messages(
+        self, thread_id: str, *, limit: int = 50, before: datetime | None = None
+    ) -> list[ChatMessage]:
         client = self._require_client()
-        response = (
-            client.table("chat_messages")
-            .select("*")
-            .eq("thread_id", thread_id)
-            .order("created_at")
-            .execute()
-        )
+        query = client.table("chat_messages").select("*").eq("thread_id", thread_id)
+        if before is not None:
+            query = query.lt("created_at", before.isoformat())
+        response = query.order("created_at", desc=True).limit(limit).execute()
         rows = response.data or []
-        return [self._parse_chat_message(row) for row in rows]
+        return list(reversed([self._parse_chat_message(row) for row in rows]))
 
     async def create_chat_message(  # noqa: PLR0913
         self,

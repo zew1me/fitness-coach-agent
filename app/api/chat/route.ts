@@ -199,20 +199,35 @@ async function extractImageContent(
   }
 }
 
+// Request parsing, persistence, enrichment, and strategy selection are one bounded HTTP boundary.
+// eslint-disable-next-line complexity
 async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  let parsedBody;
+  let parsedBody: { message?: unknown; messages?: unknown[] };
   try {
-    parsedBody = chatRequestBodySchema.parse(await request.json());
+    const serialized = await request.text();
+    if (new TextEncoder().encode(serialized).byteLength > 256 * 1024) {
+      return jsonError("Turn exceeds the 256 KiB request limit.", 413);
+    }
+    parsedBody = chatRequestBodySchema.parse(JSON.parse(serialized));
   } catch {
     return jsonError("Invalid request body.", 400);
   }
-  const messages = (parsedBody.messages ?? []) as UIMessage[];
+  const strategy = process.env["COACH_CONTEXT_STRATEGY"] ?? "session";
+  const messages = (
+    strategy === "full_history"
+      ? (parsedBody.messages ??
+        (parsedBody.message ? [parsedBody.message] : []))
+      : parsedBody.message
+        ? [parsedBody.message]
+        : (parsedBody.messages?.slice(-1) ?? [])
+  ) as UIMessage[];
   Sentry.logger.info("chat turn start", {
     user_id: token.user_id,
     message_count: messages.length,
+    context_strategy: strategy,
   });
   const modelMessages = await appendImageExtractionsToMessages(
     convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
@@ -236,6 +251,7 @@ async function handleChatRequest(
     extraHeaders: vercelProtectionBypassHeaders(),
     messages: modelMessages,
     messagesAreModelSelected: true,
+    useDurableSession: strategy !== "full_history",
     signal: request.signal,
     streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
     ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),

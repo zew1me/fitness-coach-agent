@@ -10,6 +10,7 @@ import type { ChangeEvent, JSX, ReactNode, RefObject } from "react";
 import {
   createChatUploadIntent,
   loadChatThread,
+  loadChatMessages,
   uploadFile,
 } from "../lib/coach-api";
 import { errorMessage } from "../lib/errors";
@@ -577,22 +578,25 @@ function MessageList({
   hiddenMessageCount,
   onShowMore,
   messageEndRef,
+  olderAvailable,
 }: Readonly<{
   messages: ChatMessage[];
   hiddenMessageCount: number;
   onShowMore: () => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
+  olderAvailable: boolean;
 }>): JSX.Element {
   return (
     <div className={styles.messageStack}>
-      {hiddenMessageCount > 0 ? (
+      {hiddenMessageCount > 0 || olderAvailable ? (
         <button
           className={styles.historyLoadButton}
           onClick={onShowMore}
           type="button"
         >
-          Show {Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older
-          messages
+          {hiddenMessageCount > 0
+            ? `Show ${Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older messages`
+            : "Show older messages"}
         </button>
       ) : null}
       {messages.map((message) => (
@@ -653,6 +657,7 @@ function MessagesSection({
   onPrefillStarter,
   messageEndRef,
   profileComplete,
+  olderAvailable,
 }: Readonly<{
   messages: ChatMessage[];
   hiddenMessageCount: number;
@@ -660,6 +665,7 @@ function MessagesSection({
   onPrefillStarter: (_text: string) => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
   profileComplete: boolean;
+  olderAvailable: boolean;
 }>): JSX.Element {
   const messageList = (
     <MessageList
@@ -667,6 +673,7 @@ function MessagesSection({
       messageEndRef={messageEndRef}
       messages={messages}
       onShowMore={onShowMore}
+      olderAvailable={olderAvailable}
     />
   );
   if (!onlyWelcomeMessage(messages)) {
@@ -1289,6 +1296,14 @@ function CoachChatBody({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       credentials: "include",
+      prepareSendMessagesRequest: ({
+        messages,
+      }): { body: Record<string, unknown> } => ({
+        body:
+          process.env["NEXT_PUBLIC_COACH_CONTEXT_STRATEGY"] === "full_history"
+            ? { messages }
+            : { message: messages.at(-1) },
+      }),
     }),
   });
   const composerBusy = sending || syncingThread;
@@ -1568,11 +1583,35 @@ function CoachChatBody({
             messageEndRef={messageEndRef}
             messages={visibleMessages}
             onPrefillStarter={setComposer}
-            onShowMore={() =>
-              setVisibleMessageCount(
-                (current) => current + MESSAGE_RENDER_BATCH_SIZE,
-              )
-            }
+            olderAvailable={(threadData.next_cursor ?? null) !== null}
+            onShowMore={() => {
+              if (hiddenMessageCount > 0) {
+                setVisibleMessageCount(
+                  (current) => current + MESSAGE_RENDER_BATCH_SIZE,
+                );
+                return;
+              }
+              if (!threadData.next_cursor) return;
+              void loadChatMessages(threadData.next_cursor)
+                .then((page) => {
+                  setThreadData({
+                    ...threadData,
+                    next_cursor: page.next_cursor,
+                    thread: {
+                      ...threadData.thread,
+                      messages: [...page.messages, ...persistedMessages],
+                    },
+                  });
+                  setVisibleMessageCount(
+                    (current) => current + page.messages.length,
+                  );
+                })
+                .catch((error) =>
+                  setThreadError(
+                    errorMessage(error, "Unable to load older messages."),
+                  ),
+                );
+            }}
             profileComplete={threadData.profile_complete}
           />
 

@@ -20,9 +20,10 @@ export const chatRequestMessageSchema = z.looseObject({
   parts: z.array(chatMessagePartSchema),
 });
 
-export const chatRequestBodySchema = z.object({
-  messages: z.array(chatRequestMessageSchema).optional(),
-});
+export const chatRequestBodySchema = z.union([
+  z.object({ message: chatRequestMessageSchema }),
+  z.object({ messages: z.array(chatRequestMessageSchema) }),
+]);
 
 export const uploadRequestSchema = z.object({
   content_length: z

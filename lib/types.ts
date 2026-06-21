@@ -103,6 +103,12 @@ export type ChatThread = {
 
 export type ChatThreadResponse = {
   attachments_enabled: boolean;
+  next_cursor?: string | null;
   profile_complete: boolean;
   thread: ChatThread;
+};
+
+export type ChatMessagePage = {
+  messages: ChatMessage[];
+  next_cursor: string | null;
 };

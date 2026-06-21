@@ -5,6 +5,7 @@ import type {
   AthleteProfile,
   BrowserTokenResponse,
   ChatThreadResponse,
+  ChatMessagePage,
   FitnessMetrics,
   PresignUploadRequest,
   PresignUploadResponse,
@@ -191,6 +192,18 @@ export async function loadChatThread(
     thread_id: thread.thread.id,
   });
   return thread;
+}
+
+export async function loadChatMessages(
+  before: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<ChatMessagePage> {
+  const params = new URLSearchParams({ before, limit: "50" });
+  return authorizedFetch<ChatMessagePage>(
+    `/api/chat/messages?${params.toString()}`,
+    { method: "GET" },
+    fetchImpl,
+  );
 }
 
 export async function createChatUploadIntent(

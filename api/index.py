@@ -4,7 +4,7 @@ import logging
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
@@ -80,6 +80,7 @@ else:
     logging.getLogger(__name__).info("SENTRY_DSN is not set; server-side Sentry is disabled.")
 
 logger = logging.getLogger(__name__)
+MAX_CHAT_MESSAGE_PAGE_SIZE = 100
 
 
 async def log_startup() -> None:
@@ -390,6 +391,18 @@ async def persist_chat_message(
         len(payload.attachments),
     )
     return message.model_dump(mode="json")
+
+
+@app.get("/api/chat/messages")
+async def list_chat_messages(
+    limit: int = 50,
+    before: datetime | None = None,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    if limit < 1 or limit > MAX_CHAT_MESSAGE_PAGE_SIZE:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    page = await chat_service.list_messages(user_context.user_id, limit=limit, before=before)
+    return page.model_dump(mode="json")
 
 
 @app.get("/api/chat/model-state")

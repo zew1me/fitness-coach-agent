@@ -19,6 +19,7 @@ const orchestratorMocks = vi.hoisted(() => {
     Promise.resolve({
       completed: Promise.resolve(),
       finalOutput: "Keep tomorrow easy.",
+      state: { usage: undefined },
       *[Symbol.asyncIterator]() {
         for (const event of events) yield event;
       },
@@ -88,10 +89,6 @@ vi.mock("ai", async (importOriginal) => {
 
 vi.mock("../../lib/agent/context-slices", () => ({
   buildContextSlices: vi.fn(() => ({})),
-}));
-
-vi.mock("../../lib/agent/intent-router", () => ({
-  routeTurnIntent: vi.fn(() => ({ kind: "general", specialists: [] })),
 }));
 
 vi.mock("../../lib/agent/message-context", async (importOriginal) => {
