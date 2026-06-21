@@ -1,5 +1,6 @@
 import math
 import os
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +13,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_vision_model: str = "gpt-5.4-mini"
     openai_vision_timeout_seconds: float = 45.0
+    # gpt-5.x vision is a reasoning model: reasoning draws down the output budget, so keep
+    # this generous — a truncated response is invalid even under strict structured outputs.
+    openai_vision_max_output_tokens: int = 8000
+    # Keep reasoning light: screenshot extraction is a perception task, not a reasoning one.
+    # Low effort leaves more of the token budget for output and reduces latency.
+    openai_vision_reasoning_effort: Literal["minimal", "low", "medium", "high"] = "low"
 
     @field_validator("openai_vision_model")
     @classmethod
@@ -26,6 +33,21 @@ class Settings(BaseSettings):
     def validate_vision_timeout(cls, v: float) -> float:
         if not math.isfinite(v) or v <= 0:
             raise ValueError("openai_vision_timeout_seconds must be a finite number > 0")
+        return v
+
+    @field_validator("openai_vision_max_output_tokens")
+    @classmethod
+    def validate_vision_max_output_tokens(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("openai_vision_max_output_tokens must be a positive integer")
+        return v
+
+    @field_validator("openai_vision_reasoning_effort", mode="before")
+    @classmethod
+    def normalize_vision_reasoning_effort(cls, v: object) -> object:
+        # Normalize so e.g. "Low" / " low " from the environment match the Literal.
+        if isinstance(v, str):
+            return v.strip().lower()
         return v
 
     r2_account_id: str | None = None
