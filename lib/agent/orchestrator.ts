@@ -21,6 +21,7 @@ import {
 import { oldestDueFollowUp } from "./coaching-memory";
 import { buildContextSlices } from "./context-slices";
 import { planSpecialistDelegation } from "./delegation-planner";
+import { releaseChatTurnLease } from "./lease-client";
 import { selectMessagesForModel } from "./message-context";
 import {
   specialistReportsSchema,
@@ -401,14 +402,11 @@ export function streamCoachTurn({
       } finally {
         if (leaseAcquired) {
           try {
-            await fetch(`${baseUrl}/api/chat/model-state/lease`, {
-              method: "DELETE",
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-                ...(extraHeaders ?? {}),
-              },
-              body: JSON.stringify({ lease_id: leaseId }),
+            await releaseChatTurnLease({
+              accessToken,
+              baseUrl,
+              ...(extraHeaders ? { extraHeaders } : {}),
+              leaseId,
             });
           } catch (error) {
             Sentry.logger.warn("coach: lease release failed", {
