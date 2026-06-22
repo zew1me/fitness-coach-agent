@@ -350,6 +350,13 @@ def _build_env_vars(  # noqa: PLR0913
         vars["R2_PUBLIC_BASE_URL"] = r2["public_base_url"]
     if app_base_url:
         vars["APP_BASE_URL"] = app_base_url
+    # One DSN serves every runtime; the browser needs the NEXT_PUBLIC_ copy to be
+    # inlined into the client bundle, the rest read the unprefixed SENTRY_DSN.
+    if settings.sentry_dsn:
+        vars["SENTRY_DSN"] = settings.sentry_dsn
+        vars["NEXT_PUBLIC_SENTRY_DSN"] = settings.sentry_dsn
+    if settings.sentry_auth_token:
+        vars["SENTRY_AUTH_TOKEN"] = settings.sentry_auth_token
     return vars
 
 

@@ -724,6 +724,48 @@ def test_sync_vercel_env_vars_removes_preview_app_base_url_before_upsert() -> No
     ]
 
 
+def _supabase_dict() -> dict:
+    return {"url": "https://x.supabase.co", "anon_key": "anon", "service_role_key": "service"}
+
+
+def _r2_dict() -> dict:
+    return {
+        "bucket_name": "bucket",
+        "access_key_id": "akid",
+        "secret_access_key": "secret",
+        "public_base_url": "",
+        "endpoint_url": "https://x.r2.cloudflarestorage.com",
+    }
+
+
+def test_build_env_vars_fans_sentry_dsn_to_client_and_server_keys() -> None:
+    settings = _settings(
+        sentry_dsn="https://pub@o1.ingest.sentry.io/2",
+        sentry_auth_token="sntrys_x",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["SENTRY_DSN"] == "https://pub@o1.ingest.sentry.io/2"
+    # The browser copy must carry the identical value under the NEXT_PUBLIC_ prefix.
+    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == env_vars["SENTRY_DSN"]
+    assert env_vars["SENTRY_AUTH_TOKEN"] == "sntrys_x"
+
+
+def test_build_env_vars_omits_sentry_keys_when_unset() -> None:
+    settings = _settings()
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert "SENTRY_DSN" not in env_vars
+    assert "NEXT_PUBLIC_SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
 def _settings(**overrides: str) -> BootstrapSettings:
     defaults: dict[str, Any] = {
         "supabase_access_token": "token",

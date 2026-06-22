@@ -33,14 +33,16 @@ supabase link --project-ref <project-ref>
 
 ## Step 1 — Get your admin tokens
 
-| Token | Where to get it |
-|---|---|
-| `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens; only needed for auto-creating projects |
-| `SUPABASE_ORG_ID` | Your org slug from the Supabase dashboard URL; only needed for auto-creating projects |
-| `CF_API_TOKEN` | dash.cloudflare.com → My Profile → API Tokens → create with **Workers R2 Storage:Edit** *and* **API Tokens:Edit** (the second permission lets the script auto-mint the R2 S3 runtime token) |
-| `CF_ACCOUNT_ID` | Cloudflare dashboard right sidebar (any page) |
-| `OPENAI_API_KEY` | platform.openai.com |
-| `TAVILY_API_KEY` | tavily.com |
+| Token                   | Where to get it                                                                                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens; only needed for auto-creating projects                                                                                                              |
+| `SUPABASE_ORG_ID`       | Your org slug from the Supabase dashboard URL; only needed for auto-creating projects                                                                                                       |
+| `CF_API_TOKEN`          | dash.cloudflare.com → My Profile → API Tokens → create with **Workers R2 Storage:Edit** _and_ **API Tokens:Edit** (the second permission lets the script auto-mint the R2 S3 runtime token) |
+| `CF_ACCOUNT_ID`         | Cloudflare dashboard right sidebar (any page)                                                                                                                                               |
+| `OPENAI_API_KEY`        | platform.openai.com                                                                                                                                                                         |
+| `TAVILY_API_KEY`        | tavily.com                                                                                                                                                                                  |
+| `SENTRY_DSN`            | Sentry → Settings → Projects → `javascript-nextjs` → Client Keys (DSN); optional                                                                                                            |
+| `SENTRY_AUTH_TOKEN`     | Sentry → Settings → Auth Tokens (scope `project:releases`); optional, build-time source-map upload                                                                                          |
 
 Vercel authentication uses the local `vercel` CLI (`vercel login`); no token is needed in `.env.bootstrap`.
 
@@ -75,7 +77,7 @@ Bootstrap automatically configures the Supabase project's auth settings via the 
 If `SUPABASE_ACCESS_TOKEN` is not set (e.g. existing projects using CLI login), bootstrap prints the values to configure manually in the Supabase dashboard:
 
 - **Authentication → URL Configuration**: set Site URL and add redirect URL patterns
-- **Authentication → Providers → Email**: disable *Confirm email* so OTP codes are sent directly
+- **Authentication → Providers → Email**: disable _Confirm email_ so OTP codes are sent directly
 - **Authentication → Email Templates**: update Magic Link and Confirm Signup so the email body includes `{{ .Token }}` and `{{ .ConfirmationURL }}`
 - **Vercel → Project Settings → Environment Variables**: remove `APP_BASE_URL` from Preview; keep it only for Production
 
@@ -85,6 +87,18 @@ R2 runtime credentials have a two-pass setup:
 2. In the Cloudflare dashboard, go to R2 -> Manage API tokens and create an account-level token scoped to that bucket with Object Read & Write.
 3. Copy the generated Access Key ID and Secret Access Key into `R2_ACCESS_KEY_ID_PREVIEW` / `R2_SECRET_ACCESS_KEY_PREVIEW` or the matching `_PROD` values.
 4. Rerun bootstrap so it writes those runtime credentials to Vercel.
+
+### Sentry observability (optional)
+
+Set `SENTRY_DSN` and `SENTRY_AUTH_TOKEN` in `.env.bootstrap` to provision Sentry. Both are optional — leave blank to skip Sentry entirely. A single DSN serves every environment; Sentry separates them via the `environment` tag. Bootstrap writes:
+
+| Vercel env var           | Source                    | Runtime                                                               |
+| ------------------------ | ------------------------- | --------------------------------------------------------------------- |
+| `SENTRY_DSN`             | `SENTRY_DSN`              | server, edge, Python backend                                          |
+| `NEXT_PUBLIC_SENTRY_DSN` | `SENTRY_DSN` (same value) | browser — must be `NEXT_PUBLIC_` to be inlined into the client bundle |
+| `SENTRY_AUTH_TOKEN`      | `SENTRY_AUTH_TOKEN`       | build-time source-map upload; stored as a sensitive (write-only) var  |
+
+The `environment` tag comes from `APP_ENV` (server/edge/Python) and `NEXT_PUBLIC_VERCEL_ENV` (browser). The latter is injected automatically by Vercel **only if** the project's _Automatically expose System Environment Variables_ setting is on (the default) — if a production client event shows up tagged `development`, check that setting first.
 
 ## Step 3 — Run the bootstrap
 
@@ -97,6 +111,7 @@ bun run setup:prod
 ```
 
 Each run:
+
 1. Creates (or verifies) the Supabase project and applies all pending migrations via `supabase db push`
 2. Creates (or verifies) the R2 bucket
 3. Reads bucket-scoped R2 S3 credentials from `.env.bootstrap` for backend-proxy uploads
@@ -138,8 +153,8 @@ bun run setup:prod -- --dry-run
 
 ## APP_BASE_URL behavior
 
-| Environment | Value | Why |
-|---|---|---|
-| Production | Set to your domain | Required for OAuth issuer, JWT audience, and redirect URLs |
-| Preview | Not set | Python backend falls back to `VERCEL_URL` (auto-set by Vercel on every deployment); Next.js auth callback falls back to `request.nextUrl.origin` |
-| Local dev | Falls back to `http://localhost:3000` | Same `VERCEL_URL` fallback logic — returns localhost when not on Vercel |
+| Environment | Value                                 | Why                                                                                                                                              |
+| ----------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Production  | Set to your domain                    | Required for OAuth issuer, JWT audience, and redirect URLs                                                                                       |
+| Preview     | Not set                               | Python backend falls back to `VERCEL_URL` (auto-set by Vercel on every deployment); Next.js auth callback falls back to `request.nextUrl.origin` |
+| Local dev   | Falls back to `http://localhost:3000` | Same `VERCEL_URL` fallback logic — returns localhost when not on Vercel                                                                          |

@@ -58,6 +58,14 @@ class BootstrapSettings(BaseSettings):
     openai_api_key: str
     tavily_api_key: str
 
+    # Sentry observability. A single DSN serves all environments (Sentry separates
+    # them via the `environment` tag); bootstrap fans it out to both SENTRY_DSN
+    # (server/edge/python) and NEXT_PUBLIC_SENTRY_DSN (browser). The auth token is a
+    # build-time secret used by withSentryConfig to upload source maps. Leave blank
+    # to skip Sentry provisioning entirely.
+    sentry_dsn: str = ""
+    sentry_auth_token: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env.bootstrap",
         env_file_encoding="utf-8",

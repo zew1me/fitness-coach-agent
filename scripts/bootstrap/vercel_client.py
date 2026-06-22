@@ -17,6 +17,7 @@ SENSITIVE_ENV_KEYS: frozenset[str] = frozenset(
         "TAVILY_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
+        "SENTRY_AUTH_TOKEN",
     }
 )
 
@@ -68,13 +69,13 @@ class VercelClient:
         Prefers a non-vercel.app custom domain; falls back to the vercel.app alias.
         """
         data = self._api("GET", f"/v10/projects/{self._project_id}")
-        aliases = [a.get("domain", "") for a in data.get("alias", [])]
+        aliases: list[str] = [str(a.get("domain", "")) for a in data.get("alias", [])]
         custom = [a for a in aliases if a and ".vercel.app" not in a]
         if custom:
-            return min(custom, key=len)
+            return min(custom, key=lambda d: len(d))
         vercel_aliases = [a for a in aliases if ".vercel.app" in a]
         if vercel_aliases:
-            return min(vercel_aliases, key=len)
+            return min(vercel_aliases, key=lambda d: len(d))
         return ""
 
     def _env_vars(self) -> list[dict]:
