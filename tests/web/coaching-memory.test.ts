@@ -7,6 +7,24 @@ import {
 } from "../../lib/agent/coaching-memory";
 
 describe("coaching memory lifecycle", () => {
+  it("rejects malformed plan and follow-up dates", () => {
+    const base = {
+      id: "invalid-date",
+      category: "follow_up" as const,
+      statement: "Do intervals",
+      confidence: 1,
+      sourceMessageIds: ["m1"],
+      lifecycle: "active" as const,
+    };
+
+    expect(() =>
+      coachingMemoryRecordSchema.parse({ ...base, plannedDate: "tomorrow" }),
+    ).toThrow();
+    expect(() =>
+      coachingMemoryRecordSchema.parse({ ...base, followUpAt: "next week" }),
+    ).toThrow();
+  });
+
   it("supersedes a rescheduled plan and creates a new pending record", () => {
     const existing = [
       coachingMemoryRecordSchema.parse({

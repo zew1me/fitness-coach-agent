@@ -17,8 +17,8 @@ export const coachingMemoryRecordSchema = z.object({
   effectiveUntil: z.string().optional(),
   lifecycle: z.enum(["active", "superseded", "resolved", "dismissed"]),
   supersededBy: z.string().optional(),
-  plannedDate: z.string().optional(),
-  followUpAt: z.string().optional(),
+  plannedDate: z.iso.date().optional(),
+  followUpAt: z.iso.datetime({ offset: true }).optional(),
   outcome: z.string().optional(),
 });
 
