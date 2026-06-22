@@ -355,7 +355,7 @@ def _build_env_vars(  # noqa: PLR0913
     if settings.sentry_dsn:
         vars["SENTRY_DSN"] = settings.sentry_dsn
         vars["NEXT_PUBLIC_SENTRY_DSN"] = settings.sentry_dsn
-    if settings.sentry_auth_token:
+    if settings.sentry_auth_token and settings.sentry_dsn:
         vars["SENTRY_AUTH_TOKEN"] = settings.sentry_auth_token
     return vars
 

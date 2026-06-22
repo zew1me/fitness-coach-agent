@@ -766,6 +766,18 @@ def test_build_env_vars_omits_sentry_keys_when_unset() -> None:
     assert "SENTRY_AUTH_TOKEN" not in env_vars
 
 
+def test_build_env_vars_omits_sentry_auth_token_when_dsn_unset() -> None:
+    settings = _settings(sentry_auth_token="sntrys_token")
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert "SENTRY_DSN" not in env_vars
+    assert "NEXT_PUBLIC_SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
 def _settings(**overrides: str) -> BootstrapSettings:
     defaults: dict[str, Any] = {
         "supabase_access_token": "token",
