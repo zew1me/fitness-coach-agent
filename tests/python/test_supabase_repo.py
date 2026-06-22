@@ -102,8 +102,10 @@ class FakeTableQuery:
             self._rows.extend(self._inserted_payloads)
             return FakeResponse(self._inserted_payloads)
         if self._upserted_payload is not None:
+            conflict_column = self._upsert_conflict
+            assert conflict_column is not None
             if self._ignore_duplicates and any(
-                row.get(self._upsert_conflict) == self._upserted_payload.get(self._upsert_conflict)
+                row.get(conflict_column) == self._upserted_payload.get(conflict_column)
                 for row in self._rows
             ):
                 return FakeResponse([])
@@ -131,7 +133,7 @@ class FakeTableQuery:
             and all(row.get(column) in values for column, values in self._in_filters.items())
             and all(row.get(column) is None for column in self._is_null)
             and all(
-                row.get(column) is not None and row[column] > value
+                row.get(column) is not None and str(row[column]) > str(value)
                 for column, value in self._gt_filters.items()
             )
             and (
@@ -455,7 +457,7 @@ async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None
 @pytest.mark.asyncio
 async def test_chat_message_pagination_is_stable_for_equal_timestamps() -> None:
     created_at = "2026-06-20T12:00:00+00:00"
-    rows = [
+    rows: list[dict[str, object]] = [
         {
             "id": message_id,
             "thread_id": "thread-1",
