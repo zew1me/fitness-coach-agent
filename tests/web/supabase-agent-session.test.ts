@@ -142,6 +142,32 @@ describe("DurableCompactionSession", () => {
     );
     expect(result?.usage.totalTokens).toBe(12);
   });
+
+  it("propagates a conflict while replacing compacted history", async () => {
+    const conflict = new Error("Unable to replace model state (409)");
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([userItem("old")]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn().mockRejectedValue(conflict),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({ output: [userItem("summary")] }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await expect(session.runCompaction()).rejects.toBe(conflict);
+    expect(underlying.replaceAll).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("estimateStoredContext", () => {
