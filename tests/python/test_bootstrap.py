@@ -738,9 +738,10 @@ def _r2_dict() -> dict:
     }
 
 
-def test_build_env_vars_fans_sentry_dsn_to_client_and_server_keys() -> None:
+def test_build_env_vars_sets_distinct_server_and_client_sentry_dsns() -> None:
     settings = _settings(
-        sentry_dsn="https://pub@o1.ingest.sentry.io/2",
+        sentry_dsn="https://server@o1.ingest.sentry.io/1",
+        sentry_public_dsn="https://client@o1.ingest.sentry.io/2",
         sentry_auth_token="sntrys_x",
     )
 
@@ -748,10 +749,24 @@ def test_build_env_vars_fans_sentry_dsn_to_client_and_server_keys() -> None:
         "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
     )
 
-    assert env_vars["SENTRY_DSN"] == "https://pub@o1.ingest.sentry.io/2"
-    # The browser copy must carry the identical value under the NEXT_PUBLIC_ prefix.
-    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == env_vars["SENTRY_DSN"]
+    # Server and browser DSNs are independent keys — never the same value.
+    assert env_vars["SENTRY_DSN"] == "https://server@o1.ingest.sentry.io/1"
+    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
+    assert env_vars["SENTRY_DSN"] != env_vars["NEXT_PUBLIC_SENTRY_DSN"]
     assert env_vars["SENTRY_AUTH_TOKEN"] == "sntrys_x"
+
+
+def test_build_env_vars_sets_only_the_sentry_dsns_that_are_configured() -> None:
+    # The public browser DSN can be provisioned without the server one (or vice versa).
+    settings = _settings(sentry_public_dsn="https://client@o1.ingest.sentry.io/2")
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
+    assert "SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
 
 
 def test_build_env_vars_omits_sentry_keys_when_unset() -> None:

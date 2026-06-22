@@ -350,12 +350,14 @@ def _build_env_vars(  # noqa: PLR0913
         vars["R2_PUBLIC_BASE_URL"] = r2["public_base_url"]
     if app_base_url:
         vars["APP_BASE_URL"] = app_base_url
-    # One DSN serves every runtime; the browser needs the NEXT_PUBLIC_ copy to be
-    # inlined into the client bundle, the rest read the unprefixed SENTRY_DSN.
+    # Two distinct DSNs: a secret server-side one and a public browser one. They are
+    # never the same value, so the browser DSN being public can't expose the server's.
     if settings.sentry_dsn:
         vars["SENTRY_DSN"] = settings.sentry_dsn
-        vars["NEXT_PUBLIC_SENTRY_DSN"] = settings.sentry_dsn
-    if settings.sentry_auth_token and settings.sentry_dsn:
+    if settings.sentry_public_dsn:
+        vars["NEXT_PUBLIC_SENTRY_DSN"] = settings.sentry_public_dsn
+    # Source-map upload is pointless unless at least one DSN is actually sending events.
+    if settings.sentry_auth_token and (settings.sentry_dsn or settings.sentry_public_dsn):
         vars["SENTRY_AUTH_TOKEN"] = settings.sentry_auth_token
     return vars
 

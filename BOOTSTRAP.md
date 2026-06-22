@@ -41,7 +41,8 @@ supabase link --project-ref <project-ref>
 | `CF_ACCOUNT_ID`         | Cloudflare dashboard right sidebar (any page)                                                                                                                                               |
 | `OPENAI_API_KEY`        | platform.openai.com                                                                                                                                                                         |
 | `TAVILY_API_KEY`        | tavily.com                                                                                                                                                                                  |
-| `SENTRY_DSN`            | Sentry → Settings → Projects → `javascript-nextjs` → Client Keys (DSN); optional                                                                                                            |
+| `SENTRY_DSN`            | Sentry → Settings → Projects → `javascript-nextjs` → Client Keys (DSN); server-side key, optional                                                                                           |
+| `SENTRY_PUBLIC_DSN`     | A second Sentry Client Key for the browser (public); optional                                                                                                                               |
 | `SENTRY_AUTH_TOKEN`     | Sentry → Settings → Auth Tokens (scope `project:releases`); optional, build-time source-map upload                                                                                          |
 
 Vercel authentication uses the local `vercel` CLI (`vercel login`); no token is needed in `.env.bootstrap`.
@@ -90,13 +91,13 @@ R2 runtime credentials have a two-pass setup:
 
 ### Sentry observability (optional)
 
-Set `SENTRY_DSN` and `SENTRY_AUTH_TOKEN` in `.env.bootstrap` to provision Sentry. Both are optional — leave blank to skip Sentry entirely. A single DSN serves every environment; Sentry separates them via the `environment` tag. Bootstrap writes:
+Set `SENTRY_DSN`, `SENTRY_PUBLIC_DSN`, and `SENTRY_AUTH_TOKEN` in `.env.bootstrap` to provision Sentry. All are optional — leave any blank to skip that var. Use **two distinct DSNs** (separate Client Keys) so the public browser key can never expose the server one; Sentry separates environments via the `environment` tag. Bootstrap writes:
 
-| Vercel env var           | Source                    | Runtime                                                               |
-| ------------------------ | ------------------------- | --------------------------------------------------------------------- |
-| `SENTRY_DSN`             | `SENTRY_DSN`              | server, edge, Python backend                                          |
-| `NEXT_PUBLIC_SENTRY_DSN` | `SENTRY_DSN` (same value) | browser — must be `NEXT_PUBLIC_` to be inlined into the client bundle |
-| `SENTRY_AUTH_TOKEN`      | `SENTRY_AUTH_TOKEN`       | build-time source-map upload; stored as a sensitive (write-only) var  |
+| Vercel env var           | Source              | Runtime                                                                       |
+| ------------------------ | ------------------- | ----------------------------------------------------------------------------- |
+| `SENTRY_DSN`             | `SENTRY_DSN`        | server, edge, Python backend — stored sensitive (write-only)                  |
+| `NEXT_PUBLIC_SENTRY_DSN` | `SENTRY_PUBLIC_DSN` | browser — public, must be `NEXT_PUBLIC_` to be inlined into the client bundle |
+| `SENTRY_AUTH_TOKEN`      | `SENTRY_AUTH_TOKEN` | build-time source-map upload; stored as a sensitive (write-only) var          |
 
 The `environment` tag comes from `APP_ENV` (server/edge/Python) and `NEXT_PUBLIC_VERCEL_ENV` (browser). The latter is injected automatically by Vercel **only if** the project's _Automatically expose System Environment Variables_ setting is on (the default) — if a production client event shows up tagged `development`, check that setting first.
 

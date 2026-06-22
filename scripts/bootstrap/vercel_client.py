@@ -17,6 +17,7 @@ SENSITIVE_ENV_KEYS: frozenset[str] = frozenset(
         "TAVILY_API_KEY",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
+        "SENTRY_DSN",
         "SENTRY_AUTH_TOKEN",
     }
 )
