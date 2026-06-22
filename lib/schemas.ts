@@ -25,6 +25,17 @@ export const chatRequestBodySchema = z.union([
   z.object({ messages: z.array(chatRequestMessageSchema) }),
 ]);
 
+export const chatMessagePageSchema = z.object({
+  messages: z.array(
+    z.looseObject({
+      id: z.string().min(1),
+      parts: z.array(chatMessagePartSchema),
+      role: z.enum(["user", "assistant"]),
+    }),
+  ),
+  next_cursor: z.string().nullable(),
+});
+
 export const uploadRequestSchema = z.object({
   content_length: z
     .number()

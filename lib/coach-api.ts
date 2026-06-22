@@ -1,6 +1,10 @@
 import * as Sentry from "@sentry/nextjs";
 
-import { athleteProfileSchema, uploadRequestSchema } from "./schemas";
+import {
+  athleteProfileSchema,
+  chatMessagePageSchema,
+  uploadRequestSchema,
+} from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
@@ -199,11 +203,12 @@ export async function loadChatMessages(
   fetchImpl: FetchLike = fetch,
 ): Promise<ChatMessagePage> {
   const params = new URLSearchParams({ before, limit: "50" });
-  return authorizedFetch<ChatMessagePage>(
+  const page = await authorizedFetch<unknown>(
     `/api/chat/messages?${params.toString()}`,
     { method: "GET" },
     fetchImpl,
   );
+  return chatMessagePageSchema.parse(page) as ChatMessagePage;
 }
 
 export async function createChatUploadIntent(
