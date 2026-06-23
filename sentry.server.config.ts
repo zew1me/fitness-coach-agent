@@ -4,10 +4,15 @@
 
 import * as Sentry from "@sentry/nextjs";
 
-Sentry.init({
-  dsn: process.env["SENTRY_DSN"],
-  environment: process.env["APP_ENV"] ?? "development",
+const dsn = process.env["SENTRY_DSN"];
+if (!dsn) {
+  // ESLint's no-console allows only warn/error; warn surfaces this once at load.
+  console.warn("SENTRY_DSN is not set; server-side Sentry is disabled.");
+}
 
-  // Enable logs to be sent to Sentry
+Sentry.init({
+  dsn,
+  environment: process.env["APP_ENV"] ?? "development",
   enableLogs: true,
+  tracesSampleRate: 1.0,
 });

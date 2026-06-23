@@ -724,6 +724,91 @@ def test_sync_vercel_env_vars_removes_preview_app_base_url_before_upsert() -> No
     ]
 
 
+def _supabase_dict() -> dict:
+    return {"url": "https://x.supabase.co", "anon_key": "anon", "service_role_key": "service"}
+
+
+def _r2_dict() -> dict:
+    return {
+        "bucket_name": "bucket",
+        "access_key_id": "akid",
+        "secret_access_key": "secret",
+        "public_base_url": "",
+        "endpoint_url": "https://x.r2.cloudflarestorage.com",
+    }
+
+
+def test_build_env_vars_sets_distinct_server_and_client_sentry_dsns() -> None:
+    settings = _settings(
+        sentry_dsn="https://server@o1.ingest.sentry.io/1",
+        sentry_public_dsn="https://client@o1.ingest.sentry.io/2",
+        sentry_auth_token="sntrys_x",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    # Each DSN flows to its own key — guards against regressing to a single DSN
+    # fanned out to both (the bug this two-key split fixed).
+    assert env_vars["SENTRY_DSN"] == "https://server@o1.ingest.sentry.io/1"
+    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
+    assert env_vars["SENTRY_AUTH_TOKEN"] == "sntrys_x"
+
+
+def test_build_env_vars_sets_only_the_sentry_dsns_that_are_configured() -> None:
+    # The public browser DSN can be provisioned without the server one (or vice versa).
+    settings = _settings(sentry_public_dsn="https://client@o1.ingest.sentry.io/2")
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
+    assert "SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
+def test_build_env_vars_writes_auth_token_with_only_the_public_dsn() -> None:
+    # Source-map upload should be provisioned for a browser-only Sentry setup, not just
+    # when the server DSN is present — guards the `or sentry_public_dsn` half of the gate.
+    settings = _settings(
+        sentry_public_dsn="https://client@o1.ingest.sentry.io/2",
+        sentry_auth_token="sntrys_x",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["SENTRY_AUTH_TOKEN"] == "sntrys_x"
+    assert "SENTRY_DSN" not in env_vars
+
+
+def test_build_env_vars_omits_sentry_keys_when_unset() -> None:
+    settings = _settings()
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert "SENTRY_DSN" not in env_vars
+    assert "NEXT_PUBLIC_SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
+def test_build_env_vars_omits_sentry_auth_token_when_dsn_unset() -> None:
+    settings = _settings(sentry_auth_token="sntrys_token")
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert "SENTRY_DSN" not in env_vars
+    assert "NEXT_PUBLIC_SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
 def _settings(**overrides: str) -> BootstrapSettings:
     defaults: dict[str, Any] = {
         "supabase_access_token": "token",
