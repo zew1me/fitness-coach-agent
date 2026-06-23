@@ -9,8 +9,9 @@
  * point byte-for-byte -- elevation, timestamps, and all `<extensions>` ride along
  * untouched. It never re-serializes the XML, so nothing about kept points can drift.
  *
- * The algorithm is intentionally dependency-light and side-effect-free so it can be
- * lifted into client-side code later (the eventual fix for #182).
+ * The pure core (`shrinkGpxXml`) is dependency-light and side-effect-free -- it uses only
+ * string ops, `simplify-js`, and `TextEncoder` -- so it can be lifted into client-side
+ * code later (the eventual fix for #182).
  *
  * Usage:
  *   bun scripts/shrink-gpx.ts <input.gpx> [--out <path>] [--target-mb 4.5] [--margin-mb 0.1]
@@ -27,6 +28,13 @@ const MB = 1_000_000;
 /** Approximate meters per degree of latitude; good enough for local DP distances. */
 const METERS_PER_DEGREE = 111_320;
 
+const encoder = new TextEncoder();
+
+/** UTF-8 byte length; `TextEncoder` keeps the core portable to browsers (no `Buffer`). */
+function byteLength(text: string): number {
+  return encoder.encode(text).length;
+}
+
 /** Emit a line to stdout (this is a CLI; `console` is disallowed by the repo lint config). */
 function log(message: string): void {
   process.stdout.write(`${message}\n`);
@@ -35,20 +43,26 @@ function log(message: string): void {
 type IndexedPoint = {
   x: number;
   y: number;
-  /** Index into the global `blocks` array, recovered after simplification. */
+  /** Index into `ParsedGpx.points`, recovered after simplification. */
   idx: number;
+};
+
+/** A single `<trkpt>` plus the separator text that precedes it in the document. */
+type TrackPoint = {
+  /** Text between the previous block and this one; `""` for the first point (see `header`). */
+  leadingGap: string;
+  /** The `<trkpt ...>...</trkpt>` (or self-closing `<trkpt .../>`) substring, verbatim. */
+  block: string;
 };
 
 type ParsedGpx = {
   /** Text before the first `<trkpt>` (XML header, metadata, opening tags). */
   header: string;
-  /** Each `<trkpt ...>...</trkpt>` verbatim, in document order. */
-  blocks: string[];
-  /** Separator text preceding each block; `gaps[i]` sits between block i-1 and block i. */
-  gaps: string[];
+  /** Every trackpoint in document order, each carrying its own leading separator. */
+  points: TrackPoint[];
   /** Text after the last `</trkpt>` (closing tags). */
   footer: string;
-  /** Groups of block indices, one per `<trkseg>`, so DP never spans a segment break. */
+  /** Groups of `points` indices, one per `<trkseg>`, so DP never spans a segment break. */
   segments: number[][];
 };
 
@@ -59,9 +73,10 @@ type Cli = {
   marginMb: number;
 };
 
-function validateCli(
-  cli: { input: string | undefined } & Omit<Cli, "input">,
-): Cli {
+/** A `Cli` before validation, where `input` may still be missing. */
+type RawCli = { input: string | undefined } & Omit<Cli, "input">;
+
+function validateCli(cli: RawCli): Cli {
   if (cli.input === undefined) {
     throw new Error(
       "usage: bun scripts/shrink-gpx.ts <input.gpx> [--out <path>] [--target-mb 4.5] [--margin-mb 0.1]",
@@ -81,7 +96,7 @@ function validateCli(
 }
 
 function parseArgs(argv: string[]): Cli {
-  const cli: { input: string | undefined } & Omit<Cli, "input"> = {
+  const cli: RawCli = {
     input: undefined,
     out: undefined,
     targetMb: 4.5,
@@ -100,30 +115,29 @@ function parseArgs(argv: string[]): Cli {
 }
 
 /**
- * Slice the GPX into header / verbatim `<trkpt>` blocks / gaps / footer. Segment
- * boundaries are detected by a `</trkseg>` appearing in the gap before a block.
+ * Slice the GPX into header / verbatim `<trkpt>` blocks / footer. Both full
+ * (`<trkpt>...</trkpt>`) and self-closing (`<trkpt .../>`) trackpoints are recognized.
+ * Segment boundaries are detected by a `</trkseg>` appearing in a block's leading gap.
  */
 function parseGpx(xml: string): ParsedGpx {
-  const blocks: string[] = [];
-  const gaps: string[] = [];
-  const re = /<trkpt\b[^>]*>[\s\S]*?<\/trkpt>/g;
+  const points: TrackPoint[] = [];
+  const re = /<trkpt\b[^>]*?(?:\/>|>[\s\S]*?<\/trkpt>)/g;
 
   let lastEnd = 0;
   let header = "";
   let match: RegExpExecArray | null;
   while ((match = re.exec(xml)) !== null) {
     const gap = xml.slice(lastEnd, match.index);
-    if (blocks.length === 0) {
-      header = gap;
-      gaps.push(""); // gaps[0] is unused (header holds the pre-first-block text)
+    if (points.length === 0) {
+      header = gap; // pre-first-block text lives here; the first point's leadingGap is ""
+      points.push({ leadingGap: "", block: match[0] });
     } else {
-      gaps.push(gap);
+      points.push({ leadingGap: gap, block: match[0] });
     }
-    blocks.push(match[0]);
     lastEnd = match.index + match[0].length;
   }
 
-  if (blocks.length === 0) {
+  if (points.length === 0) {
     throw new Error("no <trkpt> elements found -- is this a GPX track file?");
   }
 
@@ -131,9 +145,8 @@ function parseGpx(xml: string): ParsedGpx {
 
   const segments: number[][] = [];
   let current: number[] = [0];
-  for (let i = 1; i < blocks.length; i++) {
-    const gap = gaps[i];
-    if (gap !== undefined && gap.includes("</trkseg>")) {
+  for (let i = 1; i < points.length; i++) {
+    if (points[i]?.leadingGap.includes("</trkseg>")) {
       segments.push(current);
       current = [i];
     } else {
@@ -142,7 +155,7 @@ function parseGpx(xml: string): ParsedGpx {
   }
   segments.push(current);
 
-  return { header, blocks, gaps, footer, segments };
+  return { header, points, footer, segments };
 }
 
 function readCoord(block: string, attr: "lat" | "lon"): number {
@@ -150,17 +163,31 @@ function readCoord(block: string, attr: "lat" | "lon"): number {
   if (m?.[1] === undefined) {
     throw new Error(`<trkpt> missing ${attr}: ${block.slice(0, 80)}`);
   }
-  return Number(m[1]);
+  const value = Number(m[1]);
+  if (!Number.isFinite(value)) {
+    throw new Error(
+      `<trkpt> has non-numeric ${attr}="${m[1]}": ${block.slice(0, 80)}`,
+    );
+  }
+  return value;
+}
+
+function pointAt(parsed: ParsedGpx, idx: number): TrackPoint {
+  const point = parsed.points[idx];
+  if (point === undefined) {
+    throw new Error(`internal error: point index ${idx} out of range`);
+  }
+  return point;
 }
 
 /** Project lat/lon to local meters via equirectangular approximation around `lat0`. */
 function projectSegments(parsed: ParsedGpx): IndexedPoint[][] {
-  const firstLat = readCoord(parsed.blocks[0] ?? "", "lat");
+  const firstLat = readCoord(pointAt(parsed, 0).block, "lat");
   const cosLat0 = Math.cos((firstLat * Math.PI) / 180);
 
   return parsed.segments.map((segment) =>
     segment.map((idx) => {
-      const block = parsed.blocks[idx] ?? "";
+      const block = pointAt(parsed, idx).block;
       const lat = readCoord(block, "lat");
       const lon = readCoord(block, "lon");
       return {
@@ -172,7 +199,11 @@ function projectSegments(parsed: ParsedGpx): IndexedPoint[][] {
   );
 }
 
-/** Block indices retained after running DP per segment at the given tolerance (meters). */
+/**
+ * Block indices retained after running Douglas-Peucker per segment at the given tolerance.
+ * `highQuality` (true) skips simplify-js's radial-distance pre-pass, giving pure DP, whose
+ * retained set is monotonic in tolerance -- the property `fitToBudget` relies on.
+ */
 function keptAtTolerance(
   projected: IndexedPoint[][],
   toleranceMeters: number,
@@ -182,34 +213,32 @@ function keptAtTolerance(
     const simplified = simplify(
       points,
       toleranceMeters,
-      false,
+      true,
     ) as IndexedPoint[];
     for (const point of simplified) kept.add(point.idx);
   }
   return kept;
 }
 
-/** Reassemble the GPX keeping only blocks in `kept`, preserving original separators. */
+/** Reassemble the GPX keeping only points in `kept`, preserving original separators. */
 function rebuild(parsed: ParsedGpx, kept: Set<number>): string {
   const parts: string[] = [parsed.header];
   let first = true;
-  for (let i = 0; i < parsed.blocks.length; i++) {
+  for (let i = 0; i < parsed.points.length; i++) {
     if (!kept.has(i)) continue;
-    if (!first) parts.push(parsed.gaps[i] ?? "");
-    parts.push(parsed.blocks[i] ?? "");
+    const point = pointAt(parsed, i);
+    if (!first) parts.push(point.leadingGap);
+    parts.push(point.block);
     first = false;
   }
   parts.push(parsed.footer);
   return parts.join("");
 }
 
-function byteLength(text: string): number {
-  return Buffer.byteLength(text, "utf8");
-}
-
 /**
- * Find the smallest tolerance whose output fits the byte budget (monotonic: larger
- * tolerance -> fewer points -> smaller file), keeping as much detail as possible.
+ * Find the smallest tolerance whose output fits the byte budget. Pure Douglas-Peucker keeps
+ * a subset of points as tolerance grows, so file size decreases monotonically; we binary
+ * search the tolerance and the returned `hi` is always re-verified to fit the budget.
  */
 function fitToBudget(
   parsed: ParsedGpx,
@@ -218,10 +247,6 @@ function fitToBudget(
 ): { kept: Set<number>; tolerance: number } {
   const sizeAt = (tol: number): number =>
     byteLength(rebuild(parsed, keptAtTolerance(projected, tol)));
-
-  if (sizeAt(0) <= targetBytes) {
-    return { kept: keptAtTolerance(projected, 0), tolerance: 0 };
-  }
 
   let hi = 1;
   while (sizeAt(hi) > targetBytes) {
@@ -261,7 +286,8 @@ export type ShrinkResult = {
 /**
  * Pure core: shrink a GPX document to `targetBytes` by geometric simplification, keeping
  * retained trackpoints verbatim. No filesystem access -- safe to reuse in tests or
- * client-side code.
+ * client-side code. If the input already fits, every point is kept and the output is
+ * byte-identical to the input.
  */
 export function shrinkGpxXml(xml: string, targetBytes: number): ShrinkResult {
   if (!Number.isFinite(targetBytes) || targetBytes <= 0) {
@@ -270,14 +296,33 @@ export function shrinkGpxXml(xml: string, targetBytes: number): ShrinkResult {
     );
   }
   const parsed = parseGpx(xml);
+  const totalPoints = parsed.points.length;
+  const inputBytes = byteLength(xml);
+
+  // Already under budget: keep every point. rebuild() of the full set reconstructs the
+  // original byte-for-byte, so this is a true no-op rather than a tolerance-0 simplify
+  // (which would still drop duplicate/collinear points).
+  if (inputBytes <= targetBytes) {
+    const keptAll = new Set<number>(parsed.points.map((_, i) => i));
+    const verbatim = rebuild(parsed, keptAll);
+    return {
+      xml: verbatim,
+      inputBytes,
+      outputBytes: byteLength(verbatim),
+      totalPoints,
+      keptPoints: totalPoints,
+      tolerance: 0,
+    };
+  }
+
   const projected = projectSegments(parsed);
   const { kept, tolerance } = fitToBudget(parsed, projected, targetBytes);
   const output = rebuild(parsed, kept);
   return {
     xml: output,
-    inputBytes: byteLength(xml),
+    inputBytes,
     outputBytes: byteLength(output),
-    totalPoints: parsed.blocks.length,
+    totalPoints,
     keptPoints: kept.size,
     tolerance,
   };

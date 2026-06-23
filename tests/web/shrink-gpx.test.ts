@@ -129,4 +129,81 @@ describe("shrinkGpxXml", () => {
   it("rejects a non-positive byte budget", () => {
     expect(() => shrinkGpxXml(makeGpx(10), 0)).toThrow(/positive/);
   });
+
+  it("counts self-closing and mixed trackpoints without merging them", () => {
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<gpx version="1.1"><trk><trkseg>',
+      '<trkpt lat="47.0000000" lon="-120.0000000"/>',
+      '<trkpt lat="47.0010000" lon="-120.0010000"><ele>1.0</ele></trkpt>',
+      '<trkpt lat="47.0020000" lon="-120.0020000"/>',
+      '<trkpt lat="47.0030000" lon="-120.0030000"><ele>3.0</ele></trkpt>',
+      "</trkseg></trk></gpx>",
+    ].join("\n");
+    // Count points independently of the production regex (one lat="" per trackpoint).
+    const sourceCount = (xml.match(/lat="/g) ?? []).length;
+    const result = shrinkGpxXml(xml, bytes(xml) * 2);
+
+    expect(sourceCount).toBe(4);
+    expect(result.totalPoints).toBe(4);
+    expect(result.xml).toBe(xml);
+  });
+
+  it("throws loudly on non-numeric coordinates instead of producing NaN geometry", () => {
+    const xml = makeGpx(10).replace('lat="47.0000000"', 'lat="1.2.3"');
+    expect(() => shrinkGpxXml(xml, Math.floor(bytes(xml) * 0.5))).toThrow(
+      /non-numeric/,
+    );
+  });
+
+  it("returns a verbatim copy for under-budget tracks with duplicate/collinear points", () => {
+    // Stationary run (duplicates) + dead-straight stretch (collinear) -- common in real GPS.
+    const dup = { lat: 47.1, lon: -120.1 };
+    const points = [
+      dup,
+      dup,
+      dup,
+      { lat: 47.2, lon: -120.2 },
+      { lat: 47.3, lon: -120.3 }, // collinear with neighbors
+      { lat: 47.4, lon: -120.4 },
+    ];
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<gpx version="1.1"><trk><trkseg>',
+      ...points.map((p, i) => trkpt(p, i)),
+      "</trkseg></trk></gpx>",
+    ].join("\n");
+    const result = shrinkGpxXml(xml, bytes(xml) * 2);
+
+    expect(result.keptPoints).toBe(points.length);
+    expect(result.tolerance).toBe(0);
+    expect(result.xml).toBe(xml);
+  });
+
+  it("preserves multiple <trk> elements", () => {
+    const seg = (start: number, count: number): string =>
+      `  <trk><trkseg>\n${Array.from({ length: count }, (_, i) => trkpt(point(start + i), start + i)).join("\n")}\n  </trkseg></trk>`;
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<gpx version="1.1" xmlns:gpxtpx="x">',
+      seg(0, 150),
+      seg(150, 150),
+      "</gpx>",
+      "",
+    ].join("\n");
+    const target = Math.floor(bytes(xml) * 0.5);
+    const result = shrinkGpxXml(xml, target);
+
+    expect(result.outputBytes).toBeLessThanOrEqual(target);
+    expect((result.xml.match(/<trk>/g) ?? []).length).toBe(2);
+    expect((result.xml.match(/<\/trkseg>/g) ?? []).length).toBe(2);
+  });
+
+  it("round-trips CRLF line endings and detects segments across \\r\\n", () => {
+    const xml = makeGpx(40, [20, 20]).replace(/\n/g, "\r\n");
+    const result = shrinkGpxXml(xml, bytes(xml) * 2);
+
+    expect(result.xml).toBe(xml);
+    expect((result.xml.match(/<trkseg>/g) ?? []).length).toBe(2);
+  });
 });
