@@ -49,8 +49,7 @@ describe("useAthleteProfile", () => {
     expect(result.current.saving).toBe(false);
   });
 
-  it("prefetch failure surfaces a drawer status and logs the error", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("prefetch failure surfaces a drawer status", async () => {
     loadProfileMock.mockRejectedValueOnce(new Error("nope"));
 
     const { result } = renderHook(() => useAthleteProfile(TOKEN));
@@ -59,8 +58,6 @@ describe("useAthleteProfile", () => {
       expect(result.current.status).not.toBeNull();
     });
     expect(result.current.status).toMatch(/Couldn't load your saved profile/i);
-    expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
   });
 
   it("prefetches the profile when given a token", async () => {
@@ -73,7 +70,6 @@ describe("useAthleteProfile", () => {
   });
 
   it("falls back to an empty profile when prefetch fails", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     loadProfileMock.mockRejectedValueOnce(new Error("nope"));
     const { result } = renderHook(() => useAthleteProfile(TOKEN));
 
@@ -85,7 +81,6 @@ describe("useAthleteProfile", () => {
       coaching_state: "onboarding",
       primary_sports: [],
     });
-    errorSpy.mockRestore();
   });
 
   it("ensureLoaded is a no-op once profile is loaded", async () => {

@@ -85,8 +85,6 @@ def _build_auth_redirect_urls(
     # Production: allow the canonical site origin and the Vercel-assigned alias.
     prod_origin = _build_auth_site_url(settings, env, vercel_domain)
     if not prod_origin:
-        # Fail loud rather than write a localhost-only allow-list to production,
-        # which would silently break the magic-link flow this change exists to fix.
         raise RuntimeError(
             "Could not resolve the production auth origin. Set PRODUCTION_DOMAIN in "
             ".env.bootstrap, or ensure the Vercel production domain lookup succeeds, "
@@ -350,6 +348,16 @@ def _build_env_vars(  # noqa: PLR0913
         vars["R2_PUBLIC_BASE_URL"] = r2["public_base_url"]
     if app_base_url:
         vars["APP_BASE_URL"] = app_base_url
+    # These should be two distinct Client Keys — a secret server-side DSN and a public
+    # browser one — so the public browser DSN can't expose the server's. Bootstrap does
+    # not verify they differ; that separation is the operator's responsibility.
+    if settings.sentry_dsn:
+        vars["SENTRY_DSN"] = settings.sentry_dsn
+    if settings.sentry_public_dsn:
+        vars["NEXT_PUBLIC_SENTRY_DSN"] = settings.sentry_public_dsn
+    # Source-map upload is pointless unless at least one DSN is actually sending events.
+    if settings.sentry_auth_token and (settings.sentry_dsn or settings.sentry_public_dsn):
+        vars["SENTRY_AUTH_TOKEN"] = settings.sentry_auth_token
     return vars
 
 
@@ -362,9 +370,12 @@ def _sync_vercel_env_vars(
     vercel.upsert_env_vars(vercel_target, env_vars)
 
 
-def _print_summary(
-    env: str, supabase: dict, r2: dict, app_base_url: str, vercel_target: list
+def _print_summary(  # noqa: PLR0913
+    env: str, supabase: dict, r2: dict, app_base_url: str, vercel_target: list, env_vars: dict
 ) -> None:
+    def _present(key: str) -> str:
+        return "configured" if key in env_vars else "(not configured)"
+
     print(f"\n{'=' * 60}")
     print(f"Bootstrap complete for {env.upper()}")
     print(f"{'=' * 60}")
@@ -376,6 +387,9 @@ def _print_summary(
     print(f"  R2 access key ID     : {_mask(r2['access_key_id'])}")
     print(f"  R2 public base URL   : {r2['public_base_url'] or '(not configured)'}")
     print(f"  APP_BASE_URL         : {app_base_url or '(unset — falls back to VERCEL_URL)'}")
+    print(f"  Sentry server DSN    : {_present('SENTRY_DSN')}")
+    print(f"  Sentry browser DSN   : {_present('NEXT_PUBLIC_SENTRY_DSN')}")
+    print(f"  Sentry source maps   : {_present('SENTRY_AUTH_TOKEN')}")
     print(f"  Vercel target        : {vercel_target}")
     print()
     print("Next steps:")
@@ -422,11 +436,16 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
         app_base_url = _resolve_app_base_url(settings, env, vercel_domain)
         vercel_target = ["production"] if env == "prod" else ["preview"]
         env_vars = _build_env_vars(env, app_base_url, jwt_secret, supabase, r2, settings)
+        if settings.sentry_auth_token and "SENTRY_AUTH_TOKEN" not in env_vars:
+            print(
+                "  Warning: SENTRY_AUTH_TOKEN is set but no Sentry DSN is configured, "
+                "so it was not written. Source maps will not upload until a DSN is set."
+            )
         _sync_vercel_env_vars(vercel, vercel_target, env_vars)
     finally:
         vercel.close()
 
-    _print_summary(env, supabase, r2, app_base_url, vercel_target)
+    _print_summary(env, supabase, r2, app_base_url, vercel_target, env_vars)
 
 
 def main() -> None:

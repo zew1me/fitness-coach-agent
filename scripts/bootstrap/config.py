@@ -58,6 +58,16 @@ class BootstrapSettings(BaseSettings):
     openai_api_key: str
     tavily_api_key: str
 
+    # Sentry observability. Two distinct DSNs (separate Sentry Client Keys):
+    #   sentry_dsn        — server/edge/python (SENTRY_DSN); treated as a secret.
+    #   sentry_public_dsn — browser (NEXT_PUBLIC_SENTRY_DSN); inlined into the client
+    #                       bundle, so it is public and not sensitive.
+    # sentry_auth_token is a build-time secret used by withSentryConfig to upload
+    # source maps. Leave any blank to skip provisioning that var.
+    sentry_dsn: str = ""
+    sentry_public_dsn: str = ""
+    sentry_auth_token: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env.bootstrap",
         env_file_encoding="utf-8",

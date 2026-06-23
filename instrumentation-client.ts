@@ -4,11 +4,25 @@
 
 import * as Sentry from "@sentry/nextjs";
 
+const dsn = process.env["NEXT_PUBLIC_SENTRY_DSN"];
+if (!dsn) {
+  // ESLint's no-console allows only warn/error; warn surfaces this once at load.
+  console.warn(
+    "NEXT_PUBLIC_SENTRY_DSN is not set; client-side Sentry is disabled.",
+  );
+}
+
 Sentry.init({
-  dsn: process.env["SENTRY_DSN"],
-  environment: process.env["APP_ENV"] ?? "development",
-  tracesSampleRate: process.env["NODE_ENV"] === "development" ? 1.0 : 0.1,
+  dsn,
   enableLogs: true,
+  environment: process.env["NEXT_PUBLIC_VERCEL_ENV"] ?? "development",
+  integrations: [Sentry.browserTracingIntegration()],
+  tracePropagationTargets: [
+    "localhost",
+    /^\/api\//,
+    /^https:\/\/fitness-coach-agent(-.*)?\.vercel\.app\/api/,
+  ],
+  tracesSampleRate: 1.0,
 });
 
 export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
