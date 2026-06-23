@@ -400,7 +400,7 @@ async def list_chat_messages(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     if limit < 1 or limit > MAX_CHAT_MESSAGE_PAGE_SIZE:
-        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+        raise HTTPException(status_code=422, detail=f"limit must be between 1 and {MAX_CHAT_MESSAGE_PAGE_SIZE}")
     try:
         page = await chat_service.list_messages(user_context.user_id, limit=limit, before=before)
     except ValueError as exc:
