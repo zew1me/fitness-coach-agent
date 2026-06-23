@@ -150,69 +150,80 @@ export function streamCoachTurn({
       const textState = { textId: "coach-response", textStarted: false };
 
       try {
-        await withTrace(
-          "fitness-coach-turn",
-          async () => {
-            const intent = routeTurnIntent(
-              latestUserText(selectedMessages),
-              context,
-            );
-            const reports = specialistReportsSchema.parse(
-              await runSpecialists({
-                messages: selectedMessages,
-                messagesAreModelSelected: true,
-                model: MODEL,
-                roles: intent.specialists,
-                slices: buildContextSlices(context),
-              }),
-            ) as SpecialistReport[];
-            const tavilyServer = createTavilyServer(tavilyMcpUrl);
-            if (tavilyServer !== null) await tavilyServer.connect();
-
-            try {
-              const lead = new Agent<CoachAgentRunContext>({
-                name: "Lead coach",
-                instructions: buildLeadCoachPrompt(context, reports),
-                model: MODEL,
-                mcpServers: tavilyServer === null ? [] : [tavilyServer],
-                tools: createAgentCoachTools({
-                  accessToken,
-                  baseUrl,
-                  ...(extraHeaders ? { extraHeaders } : {}),
-                }),
-              });
-              lead.on("agent_tool_start", (activeContext) => {
-                activeContext.context.toolCalled = true;
-              });
-
-              const runner = new Runner({
-                traceIncludeSensitiveData: false,
-                tracingDisabled: false,
-                workflowName: "fitness-coach-turn",
-              });
-              const result = await runner.run(
-                lead,
-                toAgentInputItems(selectedMessages),
-                {
-                  context: runContext,
-                  maxTurns: MAX_COACH_STEPS,
-                  ...(signal ? { signal } : {}),
-                  stream: true,
-                },
-              );
-
-              for await (const event of result) {
-                writeAgentStreamEvent(event, writer, textState);
-              }
-              await result.completed;
-            } finally {
-              if (tavilyServer !== null) await tavilyServer.close();
-            }
-          },
+        await Sentry.startSpan(
           {
-            groupId: context.profile.user_id,
-            metadata: { model: MODEL },
+            name: "fitness-coach-turn",
+            op: "ai.agent",
+            attributes: {
+              "ai.model": MODEL,
+              "user.id": context.profile.user_id,
+            },
           },
+          () =>
+            withTrace(
+              "fitness-coach-turn",
+              async () => {
+                const intent = routeTurnIntent(
+                  latestUserText(selectedMessages),
+                  context,
+                );
+                const reports = specialistReportsSchema.parse(
+                  await runSpecialists({
+                    messages: selectedMessages,
+                    messagesAreModelSelected: true,
+                    model: MODEL,
+                    roles: intent.specialists,
+                    slices: buildContextSlices(context),
+                  }),
+                ) as SpecialistReport[];
+                const tavilyServer = createTavilyServer(tavilyMcpUrl);
+                if (tavilyServer !== null) await tavilyServer.connect();
+
+                try {
+                  const lead = new Agent<CoachAgentRunContext>({
+                    name: "Lead coach",
+                    instructions: buildLeadCoachPrompt(context, reports),
+                    model: MODEL,
+                    mcpServers: tavilyServer === null ? [] : [tavilyServer],
+                    tools: createAgentCoachTools({
+                      accessToken,
+                      baseUrl,
+                      ...(extraHeaders ? { extraHeaders } : {}),
+                    }),
+                  });
+                  lead.on("agent_tool_start", (activeContext) => {
+                    activeContext.context.toolCalled = true;
+                  });
+
+                  const runner = new Runner({
+                    traceIncludeSensitiveData: false,
+                    tracingDisabled: false,
+                    workflowName: "fitness-coach-turn",
+                  });
+                  const result = await runner.run(
+                    lead,
+                    toAgentInputItems(selectedMessages),
+                    {
+                      context: runContext,
+                      maxTurns: MAX_COACH_STEPS,
+                      ...(signal ? { signal } : {}),
+                      stream: true,
+                    },
+                  );
+
+                  for await (const event of result) {
+                    writeAgentStreamEvent(event, writer, textState);
+                  }
+                  await result.completed;
+                } finally {
+                  if (tavilyServer !== null) await tavilyServer.close();
+                }
+              },
+              {
+                groupId: context.profile.user_id,
+                metadata: { model: MODEL },
+              },
+            ),
         );
         finishAgentText(writer, textState);
         Sentry.logger.info("coach turn complete", {
