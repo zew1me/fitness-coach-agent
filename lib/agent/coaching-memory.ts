@@ -18,7 +18,10 @@ export const coachingMemoryRecordSchema = z.object({
   lifecycle: z.enum(["active", "superseded", "resolved", "dismissed"]),
   supersededBy: z.string().optional(),
   plannedDate: z.iso.date().optional(),
-  followUpAt: z.iso.datetime({ offset: true }).optional(),
+  followUpAt: z
+    .iso.datetime({ offset: true })
+    .transform((value) => new Date(value).toISOString())
+    .optional(),
   outcome: z.string().optional(),
 });
 
