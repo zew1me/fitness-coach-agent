@@ -68,6 +68,8 @@ if _sentry_dsn:
         environment=settings.app_env,
         enable_logs=True,
     )
+else:
+    logging.getLogger(__name__).info("SENTRY_DSN is not set; server-side Sentry is disabled.")
 
 logger = logging.getLogger(__name__)
 

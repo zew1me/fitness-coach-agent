@@ -4,8 +4,16 @@
 
 import * as Sentry from "@sentry/nextjs";
 
+const dsn = process.env["NEXT_PUBLIC_SENTRY_DSN"];
+if (!dsn) {
+  // ESLint's no-console allows only warn/error; warn surfaces this once at load.
+  console.warn(
+    "NEXT_PUBLIC_SENTRY_DSN is not set; client-side Sentry is disabled.",
+  );
+}
+
 Sentry.init({
-  dsn: process.env["NEXT_PUBLIC_SENTRY_DSN"],
+  dsn,
   enableLogs: true,
   environment: process.env["NEXT_PUBLIC_VERCEL_ENV"] ?? "development",
   integrations: [Sentry.browserTracingIntegration()],
