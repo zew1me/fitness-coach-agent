@@ -67,6 +67,9 @@ if _sentry_dsn:
         dsn=_sentry_dsn,
         environment=settings.app_env,
         enable_logs=True,
+        # Match the TS configs (1.0) so traces the browser propagates to /api/ continue
+        # server-side instead of breaking at the backend boundary.
+        traces_sample_rate=1.0,
     )
 else:
     logging.getLogger(__name__).info("SENTRY_DSN is not set; server-side Sentry is disabled.")
@@ -82,6 +85,7 @@ async def log_startup() -> None:
             [settings.r2_access_key_id, settings.r2_secret_access_key, settings.r2_bucket]
         ),
         "supabase": bool(settings.supabase_url and settings.supabase_service_role_key),
+        "sentry": bool(_sentry_dsn),
     }
     enabled = [k for k, v in features.items() if v]
     disabled = [k for k, v in features.items() if not v]
