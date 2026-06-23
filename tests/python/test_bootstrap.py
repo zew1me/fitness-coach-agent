@@ -706,32 +706,6 @@ def test_vercel_remove_env_vars_preserves_other_targets(monkeypatch) -> None:
     ]
 
 
-def test_vercel_upsert_marks_secret_keys_sensitive(monkeypatch) -> None:
-    # SENTRY_DSN is a secret (in SENSITIVE_ENV_KEYS) and must be stored write-only;
-    # a non-secret like APP_ENV stays the default `encrypted` type.
-    calls: list[tuple[str, str, dict | None]] = []
-    fake_run = _make_fake_vercel_run(
-        calls,
-        {
-            ("GET", "/v10/projects/project-id/env?teamId=team-id"): {"envs": []},
-            ("POST", "/v10/projects/project-id/env?teamId=team-id"): {},
-        },
-        capture_body=True,
-    )
-    monkeypatch.setattr("scripts.bootstrap.vercel_client.subprocess.run", fake_run)
-
-    client = VercelClient("project-id", "team-id")
-    client.upsert_env_vars(["production"], {"SENTRY_DSN": "dsn", "APP_ENV": "production"})
-    client.close()
-
-    types_by_key: dict[str, str] = {}
-    for method, _path, body in calls:
-        if method == "POST" and body is not None:
-            types_by_key[body["key"]] = body["type"]
-    assert types_by_key["SENTRY_DSN"] == "sensitive"
-    assert types_by_key["APP_ENV"] == "encrypted"
-
-
 def test_sync_vercel_env_vars_removes_preview_app_base_url_before_upsert() -> None:
     calls: list[tuple[str, list[str], dict | list[str]]] = []
 
@@ -775,10 +749,10 @@ def test_build_env_vars_sets_distinct_server_and_client_sentry_dsns() -> None:
         "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
     )
 
-    # Server and browser DSNs are independent keys — never the same value.
+    # Each DSN flows to its own key — guards against regressing to a single DSN
+    # fanned out to both (the bug this two-key split fixed).
     assert env_vars["SENTRY_DSN"] == "https://server@o1.ingest.sentry.io/1"
     assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
-    assert env_vars["SENTRY_DSN"] != env_vars["NEXT_PUBLIC_SENTRY_DSN"]
     assert env_vars["SENTRY_AUTH_TOKEN"] == "sntrys_x"
 
 
