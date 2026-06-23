@@ -6,7 +6,7 @@
       "name": "exercise-training-plan-gpt",
       "dependencies": {
         "@ai-sdk/react": "^3.0.170",
-        "@openai/agents": "^0.11.7",
+        "@openai/agents": "^0.11.8",
         "@sentry/nextjs": "^10",
         "@supabase/ssr": "^0.10.0",
         "@supabase/supabase-js": "^2.49.1",
@@ -16,7 +16,7 @@
         "next": "^15.2.2",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
-        "zod": "^4.3.6",
+        "zod": "^4.4.3",
       },
       "devDependencies": {
         "@eslint/eslintrc": "^3.3.5",
@@ -284,13 +284,13 @@
 
     "@nolyfill/is-core-module": ["@nolyfill/is-core-module@1.0.39", "", {}, "sha512-nn5ozdjYQpUCZlWGuxcJY/KpxkWQs4DcbMCmKojjyrYDEAGy4Ce19NN4v5MduafTwJlbKc99UA8YhSVqq9yPZA=="],
 
-    "@openai/agents": ["@openai/agents@0.11.7", "", { "dependencies": { "@openai/agents-core": "0.11.7", "@openai/agents-openai": "0.11.7", "@openai/agents-realtime": "0.11.7", "debug": "^4.4.0", "openai": "^6.35.0" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-hszgbOlIjCjxiSkfOEF1pz/2N2aNZaqVr+LE7gzKvwWkGUKYBtsblNL/7NEV2Yl3OqW4Q+erOHGYbuacqjy16g=="],
+    "@openai/agents": ["@openai/agents@0.11.8", "", { "dependencies": { "@openai/agents-core": "0.11.8", "@openai/agents-openai": "0.11.8", "@openai/agents-realtime": "0.11.8", "debug": "^4.4.0", "openai": "^6.35.0" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-D4XHF2g+Ub/L9fRJT/xpuiCqHyxiKzZbi0BqQxnso42t+J049O/OSvVzFBcRskF4uPFAvs0TOOB7KBbanCwaYQ=="],
 
-    "@openai/agents-core": ["@openai/agents-core@0.11.7", "", { "dependencies": { "debug": "^4.4.0", "openai": "^6.35.0" }, "optionalDependencies": { "@modelcontextprotocol/sdk": "^1.26.0" }, "peerDependencies": { "zod": "^4.0.0" }, "optionalPeers": ["zod"] }, "sha512-nL2CzatPaHIE5fcS0v8SkZOXyYnpgxeSQ+UOUd7vEgZI2eqWN639NtocZQCT1WFmFW7IDva+1sgfKFJ5Zz7wrw=="],
+    "@openai/agents-core": ["@openai/agents-core@0.11.8", "", { "dependencies": { "debug": "^4.4.0", "openai": "^6.35.0" }, "optionalDependencies": { "@modelcontextprotocol/sdk": "^1.26.0" }, "peerDependencies": { "zod": "^4.0.0" }, "optionalPeers": ["zod"] }, "sha512-TrE34RXXPoWYv2PjXf5hq3Eq+uvRJMNiY+Q5WBgEPjAg60yt2hya8cS2I8qkO6i25MjNJl37a25X0vL/gs5Wdg=="],
 
-    "@openai/agents-openai": ["@openai/agents-openai@0.11.7", "", { "dependencies": { "@openai/agents-core": "0.11.7", "debug": "^4.4.0", "openai": "^6.35.0" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-OXnf0lMRIkGisaORrbJiZjcPJNgu9mkVq/dLSvQuP05m/qmmg3QTcEOHiOnpP+zyC2nSrMBbreVeJhe0b9Qicg=="],
+    "@openai/agents-openai": ["@openai/agents-openai@0.11.8", "", { "dependencies": { "@openai/agents-core": "0.11.8", "debug": "^4.4.0", "openai": "^6.35.0" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-XjHCnJPGapgZBlh8y5oxU7zV0hrAQTF5im6HpUwaPcH5CeRFLtc06VXLso0vJ5G3g9e/J5gIh3S1iAxiJqEAVQ=="],
 
-    "@openai/agents-realtime": ["@openai/agents-realtime@0.11.7", "", { "dependencies": { "@openai/agents-core": "0.11.7", "@types/ws": "^8.18.1", "debug": "^4.4.0", "ws": "^8.18.1" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-eyzxso6aI50KrVj2POuNtKxtPx7F7ecpmUZv0M3GpqhUsNZuqdjoAvy8RlwjEnnuabkdtxvKCH5y4j8iBGx5yQ=="],
+    "@openai/agents-realtime": ["@openai/agents-realtime@0.11.8", "", { "dependencies": { "@openai/agents-core": "0.11.8", "@types/ws": "^8.18.1", "debug": "^4.4.0", "ws": "^8.18.1" }, "peerDependencies": { "zod": "^4.0.0" } }, "sha512-i1qEGUE8GTW0neWgAc1aj/3wZFtstz8bVG2BvVbU/BzQbyhZV8j3CvndkMJGFfgeobvVmn2qGTV5Ry6ibfuxeQ=="],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
 
