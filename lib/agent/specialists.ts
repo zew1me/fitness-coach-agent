@@ -1,15 +1,8 @@
-import {
-  convertToModelMessages,
-  generateText,
-  Output,
-  type LanguageModel,
-  type UIMessage,
-} from "ai";
+import { Agent, run } from "@openai/agents";
+import type { UIMessage } from "ai";
 
-import {
-  convertUnsupportedFilePartsToText,
-  selectMessagesForModel,
-} from "./message-context";
+import { toAgentInputItems } from "./agent-input";
+import { selectMessagesForModel } from "./message-context";
 import {
   type ContextSlices,
   type InternalSpecialistRole,
@@ -28,7 +21,7 @@ const SPECIALIST_ORDER: InternalSpecialistRole[] = [
 type RunSpecialistsOptions = {
   messagesAreModelSelected?: boolean;
   messages: UIMessage[];
-  model: LanguageModel;
+  model: string;
   roles: InternalSpecialistRole[];
   slices: ContextSlices;
 };
@@ -48,22 +41,24 @@ export async function runSpecialists({
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
-  const normalizedMessages =
-    convertUnsupportedFilePartsToText(selectedMessages);
   const orderedRoles = orderRoles(roles);
   const reports: SpecialistReport[] = [];
 
   for (const role of orderedRoles) {
-    const { output } = await generateText({
-      messages: await convertToModelMessages(normalizedMessages),
+    const agent = new Agent({
+      name: `${role[0]?.toUpperCase()}${role.slice(1)} specialist`,
+      instructions: buildSpecialistPrompt(role, slices[role]),
       model,
-      output: Output.object({
-        schema: specialistReportSchema,
-      }),
-      system: buildSpecialistPrompt(role, slices[role]),
+      outputType: specialistReportSchema,
+    });
+    const result = await run(agent, toAgentInputItems(selectedMessages), {
+      maxTurns: 1,
     });
 
-    reports.push(specialistReportSchema.parse(output));
+    if (!result.finalOutput) {
+      throw new Error(`Agent ${role} failed to produce output`);
+    }
+    reports.push(specialistReportSchema.parse(result.finalOutput));
   }
 
   return reports;

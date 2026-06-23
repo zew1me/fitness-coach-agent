@@ -1,3 +1,4 @@
+import { tool, type Tool } from "@openai/agents";
 import { type ToolSet } from "ai";
 
 import { coachToolDefinitions } from "./tools";
@@ -9,29 +10,39 @@ export type CoachToolContext = {
   fetchImpl?: typeof fetch;
 };
 
+const ENGINE_TIMEOUT_MS = 30_000;
+
 async function postEngine<TInput extends object>(
   context: CoachToolContext,
   path: string,
   input: TInput,
 ): Promise<unknown> {
-  const response = await (context.fetchImpl ?? fetch)(
-    `${context.baseUrl}${path}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${context.accessToken}`,
-        "Content-Type": "application/json",
-        ...(context.extraHeaders ?? {}),
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ENGINE_TIMEOUT_MS);
+
+  try {
+    const response = await (context.fetchImpl ?? fetch)(
+      `${context.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${context.accessToken}`,
+          "Content-Type": "application/json",
+          ...(context.extraHeaders ?? {}),
+        },
+        body: JSON.stringify(input),
+        signal: controller.signal,
       },
-      body: JSON.stringify(input),
-    },
-  );
+    );
 
-  if (!response.ok) {
-    throw new Error(`Engine request failed for ${path}.`);
+    if (!response.ok) {
+      throw new Error(`Engine request failed for ${path}.`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  return response.json();
 }
 
 async function getAthleteSummary(
@@ -231,7 +242,7 @@ function executeDeterministicEngineTool(
   return null;
 }
 
-function executeCoachTool(
+export function executeCoachTool(
   name: string,
   input: unknown,
   context: CoachToolContext,
@@ -275,6 +286,24 @@ function executeCoachTool(
     status: "pending_implementation",
     tool: name,
   };
+}
+
+export type CoachAgentRunContext = {
+  toolCalled: boolean;
+};
+
+export function createAgentCoachTools(
+  context: CoachToolContext,
+): Tool<CoachAgentRunContext>[] {
+  return Object.entries(coachToolDefinitions).map(([name, definition]) =>
+    tool({
+      name,
+      description: definition.description,
+      parameters: definition.inputSchema,
+      isEnabled: ({ runContext }) => !runContext.context.toolCalled,
+      execute: (input: unknown) => executeCoachTool(name, input, context),
+    }),
+  );
 }
 
 export function createCoachTools(context: CoachToolContext): ToolSet {
