@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/nextjs";
 import { type UIMessage } from "ai";
+import { after } from "next/server";
 
 import {
   appendImageExtractionsToMessages,
@@ -229,6 +230,7 @@ async function handleChatRequest(
     ? buildTavilyMcpUrl(tavilyApiKey)
     : undefined;
 
+  after(() => Sentry.flush(2000));
   return streamCoachTurn({
     accessToken: token.access_token,
     baseUrl: requestOrigin(request),
