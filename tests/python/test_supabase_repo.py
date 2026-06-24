@@ -421,8 +421,13 @@ async def test_upsert_athlete_profile_allows_null_specialization_pct() -> None:
 
     Multi-sport athletes have no single-sport specialization. The column is nullable
     after migration 0005, so the model must accept None and the upsert must succeed.
+
+    Unlike update_athlete_profile_fields (which filters out None values), upsert sends
+    the full model_dump payload — specialization_pct is present as explicit null.
+    After migration 0005 the column accepts null, so this reaches the DB correctly.
     """
-    repo = SupabaseRepository(client=FakeSupabaseClient())
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
 
     profile = AthleteProfile(
         user_id="athlete-multi2",
@@ -434,3 +439,17 @@ async def test_upsert_athlete_profile_allows_null_specialization_pct() -> None:
     saved = await repo.upsert_athlete_profile(profile)
     assert saved.user_id == "athlete-multi2"
     assert saved.specialization_pct is None
+
+    # Verify the upsert payload explicitly contains specialization_pct=None (not omitted).
+    # upsert_athlete_profile uses model_dump and sends all fields; it is the nullable
+    # column (migration 0005) that makes this safe.  Contrast with
+    # update_athlete_profile_fields which drops None values via _safe_athlete_profile_fields.
+    table = client.table("athlete_profiles")
+    assert isinstance(table, FakeTableQuery)
+    payload = table._upserted_payload
+    assert payload is not None
+    assert "specialization_pct" in payload, (
+        "upsert_athlete_profile must send specialization_pct explicitly (as null), "
+        "not omit it — omission would be semantically ambiguous in a full upsert"
+    )
+    assert payload["specialization_pct"] is None

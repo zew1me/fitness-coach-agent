@@ -29,12 +29,16 @@ from backend.repos.supabase_repo import SupabaseRepository
 _SUPABASE_CONFIGURED = bool(
     os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 )
+# Explicit opt-in prevents accidental live writes when credentials happen to be present
+# in the environment (e.g. via .env.local / direnv pointing at a hosted project).
+# Set via: RUN_DB_TESTS=1 uv run pytest -m db   (or bun run test:db which sets it).
+_RUN_DB_TESTS = os.environ.get("RUN_DB_TESTS") == "1"
 
 pytestmark = [
     pytest.mark.db,
     pytest.mark.skipif(
-        not _SUPABASE_CONFIGURED,
-        reason="SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set",
+        not (_SUPABASE_CONFIGURED and _RUN_DB_TESTS),
+        reason=("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set, or RUN_DB_TESTS=1 not provided"),
     ),
 ]
 
