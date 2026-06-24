@@ -72,6 +72,43 @@ describe("SupabaseAgentSession", () => {
     });
   });
 
+  it("throws after exhausting maxCasRetries consecutive conflicts", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        response({
+          thread_id: "thread-1",
+          version: 1,
+          items: [userItem("a")],
+          coaching_memory: [],
+          compaction_metadata: {},
+        }),
+      )
+      .mockResolvedValue(response({ detail: "version conflict" }, 409));
+    // First call returns state, all subsequent PUT calls return 409.
+    fetchMock
+      .mockResolvedValueOnce(
+        response({
+          thread_id: "thread-1",
+          version: 1,
+          items: [userItem("a")],
+          coaching_memory: [],
+          compaction_metadata: {},
+        }),
+      )
+      .mockResolvedValue(response({ detail: "version conflict" }, 409));
+
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: fetchMock,
+      maxCasRetries: 1,
+    });
+
+    await expect(session.addItems([userItem("b")])).rejects.toThrow(/409/);
+  });
+
   it("removes historical image inputs before model replay while retaining extracted text", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
@@ -167,6 +204,127 @@ describe("DurableCompactionSession", () => {
 
     await expect(session.runCompaction()).rejects.toBe(conflict);
     expect(underlying.replaceAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null and skips the API call when items is empty", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = { responses: { compact: vi.fn() } };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    const result = await session.runCompaction();
+    expect(result).toBeNull();
+    expect(client.responses.compact).not.toHaveBeenCalled();
+  });
+
+  it("returns null when token estimate is below autoCompactTokens threshold", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([userItem("short")]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = { responses: { compact: vi.fn() } };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 999_999,
+      autoCompactNonUserItems: 999_999,
+    });
+
+    const result = await session.runCompaction();
+    expect(result).toBeNull();
+    expect(client.responses.compact).not.toHaveBeenCalled();
+  });
+
+  it("force bypasses threshold checks and calls the API", async () => {
+    const output = [userItem("compacted")];
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([userItem("x")]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 999_999,
+    });
+
+    const result = await session.runCompaction({ force: true });
+    expect(result).not.toBeNull();
+    expect(client.responses.compact).toHaveBeenCalledTimes(1);
+    expect(underlying.replaceAll).toHaveBeenCalledWith(
+      output,
+      expect.objectContaining({ trigger: "forced" }),
+    );
+  });
+
+  it("throws when compaction returns an empty output array", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([userItem("x")]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [],
+          usage: {
+            input_tokens: 1,
+            output_tokens: 0,
+            total_tokens: 1,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await expect(session.runCompaction()).rejects.toThrow(
+      /refusing to wipe durable context/,
+    );
+    expect(underlying.replaceAll).not.toHaveBeenCalled();
   });
 });
 

@@ -280,6 +280,11 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       input: items as OpenAI.Responses.ResponseInput,
     });
     const output = compacted.output as AgentInputItem[];
+    if (!Array.isArray(output) || output.length === 0) {
+      throw new Error(
+        `Compaction returned ${Array.isArray(output) ? 0 : typeof output} items; refusing to wipe durable context`,
+      );
+    }
     const after = estimateStoredContext(output);
     await this.options.underlyingSession.replaceAll(output, {
       trigger: args.force === true ? "forced" : "auto",

@@ -71,7 +71,7 @@ class ChatModelState(BaseModel):
     thread_id: str
     updated_at: datetime
     user_id: str
-    version: int = 0
+    version: int = Field(default=0, ge=0)
 
 
 class ChatPersistRequest(BaseModel):

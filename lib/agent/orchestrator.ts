@@ -259,10 +259,15 @@ export function streamCoachTurn({
               });
             } catch (error) {
               if (estimate.estimatedTokens >= 260_000) throw error;
+              Sentry.captureException(error, {
+                tags: { subsystem: "forced-compaction" },
+                extra: { estimated_tokens: estimate.estimatedTokens },
+              });
               Sentry.logger.warn(
                 "coach: forced compaction failed below hard limit",
                 {
                   estimated_tokens: estimate.estimatedTokens,
+                  error: error instanceof Error ? error.message : String(error),
                 },
               );
             }
@@ -409,8 +414,9 @@ export function streamCoachTurn({
               leaseId,
             });
           } catch (error) {
-            Sentry.logger.warn("coach: lease release failed", {
-              error: error instanceof Error ? error.message : String(error),
+            Sentry.captureException(error, {
+              tags: { subsystem: "lease-release" },
+              extra: { leaseId },
             });
           }
         }

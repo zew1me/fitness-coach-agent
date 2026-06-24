@@ -44,7 +44,9 @@ class ReloadableTestSession implements SessionHistoryRewriteAwareSession {
     return Promise.resolve();
   }
 
-  applyHistoryMutations(_args: SessionHistoryRewriteArgs): void {}
+  applyHistoryMutations(_args: SessionHistoryRewriteArgs): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 const liveDescribe =

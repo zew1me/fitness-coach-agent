@@ -4,6 +4,7 @@ import {
   applyMemoryOperation,
   coachingMemoryRecordSchema,
   dueFollowUpAt,
+  oldestDueFollowUp,
 } from "../../lib/agent/coaching-memory";
 
 describe("coaching memory lifecycle", () => {
@@ -86,5 +87,127 @@ describe("coaching memory lifecycle", () => {
       lifecycle: "resolved",
       outcome: "Completed comfortably",
     });
+  });
+
+  it("dismisses a record without an outcome", () => {
+    const next = applyMemoryOperation(
+      [
+        {
+          id: "note",
+          category: "insight",
+          statement: "Athlete skipped warmup",
+          confidence: 0.8,
+          sourceMessageIds: ["m1"],
+          lifecycle: "active",
+        },
+      ],
+      { action: "dismiss", id: "note" },
+    );
+    expect(next).toHaveLength(1);
+    expect(next[0]).toMatchObject({ lifecycle: "dismissed" });
+  });
+
+  it("upserts by id, replacing an existing record with the same id", () => {
+    const base = {
+      id: "commitment-1",
+      category: "commitment" as const,
+      statement: "Run a 5k",
+      confidence: 0.7,
+      sourceMessageIds: ["m1"],
+      lifecycle: "active" as const,
+    };
+    const next = applyMemoryOperation([base], {
+      action: "upsert",
+      record: {
+        id: "commitment-1",
+        category: "commitment",
+        statement: "Run a sub-25 5k",
+        confidence: 0.9,
+        sourceMessageIds: ["m1"],
+      },
+    });
+    expect(next).toHaveLength(1);
+    expect(next[0]!.statement).toBe("Run a sub-25 5k");
+  });
+
+  it("upserts by id, appending when no existing record matches", () => {
+    const next = applyMemoryOperation([], {
+      action: "upsert",
+      record: {
+        id: "new-commitment",
+        category: "commitment",
+        statement: "Complete a triathlon",
+        confidence: 1,
+        sourceMessageIds: ["m2"],
+      },
+    });
+    expect(next).toHaveLength(1);
+    expect(next[0]!.id).toBe("new-commitment");
+  });
+});
+
+describe("oldestDueFollowUp", () => {
+  const now = new Date("2026-06-24T12:00:00.000Z");
+
+  it("returns undefined when no records are active with a past followUpAt", () => {
+    expect(oldestDueFollowUp([], now)).toBeUndefined();
+  });
+
+  it("ignores records whose followUpAt is in the future", () => {
+    const result = oldestDueFollowUp(
+      [
+        {
+          id: "f1",
+          category: "follow_up",
+          statement: "Check in next week",
+          confidence: 1,
+          sourceMessageIds: ["m1"],
+          lifecycle: "active",
+          followUpAt: "2026-06-30T12:00:00.000Z",
+        },
+      ],
+      now,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("ignores records that are not active", () => {
+    const result = oldestDueFollowUp(
+      [
+        {
+          id: "f1",
+          category: "follow_up",
+          statement: "Already resolved",
+          confidence: 1,
+          sourceMessageIds: ["m1"],
+          lifecycle: "resolved",
+          followUpAt: "2026-06-01T00:00:00.000Z",
+        },
+      ],
+      now,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("returns the oldest due follow-up when multiple are past due", () => {
+    const older = {
+      id: "f1",
+      category: "follow_up" as const,
+      statement: "Older",
+      confidence: 1,
+      sourceMessageIds: ["m1"],
+      lifecycle: "active" as const,
+      followUpAt: "2026-06-10T00:00:00.000Z",
+    };
+    const newer = {
+      id: "f2",
+      category: "follow_up" as const,
+      statement: "Newer",
+      confidence: 1,
+      sourceMessageIds: ["m2"],
+      lifecycle: "active" as const,
+      followUpAt: "2026-06-20T00:00:00.000Z",
+    };
+    expect(oldestDueFollowUp([newer, older], now)!.id).toBe("f1");
   });
 });
