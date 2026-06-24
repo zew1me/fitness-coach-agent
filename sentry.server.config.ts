@@ -14,5 +14,6 @@ Sentry.init({
   dsn,
   environment: process.env["APP_ENV"] ?? "development",
   enableLogs: true,
+  streamGenAiSpans: true,
   tracesSampleRate: 1.0,
 });
