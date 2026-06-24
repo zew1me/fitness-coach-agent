@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, after: vi.fn() };
+});
+
 import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import {

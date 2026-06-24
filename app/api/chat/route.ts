@@ -230,7 +230,12 @@ async function handleChatRequest(
     ? buildTavilyMcpUrl(tavilyApiKey)
     : undefined;
 
-  after(() => Sentry.flush(2000));
+  after(async () => {
+    const flushed = await Sentry.flush(5000);
+    if (!flushed) {
+      console.warn("[chat] Sentry.flush timed out; some spans may be lost");
+    }
+  });
   return streamCoachTurn({
     accessToken: token.access_token,
     baseUrl: requestOrigin(request),
