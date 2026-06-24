@@ -26,6 +26,34 @@ describe("specialistReportSchema", () => {
     expect(parsed.proposedUpdates[0]?.toolName).toBe("update_athlete_profile");
   });
 
+  it("accepts a raw object for input — coerces it to a JSON string (model regression guard)", () => {
+    // The OpenAI model sometimes returns a raw object for `input` instead of a
+    // JSON-encoded string.  The preprocess coercion must accept this and serialise
+    // it so the downstream validation still runs correctly.
+    const parsed = specialistReportSchema.parse({
+      confidence: "high",
+      proposedUpdates: [
+        {
+          input: {
+            primary_sports: ["running", "cycling", "hiking"],
+            weekly_available_hours: 6,
+          },
+          rationale: "Multi-sport athlete with 6h/week availability.",
+          toolName: "update_athlete_profile",
+        },
+      ],
+      role: "intake",
+      risks: [],
+      summary: "Multi-sport athlete, 6h/week.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.toolName).toBe("update_athlete_profile");
+    // After coercion the stored value is the JSON string, not the raw object.
+    expect(typeof parsed.proposedUpdates[0]?.input).toBe("string");
+    const parsedInput = JSON.parse(parsed.proposedUpdates[0]?.input ?? "{}") as Record<string, unknown>;
+    expect(parsedInput["primary_sports"]).toEqual(["running", "cycling", "hiking"]);
+  });
+
   it("rejects proposed updates for unknown or read-only tools", () => {
     expect(() =>
       specialistReportSchema.parse({
