@@ -375,6 +375,15 @@ async def test_create_chat_message_persists_json_attachments_with_honored_messag
     ]
 
 
+def test_athlete_profile_specialization_pct_defaults_to_none() -> None:
+    """Regression guard: default must be None, not 80 (issue #254).
+
+    If this fails someone reverted int|None=None back to int=80 in athlete.py.
+    """
+    profile = AthleteProfile(user_id="x")
+    assert profile.specialization_pct is None
+
+
 @pytest.mark.asyncio
 async def test_update_athlete_profile_fields_drops_null_specialization_pct() -> None:
     """None specialization_pct must be excluded from the upsert payload.

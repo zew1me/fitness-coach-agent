@@ -121,3 +121,22 @@ async def test_update_profile_fields_can_set_specialization_pct_to_value(
     assert updated.specialization_pct == 65
     refreshed = await repo.get_athlete_profile(unique_user)
     assert refreshed.specialization_pct == 65
+
+
+@pytest.mark.asyncio
+async def test_new_profile_row_has_null_specialization_pct_not_default_80(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """A brand-new profile row must store NULL for specialization_pct, not the old DEFAULT 80.
+
+    This tests the DROP DEFAULT path of migration 0005.  Before 0005, omitting the
+    field from the INSERT would fall back to DEFAULT 80.  After 0005 it stores NULL.
+    The canonical failure for issue #254 came from the column having no DEFAULT on a
+    drifted DB — this test verifies we converge on NULL everywhere.
+    """
+    await repo.update_athlete_profile_fields(unique_user, {"coaching_state": "onboarding"})
+
+    profile = await repo.get_athlete_profile(unique_user)
+    assert profile.specialization_pct is None, (
+        "New rows must have NULL specialization_pct, not the old DEFAULT 80"
+    )
