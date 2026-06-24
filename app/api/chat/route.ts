@@ -233,7 +233,9 @@ async function handleChatRequest(
   after(async () => {
     const flushed = await Sentry.flush(5000);
     if (!flushed) {
-      console.warn("[chat] Sentry.flush timed out; some spans may be lost");
+      Sentry.logger.warn(
+        "chat: Sentry.flush timed out; some spans may be lost",
+      );
     }
   });
   return streamCoachTurn({
