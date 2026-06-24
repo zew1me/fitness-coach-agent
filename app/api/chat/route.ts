@@ -231,11 +231,18 @@ async function handleChatRequest(
     : undefined;
 
   after(async () => {
-    const flushed = await Sentry.flush(5000);
-    if (!flushed) {
-      Sentry.logger.warn(
-        "chat: Sentry.flush timed out; some spans may be lost",
-      );
+    try {
+      const flushed = await Sentry.flush(5000);
+      if (!flushed) {
+        // Both channels: Sentry for correlation, console as fallback if transport is degraded.
+        Sentry.logger.warn(
+          "chat: Sentry.flush timed out; some spans may be lost",
+        );
+        console.warn("[chat] Sentry.flush timed out; some spans may be lost");
+      }
+    } catch (error) {
+      // Sentry.flush itself threw — SDK malfunction. Console is the only reliable channel.
+      console.error("[chat] Sentry.flush threw unexpectedly:", error);
     }
   });
   return streamCoachTurn({

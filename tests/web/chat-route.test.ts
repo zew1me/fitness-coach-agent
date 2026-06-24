@@ -1,9 +1,18 @@
+import * as Sentry from "@sentry/nextjs";
+import { after } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
   return { ...actual, after: vi.fn() };
 });
+
+vi.mock("@sentry/nextjs", () => ({
+  flush: vi.fn().mockResolvedValue(true),
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  captureException: vi.fn(),
+  captureRequestError: vi.fn(),
+}));
 
 import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
@@ -1195,5 +1204,79 @@ describe("app/api/chat route", () => {
         method: "POST",
       }),
     );
+  });
+
+  it("schedules a Sentry flush via after() on every successful chat request", async () => {
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(vi.mocked(after)).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs a warning when Sentry.flush times out after streaming", async () => {
+    vi.mocked(Sentry.flush).mockResolvedValueOnce(false);
+    const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    // Extract and invoke the after() callback to exercise the flush path.
+    const afterCallback = vi.mocked(after).mock.calls[0]?.[0];
+    expect(typeof afterCallback).toBe("function");
+    await (afterCallback as () => Promise<void>)();
+
+    expect(Sentry.logger.warn).toHaveBeenCalledWith(
+      "chat: Sentry.flush timed out; some spans may be lost",
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[chat] Sentry.flush timed out; some spans may be lost",
+    );
+    consoleSpy.mockRestore();
   });
 });
