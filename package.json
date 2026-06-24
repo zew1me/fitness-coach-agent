@@ -18,6 +18,7 @@
     "test:oai": "vitest run --config vitest.oai.config.ts",
     "test:ui": "playwright test",
     "format": "prettier --write .",
+    "shrink:gpx": "bun scripts/shrink-gpx.ts",
     "db:start": "bash scripts/db-start.sh",
     "db:stop": "bash scripts/db-stop.sh",
     "db:reset": "bash scripts/db-reset.sh",
@@ -62,6 +63,7 @@
     "knip": "^6.16.1",
     "lefthook": "^2.1.9",
     "prettier": "^3.5.3",
+    "simplify-js": "^1.2.4",
     "typescript": "^5.8.2",
     "vitest": "^3.0.8"
   }

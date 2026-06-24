@@ -36,6 +36,7 @@
     "tests/web",
     "vitest.config.ts",
     "vitest.oai.config.ts",
+    "scripts/**/*.ts",
     ".next/types/**/*.ts",
     "instrumentation.ts",
     "instrumentation-client.ts",
