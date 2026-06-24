@@ -250,6 +250,11 @@ export function streamCoachTurn({
           "[chat] stream error:",
           message.replace(/key=[^&\s]+/g, "key=***"),
         );
+      } finally {
+        // Flush buffered Sentry spans/logs before the stream executor resolves.
+        // The route handler returns a Response before this callback completes,
+        // so Sentry's automatic flush fires too early and drops all data.
+        await Sentry.flush(2000);
       }
     },
   });
