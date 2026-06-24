@@ -99,3 +99,17 @@ accidental history row.
 
 Do not add empty dummy migrations. Empty files hide drift instead of preserving
 the schema change that actually reached the database.
+
+## 0005 — specialization_pct nullable (2026-06-23)
+
+**File:** `supabase/migrations/0005_specialization_pct_nullable.sql`
+
+**Change:** `ALTER TABLE athlete_profiles ALTER COLUMN specialization_pct DROP NOT NULL, ALTER COLUMN specialization_pct DROP DEFAULT`
+
+**Why:** The multi-sport redesign (issue #254) allows athletes to have no single-sport
+specialization (duathletes, triathletes, etc.). The old `NOT NULL DEFAULT 80` caused
+a constraint violation when the AI omitted the field for multi-sport athletes and the
+column default was missing on a drifted preview DB. `NULL` is now the correct sentinel
+for "unspecialized"; the 0–100 check constraint is preserved.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset` locally).
