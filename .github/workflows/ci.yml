@@ -8,7 +8,7 @@ jobs:
   web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -31,22 +31,41 @@ jobs:
       APP_BASE_URL: http://localhost:3000
       APP_JWT_SECRET: dummy-jwt-secret-for-ci
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
       - uses: oven-sh/setup-bun@v2
       - run: bun install
       - name: Cache Playwright browsers
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('**/bun.lockb') }}
-      - name: Install Playwright Chromium
+          # bun emits a text lockfile named bun.lock (not bun.lockb); the old
+          # glob matched nothing, so the key collapsed to a constant and the
+          # cached browser never refreshed on a Playwright bump.
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+      # On a cache miss, download the browser and its apt deps in one shot.
+      # @playwright/test must be >= 1.60 — earlier versions deadlock during zip
+      # extraction on Node >= 24.16 (Playwright #41000), which hangs this step
+      # forever. timeout-minutes caps any residual network stall so the job
+      # fails fast instead of burning the 20-min budget.
+      - name: Install Playwright Chromium + system deps
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install chromium
-      - name: Install Chromium system deps
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: npx playwright install --with-deps chromium
+      # On a cache hit the browser binary is restored, but apt system libs are
+      # never cached, so they must be reinstalled before Chromium can launch.
+      - name: Install Chromium system deps (cached browser)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: npx playwright install-deps chromium
       - run: bun run test:ui
       - uses: actions/upload-artifact@v7
@@ -62,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v8.2.0
       - run: uv sync --all-groups
       - run: uv run ruff check .
       - run: uv run ruff format --check .
