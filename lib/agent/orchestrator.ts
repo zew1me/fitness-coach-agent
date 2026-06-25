@@ -274,7 +274,8 @@ export function streamCoachTurn({
           }
         }
         await Sentry.startSpan(
-          {
+        await withTrace(
+                    {
             name: "fitness-coach-turn",
             op: "ai.agent",
             attributes: {
