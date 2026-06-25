@@ -89,6 +89,12 @@ const COACHING_STARTERS: StarterPrompt[] = [
   },
 ];
 
+/**
+ * Create a minimal athlete profile for the given user with onboarding state.
+ *
+ * @param userId - The user's id to set on the created profile
+ * @returns An `AthleteProfile` with `user_id` set to `userId`, `coaching_state` set to `"onboarding"`, and an empty `primary_sports` array
+ */
 function emptyProfile(userId: string): AthleteProfile {
   return {
     user_id: userId,
@@ -498,7 +504,16 @@ function ChatErrorState({
   );
 }
 
-// eslint-disable-next-line complexity
+/**
+ * Renders the full Coach Chat interface and manages its client-side state and interactions.
+ *
+ * This component handles browser session bootstrap, loading and persisting the coaching thread,
+ * composing and sending messages (text and supported attachments), uploading files, rendering
+ * message history (including live streaming messages), drag-and-drop and paste-to-image file
+ * uploads, an athlete profile drawer with theme controls, and export of chat history to JSONL.
+ *
+ * @returns The root JSX element for the coach chat UI.
+ */
 export function CoachChat(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
