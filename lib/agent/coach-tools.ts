@@ -274,6 +274,12 @@ export function executeCoachTool(
     if (result !== null) {
       return result;
     }
+    return {
+      message:
+        "Unsupported file type. Upload a screenshot (PNG/JPEG) or an activity file (GPX/FIT/TCX).",
+      status: "unsupported_file_type",
+      tool: name,
+    };
   }
 
   const engineResult = executeDeterministicEngineTool(name, input, context);
