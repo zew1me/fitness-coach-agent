@@ -89,3 +89,6 @@ test-results/
 .dev/garage/meta/*
 preview
 production
+
+# Sentry Config File
+.env.sentry-build-plugin

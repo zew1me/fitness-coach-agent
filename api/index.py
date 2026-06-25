@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import date
@@ -8,6 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
 
+import sentry_sdk
 from fastapi import (
     Cookie,
     Depends,
@@ -59,6 +61,19 @@ from backend.services.r2 import R2Service
 
 configure_logging(debug=settings.app_env == "development")
 
+_sentry_dsn = os.environ.get("SENTRY_DSN")
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        environment=settings.app_env,
+        enable_logs=True,
+        # Match the TS configs (1.0) so traces the browser propagates to /api/ continue
+        # server-side instead of breaking at the backend boundary.
+        traces_sample_rate=1.0,
+    )
+else:
+    logging.getLogger(__name__).info("SENTRY_DSN is not set; server-side Sentry is disabled.")
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +85,7 @@ async def log_startup() -> None:
             [settings.r2_access_key_id, settings.r2_secret_access_key, settings.r2_bucket]
         ),
         "supabase": bool(settings.supabase_url and settings.supabase_service_role_key),
+        "sentry": bool(_sentry_dsn),
     }
     enabled = [k for k, v in features.items() if v]
     disabled = [k for k, v in features.items() if not v]
@@ -110,6 +126,7 @@ def require_user_context(authorization: str | None = Header(default=None)) -> Us
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        logger.warning("bearer auth failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=401, detail="Invalid bearer token") from exc
 
 
@@ -154,10 +171,12 @@ async def oauth_authorize(  # noqa: PLR0913
         code_challenge_method=code_challenge_method,
         prompt=prompt,
     )
+    logger.info("oauth authorize client_id=%s scope=%s", client_id, scope)
     try:
         auth_service.parse_authorize_request(request)
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
     except OAuthLoginRequiredError:
+        logger.info("oauth authorize login required, redirecting client_id=%s", client_id)
         authorize_url = "/api/oauth/authorize?" + urlencode(
             {
                 "client_id": client_id,
@@ -180,11 +199,13 @@ async def oauth_authorize(  # noqa: PLR0913
             request=request, browser_session=browser_session
         )
     except OAuthConsentRequiredError:
+        logger.info("oauth authorize consent required client_id=%s", client_id)
         return RedirectResponse(auth_service.build_consent_redirect(request), status_code=302)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OAuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info("oauth authorize approved, issuing code client_id=%s", client_id)
     return RedirectResponse(redirect_target, status_code=302)
 
 
@@ -240,6 +261,7 @@ async def oauth_browser_session(
 
 @app.post("/api/oauth/browser-session/logout")
 async def oauth_browser_session_logout() -> Response:
+    logger.info("browser session logout")
     response = RedirectResponse("/login?return_to=/", status_code=303)
     response.delete_cookie(
         key=auth_service.browser_session_cookie_name,
@@ -257,11 +279,14 @@ async def oauth_browser_token(
 ) -> BrowserTokenResponse:
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
-        return auth_service.create_browser_token(browser_session)
+        token = auth_service.create_browser_token(browser_session)
     except OAuthLoginRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    else:
+        logger.debug("browser token issued user_id=%s", browser_session.user_id)
+        return token
 
 
 @app.post("/api/oauth/authorize/decision")
@@ -286,11 +311,15 @@ async def oauth_authorize_decision(  # noqa: PLR0913
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
     except OAuthLoginRequiredError:
+        logger.info("oauth consent decision: session expired client_id=%s", client_id)
         return RedirectResponse(
             auth_service.build_login_redirect(auth_service.build_consent_redirect(request)),
             status_code=302,
         )
     if decision != "approve":
+        logger.info(
+            "oauth consent denied client_id=%s user_id=%s", client_id, browser_session.user_id
+        )
         denial_redirect = (
             f"{redirect_uri}?error=access_denied&state={state}"
             if state
@@ -305,6 +334,9 @@ async def oauth_authorize_decision(  # noqa: PLR0913
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OAuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info(
+        "oauth consent approved client_id=%s user_id=%s", client_id, browser_session.user_id
+    )
     return RedirectResponse(redirect_target, status_code=302)
 
 
@@ -329,13 +361,6 @@ async def persist_chat_message(
     payload: ChatPersistRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    logger.debug(
-        "chat message persist user_id=%s role=%s parts=%d attachments=%d",
-        user_context.user_id,
-        payload.role,
-        len(payload.parts),
-        len(payload.attachments),
-    )
     try:
         message = await chat_service.persist_message(
             user_context.user_id,
@@ -351,6 +376,14 @@ async def persist_chat_message(
     except RepositoryNotConfiguredError as exc:
         logger.exception("repository not configured")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    logger.info(
+        "chat message saved user_id=%s role=%s message_id=%s parts=%d attachments=%d",
+        user_context.user_id,
+        payload.role,
+        message.id,
+        len(payload.parts),
+        len(payload.attachments),
+    )
     return message.model_dump(mode="json")
 
 
@@ -359,8 +392,17 @@ async def presign_chat_upload(
     payload: PresignUploadRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    presigned_upload = r2_service.create_presigned_upload(
-        user_id=user_context.user_id, request=payload
+    try:
+        presigned_upload = r2_service.create_presigned_upload(
+            user_id=user_context.user_id, request=payload
+        )
+    except Exception as exc:
+        logger.exception("chat presign failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Storage service unavailable") from exc
+    logger.info(
+        "chat attachment presign issued user_id=%s content_type=%s",
+        user_context.user_id,
+        payload.content_type,
     )
     return presigned_upload.model_dump(mode="json")
 
@@ -369,8 +411,17 @@ async def presign_chat_upload(
 async def presign_upload(
     payload: PresignUploadRequest, user_context: UserContext = Depends(require_user_context)
 ) -> Mapping[str, object]:
-    presigned_upload = r2_service.create_presigned_upload(
-        user_id=user_context.user_id, request=payload
+    try:
+        presigned_upload = r2_service.create_presigned_upload(
+            user_id=user_context.user_id, request=payload
+        )
+    except Exception as exc:
+        logger.exception("file presign failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Storage service unavailable") from exc
+    logger.info(
+        "file presign issued user_id=%s content_type=%s",
+        user_context.user_id,
+        payload.content_type,
     )
     return presigned_upload.model_dump(mode="json")
 
@@ -392,6 +443,12 @@ async def upload_chat_attachment(
         object_key=object_key,
         file_stream=file.file,
         content_type=file.content_type or "application/octet-stream",
+    )
+    logger.info(
+        "chat attachment uploaded user_id=%s content_type=%s object_key_suffix=...%s",
+        user_context.user_id,
+        file.content_type,
+        object_key[-12:],
     )
     return upload_result.model_dump(mode="json")
 
@@ -417,6 +474,7 @@ async def calculate_zones(
 ) -> Mapping[str, object]:
     from backend.engine.zones import compute_zones
 
+    logger.info("calculate zones sport=%s", payload.sport)
     zones = compute_zones(
         payload.sport,
         ftp_watts=payload.ftp_watts,
@@ -451,6 +509,20 @@ async def compute_tss_endpoint(
 ) -> Mapping[str, object]:
     from backend.engine.tss import compute_tss
 
+    if payload.normalized_power:
+        method = "power"
+    elif payload.avg_pace_sec_km:
+        method = "pace"
+    elif payload.avg_hr:
+        method = "hr"
+    else:
+        method = "rpe"
+    logger.debug(
+        "compute tss sport=%s method=%s duration_s=%d",
+        payload.sport,
+        method,
+        payload.duration_seconds,
+    )
     tss = compute_tss(
         payload.duration_seconds,
         sport=payload.sport,
@@ -484,6 +556,7 @@ async def estimate_thresholds_endpoint(
 ) -> Mapping[str, object]:
     from backend.engine.thresholds import estimate_cycling_thresholds, estimate_running_thresholds
 
+    logger.info("estimate thresholds sport=%s", payload.sport)
     if payload.sport == "running" and payload.race_time_seconds:
         result = estimate_running_thresholds(
             payload.race_time_seconds,
@@ -795,7 +868,12 @@ async def get_recent_activities(
         sport=payload.sport,
         limit=min(max(payload.limit, 1), 100),
     )
-
+    logger.debug(
+        "recent activities user_id=%s sport=%s count=%d",
+        user_context.user_id,
+        payload.sport,
+        len(activities),
+    )
     return {"activities": [activity.model_dump(mode="json") for activity in activities]}
 
 
@@ -885,6 +963,7 @@ async def confirm_threshold(
     client.table("sport_thresholds").update(
         {"estimation_method": "manual", "confidence": "high", "source": "user"}
     ).eq("user_id", user_id).eq("sport", payload.sport).is_("superseded_at", "null").execute()
+    logger.info("threshold confirmed user_id=%s sport=%s", user_id, payload.sport)
 
     thresholds = await repo.get_active_thresholds(user_id)
     confirmed = next((t for t in thresholds if t.sport == payload.sport), None)
@@ -908,6 +987,9 @@ async def confirm_profile_metric(
 
     source_field = f"{payload.metric}_source"
     profile = await repo.update_athlete_profile_fields(user_context.user_id, {source_field: "user"})
+    logger.info(
+        "profile metric confirmed user_id=%s metric=%s", user_context.user_id, payload.metric
+    )
     return profile.model_dump(mode="json")
 
 

@@ -31,10 +31,17 @@
     "next-env.d.ts",
     "next.config.ts",
     "playwright.config.ts",
+    "tests/integration",
     "tests/ui",
     "tests/web",
     "vitest.config.ts",
-    ".next/types/**/*.ts"
+    "vitest.oai.config.ts",
+    "scripts/**/*.ts",
+    ".next/types/**/*.ts",
+    "instrumentation.ts",
+    "instrumentation-client.ts",
+    "sentry.server.config.ts",
+    "sentry.edge.config.ts"
   ],
   "exclude": ["node_modules"]
 }

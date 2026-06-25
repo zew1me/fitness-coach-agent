@@ -1,5 +1,6 @@
 "use client";
 
+import * as Sentry from "@sentry/nextjs";
 import { useEffect, useState } from "react";
 
 import { fetchBrowserToken } from "./coach-api";
@@ -25,9 +26,17 @@ export function useBrowserSession(): BrowserSessionState {
       try {
         const token = await fetchBrowserToken();
         if (cancelled) return;
+        Sentry.logger.info("browser session established", {
+          user_id: token.user_id,
+        });
+        Sentry.setUser({ id: token.user_id });
         setState({ token, error: null, loading: false });
       } catch (error) {
         if (cancelled) return;
+        Sentry.setUser(null);
+        Sentry.logger.warn("browser session failed", {
+          reason: errorMessage(error, "unknown"),
+        });
         setState({
           token: null,
           error: errorMessage(error, "Unable to connect your browser session."),

@@ -1,5 +1,5 @@
-import { zodSchema } from "ai";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import { coachToolDefinitions } from "../../lib/agent/tools";
@@ -58,9 +58,9 @@ describe("coachToolDefinitions", () => {
     );
   });
 
-  it("emits OpenAI-compatible schemas for all coach tools", async () => {
+  it("emits OpenAI-compatible schemas for all coach tools", () => {
     for (const [name, definition] of Object.entries(coachToolDefinitions)) {
-      const jsonSchema = await zodSchema(definition.inputSchema).jsonSchema;
+      const jsonSchema = z.toJSONSchema(definition.inputSchema);
 
       expect(() =>
         assertTypedAdditionalProperties(jsonSchema, name),
@@ -69,14 +69,29 @@ describe("coachToolDefinitions", () => {
   });
 
   it("validates profile onboarding domain field names", () => {
+    const fullProfileFields = {
+      biological_sex: "not_specified" as const,
+      birth_date: null,
+      coaching_state: null,
+      constraints: null,
+      dietary_restrictions: ["vegetarian"],
+      display_name: null,
+      height_cm: null,
+      hormone_status: "not_specified" as const,
+      injuries_rehab: null,
+      max_hr_bpm: null,
+      notes: null,
+      nutrition_notes: null,
+      onboarding_collected: { nutrition: true },
+      primary_sports: null,
+      resting_hr_bpm: null,
+      specialization_pct: null,
+      weekly_available_hours: null,
+      weight_kg: null,
+    };
     expect(
       coachToolDefinitions.update_athlete_profile.inputSchema.parse({
-        fields: {
-          biological_sex: "not_specified",
-          dietary_restrictions: ["vegetarian"],
-          hormone_status: "not_specified",
-          onboarding_collected: { nutrition: true },
-        },
+        fields: fullProfileFields,
       }),
     ).toMatchObject({
       fields: {
@@ -88,9 +103,7 @@ describe("coachToolDefinitions", () => {
 
     expect(() =>
       coachToolDefinitions.update_athlete_profile.inputSchema.parse({
-        fields: {
-          hormone_status: "not_provided",
-        },
+        fields: { ...fullProfileFields, hormone_status: "not_provided" },
       }),
     ).toThrow();
   });
@@ -188,5 +201,37 @@ describe("coachToolDefinitions", () => {
     expect(request.headers.get("x-vercel-protection-bypass")).toBe(
       "preview-bypass",
     );
+  });
+
+  it("returns a graceful result for unsupported uploaded file types", async () => {
+    let fetchCalled = false;
+    const fetchImpl = (): Promise<Response> => {
+      fetchCalled = true;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const execute = (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute;
+
+    const result = await execute({
+      content_type: "application/pdf",
+      filename: "plan.pdf",
+      object_key: "uploads/plan.pdf",
+      public_url: "https://files.test/plan.pdf",
+    });
+
+    expect(fetchCalled).toBe(false);
+    expect(result).toMatchObject({
+      status: "unsupported_file_type",
+      tool: "process_uploaded_file",
+    });
   });
 });
