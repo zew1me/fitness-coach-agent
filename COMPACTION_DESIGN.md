@@ -29,7 +29,7 @@ table is never touched by a compaction operation.
 
 ## Database schema — `chat_model_states`
 
-Key columns (see `supabase/migrations/0005_chat_model_state.sql`):
+Key columns (see `supabase/migrations/20260625172251_chat_model_state.sql`):
 
 | Column                | Purpose                                                            |
 | --------------------- | ------------------------------------------------------------------ |

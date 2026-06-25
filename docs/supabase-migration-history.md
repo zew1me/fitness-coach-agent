@@ -6,9 +6,10 @@
 - `0002_nutrition.sql` — nutrition tracking
 - `0003_fitness_thresholds.sql` — threshold provenance
 - `0004_chat_messages_parts.sql` — AI SDK message-parts persistence
-- `0005_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
+- `20260624055541_specialization_pct_nullable.sql` — nullable sport specialization for multi-sport athletes
+- `20260625172251_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
 
-`0005` deliberately stores compactable model context separately from
+`20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
 athlete-visible transcript.
 
