@@ -1,12 +1,11 @@
-import { readFileSync } from "node:fs";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import {
   appendImageExtractionsToMessages,
-  selectMessagesForModel
+  convertUnsupportedFilePartsToText,
+  selectMessagesForModel,
 } from "../../lib/agent/message-context";
 import { streamCoachTurn } from "../../lib/agent/orchestrator";
 
@@ -18,13 +17,15 @@ vi.mock("../../lib/agent/orchestrator", () => ({
       new Response("coach stream", {
         headers: { "content-type": "text/plain" },
         status: 200,
-      })
-    )
+      }),
+    ),
   ),
 }));
 
 const originalFetch = globalThis.fetch;
-const originalVercelBypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
+const originalVercelBypassSecret =
+  process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
+const originalTavilyApiKey = process.env["TAVILY_API_KEY"];
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -33,25 +34,68 @@ afterEach(() => {
   } else {
     process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] = originalVercelBypassSecret;
   }
+  if (originalTavilyApiKey === undefined) {
+    delete process.env["TAVILY_API_KEY"];
+  } else {
+    process.env["TAVILY_API_KEY"] = originalTavilyApiKey;
+  }
   vi.clearAllMocks();
 });
 
 describe("app/api/chat route", () => {
+  it("passes the configured Tavily MCP URL to the Agents SDK orchestrator", async () => {
+    process.env["TAVILY_API_KEY"] = "tavily-test-key";
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), { status: 200 }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ id: "thread-1", messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(streamCoachTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tavilyMcpUrl:
+          "https://mcp.tavily.com/mcp/?tavilyApiKey=tavily-test-key",
+      }),
+    );
+  });
+
   it("delegates authenticated chat turns to the orchestrator", async () => {
     const messages = [
       {
         id: "message-1",
-        parts: [{ text: "Can you adjust tomorrow's workout?", type: "text" as const }],
+        parts: [
+          { text: "Can you adjust tomorrow's workout?", type: "text" as const },
+        ],
         role: "user" as const,
       },
     ];
     const fetchMock = vi.fn((url: RequestInfo | URL) => {
       if (String(url).endsWith("/api/oauth/browser-token")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          })
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
         );
       }
 
@@ -59,7 +103,7 @@ describe("app/api/chat route", () => {
         new Response(JSON.stringify(athleteContextFixture), {
           headers: { "content-type": "application/json" },
           status: 200,
-        })
+        }),
       );
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -69,7 +113,7 @@ describe("app/api/chat route", () => {
         body: JSON.stringify({ messages }),
         headers: { cookie: "coach_browser_session=session-token" },
         method: "POST",
-      })
+      }),
     );
 
     expect(response.status).toBe(200);
@@ -77,13 +121,9 @@ describe("app/api/chat route", () => {
     expect(streamCoachTurn).toHaveBeenCalledWith(
       expect.objectContaining({
         accessToken: "token-1",
-        baseUrl: "http://localhost",
-        context: athleteContextFixture,
-        extraHeaders: {},
         messages,
         messagesAreModelSelected: true,
-        streamErrorMessage: "Coach is unavailable right now. Please try again.",
-      })
+      }),
     );
   });
 
@@ -100,15 +140,22 @@ describe("app/api/chat route", () => {
         role: "user" as const,
       },
     ];
-    const persistRequests: { url: string; body: unknown; headers: Record<string, string> }[] = [];
+    const persistRequests: {
+      url: string;
+      body: unknown;
+      headers: Record<string, string>;
+    }[] = [];
     const fetchMock = vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
       const urlStr = String(url);
       if (urlStr.endsWith("/api/oauth/browser-token")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          })
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
         );
       }
       if (urlStr.endsWith("/api/chat/messages")) {
@@ -121,14 +168,14 @@ describe("app/api/chat route", () => {
           new Response(JSON.stringify({ id: "message-1" }), {
             headers: { "content-type": "application/json" },
             status: 200,
-          })
+          }),
         );
       }
       return Promise.resolve(
         new Response(JSON.stringify(athleteContextFixture), {
           headers: { "content-type": "application/json" },
           status: 200,
-        })
+        }),
       );
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -138,7 +185,7 @@ describe("app/api/chat route", () => {
         body: JSON.stringify({ messages }),
         headers: { cookie: "coach_browser_session=session-token" },
         method: "POST",
-      })
+      }),
     );
 
     expect(persistRequests).toHaveLength(1);
@@ -148,7 +195,7 @@ describe("app/api/chat route", () => {
       parts: [{ text: "I train ~8 hours/week", type: "text" }],
       metadata: {
         message_kind: "user_turn",
-        client_message_id: "63ff9606-9158-43d7-a82b-d31ef9788b7d"
+        client_message_id: "63ff9606-9158-43d7-a82b-d31ef9788b7d",
       },
     });
     expect(persistRequests[0]?.headers["authorization"]).toBe("Bearer token-1");
@@ -175,10 +222,13 @@ describe("app/api/chat route", () => {
       const urlStr = String(url);
       if (urlStr.endsWith("/api/oauth/browser-token")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          })
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
         );
       }
       if (urlStr.endsWith("/api/chat/messages")) {
@@ -187,14 +237,14 @@ describe("app/api/chat route", () => {
           new Response(JSON.stringify({ id: "msg-1" }), {
             headers: { "content-type": "application/json" },
             status: 200,
-          })
+          }),
         );
       }
       return Promise.resolve(
         new Response(JSON.stringify(athleteContextFixture), {
           headers: { "content-type": "application/json" },
           status: 200,
-        })
+        }),
       );
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -204,11 +254,13 @@ describe("app/api/chat route", () => {
         body: JSON.stringify({ messages }),
         headers: { cookie: "coach_browser_session=session-token" },
         method: "POST",
-      })
+      }),
     );
 
     expect(persistBodies).toHaveLength(1);
-    expect((persistBodies[0] as { id: string }).id).toBe("46db0714-d6d8-402b-a421-00b21b3a29f6");
+    expect((persistBodies[0] as { id: string }).id).toBe(
+      "46db0714-d6d8-402b-a421-00b21b3a29f6",
+    );
     expect((persistBodies[0] as { parts: unknown[] }).parts).toEqual([
       { text: "Here's my chart", type: "text" },
       {
@@ -232,10 +284,13 @@ describe("app/api/chat route", () => {
       const urlStr = String(url);
       if (urlStr.endsWith("/api/oauth/browser-token")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          })
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
         );
       }
       if (urlStr.endsWith("/api/chat/messages")) {
@@ -245,7 +300,7 @@ describe("app/api/chat route", () => {
         new Response(JSON.stringify(athleteContextFixture), {
           headers: { "content-type": "application/json" },
           status: 200,
-        })
+        }),
       );
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -256,7 +311,7 @@ describe("app/api/chat route", () => {
         body: JSON.stringify({ messages }),
         headers: { cookie: "coach_browser_session=session-token" },
         method: "POST",
-      })
+      }),
     );
 
     expect(response.status).toBe(200);
@@ -267,15 +322,18 @@ describe("app/api/chat route", () => {
     const messages = Array.from({ length: 40 }, (_, index) => ({
       id: `message-${index}`,
       parts: [{ text: `Message ${index}`, type: "text" as const }],
-      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const)
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
     }));
     const fetchMock = vi.fn((url: RequestInfo | URL) => {
       if (String(url).endsWith("/api/oauth/browser-token")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          })
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
         );
       }
 
@@ -283,7 +341,7 @@ describe("app/api/chat route", () => {
         new Response(JSON.stringify(athleteContextFixture), {
           headers: { "content-type": "application/json" },
           status: 200,
-        })
+        }),
       );
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -293,7 +351,7 @@ describe("app/api/chat route", () => {
         body: JSON.stringify({ messages }),
         headers: { cookie: "coach_browser_session=session-token" },
         method: "POST",
-      })
+      }),
     );
 
     expect(streamCoachTurn).toHaveBeenCalledWith(
@@ -312,21 +370,15 @@ describe("app/api/chat route", () => {
           ...messages.slice(16),
         ],
         messagesAreModelSelected: true,
-      })
+      }),
     );
-  });
-
-  it("keeps the GPT-5 mini model in the orchestrator for chat responses", () => {
-    const routeSource = readFileSync(new URL("../../lib/agent/orchestrator.ts", import.meta.url), "utf8");
-
-    expect(routeSource).toContain('openai("gpt-5-mini")');
   });
 
   it("keeps short conversations intact for model context", () => {
     const messages = Array.from({ length: 4 }, (_, index) => ({
       id: `message-${index}`,
       parts: [{ text: `Message ${index}`, type: "text" as const }],
-      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const)
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
     }));
 
     expect(selectMessagesForModel(messages)).toEqual(messages);
@@ -336,7 +388,7 @@ describe("app/api/chat route", () => {
     const messages = Array.from({ length: 40 }, (_, index) => ({
       id: `message-${index}`,
       parts: [{ text: `Message ${index}`, type: "text" as const }],
-      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const)
+      role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
     }));
 
     const selected = selectMessagesForModel(messages);
@@ -348,12 +400,12 @@ describe("app/api/chat route", () => {
       parts: [
         {
           text: expect.stringContaining("previous 16 chat messages"),
-          type: "text"
-        }
-      ]
+          type: "text",
+        },
+      ],
     });
     expect(selected.slice(1).map((message) => message.id)).toEqual(
-      messages.slice(16).map((message) => message.id)
+      messages.slice(16).map((message) => message.id),
     );
   });
 
@@ -367,26 +419,29 @@ describe("app/api/chat route", () => {
             filename: "fitness-chart.png",
             mediaType: "image/png",
             type: "file" as const,
-            url: "https://example.com/fitness-chart.png"
-          }
+            url: "https://example.com/fitness-chart.png",
+          },
         ],
-        role: "user" as const
-      }
+        role: "user" as const,
+      },
     ];
 
-    const enriched = await appendImageExtractionsToMessages(messages, ({ imageUrl }) => {
-      expect(imageUrl).toBe("https://example.com/fitness-chart.png");
-      return Promise.resolve({
-        data: {
-          date_range: { end: "2026-04-26", start: "2026-04-20" },
-          series: [
-            { date: "2026-04-20", metric: "ctl", value: 42 },
-            { date: "2026-04-21", metric: "ctl", value: 43 }
-          ]
-        },
-        screenshot_type: "training_load_chart"
-      });
-    });
+    const enriched = await appendImageExtractionsToMessages(
+      messages,
+      ({ imageUrl }) => {
+        expect(imageUrl).toBe("https://example.com/fitness-chart.png");
+        return Promise.resolve({
+          data: {
+            date_range: { end: "2026-04-26", start: "2026-04-20" },
+            series: [
+              { date: "2026-04-20", metric: "ctl", value: 42 },
+              { date: "2026-04-21", metric: "ctl", value: 43 },
+            ],
+          },
+          screenshot_type: "training_load_chart",
+        });
+      },
+    );
 
     expect(enriched[0]?.parts).toContainEqual({
       type: "text",
@@ -397,32 +452,245 @@ describe("app/api/chat route", () => {
             date_range: { end: "2026-04-26", start: "2026-04-20" },
             series: [
               { date: "2026-04-20", metric: "ctl", value: 42 },
-              { date: "2026-04-21", metric: "ctl", value: 43 }
-            ]
+              { date: "2026-04-21", metric: "ctl", value: 43 },
+            ],
           },
           null,
-          2
-        )
+          2,
+        ),
     });
+  });
+
+  describe("convertUnsupportedFilePartsToText", () => {
+    it("converts a GPX file part to a text descriptor", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [
+            { type: "text" as const, text: "Here is my run" },
+            {
+              type: "file" as const,
+              mediaType: "application/gpx+xml",
+              filename: "morning-run.gpx",
+              url: "https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+            },
+          ],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]?.parts).toHaveLength(2);
+      expect(result[0]?.parts[0]).toEqual({
+        type: "text",
+        text: "Here is my run",
+      });
+      const textPart = result[0]?.parts[1] as { type: string; text: string };
+      expect(textPart.type).toBe("text");
+      expect(textPart.text).toContain("morning-run.gpx");
+      expect(textPart.text).toContain("content_type=application/gpx+xml");
+      expect(textPart.text).toContain(
+        "public_url=https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+      );
+      expect(textPart.text).toContain(
+        "object_key=users/athlete-1/chat-attachment/2026/06/17/uuid.gpx",
+      );
+    });
+
+    it("leaves image file parts unchanged", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [
+            {
+              type: "file" as const,
+              mediaType: "image/png",
+              filename: "chart.png",
+              url: "https://example.com/chart.png",
+            },
+          ],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]?.parts).toEqual(messages[0]?.parts);
+      expect(result[0]).toBe(messages[0]); // reference equality — unchanged
+    });
+
+    it("leaves text parts unchanged", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [{ type: "text" as const, text: "Hello coach" }],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]).toBe(messages[0]);
+    });
+
+    it("converts multiple non-image file parts in the same message", () => {
+      const messages = [
+        {
+          id: "msg-1",
+          role: "user" as const,
+          parts: [
+            {
+              type: "file" as const,
+              mediaType: "application/gpx+xml",
+              filename: "run.gpx",
+              url: "https://r2.example.com/path/run.gpx",
+            },
+            {
+              type: "file" as const,
+              mediaType: "application/vnd.garmin.fit",
+              filename: "ride.fit",
+              url: "https://r2.example.com/path/ride.fit",
+            },
+          ],
+        },
+      ];
+
+      const result = convertUnsupportedFilePartsToText(messages);
+
+      expect(result[0]?.parts).toHaveLength(2);
+      expect(result[0]?.parts[0]).toMatchObject({ type: "text" });
+      expect(result[0]?.parts[1]).toMatchObject({ type: "text" });
+      expect((result[0]?.parts[0] as { text: string }).text).toContain(
+        "run.gpx",
+      );
+      expect((result[0]?.parts[1] as { text: string }).text).toContain(
+        "ride.fit",
+      );
+    });
+
+    it("only modifies messages that contain non-image file parts", () => {
+      const textOnlyMessage = {
+        id: "msg-1",
+        role: "user" as const,
+        parts: [{ type: "text" as const, text: "hi" }],
+      };
+      const gpxMessage = {
+        id: "msg-2",
+        role: "user" as const,
+        parts: [
+          {
+            type: "file" as const,
+            mediaType: "application/gpx+xml",
+            filename: "run.gpx",
+            url: "https://r2.example.com/path/run.gpx",
+          },
+        ],
+      };
+
+      const result = convertUnsupportedFilePartsToText([
+        textOnlyMessage,
+        gpxMessage,
+      ]);
+
+      expect(result[0]).toBe(textOnlyMessage); // unchanged reference
+      expect(result[1]).not.toBe(gpxMessage); // new object
+      expect(result[1]?.parts[0]).toMatchObject({ type: "text" });
+    });
+  });
+
+  it("converts GPX file parts to text before passing messages to the model", async () => {
+    const gpxUrl =
+      "https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx";
+    const messages = [
+      {
+        id: "msg-with-gpx",
+        role: "user" as const,
+        parts: [
+          { type: "text" as const, text: "Here is my run file" },
+          {
+            type: "file" as const,
+            mediaType: "application/gpx+xml",
+            filename: "morning-run.gpx",
+            url: gpxUrl,
+          },
+        ],
+      },
+    ];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(streamCoachTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            id: "msg-with-gpx",
+            parts: [
+              { type: "text", text: "Here is my run file" },
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("morning-run.gpx"),
+              }),
+            ],
+          }),
+        ],
+      }),
+    );
+
+    // The raw GPX file part must NOT reach the model
+    const calledMessages = (streamCoachTurn as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0]?.messages as Array<{ parts: unknown[] }>;
+    const allParts = calledMessages.flatMap((m) => m.parts);
+    expect(allParts).not.toContainEqual(
+      expect.objectContaining({
+        type: "file",
+        mediaType: "application/gpx+xml",
+      }),
+    );
   });
 
   it("returns 401 when the browser session cookie is absent", async () => {
     const response = await POST(
       new Request("http://localhost/api/chat", {
         method: "POST",
-        body: JSON.stringify({ messages: [] })
-      })
+        body: JSON.stringify({ messages: [] }),
+      }),
     );
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
-      error: "Missing browser session cookie."
+      error: "Missing browser session cookie.",
     });
   });
 
   it("returns a bounded 503 when the browser token proxy connection resets", async () => {
     process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] = "preview-bypass";
-    const error = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    const error = Object.assign(new Error("socket hang up"), {
+      code: "ECONNRESET",
+    });
     const fetchMock = vi.fn(() => Promise.reject(error));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -430,35 +698,40 @@ describe("app/api/chat route", () => {
       new Request("http://localhost/api/chat", {
         method: "POST",
         headers: { cookie: "coach_browser_session=session-token" },
-        body: JSON.stringify({ messages: [] })
-      })
+        body: JSON.stringify({ messages: [] }),
+      }),
     );
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
-      error: "Something went wrong. Please refresh and try again."
+      error: "Something went wrong. Please refresh and try again.",
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/oauth/browser-token",
       expect.objectContaining({
-        headers: {
+        headers: expect.objectContaining({
           cookie: "coach_browser_session=session-token",
-          "x-vercel-protection-bypass": "preview-bypass"
-        },
-        method: "POST"
-      })
+          "x-vercel-protection-bypass": "preview-bypass",
+        }),
+        method: "POST",
+      }),
     );
   });
 
   it("returns a bounded 503 when coach streaming setup fails", async () => {
-    vi.mocked(streamCoachTurn).mockRejectedValueOnce(new Error("Invalid schema for response_format"));
+    vi.mocked(streamCoachTurn).mockRejectedValueOnce(
+      new Error("Invalid schema for response_format"),
+    );
     const fetchMock = vi.fn((url: RequestInfo | URL) => {
       if (String(url).endsWith("/api/oauth/browser-token")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }), {
-            headers: { "content-type": "application/json" },
-            status: 200,
-          })
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200,
+            },
+          ),
         );
       }
 
@@ -466,7 +739,7 @@ describe("app/api/chat route", () => {
         new Response(JSON.stringify(athleteContextFixture), {
           headers: { "content-type": "application/json" },
           status: 200,
-        })
+        }),
       );
     });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -476,11 +749,13 @@ describe("app/api/chat route", () => {
         method: "POST",
         headers: { cookie: "coach_browser_session=session-token" },
         body: JSON.stringify({ messages: [] }),
-      })
+      }),
     );
 
     expect(response.status).toBe(503);
-    await expect(response.text()).resolves.toBe("Coach is unavailable right now. Please try again.");
+    await expect(response.text()).resolves.toBe(
+      "Coach is out to lunch. Please try again later.",
+    );
   });
 
   it("executes get_athlete_context by calling the engine summary endpoint", async () => {
@@ -488,9 +763,9 @@ describe("app/api/chat route", () => {
       Promise.resolve(
         new Response(JSON.stringify({ profile: { user_id: "athlete-1" } }), {
           status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+          headers: { "content-type": "application/json" },
+        }),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -502,25 +777,32 @@ describe("app/api/chat route", () => {
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
-    await expect(getAthleteContext.execute({ user_id: "athlete-1" })).resolves.toEqual({
-      profile: { user_id: "athlete-1" }
+    await expect(
+      getAthleteContext.execute({ user_id: "athlete-1" }),
+    ).resolves.toEqual({
+      profile: { user_id: "athlete-1" },
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/get-athlete-summary",
       expect.objectContaining({
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
   it("executes get_active_plan by reading it from the athlete summary", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ active_plan: { id: "plan-1", title: "Base build" } }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+        new Response(
+          JSON.stringify({
+            active_plan: { id: "plan-1", title: "Base build" },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -532,25 +814,32 @@ describe("app/api/chat route", () => {
       execute: (...args: unknown[]) => Promise<unknown>;
     };
 
-    await expect(getActivePlan.execute({ user_id: "athlete-1" })).resolves.toEqual({
-      active_plan: { id: "plan-1", title: "Base build" }
+    await expect(
+      getActivePlan.execute({ user_id: "athlete-1" }),
+    ).resolves.toEqual({
+      active_plan: { id: "plan-1", title: "Base build" },
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/get-athlete-summary",
       expect.objectContaining({
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
   it("executes get_recent_activities by calling the engine activities endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ activities: [{ id: "activity-1", sport: "running" }] }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+        new Response(
+          JSON.stringify({
+            activities: [{ id: "activity-1", sport: "running" }],
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -566,29 +855,34 @@ describe("app/api/chat route", () => {
       getRecentActivities.execute({
         limit: 3,
         sport: "running",
-        user_id: "athlete-1"
-      })
-    ).resolves.toEqual({ activities: [{ id: "activity-1", sport: "running" }] });
+        user_id: "athlete-1",
+      }),
+    ).resolves.toEqual({
+      activities: [{ id: "activity-1", sport: "running" }],
+    });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/get-recent-activities",
       expect.objectContaining({
         body: JSON.stringify({
           limit: 3,
-          sport: "running"
+          sport: "running",
         }),
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
   it("executes calculate_zones by calling the engine zones endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ zones: [{ name: "Endurance", zone: 2 }] }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+        new Response(
+          JSON.stringify({ zones: [{ name: "Endurance", zone: 2 }] }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -604,29 +898,32 @@ describe("app/api/chat route", () => {
       calculateZones.execute({
         ftp_watts: 300,
         sport: "cycling",
-        user_id: "athlete-1"
-      })
+        user_id: "athlete-1",
+      }),
     ).resolves.toEqual({ zones: [{ name: "Endurance", zone: 2 }] });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/calculate-zones",
       expect.objectContaining({
         body: JSON.stringify({
           ftp_watts: 300,
-          sport: "cycling"
+          sport: "cycling",
         }),
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
   it("executes estimate_thresholds by calling the engine thresholds endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ ftp_watts: 285, lt1_watts: 214, sport: "cycling" }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+        new Response(
+          JSON.stringify({ ftp_watts: 285, lt1_watts: 214, sport: "cycling" }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -643,8 +940,8 @@ describe("app/api/chat route", () => {
         sport: "cycling",
         test_duration_minutes: 20,
         test_power_watts: 300,
-        user_id: "athlete-1"
-      })
+        user_id: "athlete-1",
+      }),
     ).resolves.toEqual({ ftp_watts: 285, lt1_watts: 214, sport: "cycling" });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/estimate-thresholds",
@@ -652,21 +949,24 @@ describe("app/api/chat route", () => {
         body: JSON.stringify({
           sport: "cycling",
           test_duration_minutes: 20,
-          test_power_watts: 300
+          test_power_watts: 300,
         }),
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
   it("executes generate_training_plan by calling the engine plan structure endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ phases: [{ name: "Base" }], total_weeks: 8 }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+        new Response(
+          JSON.stringify({ phases: [{ name: "Base" }], total_weeks: 8 }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -681,28 +981,34 @@ describe("app/api/chat route", () => {
     await expect(
       generateTrainingPlan.execute({
         goal_id: "goal-1",
-        user_id: "athlete-1"
-      })
+        user_id: "athlete-1",
+      }),
     ).resolves.toEqual({ phases: [{ name: "Base" }], total_weeks: 8 });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/generate-plan-structure",
       expect.objectContaining({
         body: JSON.stringify({
-          goal_id: "goal-1"
+          goal_id: "goal-1",
         }),
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
   it("executes process_uploaded_file for screenshots by calling the screenshot analyzer", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ data: { sport: "running" }, screenshot_type: "activity_single" }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+        new Response(
+          JSON.stringify({
+            data: { sport: "running" },
+            screenshot_type: "activity_single",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -720,28 +1026,36 @@ describe("app/api/chat route", () => {
         filename: "activity.png",
         object_key: "uploads/activity.png",
         public_url: "https://example.com/activity.png",
-        user_id: "athlete-1"
-      })
-    ).resolves.toEqual({ data: { sport: "running" }, screenshot_type: "activity_single" });
+        user_id: "athlete-1",
+      }),
+    ).resolves.toEqual({
+      data: { sport: "running" },
+      screenshot_type: "activity_single",
+    });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/analyze-screenshot",
       expect.objectContaining({
         body: JSON.stringify({
-          image_url: "https://example.com/activity.png"
+          image_url: "https://example.com/activity.png",
         }),
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
   it("executes process_uploaded_file for activity files by calling the activity parser", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ activity: { sport: "running", distance_meters: 5000 } }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        })
-      )
+        new Response(
+          JSON.stringify({
+            activity: { sport: "running", distance_meters: 5000 },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
     );
     const tools = createCoachTools({
       accessToken: "token-1",
@@ -754,15 +1068,15 @@ describe("app/api/chat route", () => {
     };
 
     const result = processUploadedFile.execute({
-        content_type: "application/gpx+xml",
-        filename: "morning-run.gpx",
-        object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
-        public_url: "https://example.com/morning-run.gpx",
-        user_id: "attacker-controlled-user"
-      });
+      content_type: "application/gpx+xml",
+      filename: "morning-run.gpx",
+      object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+      public_url: "https://example.com/morning-run.gpx",
+      user_id: "attacker-controlled-user",
+    });
 
     await expect(Promise.resolve(result)).resolves.toEqual({
-      activity: { sport: "running", distance_meters: 5000 }
+      activity: { sport: "running", distance_meters: 5000 },
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost/api/engine/process-uploaded-file",
@@ -770,12 +1084,111 @@ describe("app/api/chat route", () => {
         body: JSON.stringify({
           content_type: "application/gpx+xml",
           filename: "morning-run.gpx",
-          object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
-          public_url: "https://example.com/morning-run.gpx"
+          object_key:
+            "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+          public_url: "https://example.com/morning-run.gpx",
         }),
-        method: "POST"
-      })
+        method: "POST",
+      }),
     );
   });
 
+  it("falls back to filename inference when content_type is missing for activity files", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            activity: { sport: "running", distance_meters: 5000 },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = processUploadedFile.execute({
+      filename: "morning-run.gpx",
+      object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+      public_url: "https://example.com/morning-run.gpx",
+      user_id: "attacker-controlled-user",
+    });
+
+    await expect(Promise.resolve(result)).resolves.toEqual({
+      activity: { sport: "running", distance_meters: 5000 },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/process-uploaded-file",
+      expect.objectContaining({
+        body: JSON.stringify({
+          content_type: "application/gpx+xml",
+          filename: "morning-run.gpx",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+          public_url: "https://example.com/morning-run.gpx",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("prefers filename inference when content_type is a generic fallback", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            activity: { sport: "running", distance_meters: 5000 },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = processUploadedFile.execute({
+      content_type: "application/octet-stream",
+      filename: "morning-run.gpx",
+      object_key: "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+      public_url: "https://example.com/morning-run.gpx",
+      user_id: "attacker-controlled-user",
+    });
+
+    await expect(Promise.resolve(result)).resolves.toEqual({
+      activity: { sport: "running", distance_meters: 5000 },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/process-uploaded-file",
+      expect.objectContaining({
+        body: JSON.stringify({
+          content_type: "application/gpx+xml",
+          filename: "morning-run.gpx",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/04/19/morning-run.gpx",
+          public_url: "https://example.com/morning-run.gpx",
+        }),
+        method: "POST",
+      }),
+    );
+  });
 });

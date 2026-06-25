@@ -9,7 +9,7 @@ Usage:
 
 import argparse
 import sys
-from typing import Protocol
+from typing import Any, Protocol
 
 from scripts.bootstrap.cloudflare_client import CloudflareClient
 from scripts.bootstrap.config import BootstrapSettings, load_settings
@@ -58,14 +58,63 @@ def _build_auth_site_url(settings: BootstrapSettings, env: str, vercel_domain: s
     return f"https://{vercel_domain}" if vercel_domain else ""
 
 
-def _build_auth_redirect_urls(env: str, vercel_domain: str) -> list[str]:
-    """Return extra allowed redirect URLs for Supabase auth configuration."""
+def _build_auth_redirect_urls(
+    settings: BootstrapSettings, env: str, vercel_domain: str
+) -> list[str]:
+    """Return extra allowed redirect URLs for Supabase auth configuration.
+
+    The magic-link / OTP flow redirects to ``/auth/callback`` on the deployment
+    origin. Supabase only honours a ``redirect_to`` whose full path matches an
+    entry in the allow-list, and the bare ``site_url`` origin does not cover its
+    own sub-paths — a ``/**`` wildcard is required. Production must therefore get
+    a wildcard entry for its origin just like preview does; omitting it makes
+    Supabase drop ``redirect_to`` and bounce to the site root without the auth
+    ``code``, which surfaces as "Your sign-in link is missing or has already
+    been used" (issue #172).
+    """
     urls = ["http://localhost:3000/**", "http://localhost:3001/**"]
     if env == "preview":
         urls.append("https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**")
         if vercel_domain:
             urls.append(f"https://{vercel_domain}/**")
+        return urls
+
+    if env != "prod":
+        raise ValueError(f"Unknown env {env!r}; expected 'preview' or 'prod'")
+
+    # Production: allow the canonical site origin and the Vercel-assigned alias.
+    prod_origin = _build_auth_site_url(settings, env, vercel_domain)
+    if not prod_origin:
+        raise RuntimeError(
+            "Could not resolve the production auth origin. Set PRODUCTION_DOMAIN in "
+            ".env.bootstrap, or ensure the Vercel production domain lookup succeeds, "
+            "then rerun bootstrap."
+        )
+    urls.append(f"{prod_origin}/**")
+    vercel_origin = f"https://{vercel_domain}" if vercel_domain else ""
+    if vercel_origin and vercel_origin != prod_origin:
+        urls.append(f"{vercel_origin}/**")
     return urls
+
+
+def _build_smtp_settings(settings: BootstrapSettings) -> dict[str, Any] | None:
+    """Return shared custom SMTP (Resend) settings, or None to use built-in mail.
+
+    The same SMTP server is applied to both preview and production so email
+    delivery is at parity. Custom SMTP is only configured when a password
+    (Resend API key) and a sender address are both present; otherwise Supabase's
+    built-in, rate-limited sender is left in place.
+    """
+    if not settings.smtp_pass or not settings.smtp_admin_email:
+        return None
+    return {
+        "host": settings.smtp_host,
+        "port": settings.smtp_port,
+        "user": settings.smtp_user,
+        "pass": settings.smtp_pass,
+        "admin_email": settings.smtp_admin_email,
+        "sender_name": settings.smtp_sender_name,
+    }
 
 
 def _setup_supabase(  # noqa: PLR0913
@@ -104,7 +153,8 @@ def _setup_supabase(  # noqa: PLR0913
         sb.configure_auth_settings(
             project_ref,
             site_url=_build_auth_site_url(settings, env, vercel_domain),
-            extra_redirect_urls=_build_auth_redirect_urls(env, vercel_domain),
+            extra_redirect_urls=_build_auth_redirect_urls(settings, env, vercel_domain),
+            smtp=_build_smtp_settings(settings),
         )
         migration_db_password = db_pass or state.get("supabase_db_password") or env_db_password
         keys = configured_keys or sb.get_api_keys(project_ref, use_cli=bool(existing_ref))
@@ -206,7 +256,7 @@ def _setup_r2(
             print(f"  Using R2 public base URL from .env.bootstrap: {configured_public_base_url}")
             public_base_url = configured_public_base_url
         else:
-            public_base_url = cf.get_public_base_url(bucket_name)
+            public_base_url = cf.ensure_public_access(bucket_name)
         endpoint_url = cf.endpoint_url()
     finally:
         cf.close()
@@ -290,10 +340,24 @@ def _build_env_vars(  # noqa: PLR0913
         "R2_SECRET_ACCESS_KEY": r2["secret_access_key"],
         "R2_BUCKET": r2["bucket_name"],
         "R2_ENDPOINT_URL": r2["endpoint_url"],
-        "R2_PUBLIC_BASE_URL": r2["public_base_url"],
     }
+    # Only set R2_PUBLIC_BASE_URL when we actually have one. An empty value is
+    # silently accepted by Vercel but yields a null public_url at upload time,
+    # which surfaces to users as "couldn't get a shareable link back" (#163).
+    if r2["public_base_url"]:
+        vars["R2_PUBLIC_BASE_URL"] = r2["public_base_url"]
     if app_base_url:
         vars["APP_BASE_URL"] = app_base_url
+    # These should be two distinct Client Keys — a secret server-side DSN and a public
+    # browser one — so the public browser DSN can't expose the server's. Bootstrap does
+    # not verify they differ; that separation is the operator's responsibility.
+    if settings.sentry_dsn:
+        vars["SENTRY_DSN"] = settings.sentry_dsn
+    if settings.sentry_public_dsn:
+        vars["NEXT_PUBLIC_SENTRY_DSN"] = settings.sentry_public_dsn
+    # Source-map upload is pointless unless at least one DSN is actually sending events.
+    if settings.sentry_auth_token and (settings.sentry_dsn or settings.sentry_public_dsn):
+        vars["SENTRY_AUTH_TOKEN"] = settings.sentry_auth_token
     return vars
 
 
@@ -306,9 +370,12 @@ def _sync_vercel_env_vars(
     vercel.upsert_env_vars(vercel_target, env_vars)
 
 
-def _print_summary(
-    env: str, supabase: dict, r2: dict, app_base_url: str, vercel_target: list
+def _print_summary(  # noqa: PLR0913
+    env: str, supabase: dict, r2: dict, app_base_url: str, vercel_target: list, env_vars: dict
 ) -> None:
+    def _present(key: str) -> str:
+        return "configured" if key in env_vars else "(not configured)"
+
     print(f"\n{'=' * 60}")
     print(f"Bootstrap complete for {env.upper()}")
     print(f"{'=' * 60}")
@@ -320,13 +387,17 @@ def _print_summary(
     print(f"  R2 access key ID     : {_mask(r2['access_key_id'])}")
     print(f"  R2 public base URL   : {r2['public_base_url'] or '(not configured)'}")
     print(f"  APP_BASE_URL         : {app_base_url or '(unset — falls back to VERCEL_URL)'}")
+    print(f"  Sentry server DSN    : {_present('SENTRY_DSN')}")
+    print(f"  Sentry browser DSN   : {_present('NEXT_PUBLIC_SENTRY_DSN')}")
+    print(f"  Sentry source maps   : {_present('SENTRY_AUTH_TOKEN')}")
     print(f"  Vercel target        : {vercel_target}")
     print()
     print("Next steps:")
     print("  • Run `vercel env ls` to confirm vars are set.")
     print(
-        "  • If R2 public URL is empty, enable 'Public Access' on the bucket in the\n"
-        "    Cloudflare dashboard, then re-run to update R2_PUBLIC_BASE_URL."
+        "  • The R2 bucket's public dev URL (r2.dev) is enabled automatically and is\n"
+        "    rate-limited / non-production. For prod traffic, attach a custom domain and\n"
+        "    set R2_PUBLIC_BASE_URL_PROD in .env.bootstrap, then re-run."
     )
     print("  • Redeploy to pick up the new env vars: `vercel deploy` (or push a commit).")
     if env == "preview":
@@ -365,11 +436,16 @@ def run(env: str, skip_migrations: bool, dry_run: bool) -> None:
         app_base_url = _resolve_app_base_url(settings, env, vercel_domain)
         vercel_target = ["production"] if env == "prod" else ["preview"]
         env_vars = _build_env_vars(env, app_base_url, jwt_secret, supabase, r2, settings)
+        if settings.sentry_auth_token and "SENTRY_AUTH_TOKEN" not in env_vars:
+            print(
+                "  Warning: SENTRY_AUTH_TOKEN is set but no Sentry DSN is configured, "
+                "so it was not written. Source maps will not upload until a DSN is set."
+            )
         _sync_vercel_env_vars(vercel, vercel_target, env_vars)
     finally:
         vercel.close()
 
-    _print_summary(env, supabase, r2, app_base_url, vercel_target)
+    _print_summary(env, supabase, r2, app_base_url, vercel_target, env_vars)
 
 
 def main() -> None:

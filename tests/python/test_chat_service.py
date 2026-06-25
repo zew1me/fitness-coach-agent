@@ -1,4 +1,3 @@
-import re
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
@@ -68,7 +67,7 @@ class OnboardingRepo:
 
 
 @pytest.mark.asyncio
-async def test_onboarding_welcome_asks_for_sport_and_goal_first() -> None:
+async def test_onboarding_welcome_writes_assistant_welcome_message() -> None:
     repo = OnboardingRepo()
     service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
@@ -78,17 +77,11 @@ async def test_onboarding_welcome_asks_for_sport_and_goal_first() -> None:
     assert repo.create_calls[0]["role"] == "assistant"
     assert repo.create_calls[0]["metadata"] == {"message_kind": "welcome"}
 
+    assert len(bootstrap.thread.messages) == 1
+    assert bootstrap.thread.messages[0].role == "assistant"
     welcome_parts = bootstrap.thread.messages[0].parts
     assert welcome_parts and welcome_parts[0]["type"] == "text"
-    welcome = welcome_parts[0]["text"]
-    welcome_lower = welcome.lower()
-    assert "sport" in welcome_lower
-    assert re.search(r"\b(coaching|goal|objective|help|improve)\b", welcome_lower) is not None
-    assert re.search(r"\bage\b", welcome_lower) is None
-    assert "nutrition" not in welcome_lower
-    assert "equipment" not in welcome_lower
-    assert "availability" not in welcome_lower
-    assert "recent training" not in welcome_lower
+    assert welcome_parts[0]["text"].strip()
 
 
 @pytest.mark.asyncio

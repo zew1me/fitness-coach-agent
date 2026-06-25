@@ -97,9 +97,7 @@ The legacy columns `chat_messages.content` (denormalized text mirror) and the se
 
 **Intent.** Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
 
-**Current reality (as of #149 landing).** Chat image attachments are being written into Postgres as inline base64 `data:image/png;base64,…` URLs inside `chat_messages.parts`, **not** as R2 URLs. Row sizes for a single-image message reach ~250KB. The R2 presign + upload calls _do_ happen and the bytes land in R2, but the `public_url` returned by the upload proxy isn't being threaded back into the `LocalAttachment` state before submit, so `uploadedFileParts` falls through to its `attachment.dataUrl` (base64) fallback (`components/coach-chat.tsx:237`). Tracked in **issue #163**; whether R2 is referenced by anything else in the running app is **issue #164**.
-
-Anyone reasoning about storage costs, backup size, or LLM context bloat should treat chat images as Postgres rows today, not R2 objects.
+**Current reality.** Chat image attachments are now persisted to `chat_messages.parts` as R2 `public_url` references (issue #163 fix). The client refuses to send a message whose attachment lacks a `public_url`, so any base64 `data:` URL in `parts[i].url` is a stale row from before the fix landed. Whether R2 is referenced by anything else in the running app is **issue #164**.
 
 ## Environment Variables
 
@@ -113,7 +111,7 @@ See `.env.example`. Required:
 
 ## Tests
 
-- Web tests: `tests/web/` — Vitest, `environment: "node"`
+- Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
 - Python tests: `tests/python/` — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for fixtures
 
@@ -150,12 +148,12 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | `pytest`            | `uv run pytest`                                                               |
 | `cpd`               | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
 | `knip`              | Dead-code / unused-export detection (production code only)                    |
-| `playwright`        | Full Playwright UI suite
+| `playwright`        | Full Playwright UI suite                                                      |
 
 ### Changes that don't impact the UI layer
 
-Playwright is slow (~2–3 min). Only in cases where you are absolutely sure a change does not impact 
-the UI layer or interface UI layer interacts with or anything that will manifest only in rendering 
+Playwright is slow (~2–3 min). Only in cases where you are absolutely sure a change does not impact
+the UI layer or interface UI layer interacts with or anything that will manifest only in rendering
 lever type of tests, it may be skipped. Skip it on a given push using **either** method:
 
 ```bash

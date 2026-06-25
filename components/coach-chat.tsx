@@ -1,19 +1,18 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
+import * as Sentry from "@sentry/nextjs";
 import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
 import Link from "next/link";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, JSX } from "react";
+import type { ChangeEvent, JSX, ReactNode, RefObject } from "react";
 
 import {
   createChatUploadIntent,
-  fetchBrowserToken,
   loadChatThread,
-  loadProfile,
-  saveProfile,
   uploadFile,
 } from "../lib/coach-api";
+import { errorMessage } from "../lib/errors";
 import { siteConfig } from "../lib/site";
 import type {
   AdaptedPlan,
@@ -22,23 +21,22 @@ import type {
   ChatMessage,
   ChatThreadResponse,
 } from "../lib/types";
+import type { AthleteProfileHook } from "../lib/use-athlete-profile";
+import { useAthleteProfile } from "../lib/use-athlete-profile";
+import { useBrowserSession } from "../lib/use-browser-session";
+import { useChatThread } from "../lib/use-chat-thread";
+import { useIsMobile } from "../lib/use-is-mobile";
 import { useTheme } from "../lib/use-theme";
 import type { ThemeMode } from "../lib/use-theme";
 
 import styles from "./coach-chat.module.css";
 
-type SessionState = {
-  error: string | null;
-  loading: boolean;
-  token: BrowserTokenResponse | null;
-};
-
 type LocalAttachment = {
+  id: string;
   content_type: string;
-  dataUrl: string | null;
   filename: string;
   object_key: string;
-  previewUrl: string | null;
+  preview_url: string | null;
   public_url: string | null;
   status: "error" | "uploaded" | "uploading";
 };
@@ -48,16 +46,6 @@ type StarterPrompt = {
   prompt: string;
 };
 
-const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
-const MESSAGE_RENDER_BATCH_SIZE = 60;
-const LOCAL_CHAT_THREAD_STORAGE_PREFIX = "fitness-coach.local-chat-thread";
-const WAITING_STATUS_INTERVAL_MS = 1600;
-const WAITING_STATUSES = [
-  "Thinking...",
-  "Still working...",
-  "Checking the coaching notes...",
-  "Almost there...",
-];
 const ONBOARDING_STARTERS: StarterPrompt[] = [
   {
     label: "Running base and consistency",
@@ -89,13 +77,16 @@ const COACHING_STARTERS: StarterPrompt[] = [
   },
 ];
 
-function emptyProfile(userId: string): AthleteProfile {
-  return {
-    user_id: userId,
-    coaching_state: "onboarding",
-    primary_sports: [],
-  };
-}
+const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
+const MESSAGE_RENDER_BATCH_SIZE = 60;
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20_000;
+const WAITING_STATUS_INTERVAL_MS = 1600;
+const WAITING_STATUSES = [
+  "Thinking...",
+  "Still working...",
+  "Checking the coaching notes...",
+  "Almost there...",
+];
 
 function onlyWelcomeMessage(messages: ChatMessage[]): boolean {
   const firstMessage = messages[0];
@@ -107,60 +98,6 @@ function onlyWelcomeMessage(messages: ChatMessage[]): boolean {
   );
 }
 
-function canUseLocalChatHistory(): boolean {
-  return (
-    window.location.hostname === "localhost" ||
-    window.location.hostname === "127.0.0.1"
-  );
-}
-
-function localChatThreadStorageKey(userId: string): string {
-  return `${LOCAL_CHAT_THREAD_STORAGE_PREFIX}.${userId}`;
-}
-
-function readLocalChatThread(userId: string): ChatThreadResponse | null {
-  if (!canUseLocalChatHistory()) {
-    return null;
-  }
-
-  try {
-    const rawThread = window.localStorage.getItem(
-      localChatThreadStorageKey(userId),
-    );
-    if (rawThread === null) {
-      return null;
-    }
-    const parsed = JSON.parse(rawThread) as ChatThreadResponse;
-    if (
-      parsed.thread.user_id !== userId ||
-      !Array.isArray(parsed.thread.messages)
-    ) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function writeLocalChatThread(
-  thread: ChatThreadResponse,
-  userId: string,
-): void {
-  if (!canUseLocalChatHistory()) {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(
-      localChatThreadStorageKey(userId),
-      JSON.stringify(thread),
-    );
-  } catch {
-    // Local persistence is best-effort for development and should never block chat.
-  }
-}
-
 function readableTime(timestamp: string): string {
   return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
@@ -170,8 +107,8 @@ function readableTime(timestamp: string): string {
 
 function removePreviewUrls(attachments: LocalAttachment[]): void {
   for (const attachment of attachments) {
-    if (attachment.previewUrl !== null) {
-      URL.revokeObjectURL(attachment.previewUrl);
+    if (attachment.preview_url !== null) {
+      URL.revokeObjectURL(attachment.preview_url);
     }
   }
 }
@@ -301,11 +238,7 @@ function toLiveChatMessage(
 
 function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
   return attachments.flatMap((attachment) => {
-    if (attachment.status !== "uploaded") {
-      return [];
-    }
-    const url = attachment.public_url ?? attachment.dataUrl;
-    if (url === null) {
+    if (attachment.status !== "uploaded" || attachment.public_url === null) {
       return [];
     }
     return [
@@ -313,10 +246,24 @@ function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
         filename: attachment.filename,
         mediaType: attachment.content_type,
         type: "file",
-        url,
+        url: attachment.public_url,
       },
     ];
   });
+}
+
+function hasSendableContent(
+  composer: string,
+  attachments: LocalAttachment[],
+): boolean {
+  const hasText = composer.trim().length > 0;
+  const hasPendingAttachment = attachments.some(
+    (attachment) => attachment.status === "uploading",
+  );
+
+  return hasText
+    ? !hasPendingAttachment
+    : attachments.some((attachment) => attachment.status === "uploaded");
 }
 
 function activityContentType(file: File): string {
@@ -349,6 +296,17 @@ function fileTypeBadge(attachment: {
   }
   const suffix = attachment.filename.split(".").pop()?.toUpperCase();
   return suffix && ["GPX", "FIT", "TCX"].includes(suffix) ? suffix : "FILE";
+}
+
+function composerPlaceholderFor(
+  messages: ChatMessage[],
+  profileComplete: boolean,
+): string {
+  if (profileComplete) return "Ask your coach...";
+  if (onlyWelcomeMessage(messages)) {
+    return "Tell your coach your sport and goal...";
+  }
+  return "Reply to your coach...";
 }
 
 function SendIcon(): JSX.Element {
@@ -498,358 +456,461 @@ function ChatErrorState({
   );
 }
 
-// eslint-disable-next-line complexity
-export function CoachChat(): JSX.Element {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const messageEndRef = useRef<HTMLDivElement | null>(null);
-  const [session, setSession] = useState<SessionState>({
-    token: null,
-    error: null,
-    loading: true,
-  });
-  const [threadState, setThreadState] = useState<{
-    data: ChatThreadResponse | null;
-    error: string | null;
-    loading: boolean;
-  }>({
-    data: null,
-    error: null,
-    loading: false,
-  });
-  const [composer, setComposer] = useState("");
-  const [visibleMessageCount, setVisibleMessageCount] = useState(
-    MESSAGE_RENDER_BATCH_SIZE,
+/**
+ * Render the Coach Chat user interface for browser-based coaching interactions.
+ *
+ * The component manages browser session bootstrap, loads and syncs the chat thread
+ * and athlete profile, handles message composition (text and attachments),
+ * supports image and activity-file uploads, displays assistant/user messages
+ * (including tool statuses and attachments), and provides a profile/settings drawer
+ * and export functionality.
+ *
+ * @returns A JSX element containing the complete coach chat interface.
+ */
+function ChatLoadingShell(): JSX.Element {
+  return (
+    <main className={styles.page}>
+      <div className={styles.shell}>
+        <div className={styles.frame}>
+          <div className={styles.topbar}>
+            <div className={styles.brandBlock}>
+              <p className={styles.brand}>{siteConfig.appName}</p>
+              <span className={styles.meta}>Loading your coach chat…</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
   );
-  const [sending, setSending] = useState(false);
-  const [syncingThread, setSyncingThread] = useState(false);
-  const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
-  const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
-  const [dragActive, setDragActive] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerLoading, setDrawerLoading] = useState(false);
-  const [drawerStatus, setDrawerStatus] = useState<string | null>(null);
-  const [profile, setProfile] = useState<AthleteProfile | null>(null);
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const { mode: themeMode, setTheme } = useTheme();
-  const chatMessages = useMemo<UIMessage[]>(
-    () => threadState.data?.thread.messages.map(toUiMessage) ?? [],
-    [threadState.data?.thread.messages],
-  );
-  const { messages: liveMessages, sendMessage } = useChat({
-    id: threadState.data?.thread.id ?? "coach-chat",
-    messages: chatMessages,
-    transport: new DefaultChatTransport({
-      api: "/api/chat",
-      credentials: "include",
-    }),
-  });
-  const composerBusy = sending || syncingThread;
-  const displayedMessages = useMemo<ChatMessage[]>(() => {
-    if (threadState.data === null || session.token === null) {
-      return [];
-    }
+}
 
-    const thread = threadState.data.thread;
-    const token = session.token;
-    const persistedMessages = thread.messages;
-    const persistedIds = new Set(
-      persistedMessages.map((message) => message.id),
+function PlanCard({ plan }: Readonly<{ plan: AdaptedPlan }>): JSX.Element {
+  return (
+    <section className={styles.planCard}>
+      <div className={styles.planMeta}>
+        <span className={styles.planPill}>{plan.summary}</span>
+        <span className={styles.planPill}>{plan.trend}</span>
+        <span className={styles.planPill}>{plan.hours} hours</span>
+      </div>
+      <div className={styles.planDays}>
+        {plan.days.map((day) => (
+          <article className={styles.planDay} key={day.day_index}>
+            <h3 className={styles.planDayTitle}>
+              Day {day.day_index}: {day.focus}
+            </h3>
+            <p className={styles.planDayNote}>{day.notes}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): JSX.Element {
+  const filename = part.filename ?? "attachment";
+  const contentType = part.mediaType;
+  const isImage = contentType.startsWith("image/");
+  const badge = fileTypeBadge({ content_type: contentType, filename });
+  return (
+    <div className={styles.attachmentThumb}>
+      {isImage ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img alt={filename} src={part.url} />
+      ) : (
+        <div className={styles.attachmentFileCard}>
+          <span>{badge ?? "FILE"}</span>
+        </div>
+      )}
+      <span className={styles.attachmentName}>{filename}</span>
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+}: Readonly<{ message: ChatMessage }>): JSX.Element {
+  const rowClass =
+    message.role === "assistant" ? styles.rowAssistant : styles.rowUser;
+  const bubbleClass =
+    message.role === "assistant"
+      ? `${styles.bubble} ${styles.assistantBubble}`
+      : `${styles.bubble} ${styles.userBubble}`;
+  const plan = message.metadata.plan;
+  const parts = deriveParts(message);
+  const textBlocks = parts
+    .map((part) => uiPartText(part))
+    .filter((text): text is string => text !== null && text.length > 0);
+  const fileParts = parts.filter(
+    (part): part is FileUIPart => part.type === "file",
+  );
+
+  return (
+    <div className={rowClass}>
+      <div
+        className={bubbleClass}
+        data-role={message.role}
+        data-testid="chat-bubble"
+      >
+        {textBlocks.map((text, idx) => (
+          <p className={styles.messageText} key={`text-${idx}`}>
+            {text}
+          </p>
+        ))}
+        {fileParts.length > 0 ? (
+          <div className={styles.attachmentGrid}>
+            {fileParts.map((part, idx) => (
+              <AttachmentTile key={`file-${part.url}-${idx}`} part={part} />
+            ))}
+          </div>
+        ) : null}
+        {plan ? <PlanCard plan={plan} /> : null}
+        <div className={styles.attachmentName}>
+          {readableTime(message.created_at)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MessageList({
+  messages,
+  hiddenMessageCount,
+  onShowMore,
+  messageEndRef,
+}: Readonly<{
+  messages: ChatMessage[];
+  hiddenMessageCount: number;
+  onShowMore: () => void;
+  messageEndRef: RefObject<HTMLDivElement | null>;
+}>): JSX.Element {
+  return (
+    <div className={styles.messageStack}>
+      {hiddenMessageCount > 0 ? (
+        <button
+          className={styles.historyLoadButton}
+          onClick={onShowMore}
+          type="button"
+        >
+          Show {Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older
+          messages
+        </button>
+      ) : null}
+      {messages.map((message) => (
+        <MessageBubble key={message.id} message={message} />
+      ))}
+      <div ref={messageEndRef} />
+    </div>
+  );
+}
+
+function EmptyChatLandingCard({
+  variant,
+  onPrefill,
+  children,
+}: Readonly<{
+  variant: "coaching" | "onboarding";
+  onPrefill: (_text: string) => void;
+  children: ReactNode;
+}>): JSX.Element {
+  const starters =
+    variant === "onboarding" ? ONBOARDING_STARTERS : COACHING_STARTERS;
+  const title =
+    variant === "onboarding"
+      ? "Start with your sport and goal"
+      : "What should we work on next?";
+  const body =
+    variant === "onboarding"
+      ? "Tell me what you are training for and what you want coaching around. A short answer is enough."
+      : "Use this thread for quick training updates, image-backed check-ins, and your next 14-day plan. I’ll keep the details in the background and keep the surface focused.";
+  return (
+    <div className={styles.emptyState}>
+      <div className={styles.emptyCard}>
+        <p className={styles.eyebrow}>Coach Chat</p>
+        <h1 className={styles.emptyTitle}>{title}</h1>
+        <p className={styles.emptyText}>{body}</p>
+        <div className={styles.starterRow}>
+          {starters.map((starter) => (
+            <button
+              className={styles.starterButton}
+              key={starter.label}
+              onClick={() => onPrefill(starter.prompt)}
+              type="button"
+            >
+              {starter.label}
+            </button>
+          ))}
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function MessagesSection({
+  messages,
+  hiddenMessageCount,
+  onShowMore,
+  onPrefillStarter,
+  messageEndRef,
+  profileComplete,
+}: Readonly<{
+  messages: ChatMessage[];
+  hiddenMessageCount: number;
+  onShowMore: () => void;
+  onPrefillStarter: (_text: string) => void;
+  messageEndRef: RefObject<HTMLDivElement | null>;
+  profileComplete: boolean;
+}>): JSX.Element {
+  const messageList = (
+    <MessageList
+      hiddenMessageCount={hiddenMessageCount}
+      messageEndRef={messageEndRef}
+      messages={messages}
+      onShowMore={onShowMore}
+    />
+  );
+  if (!onlyWelcomeMessage(messages)) {
+    return <section className={styles.messagesPane}>{messageList}</section>;
+  }
+  const variant = profileComplete ? "coaching" : "onboarding";
+  return (
+    <section className={styles.messagesPane}>
+      <EmptyChatLandingCard onPrefill={onPrefillStarter} variant={variant}>
+        {messageList}
+      </EmptyChatLandingCard>
+    </section>
+  );
+}
+
+function AccountMenu({
+  profile,
+  onOpenProfile,
+  onExport,
+}: Readonly<{
+  profile: AthleteProfile | null;
+  onOpenProfile: () => void;
+  onExport: () => void;
+}>): JSX.Element {
+  return (
+    <div aria-label="Account" className={styles.accountMenu} role="menu">
+      <div className={styles.accountSummary}>
+        <span>Signed in</span>
+        <strong>{accountLabel(profile)}</strong>
+      </div>
+      <button
+        className={styles.menuItem}
+        onClick={onOpenProfile}
+        role="menuitem"
+        type="button"
+      >
+        Profile
+      </button>
+      <button
+        className={styles.menuItem}
+        onClick={onExport}
+        role="menuitem"
+        type="button"
+      >
+        Export JSONL
+      </button>
+      <form
+        action="/api/oauth/browser-session/logout"
+        className={styles.menuForm}
+        method="post"
+      >
+        <button className={styles.menuItem} role="menuitem" type="submit">
+          Sign out
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function ChatTopbar({
+  profile,
+  coachingStatus,
+  onOpenDrawer,
+  onExport,
+}: Readonly<{
+  profile: AthleteProfile | null;
+  coachingStatus: string;
+  onOpenDrawer: () => void;
+  onExport: () => void;
+}>): JSX.Element {
+  const [open, setOpen] = useState(false);
+  return (
+    <header className={styles.topbar}>
+      <div className={styles.brandBlock}>
+        <p className={styles.brand}>{siteConfig.appName}</p>
+        <span className={styles.meta}>{coachingStatus}</span>
+      </div>
+      <div className={styles.topbarActions}>
+        <div className={styles.accountMenuWrap}>
+          <button
+            aria-expanded={open}
+            aria-haspopup="menu"
+            aria-label="Account menu"
+            className={styles.accountButton}
+            onClick={() => setOpen((prev) => !prev)}
+            type="button"
+          >
+            Account
+            <span aria-hidden="true">⌄</span>
+          </button>
+          {open ? (
+            <AccountMenu
+              profile={profile}
+              onOpenProfile={() => {
+                setOpen(false);
+                onOpenDrawer();
+              }}
+              onExport={() => {
+                setOpen(false);
+                onExport();
+              }}
+            />
+          ) : null}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function UploadChip({
+  attachment,
+}: Readonly<{ attachment: LocalAttachment }>): JSX.Element {
+  const badge = fileTypeBadge(attachment);
+  const statusLabel =
+    attachment.status === "uploading"
+      ? "Uploading"
+      : attachment.status === "uploaded"
+        ? "Ready"
+        : "Upload failed";
+  return (
+    <div className={styles.uploadChip}>
+      {badge ? <span className={styles.uploadBadge}>{badge}</span> : null}
+      <span>{attachment.filename}</span>
+      <span className={styles.uploadStatus}>{statusLabel}</span>
+    </div>
+  );
+}
+
+function UploadChips({
+  attachments,
+}: Readonly<{ attachments: LocalAttachment[] }>): JSX.Element | null {
+  if (attachments.length === 0) return null;
+  return (
+    <div className={styles.uploadRow}>
+      {attachments.map((attachment) => (
+        <UploadChip attachment={attachment} key={attachment.id} />
+      ))}
+    </div>
+  );
+}
+
+function SendButton({
+  composer,
+  attachments,
+  composerBusy,
+  sending,
+  syncingThread,
+  onSend,
+}: Readonly<{
+  composer: string;
+  attachments: LocalAttachment[];
+  composerBusy: boolean;
+  sending: boolean;
+  syncingThread: boolean;
+  onSend: () => void;
+}>): JSX.Element {
+  const disabled = composerBusy || !hasSendableContent(composer, attachments);
+  const label = syncingThread ? "Syncing" : sending ? "Sending..." : "Send";
+  return (
+    <button
+      className={styles.sendButton}
+      disabled={disabled}
+      onClick={onSend}
+      type="button"
+    >
+      <SendIcon />
+      <span className={styles.sendButtonText}>{label}</span>
+    </button>
+  );
+}
+
+function ComposerHint({
+  syncingThread,
+  sending,
+  threadError,
+  isMobile,
+  waitingStatus,
+}: Readonly<{
+  syncingThread: boolean;
+  sending: boolean;
+  threadError: string | null;
+  isMobile: boolean;
+  waitingStatus: string | undefined;
+}>): JSX.Element {
+  if (syncingThread) {
+    return (
+      <span aria-live="polite" className={styles.waitingStatus} role="status">
+        Syncing coach chat...
+      </span>
     );
-    const additionalMessages = liveMessages
-      .filter((message) => !persistedIds.has(message.id))
-      .map((message) => toLiveChatMessage(message, thread.id, token.user_id))
-      .filter(
-        (message): message is ChatMessage =>
-          message !== null && (message.parts ?? []).length > 0,
-      );
-
-    return [...persistedMessages, ...additionalMessages];
-  }, [liveMessages, session.token, threadState.data]);
-
-  useEffect(() => {
-    async function bootstrap(): Promise<void> {
-      try {
-        const token = await fetchBrowserToken();
-        setSession({ token, error: null, loading: false });
-      } catch (error) {
-        setSession({
-          token: null,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Unable to connect your browser session.",
-          loading: false,
-        });
-      }
-    }
-
-    void bootstrap();
-  }, []);
-
-  useEffect(() => {
-    if (session.token === null) {
-      return;
-    }
-    const token = session.token;
-
-    async function loadThread(): Promise<void> {
-      setThreadState((current) => ({ ...current, loading: true, error: null }));
-      try {
-        const thread = await loadChatThread();
-        setThreadState({
-          data: thread,
-          error: null,
-          loading: false,
-        });
-      } catch (error) {
-        const localThread = readLocalChatThread(token.user_id);
-        if (localThread !== null) {
-          setThreadState({ data: localThread, error: null, loading: false });
-          return;
-        }
-
-        setThreadState({
-          data: null,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Unable to load the coaching conversation.",
-          loading: false,
-        });
-      }
-    }
-
-    async function prefetchProfile(userId: string): Promise<void> {
-      try {
-        const loaded = await loadProfile(userId);
-        setProfile(loaded);
-      } catch {
-        setProfile(emptyProfile(userId));
-      }
-    }
-
-    void loadThread();
-    void prefetchProfile(token.user_id);
-  }, [session.token]);
-
-  useEffect(() => {
-    if (
-      session.token === null ||
-      threadState.data === null ||
-      threadState.data.thread.messages.length === 0
-    ) {
-      return;
-    }
-
-    writeLocalChatThread(threadState.data, session.token.user_id);
-  }, [session.token, threadState.data]);
-
-  useEffect(() => {
-    const scrollTarget = messageEndRef.current;
-    if (
-      scrollTarget !== null &&
-      typeof scrollTarget.scrollIntoView === "function"
-    ) {
-      scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
-  }, [threadState.data?.thread.messages.length, sending]);
-
-  useEffect(() => {
-    setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
-  }, [threadState.data?.thread.id]);
-
-  useEffect((): (() => void) | void => {
-    if (!sending) {
-      setWaitingStatusIndex(0);
-      return;
-    }
-
-    const intervalId = window.setInterval(() => {
-      setWaitingStatusIndex(
-        (current) => (current + 1) % WAITING_STATUSES.length,
-      );
-    }, WAITING_STATUS_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [sending]);
-
-  useEffect((): (() => void) => {
-    return () => {
-      removePreviewUrls(attachments);
-    };
-  }, [attachments]);
-
-  async function handleSend(): Promise<void> {
-    if (composerBusy || threadState.data === null) {
-      return;
-    }
-    if (composer.trim().length === 0 && attachments.length === 0) {
-      return;
-    }
-
-    setSending(true);
-    setThreadState((current) => ({ ...current, error: null }));
-    try {
-      const token = session.token;
-      if (token === null) {
-        throw new Error("Unable to send without an active browser session.");
-      }
-      const pendingComposer = composer;
-      const pendingAttachments = attachments;
-      const messageId = crypto.randomUUID();
-      // Clear immediately so the composer feels responsive before the network call.
-      removePreviewUrls(pendingAttachments);
-      setAttachments([]);
-      setComposer("");
-      await sendMessage({
-        id: messageId,
-        parts: [
-          { type: "text", text: pendingComposer },
-          ...uploadedFileParts(pendingAttachments),
-        ],
-      });
-      setSending(false);
-      setSyncingThread(true);
-      try {
-        const thread = await loadChatThread();
-        setThreadState({ data: thread, error: null, loading: false });
-      } catch {
-        setThreadState((current) => ({
-          ...current,
-          error:
-            "Message sent, but the thread failed to refresh. Reload to see the latest.",
-          loading: false,
-        }));
-      } finally {
-        setSyncingThread(false);
-      }
-    } catch (error) {
-      setSyncingThread(false);
-      setThreadState((current) => ({
-        ...current,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unable to send your message.",
-        loading: false,
-      }));
-    } finally {
-      setSending(false);
-    }
   }
-
-  async function handleFilesAdded(files: File[]): Promise<void> {
-    if (files.length === 0) return;
-
-    const nextLocalAttachments = files
-      .filter(isSupportedAttachment)
-      .map<LocalAttachment>((file) => ({
-        content_type: activityContentType(file),
-        dataUrl: null,
-        filename: file.name,
-        object_key: "",
-        previewUrl: file.type.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : null,
-        public_url: null,
-        status: "uploading",
-      }));
-    setAttachments((current) => [...current, ...nextLocalAttachments]);
-
-    for (const file of files) {
-      if (!isSupportedAttachment(file)) {
-        setThreadState((current) => ({
-          ...current,
-          error:
-            "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
-        }));
-        continue;
-      }
-      const contentType = activityContentType(file);
-
-      try {
-        const intent = await createChatUploadIntent({
-          content_length: file.size,
-          content_type: contentType,
-          filename: file.name,
-          purpose: "chat-attachment",
-        });
-
-        const uploaded = await uploadFile(intent.object_key, file);
-
-        let dataUrl: string | null = null;
-        if (contentType.startsWith("image/")) {
-          try {
-            const buffer = await file.arrayBuffer();
-            const bytes = new Uint8Array(buffer);
-            let binary = "";
-            for (let i = 0; i < bytes.length; i++) {
-              binary += String.fromCharCode(bytes[i] as number);
-            }
-            dataUrl = `data:${contentType};base64,${btoa(binary)}`;
-          } catch {
-            // Non-critical: data URL is only a fallback when public_url is unavailable
-          }
-        }
-
-        setAttachments((current) =>
-          current.map((attachment) =>
-            attachment.filename === file.name && attachment.object_key === ""
-              ? {
-                  ...attachment,
-                  dataUrl,
-                  object_key: uploaded.object_key,
-                  public_url: uploaded.public_url,
-                  status: "uploaded",
-                }
-              : attachment,
-          ),
-        );
-      } catch (error) {
-        setAttachments((current) =>
-          current.map((attachment) =>
-            attachment.filename === file.name && attachment.object_key === ""
-              ? { ...attachment, status: "error" }
-              : attachment,
-          ),
-        );
-        setThreadState((current) => ({
-          ...current,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Unable to upload that attachment.",
-        }));
-      }
-    }
+  if (sending) {
+    return (
+      <span aria-live="polite" className={styles.waitingStatus} role="status">
+        {waitingStatus}
+      </span>
+    );
   }
-
-  async function handleFileSelect(
-    event: ChangeEvent<HTMLInputElement>,
-  ): Promise<void> {
-    await handleFilesAdded(Array.from(event.target.files ?? []));
-    event.target.value = "";
+  if (threadError !== null) {
+    return <span className={styles.errorTextInline}>{threadError}</span>;
   }
+  return (
+    <>
+      {isMobile
+        ? "Tap the send button when you're ready. Add photos with the plus button."
+        : "Use Shift+Enter for a new line. Add photos with the plus button."}
+    </>
+  );
+}
 
-  function handlePaste(event: React.ClipboardEvent): void {
-    const imageFiles = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null);
-
-    if (imageFiles.length > 0) {
-      event.preventDefault();
-      void handleFilesAdded(imageFiles);
-    }
-  }
+function Composer({
+  composer,
+  onComposerChange,
+  attachments,
+  composerBusy,
+  sending,
+  syncingThread,
+  threadError,
+  isMobile,
+  waitingStatus,
+  placeholder,
+  onSend,
+  onFilesAdded,
+}: Readonly<{
+  composer: string;
+  onComposerChange: (_next: string) => void;
+  attachments: LocalAttachment[];
+  composerBusy: boolean;
+  sending: boolean;
+  syncingThread: boolean;
+  threadError: string | null;
+  isMobile: boolean;
+  waitingStatus: string | undefined;
+  placeholder: string;
+  onSend: () => void;
+  onFilesAdded: (_files: File[]) => void;
+}>): JSX.Element {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragActive, setDragActive] = useState(false);
 
   // Dragging a file onto a bare <textarea> makes the browser navigate to the
   // file URL (issue #161). Capturing dragover/drop on the composer wrapper and
   // calling preventDefault keeps the file in-app and routes it through the same
-  // upload path as the + button. `handleFilesAdded` already filters unsupported
-  // types and surfaces the error, so we forward every dropped file.
+  // upload path as the + button.
   function handleDragOver(event: React.DragEvent): void {
     if (!Array.from(event.dataTransfer.types).includes("Files")) return;
     // preventDefault must come before the composerBusy guard: the browser
@@ -877,578 +938,678 @@ export function CoachChat(): JSX.Element {
     if (composerBusy) return;
     const files = Array.from(event.dataTransfer.files);
     if (files.length === 0) return;
-    void handleFilesAdded(files);
+    onFilesAdded(files);
+  }
+
+  function handlePaste(event: React.ClipboardEvent): void {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      onFilesAdded(imageFiles);
+    }
+  }
+
+  function handleFileSelect(event: ChangeEvent<HTMLInputElement>): void {
+    onFilesAdded(Array.from(event.target.files ?? []));
+    event.target.value = "";
+  }
+
+  const rowClass = dragActive
+    ? `${styles.composerRow} ${styles.composerRowDragActive}`
+    : styles.composerRow;
+  const attachClass = composerBusy
+    ? `${styles.attachButton} ${styles.attachDisabled}`
+    : styles.attachButton;
+
+  return (
+    <div className={styles.composerWrap}>
+      <div className={styles.composerCard}>
+        <UploadChips attachments={attachments} />
+
+        <div
+          className={rowClass}
+          data-testid="composer-row"
+          onDragEnter={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
+          <label
+            aria-label="Add photo or activity file"
+            className={attachClass}
+            title="Add photo or activity file"
+          >
+            <input
+              accept={CHAT_ATTACHMENT_ACCEPT}
+              className={styles.hiddenInput}
+              disabled={composerBusy}
+              multiple
+              onChange={handleFileSelect}
+              ref={fileInputRef}
+              type="file"
+            />
+            +
+          </label>
+          <textarea
+            className={styles.composerInput}
+            onChange={(event) => onComposerChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (!isMobile && event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                onSend();
+              }
+            }}
+            onPaste={handlePaste}
+            placeholder={placeholder}
+            rows={1}
+            value={composer}
+          />
+          <SendButton
+            attachments={attachments}
+            composer={composer}
+            composerBusy={composerBusy}
+            onSend={onSend}
+            sending={sending}
+            syncingThread={syncingThread}
+          />
+        </div>
+        <div className={styles.composerHint}>
+          <ComposerHint
+            isMobile={isMobile}
+            sending={sending}
+            syncingThread={syncingThread}
+            threadError={threadError}
+            waitingStatus={waitingStatus}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfileDrawerFields({
+  profile,
+  setProfile,
+  saving,
+  status,
+  onSave,
+}: Readonly<{
+  profile: AthleteProfile;
+  setProfile: (_profile: AthleteProfile) => void;
+  saving: boolean;
+  status: string | null;
+  onSave: () => void;
+}>): JSX.Element {
+  return (
+    <div className={styles.fieldGrid}>
+      <label className={styles.fieldLabel}>
+        Display name
+        <input
+          className={styles.fieldInput}
+          onChange={(event) =>
+            setProfile({
+              ...profile,
+              display_name: event.target.value || null,
+            })
+          }
+          placeholder="Your name (optional)"
+          value={profile.display_name ?? ""}
+        />
+      </label>
+      <label className={styles.fieldLabel}>
+        Sports (comma-separated)
+        <input
+          className={styles.fieldInput}
+          onChange={(event) =>
+            setProfile({
+              ...profile,
+              primary_sports: event.target.value
+                .split(",")
+                .map((s) => s.trim())
+                .filter((s) => s.length > 0),
+            })
+          }
+          placeholder="e.g. running, cycling, strength"
+          value={profile.primary_sports.join(", ")}
+        />
+      </label>
+      <label className={styles.fieldLabel}>
+        Weekly training hours
+        <input
+          className={styles.fieldInput}
+          min="0"
+          onChange={(event) =>
+            setProfile({
+              ...profile,
+              weekly_available_hours:
+                event.target.value === "" ? null : Number(event.target.value),
+            })
+          }
+          step="0.5"
+          type="number"
+          value={profile.weekly_available_hours ?? ""}
+        />
+      </label>
+      <div className={styles.actionRow}>
+        <button
+          className={styles.primaryButton}
+          disabled={saving}
+          onClick={onSave}
+          type="button"
+        >
+          {saving ? "Saving..." : "Save profile"}
+        </button>
+      </div>
+      {status !== null ? <p className={styles.drawerStatus}>{status}</p> : null}
+    </div>
+  );
+}
+
+function ProfileDrawer({
+  open,
+  onClose,
+  profile,
+  setProfile,
+  themeMode,
+  setTheme,
+  saving,
+  status,
+  onSave,
+}: Readonly<{
+  open: boolean;
+  onClose: () => void;
+  profile: AthleteProfile | null;
+  setProfile: (_profile: AthleteProfile) => void;
+  themeMode: ThemeMode;
+  setTheme: (_mode: ThemeMode) => void;
+  saving: boolean;
+  status: string | null;
+  onSave: () => void;
+}>): JSX.Element | null {
+  if (!open) return null;
+  return (
+    <div
+      className={styles.drawerBackdrop}
+      onClick={onClose}
+      role="presentation"
+    >
+      <aside
+        aria-label="Profile and preferences"
+        className={styles.drawer}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className={styles.drawerHeader}>
+          <div>
+            <h2 className={styles.drawerTitle}>Profile</h2>
+            <p className={styles.drawerText}>
+              Review the profile details your coach uses for training guidance.
+            </p>
+          </div>
+          <button
+            className={styles.drawerClose}
+            onClick={onClose}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className={styles.themeRow}>
+          {(["light", "system", "dark"] as ThemeMode[]).map((option) => (
+            <label className={styles.themeOption} key={option}>
+              <input
+                checked={themeMode === option}
+                name="theme"
+                onChange={() => setTheme(option)}
+                type="radio"
+                value={option}
+              />
+              {option.charAt(0).toUpperCase() + option.slice(1)}
+            </label>
+          ))}
+        </div>
+
+        <ProfileDrawerBody
+          profile={profile}
+          saving={saving}
+          setProfile={setProfile}
+          status={status}
+          onSave={onSave}
+        />
+      </aside>
+    </div>
+  );
+}
+
+function ProfileDrawerBody({
+  profile,
+  setProfile,
+  saving,
+  status,
+  onSave,
+}: Readonly<{
+  profile: AthleteProfile | null;
+  setProfile: (_profile: AthleteProfile) => void;
+  saving: boolean;
+  status: string | null;
+  onSave: () => void;
+}>): JSX.Element {
+  if (saving && profile === null) {
+    return <p className={styles.drawerStatus}>Loading your settings…</p>;
+  }
+  if (profile === null) {
+    return <p className={styles.drawerStatus}>No profile loaded yet.</p>;
+  }
+  return (
+    <ProfileDrawerFields
+      profile={profile}
+      saving={saving}
+      setProfile={setProfile}
+      status={status}
+      onSave={onSave}
+    />
+  );
+}
+
+export function CoachChat(): JSX.Element {
+  const session = useBrowserSession();
+  if (session.loading) {
+    return <ChatLoading />;
+  }
+  if (session.token === null) {
+    return <LoggedOutLanding error={session.error} />;
+  }
+  return <SignedInChat token={session.token} />;
+}
+
+function SignedInChat({
+  token,
+}: Readonly<{ token: BrowserTokenResponse }>): JSX.Element {
+  const thread = useChatThread(token);
+  const athleteProfile = useAthleteProfile(token);
+  if (thread.loading) {
+    return <ChatLoadingShell />;
+  }
+  if (thread.data === null) {
+    return <ChatErrorState error={thread.error} />;
+  }
+  return (
+    <CoachChatBody
+      athleteProfile={athleteProfile}
+      setThreadData={thread.setData}
+      setThreadError={thread.setError}
+      threadData={thread.data}
+      threadError={thread.error}
+      token={token}
+    />
+  );
+}
+
+function CoachChatBody({
+  token,
+  threadData,
+  threadError,
+  setThreadData,
+  setThreadError,
+  athleteProfile,
+}: Readonly<{
+  token: BrowserTokenResponse;
+  threadData: ChatThreadResponse;
+  threadError: string | null;
+  setThreadData: (_thread: ChatThreadResponse) => void;
+  setThreadError: (_error: string | null) => void;
+  athleteProfile: AthleteProfileHook;
+}>): JSX.Element {
+  const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const [composer, setComposer] = useState("");
+  const [visibleMessageCount, setVisibleMessageCount] = useState(
+    MESSAGE_RENDER_BATCH_SIZE,
+  );
+  const [sending, setSending] = useState(false);
+  const [syncingThread, setSyncingThread] = useState(false);
+  const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
+  const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const { mode: themeMode, setTheme } = useTheme();
+  const isMobile = useIsMobile();
+
+  const persistedMessages = threadData.thread.messages;
+  const threadId = threadData.thread.id;
+
+  const chatMessages = useMemo<UIMessage[]>(
+    () => persistedMessages.map(toUiMessage),
+    [persistedMessages],
+  );
+  const { messages: liveMessages, sendMessage } = useChat({
+    id: threadId,
+    messages: chatMessages,
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      credentials: "include",
+    }),
+  });
+  const composerBusy = sending || syncingThread;
+  const displayedMessages = useMemo<ChatMessage[]>(() => {
+    const persistedIds = new Set(persistedMessages.map((m) => m.id));
+    const additional = liveMessages
+      .filter((m) => !persistedIds.has(m.id))
+      .map((m) => toLiveChatMessage(m, threadId, token.user_id))
+      .filter(
+        (m): m is ChatMessage => m !== null && (m.parts ?? []).length > 0,
+      );
+    return [...persistedMessages, ...additional];
+  }, [liveMessages, persistedMessages, threadId, token.user_id]);
+
+  useEffect(() => {
+    const scrollTarget = messageEndRef.current;
+    if (
+      scrollTarget !== null &&
+      typeof scrollTarget.scrollIntoView === "function"
+    ) {
+      scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [persistedMessages.length, sending]);
+
+  useEffect(() => {
+    setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
+  }, [threadId]);
+
+  useEffect((): (() => void) | void => {
+    if (!sending) {
+      setWaitingStatusIndex(0);
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setWaitingStatusIndex(
+        (current) => (current + 1) % WAITING_STATUSES.length,
+      );
+    }, WAITING_STATUS_INTERVAL_MS);
+    return (): void => {
+      window.clearInterval(intervalId);
+    };
+  }, [sending]);
+
+  useEffect((): (() => void) => {
+    return (): void => {
+      removePreviewUrls(attachments);
+    };
+  }, [attachments]);
+
+  async function uploadOneAttachment(
+    attachmentId: string,
+    file: File,
+  ): Promise<void> {
+    const contentType = activityContentType(file);
+    try {
+      const intent = await createChatUploadIntent({
+        content_length: file.size,
+        content_type: contentType,
+        filename: file.name,
+        purpose: "chat-attachment",
+      });
+      const uploaded = await uploadFile(
+        intent.object_key,
+        file,
+        undefined,
+        AbortSignal.timeout(ATTACHMENT_UPLOAD_TIMEOUT_MS),
+      );
+      if (uploaded.public_url === null) {
+        setAttachments((current) =>
+          current.map((attachment) =>
+            attachment.id === attachmentId
+              ? {
+                  ...attachment,
+                  object_key: uploaded.object_key,
+                  public_url: null,
+                  status: "error",
+                }
+              : attachment,
+          ),
+        );
+        Sentry.logger.error("chat: attachment upload returned no public_url", {
+          filename_suffix: file.name.includes(".")
+            ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+            : "",
+          content_type: contentType,
+        });
+        setThreadError(
+          "We uploaded the file but couldn't get a shareable link back. Ask an admin to check the storage configuration.",
+        );
+        return;
+      }
+      Sentry.logger.info("chat attachment ready", {
+        filename_suffix: file.name.includes(".")
+          ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+          : "",
+        content_type: contentType,
+        has_public_url: true,
+      });
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.id === attachmentId
+            ? {
+                ...attachment,
+                object_key: uploaded.object_key,
+                public_url: uploaded.public_url,
+                status: "uploaded",
+              }
+            : attachment,
+        ),
+      );
+    } catch (error) {
+      Sentry.logger.error("chat attachment upload failed", {
+        filename_suffix: file.name.includes(".")
+          ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
+          : "",
+        content_type: contentType,
+      });
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.id === attachmentId
+            ? { ...attachment, status: "error" }
+            : attachment,
+        ),
+      );
+      const timedOut =
+        error instanceof DOMException && error.name === "TimeoutError";
+      console.error("Chat attachment upload failed", error);
+      setThreadError(
+        timedOut
+          ? "That upload took too long and was cancelled. Check your connection and try again."
+          : errorMessage(error, "Unable to upload that attachment."),
+      );
+    }
+  }
+
+  async function handleFilesAdded(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+
+    const uploadQueue: Array<{ attachmentId: string; file: File }> = [];
+    const nextLocalAttachments: LocalAttachment[] = [];
+
+    for (const file of files) {
+      if (!isSupportedAttachment(file)) {
+        setThreadError(
+          "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
+        );
+        continue;
+      }
+      const attachmentId = crypto.randomUUID();
+      uploadQueue.push({ attachmentId, file });
+      nextLocalAttachments.push({
+        id: attachmentId,
+        content_type: activityContentType(file),
+        filename: file.name,
+        object_key: "",
+        preview_url: file.type.startsWith("image/")
+          ? URL.createObjectURL(file)
+          : null,
+        public_url: null,
+        status: "uploading",
+      });
+    }
+    setAttachments((current) => [...current, ...nextLocalAttachments]);
+
+    for (const { attachmentId, file } of uploadQueue) {
+      await uploadOneAttachment(attachmentId, file);
+    }
+  }
+
+  async function handleSend(): Promise<void> {
+    if (composerBusy) return;
+    if (!hasSendableContent(composer, attachments)) return;
+
+    setSending(true);
+    setThreadError(null);
+    try {
+      const pendingComposer = composer;
+      const pendingAttachments = attachments;
+      const messageId = crypto.randomUUID();
+      Sentry.logger.info("user turn submitted", {
+        has_text: pendingComposer.trim().length > 0,
+        attachment_count: pendingAttachments.length,
+        message_id: messageId,
+      });
+      const messageParts: UIMessage["parts"] =
+        pendingComposer.trim().length > 0
+          ? [{ type: "text" as const, text: pendingComposer }]
+          : [];
+      await sendMessage({
+        id: messageId,
+        parts: [...messageParts, ...uploadedFileParts(pendingAttachments)],
+      });
+      // Clear the draft only after the send succeeds so a failed send leaves the
+      // composer text and attachments intact for the user to retry. The textarea
+      // stays editable while the request is in flight, so only clear the text if
+      // it still matches what we sent — otherwise we'd wipe newly typed input.
+      removePreviewUrls(pendingAttachments);
+      setAttachments([]);
+      setComposer((current) => (current === pendingComposer ? "" : current));
+      setSending(false);
+      setSyncingThread(true);
+      try {
+        const refreshed = await loadChatThread();
+        setThreadData(refreshed);
+      } catch (refreshError) {
+        Sentry.logger.warn("chat thread refresh failed after send");
+        console.error("Chat thread refresh failed after send", refreshError);
+        setThreadError(
+          "Message sent, but the thread failed to refresh. Reload to see the latest.",
+        );
+      } finally {
+        setSyncingThread(false);
+      }
+    } catch (error) {
+      Sentry.logger.error("message send failed");
+      console.error("Sending coach message failed", error);
+      setSyncingThread(false);
+      setThreadError(errorMessage(error, "Unable to send your message."));
+    } finally {
+      setSending(false);
+    }
   }
 
   async function openDrawer(): Promise<void> {
-    if (session.token === null) {
-      return;
-    }
     setDrawerOpen(true);
-    if (profile !== null) {
-      return;
-    }
-    setDrawerLoading(true);
-    setDrawerStatus(null);
-    try {
-      const loaded = await loadProfile(session.token.user_id);
-      setProfile(loaded);
-    } catch {
-      setProfile(emptyProfile(session.token.user_id));
-    } finally {
-      setDrawerLoading(false);
-    }
+    await athleteProfile.ensureLoaded();
   }
 
   async function handleSaveProfile(): Promise<void> {
-    if (profile === null) {
-      return;
-    }
-    setDrawerLoading(true);
-    setDrawerStatus(null);
+    const saved = await athleteProfile.save();
+    if (saved === null) return;
     try {
-      const saved = await saveProfile(profile);
-      setProfile(saved);
-      setDrawerStatus("Saved your athlete settings.");
-      if (session.token !== null) {
-        const thread = await loadChatThread();
-        setThreadState({ data: thread, error: null, loading: false });
-      }
-    } catch (error) {
-      setDrawerStatus(
-        error instanceof Error
-          ? error.message
-          : "Unable to save your athlete settings.",
+      const refreshed = await loadChatThread();
+      setThreadData(refreshed);
+    } catch (refreshError) {
+      Sentry.logger.warn("chat thread refresh failed after profile save");
+      console.warn(
+        "Profile saved but chat thread refresh failed",
+        refreshError,
       );
-    } finally {
-      setDrawerLoading(false);
     }
   }
 
   function handleExportJsonl(): void {
-    if (threadState.data === null) {
-      return;
-    }
-
     const exportDate = new Date().toISOString().slice(0, 10);
     downloadTextFile(
       `coaching-history-${exportDate}.jsonl`,
-      serializeChatHistoryJsonl(threadState.data.thread.messages),
+      serializeChatHistoryJsonl(persistedMessages),
       "application/x-ndjson;charset=utf-8",
     );
-    setUserMenuOpen(false);
-  }
-
-  function renderPlan(plan: AdaptedPlan): JSX.Element {
-    return (
-      <section className={styles.planCard}>
-        <div className={styles.planMeta}>
-          <span className={styles.planPill}>{plan.summary}</span>
-          <span className={styles.planPill}>{plan.trend}</span>
-          <span className={styles.planPill}>{plan.hours} hours</span>
-        </div>
-        <div className={styles.planDays}>
-          {plan.days.map((day) => (
-            <article className={styles.planDay} key={day.day_index}>
-              <h3 className={styles.planDayTitle}>
-                Day {day.day_index}: {day.focus}
-              </h3>
-              <p className={styles.planDayNote}>{day.notes}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-    );
-  }
-
-  function renderMessages(
-    messages: ChatMessage[],
-    hiddenMessageCount = 0,
-  ): JSX.Element {
-    return (
-      <div className={styles.messageStack}>
-        {hiddenMessageCount > 0 ? (
-          <button
-            className={styles.historyLoadButton}
-            onClick={() =>
-              setVisibleMessageCount(
-                (current) => current + MESSAGE_RENDER_BATCH_SIZE,
-              )
-            }
-            type="button"
-          >
-            Show {Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older
-            messages
-          </button>
-        ) : null}
-        {messages.map((message) => {
-          const rowClass =
-            message.role === "assistant" ? styles.rowAssistant : styles.rowUser;
-          const bubbleClass =
-            message.role === "assistant"
-              ? `${styles.bubble} ${styles.assistantBubble}`
-              : `${styles.bubble} ${styles.userBubble}`;
-          const plan = message.metadata.plan;
-          const parts = deriveParts(message);
-          const textBlocks = parts
-            .map((part) => uiPartText(part))
-            .filter((text): text is string => text !== null && text.length > 0);
-          const fileParts = parts.filter(
-            (part): part is FileUIPart => part.type === "file",
-          );
-
-          return (
-            <div className={rowClass} key={message.id}>
-              <div
-                className={bubbleClass}
-                data-role={message.role}
-                data-testid="chat-bubble"
-              >
-                {textBlocks.map((text, idx) => (
-                  <p className={styles.messageText} key={`text-${idx}`}>
-                    {text}
-                  </p>
-                ))}
-                {fileParts.length > 0 ? (
-                  <div className={styles.attachmentGrid}>
-                    {fileParts.map((part, idx) => {
-                      const filename = part.filename ?? "attachment";
-                      const contentType = part.mediaType;
-                      const isImage = contentType.startsWith("image/");
-                      const badge = fileTypeBadge({
-                        content_type: contentType,
-                        filename,
-                      });
-                      return (
-                        <div
-                          className={styles.attachmentThumb}
-                          key={`file-${part.url}-${idx}`}
-                        >
-                          {isImage ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img alt={filename} src={part.url} />
-                          ) : (
-                            <div className={styles.attachmentFileCard}>
-                              <span>{badge ?? "FILE"}</span>
-                            </div>
-                          )}
-                          <span className={styles.attachmentName}>
-                            {filename}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : null}
-                {plan ? renderPlan(plan) : null}
-                <div className={styles.attachmentName}>
-                  {readableTime(message.created_at)}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-        <div ref={messageEndRef} />
-      </div>
-    );
-  }
-
-  if (session.loading) {
-    return <ChatLoading />;
-  }
-
-  if (session.token === null) {
-    return <LoggedOutLanding error={session.error} />;
-  }
-
-  if (threadState.loading) {
-    return (
-      <main className={styles.page}>
-        <div className={styles.shell}>
-          <div className={styles.frame}>
-            <div className={styles.topbar}>
-              <div className={styles.brandBlock}>
-                <p className={styles.brand}>{siteConfig.appName}</p>
-                <span className={styles.meta}>Loading your coach chat…</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </main>
-    );
-  }
-
-  if (threadState.data === null) {
-    return <ChatErrorState error={threadState.error} />;
   }
 
   const messages = displayedMessages;
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageCount);
   const visibleMessages =
     hiddenMessageCount > 0 ? messages.slice(hiddenMessageCount) : messages;
-  const welcomeOnly = onlyWelcomeMessage(messages);
-  const onboardingWelcome = welcomeOnly && !threadState.data.profile_complete;
-  const starterPrompts = onboardingWelcome
-    ? ONBOARDING_STARTERS
-    : COACHING_STARTERS;
-  const composerPlaceholder = threadState.data.profile_complete
-    ? "Ask your coach..."
-    : onboardingWelcome
-      ? "Tell your coach your sport and goal..."
-      : "Reply to your coach...";
+  const composerPlaceholder = composerPlaceholderFor(
+    visibleMessages,
+    threadData.profile_complete,
+  );
 
   return (
     <main className={styles.page}>
       <div className={styles.shell}>
         <div className={styles.frame}>
-          <header className={styles.topbar}>
-            <div className={styles.brandBlock}>
-              <p className={styles.brand}>{siteConfig.appName}</p>
-              <span className={styles.meta}>
-                {coachingStatusLabel(threadState.data.profile_complete)}
-              </span>
-            </div>
-            <div className={styles.topbarActions}>
-              <div className={styles.accountMenuWrap}>
-                <button
-                  aria-expanded={userMenuOpen}
-                  aria-haspopup="menu"
-                  aria-label="Account menu"
-                  className={styles.accountButton}
-                  onClick={() => setUserMenuOpen((open) => !open)}
-                  type="button"
-                >
-                  Account
-                  <span aria-hidden="true">⌄</span>
-                </button>
-                {userMenuOpen ? (
-                  <div
-                    aria-label="Account"
-                    className={styles.accountMenu}
-                    role="menu"
-                  >
-                    <div className={styles.accountSummary}>
-                      <span>Signed in</span>
-                      <strong>{accountLabel(profile)}</strong>
-                    </div>
-                    <button
-                      className={styles.menuItem}
-                      onClick={() => {
-                        setUserMenuOpen(false);
-                        void openDrawer();
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      Profile
-                    </button>
-                    <button
-                      className={styles.menuItem}
-                      onClick={handleExportJsonl}
-                      role="menuitem"
-                      type="button"
-                    >
-                      Export JSONL
-                    </button>
-                    <form
-                      action="/api/oauth/browser-session/logout"
-                      className={styles.menuForm}
-                      method="post"
-                    >
-                      <button
-                        className={styles.menuItem}
-                        role="menuitem"
-                        type="submit"
-                      >
-                        Sign out
-                      </button>
-                    </form>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </header>
+          <ChatTopbar
+            coachingStatus={coachingStatusLabel(threadData.profile_complete)}
+            onExport={handleExportJsonl}
+            onOpenDrawer={() => {
+              void openDrawer();
+            }}
+            profile={athleteProfile.profile}
+          />
 
-          <section className={styles.messagesPane}>
-            {welcomeOnly ? (
-              <div className={styles.emptyState}>
-                <div className={styles.emptyCard}>
-                  <p className={styles.eyebrow}>Coach Chat</p>
-                  <h1 className={styles.emptyTitle}>
-                    {onboardingWelcome
-                      ? "Start with your sport and goal"
-                      : "What should we work on next?"}
-                  </h1>
-                  <p className={styles.emptyText}>
-                    {onboardingWelcome
-                      ? "Tell me what you are training for and what you want coaching around. A short answer is enough."
-                      : "Use this thread for quick training updates, image-backed check-ins, and your next 14-day plan. I'll keep the details in the background and keep the surface focused."}
-                  </p>
-                  <div className={styles.starterRow}>
-                    {starterPrompts.map((starter) => (
-                      <button
-                        className={styles.starterButton}
-                        key={starter.label}
-                        onClick={() => setComposer(starter.prompt)}
-                        type="button"
-                      >
-                        {starter.label}
-                      </button>
-                    ))}
-                  </div>
-                  {renderMessages(visibleMessages, hiddenMessageCount)}
-                </div>
-              </div>
-            ) : (
-              renderMessages(visibleMessages, hiddenMessageCount)
-            )}
-          </section>
+          <MessagesSection
+            hiddenMessageCount={hiddenMessageCount}
+            messageEndRef={messageEndRef}
+            messages={visibleMessages}
+            onPrefillStarter={setComposer}
+            onShowMore={() =>
+              setVisibleMessageCount(
+                (current) => current + MESSAGE_RENDER_BATCH_SIZE,
+              )
+            }
+            profileComplete={threadData.profile_complete}
+          />
 
-          <div className={styles.composerWrap}>
-            <div className={styles.composerCard}>
-              {attachments.length > 0 ? (
-                <div className={styles.uploadRow}>
-                  {attachments.map((attachment) => (
-                    <div
-                      className={styles.uploadChip}
-                      key={`${attachment.filename}-${attachment.previewUrl ?? ""}`}
-                    >
-                      {fileTypeBadge(attachment) ? (
-                        <span className={styles.uploadBadge}>
-                          {fileTypeBadge(attachment)}
-                        </span>
-                      ) : null}
-                      <span>{attachment.filename}</span>
-                      <span className={styles.uploadStatus}>
-                        {attachment.status === "uploading"
-                          ? "Uploading"
-                          : attachment.status === "uploaded"
-                            ? "Ready"
-                            : "Upload failed"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-
-              <div
-                className={
-                  dragActive
-                    ? `${styles.composerRow} ${styles.composerRowDragActive}`
-                    : styles.composerRow
-                }
-                data-testid="composer-row"
-                onDragEnter={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
-              >
-                <label
-                  aria-label="Add photo or activity file"
-                  className={
-                    composerBusy
-                      ? `${styles.attachButton} ${styles.attachDisabled}`
-                      : styles.attachButton
-                  }
-                  title="Add photo or activity file"
-                >
-                  <input
-                    accept={CHAT_ATTACHMENT_ACCEPT}
-                    className={styles.hiddenInput}
-                    disabled={composerBusy}
-                    multiple
-                    onChange={(event) => {
-                      void handleFileSelect(event);
-                    }}
-                    ref={fileInputRef}
-                    type="file"
-                  />
-                  +
-                </label>
-                <textarea
-                  className={styles.composerInput}
-                  onChange={(event) => setComposer(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void handleSend();
-                    }
-                  }}
-                  onPaste={handlePaste}
-                  placeholder={composerPlaceholder}
-                  rows={1}
-                  value={composer}
-                />
-                <button
-                  className={styles.sendButton}
-                  disabled={
-                    composerBusy ||
-                    (composer.trim().length === 0 && attachments.length === 0)
-                  }
-                  onClick={() => {
-                    void handleSend();
-                  }}
-                  type="button"
-                >
-                  <SendIcon />
-                  <span className={styles.sendButtonText}>
-                    {syncingThread
-                      ? "Syncing"
-                      : sending
-                        ? "Sending..."
-                        : "Send"}
-                  </span>
-                </button>
-              </div>
-              <div className={styles.composerHint}>
-                {syncingThread ? (
-                  <span
-                    aria-live="polite"
-                    className={styles.waitingStatus}
-                    role="status"
-                  >
-                    Syncing coach chat...
-                  </span>
-                ) : sending ? (
-                  <span
-                    aria-live="polite"
-                    className={styles.waitingStatus}
-                    role="status"
-                  >
-                    {WAITING_STATUSES[waitingStatusIndex]}
-                  </span>
-                ) : threadState.error ? (
-                  <span className={styles.errorTextInline}>
-                    {threadState.error}
-                  </span>
-                ) : (
-                  "Use Shift+Enter for a new line. Add photos with the plus button."
-                )}
-              </div>
-            </div>
-          </div>
+          <Composer
+            attachments={attachments}
+            composer={composer}
+            composerBusy={composerBusy}
+            isMobile={isMobile}
+            onComposerChange={setComposer}
+            onFilesAdded={(files) => {
+              void handleFilesAdded(files);
+            }}
+            onSend={() => {
+              void handleSend();
+            }}
+            placeholder={composerPlaceholder}
+            sending={sending}
+            syncingThread={syncingThread}
+            threadError={threadError}
+            waitingStatus={WAITING_STATUSES[waitingStatusIndex]}
+          />
         </div>
       </div>
 
-      {drawerOpen ? (
-        <div
-          className={styles.drawerBackdrop}
-          onClick={() => setDrawerOpen(false)}
-          role="presentation"
-        >
-          <aside
-            aria-label="Profile and preferences"
-            className={styles.drawer}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className={styles.drawerHeader}>
-              <div>
-                <h2 className={styles.drawerTitle}>Profile</h2>
-                <p className={styles.drawerText}>
-                  Review the profile details your coach uses for training
-                  guidance.
-                </p>
-              </div>
-              <button
-                className={styles.drawerClose}
-                onClick={() => setDrawerOpen(false)}
-                type="button"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className={styles.themeRow}>
-              {(["light", "system", "dark"] as ThemeMode[]).map((option) => (
-                <label className={styles.themeOption} key={option}>
-                  <input
-                    checked={themeMode === option}
-                    name="theme"
-                    onChange={() => setTheme(option)}
-                    type="radio"
-                    value={option}
-                  />
-                  {option.charAt(0).toUpperCase() + option.slice(1)}
-                </label>
-              ))}
-            </div>
-
-            {drawerLoading && profile === null ? (
-              <p className={styles.drawerStatus}>Loading your settings…</p>
-            ) : profile ? (
-              <div className={styles.fieldGrid}>
-                <label className={styles.fieldLabel}>
-                  Display name
-                  <input
-                    className={styles.fieldInput}
-                    onChange={(event) =>
-                      setProfile({
-                        ...profile,
-                        display_name: event.target.value || null,
-                      })
-                    }
-                    placeholder="Your name (optional)"
-                    value={profile.display_name ?? ""}
-                  />
-                </label>
-                <label className={styles.fieldLabel}>
-                  Sports (comma-separated)
-                  <input
-                    className={styles.fieldInput}
-                    onChange={(event) =>
-                      setProfile({
-                        ...profile,
-                        primary_sports: event.target.value
-                          .split(",")
-                          .map((s) => s.trim())
-                          .filter((s) => s.length > 0),
-                      })
-                    }
-                    placeholder="e.g. running, cycling, strength"
-                    value={profile.primary_sports.join(", ")}
-                  />
-                </label>
-                <label className={styles.fieldLabel}>
-                  Weekly training hours
-                  <input
-                    className={styles.fieldInput}
-                    min="0"
-                    onChange={(event) =>
-                      setProfile({
-                        ...profile,
-                        weekly_available_hours:
-                          event.target.value === ""
-                            ? null
-                            : Number(event.target.value),
-                      })
-                    }
-                    step="0.5"
-                    type="number"
-                    value={profile.weekly_available_hours ?? ""}
-                  />
-                </label>
-                <div className={styles.actionRow}>
-                  <button
-                    className={styles.primaryButton}
-                    disabled={drawerLoading}
-                    onClick={() => {
-                      void handleSaveProfile();
-                    }}
-                    type="button"
-                  >
-                    {drawerLoading ? "Saving..." : "Save profile"}
-                  </button>
-                </div>
-                {drawerStatus ? (
-                  <p className={styles.drawerStatus}>{drawerStatus}</p>
-                ) : null}
-              </div>
-            ) : (
-              <p className={styles.drawerStatus}>No profile loaded yet.</p>
-            )}
-          </aside>
-        </div>
-      ) : null}
+      <ProfileDrawer
+        onClose={() => setDrawerOpen(false)}
+        onSave={() => {
+          void handleSaveProfile();
+        }}
+        open={drawerOpen}
+        profile={athleteProfile.profile}
+        saving={athleteProfile.saving}
+        setProfile={athleteProfile.setProfile}
+        setTheme={setTheme}
+        status={athleteProfile.status}
+        themeMode={themeMode}
+      />
     </main>
   );
 }

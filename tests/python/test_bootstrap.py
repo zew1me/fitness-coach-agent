@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -356,9 +357,9 @@ def test_setup_r2_creates_bucket_then_requests_runtime_credentials(monkeypatch) 
             calls.append(f"ensure_r2_token:{bucket_name}:{env}")
             return {"access_key_id": "minted-id", "secret_access_key": "minted-secret"}
 
-        def get_public_base_url(self, bucket_name: str) -> str:
-            calls.append(f"get_public_base_url:{bucket_name}")
-            return ""
+        def ensure_public_access(self, bucket_name: str) -> str:
+            calls.append(f"ensure_public_access:{bucket_name}")
+            return "https://pub-test.r2.dev"
 
         def endpoint_url(self) -> str:
             return "https://account-id.r2.cloudflarestorage.com"
@@ -372,10 +373,11 @@ def test_setup_r2_creates_bucket_then_requests_runtime_credentials(monkeypatch) 
 
     assert result["access_key_id"] == "minted-id"
     assert result["secret_access_key"] == "minted-secret"
+    assert result["public_base_url"] == "https://pub-test.r2.dev"
     assert calls == [
         "ensure_bucket:preview",
         "ensure_r2_token:fitness-coach-agent-preview:preview",
-        "get_public_base_url:fitness-coach-agent-preview",
+        "ensure_public_access:fitness-coach-agent-preview",
         "close",
     ]
 
@@ -394,9 +396,9 @@ def test_setup_r2_uses_configured_credentials_without_creating_token(monkeypatch
         def ensure_r2_token(self, *_args, **_kwargs) -> dict:
             raise AssertionError("dashboard-provided credentials should skip token creation")
 
-        def get_public_base_url(self, bucket_name: str) -> str:
-            calls.append(f"get_public_base_url:{bucket_name}")
-            return ""
+        def ensure_public_access(self, bucket_name: str) -> str:
+            calls.append(f"ensure_public_access:{bucket_name}")
+            return "https://pub-test.r2.dev"
 
         def endpoint_url(self) -> str:
             return "https://account-id.r2.cloudflarestorage.com"
@@ -418,14 +420,14 @@ def test_setup_r2_uses_configured_credentials_without_creating_token(monkeypatch
 
     assert calls == [
         "ensure_bucket:preview",
-        "get_public_base_url:fitness-coach-agent-preview",
+        "ensure_public_access:fitness-coach-agent-preview",
         "close",
     ]
     assert r2 == {
         "bucket_name": "fitness-coach-agent-preview",
         "access_key_id": "configured-access",
         "secret_access_key": "configured-secret",
-        "public_base_url": "",
+        "public_base_url": "https://pub-test.r2.dev",
         "endpoint_url": "https://account-id.r2.cloudflarestorage.com",
     }
 
@@ -519,6 +521,106 @@ def test_cloudflare_r2_token_uses_user_token_api_and_hashes_token_value() -> Non
             },
         ),
     ]
+
+
+def test_ensure_public_access_enables_managed_domain_and_returns_url() -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeHTTP:
+        def put(self, url: str, json: dict) -> httpx.Response:
+            calls.append(("PUT", url, json))
+            request = httpx.Request("PUT", url)
+            return httpx.Response(
+                200,
+                json={"result": {"domain": "pub-abc123.r2.dev", "enabled": True}},
+                request=request,
+            )
+
+        def close(self) -> None:
+            pass
+
+    client = CloudflareClient("token", "account-id")
+    client._http = FakeHTTP()
+
+    url = client.ensure_public_access("fitness-coach-agent-preview")
+    client.close()
+
+    assert url == "https://pub-abc123.r2.dev"
+    assert calls == [
+        (
+            "PUT",
+            "https://api.cloudflare.com/client/v4/accounts/account-id/r2/buckets/"
+            "fitness-coach-agent-preview/domains/managed",
+            {"enabled": True},
+        ),
+    ]
+
+
+def test_ensure_public_access_fallback_get_when_put_returns_no_domain() -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class FakeHTTP:
+        def put(self, url: str, json: dict) -> httpx.Response:
+            calls.append(("PUT", url, json))
+            request = httpx.Request("PUT", url)
+            # PUT succeeds but omits domain field (only returns enabled)
+            return httpx.Response(200, json={"result": {"enabled": True}}, request=request)
+
+        def get(self, url: str, **_kwargs) -> httpx.Response:
+            calls.append(("GET", url, None))
+            request = httpx.Request("GET", url)
+            # GET returns both enabled and domain
+            return httpx.Response(
+                200,
+                json={"result": {"domain": "pub-fallback.r2.dev", "enabled": True}},
+                request=request,
+            )
+
+        def close(self) -> None:
+            pass
+
+    client = CloudflareClient("token", "account-id")
+    client._http = FakeHTTP()
+
+    url = client.ensure_public_access("fitness-coach-agent-preview")
+    client.close()
+
+    assert url == "https://pub-fallback.r2.dev"
+    assert calls == [
+        (
+            "PUT",
+            "https://api.cloudflare.com/client/v4/accounts/account-id/r2/buckets/"
+            "fitness-coach-agent-preview/domains/managed",
+            {"enabled": True},
+        ),
+        (
+            "GET",
+            "https://api.cloudflare.com/client/v4/accounts/account-id/r2/buckets/"
+            "fitness-coach-agent-preview/domains/managed",
+            None,
+        ),
+    ]
+
+
+def test_ensure_public_access_raises_when_no_domain_returned() -> None:
+    class FakeHTTP:
+        def put(self, url: str, json: dict) -> httpx.Response:
+            request = httpx.Request("PUT", url)
+            return httpx.Response(200, json={"result": {"enabled": True}}, request=request)
+
+        def get(self, url: str, **_kwargs) -> httpx.Response:
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"result": {"enabled": True}}, request=request)
+
+        def close(self) -> None:
+            pass
+
+    client = CloudflareClient("token", "account-id")
+    client._http = FakeHTTP()
+
+    with pytest.raises(RuntimeError, match="returned no"):
+        client.ensure_public_access("fitness-coach-agent-preview")
+    client.close()
 
 
 def test_vercel_remove_env_vars_deletes_matching_preview_key(monkeypatch) -> None:
@@ -622,6 +724,91 @@ def test_sync_vercel_env_vars_removes_preview_app_base_url_before_upsert() -> No
     ]
 
 
+def _supabase_dict() -> dict:
+    return {"url": "https://x.supabase.co", "anon_key": "anon", "service_role_key": "service"}
+
+
+def _r2_dict() -> dict:
+    return {
+        "bucket_name": "bucket",
+        "access_key_id": "akid",
+        "secret_access_key": "secret",
+        "public_base_url": "",
+        "endpoint_url": "https://x.r2.cloudflarestorage.com",
+    }
+
+
+def test_build_env_vars_sets_distinct_server_and_client_sentry_dsns() -> None:
+    settings = _settings(
+        sentry_dsn="https://server@o1.ingest.sentry.io/1",
+        sentry_public_dsn="https://client@o1.ingest.sentry.io/2",
+        sentry_auth_token="sntrys_x",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    # Each DSN flows to its own key — guards against regressing to a single DSN
+    # fanned out to both (the bug this two-key split fixed).
+    assert env_vars["SENTRY_DSN"] == "https://server@o1.ingest.sentry.io/1"
+    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
+    assert env_vars["SENTRY_AUTH_TOKEN"] == "sntrys_x"
+
+
+def test_build_env_vars_sets_only_the_sentry_dsns_that_are_configured() -> None:
+    # The public browser DSN can be provisioned without the server one (or vice versa).
+    settings = _settings(sentry_public_dsn="https://client@o1.ingest.sentry.io/2")
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
+    assert "SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
+def test_build_env_vars_writes_auth_token_with_only_the_public_dsn() -> None:
+    # Source-map upload should be provisioned for a browser-only Sentry setup, not just
+    # when the server DSN is present — guards the `or sentry_public_dsn` half of the gate.
+    settings = _settings(
+        sentry_public_dsn="https://client@o1.ingest.sentry.io/2",
+        sentry_auth_token="sntrys_x",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["SENTRY_AUTH_TOKEN"] == "sntrys_x"
+    assert "SENTRY_DSN" not in env_vars
+
+
+def test_build_env_vars_omits_sentry_keys_when_unset() -> None:
+    settings = _settings()
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert "SENTRY_DSN" not in env_vars
+    assert "NEXT_PUBLIC_SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
+def test_build_env_vars_omits_sentry_auth_token_when_dsn_unset() -> None:
+    settings = _settings(sentry_auth_token="sntrys_token")
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert "SENTRY_DSN" not in env_vars
+    assert "NEXT_PUBLIC_SENTRY_DSN" not in env_vars
+    assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
 def _settings(**overrides: str) -> BootstrapSettings:
     defaults: dict[str, Any] = {
         "supabase_access_token": "token",
@@ -645,6 +832,12 @@ def _settings(**overrides: str) -> BootstrapSettings:
         "openai_api_key": "openai-key",
         "tavily_api_key": "tavily-key",
         "production_domain": "",
+        "smtp_host": "smtp.resend.com",
+        "smtp_port": 465,
+        "smtp_user": "resend",
+        "smtp_pass": "",
+        "smtp_admin_email": "",
+        "smtp_sender_name": "",
     }
     defaults.update(overrides)
     return BootstrapSettings.model_construct(**defaults)
@@ -668,17 +861,14 @@ def _make_fake_vercel_run(
         body = kwargs.get("input")
         body_dict = None
         if body is not None:
-            import json as _json
-
-            body_dict = _json.loads(body)
+            body_dict = json.loads(body)
         if capture_body:
             calls.append((method, path, body_dict))
         else:
             calls.append((method, path))
         payload = responses.get((method, path), {})
-        import json as _json
 
-        return SimpleNamespace(returncode=0, stdout=_json.dumps(payload), stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
     return fake_run
 
@@ -750,7 +940,389 @@ def test_configure_auth_settings_dry_run(monkeypatch, capsys) -> None:
 
 def test_build_auth_redirect_urls_preview_includes_scoped_wildcard_and_domain() -> None:
     domain = "fitness-coach-agent.vercel.app"
-    urls = bootstrap_main._build_auth_redirect_urls("preview", domain)
+    urls = bootstrap_main._build_auth_redirect_urls(_settings(), "preview", domain)
     assert "https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**" in urls
     assert "https://fitness-coach-agent.vercel.app/**" in urls
     assert "http://localhost:3000/**" in urls
+
+
+def test_build_auth_redirect_urls_prod_includes_site_origin_wildcard() -> None:
+    # Regression for issue #172: production must allow-list its own /auth/callback
+    # path via a /** wildcard, or Supabase drops redirect_to and the magic link
+    # arrives without the auth code. The Vercel-assigned alias is allowed too.
+    domain = "fitness-coach-agent-phi.vercel.app"
+    urls = bootstrap_main._build_auth_redirect_urls(
+        _settings(production_domain="coach.example.com"), "prod", domain
+    )
+    assert "https://coach.example.com/**" in urls
+    assert "https://fitness-coach-agent-phi.vercel.app/**" in urls
+    assert "http://localhost:3000/**" in urls
+
+
+def test_build_auth_redirect_urls_prod_without_custom_domain_uses_vercel_alias() -> None:
+    domain = "fitness-coach-agent-phi.vercel.app"
+    urls = bootstrap_main._build_auth_redirect_urls(_settings(), "prod", domain)
+    # Only one wildcard for the origin — no duplicate when site URL == alias.
+    assert urls.count("https://fitness-coach-agent-phi.vercel.app/**") == 1
+
+
+def test_build_auth_redirect_urls_rejects_unknown_env() -> None:
+    # Guard against a typo'd env silently inheriting the production allow-list.
+    with pytest.raises(ValueError, match="Unknown env"):
+        bootstrap_main._build_auth_redirect_urls(_settings(), "staging", "example.vercel.app")
+
+
+def test_build_smtp_settings_returns_none_without_credentials() -> None:
+    assert bootstrap_main._build_smtp_settings(_settings()) is None
+    # Sender address alone is not enough — the password (Resend key) is required.
+    assert (
+        bootstrap_main._build_smtp_settings(_settings(smtp_admin_email="login@example.com")) is None
+    )
+    # ...and the password alone is not enough either — the sender address is required.
+    assert bootstrap_main._build_smtp_settings(_settings(smtp_pass="re_secret")) is None
+
+
+def test_build_smtp_settings_returns_resend_config_when_present() -> None:
+    smtp = bootstrap_main._build_smtp_settings(
+        _settings(smtp_pass="re_secret", smtp_admin_email="login@example.com")
+    )
+    assert smtp == {
+        "host": "smtp.resend.com",
+        "port": 465,
+        "user": "resend",
+        "pass": "re_secret",
+        "admin_email": "login@example.com",
+        "sender_name": "",
+    }
+
+
+def test_configure_auth_settings_includes_smtp_when_provided(monkeypatch) -> None:
+    patched: list[tuple[str, dict]] = []
+
+    def fake_patch(self, path: str, body: dict) -> dict:
+        patched.append((path, body))
+        return {}
+
+    monkeypatch.setattr(SupabaseClient, "_patch", fake_patch)
+
+    client = SupabaseClient("my-access-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "Coach",
+        },
+    )
+    client.close()
+
+    _, body = patched[0]
+    assert body["smtp_host"] == "smtp.resend.com"
+    assert body["smtp_port"] == 465
+    assert body["smtp_user"] == "resend"
+    assert body["smtp_pass"] == "re_secret"
+    assert body["smtp_admin_email"] == "login@example.com"
+    assert body["smtp_sender_name"] == "Coach"
+
+
+def test_configure_auth_settings_omits_smtp_when_absent(monkeypatch) -> None:
+    patched: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(
+        SupabaseClient, "_patch", lambda self, path, body: patched.append((path, body)) or {}
+    )
+
+    client = SupabaseClient("my-access-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+    )
+    client.close()
+
+    _, body = patched[0]
+    assert not any(key.startswith("smtp_") for key in body)
+
+
+def test_configure_auth_settings_falls_back_to_smtp_instructions_on_api_error(
+    monkeypatch, capsys
+) -> None:
+    def fake_patch(self, path: str, body: dict) -> dict:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(SupabaseClient, "_patch", fake_patch)
+
+    client = SupabaseClient("my-access-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "Coach",
+        },
+    )
+    client.close()
+
+    out = capsys.readouterr().out
+    assert "could not configure auth settings" in out
+    # The manual fallback prints the SMTP block so the operator can finish by hand...
+    assert "SMTP Settings" in out
+    assert "smtp.resend.com" in out
+    # ...but never echoes the Resend API key.
+    assert "re_secret" not in out
+
+
+# ---------------------------------------------------------------------------
+# Additional tests from CodeRabbit UTG covering gaps after PR #220
+# ---------------------------------------------------------------------------
+
+
+def test_build_smtp_settings_includes_custom_sender_name() -> None:
+    smtp = bootstrap_main._build_smtp_settings(
+        _settings(
+            smtp_pass="re_secret",
+            smtp_admin_email="login@example.com",
+            smtp_sender_name="My App",
+        )
+    )
+    assert smtp is not None
+    assert smtp["sender_name"] == "My App"
+
+
+def test_build_auth_redirect_urls_preview_without_domain_omits_domain_wildcard() -> None:
+    urls = bootstrap_main._build_auth_redirect_urls(_settings(), "preview", "")
+    assert "https://fitness-coach-agent-*-nigel-stukes-projects.vercel.app/**" in urls
+    assert "http://localhost:3000/**" in urls
+    assert "http://localhost:3001/**" in urls
+    # No concrete (non-pattern) HTTPS URL should be present when domain is empty.
+    assert not any(u.startswith("https://") and "/**" in u and "*" not in u for u in urls)
+
+
+def test_build_auth_redirect_urls_always_includes_localhost_3001() -> None:
+    urls_preview = bootstrap_main._build_auth_redirect_urls(_settings(), "preview", "")
+    urls_prod = bootstrap_main._build_auth_redirect_urls(
+        _settings(), "prod", "fitness-coach-agent-phi.vercel.app"
+    )
+    assert "http://localhost:3001/**" in urls_preview
+    assert "http://localhost:3001/**" in urls_prod
+
+
+def test_build_auth_redirect_urls_prod_with_empty_domain_requires_origin() -> None:
+    with pytest.raises(RuntimeError, match="production auth origin"):
+        bootstrap_main._build_auth_redirect_urls(_settings(), "prod", "")
+
+
+def test_build_auth_redirect_urls_prod_with_only_vercel_domain() -> None:
+    domain = "fitness-coach-agent-phi.vercel.app"
+    urls = bootstrap_main._build_auth_redirect_urls(_settings(), "prod", domain)
+    assert f"https://{domain}/**" in urls
+    # No duplicate entry when production_domain is blank and vercel_domain is used.
+    assert urls.count(f"https://{domain}/**") == 1
+
+
+def test_print_auth_config_instructions_without_smtp_omits_smtp_section(capsys) -> None:
+    supabase_client._print_auth_config_instructions(
+        "https://example.vercel.app",
+        ["https://example.vercel.app/**"],
+        smtp=None,
+    )
+    out = capsys.readouterr().out
+    assert "SMTP" not in out
+    assert "smtp.resend.com" not in out
+    assert "URL Configuration" in out
+    assert "manually" in out
+
+
+def test_print_auth_config_instructions_with_smtp_prints_smtp_section(capsys) -> None:
+    supabase_client._print_auth_config_instructions(
+        "https://example.vercel.app",
+        ["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "admin_email": "login@example.com",
+            "sender_name": "Coach App",
+        },
+    )
+    out = capsys.readouterr().out
+    assert "SMTP Settings" in out
+    assert "smtp.resend.com" in out
+    assert "465" in out
+    assert "resend" in out
+    assert "login@example.com" in out
+    assert "Coach App" in out
+
+
+def test_configure_auth_settings_dry_run_with_smtp_shows_smtp_host(monkeypatch, capsys) -> None:
+    def fail_patch(self, path: str, body: dict) -> dict:
+        raise AssertionError("_patch should not be called in dry-run mode")
+
+    monkeypatch.setattr(SupabaseClient, "_patch", fail_patch)
+
+    client = SupabaseClient("my-token", "my-org", dry_run=True)
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://prod.example.com",
+        extra_redirect_urls=["http://localhost:3000/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "",
+        },
+    )
+    client.close()
+
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "smtp.resend.com" in out
+
+
+def test_configure_auth_settings_no_token_with_smtp_prints_smtp_instructions(capsys) -> None:
+    client = SupabaseClient("", "")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "",
+        },
+    )
+    client.close()
+
+    out = capsys.readouterr().out
+    assert "SMTP Settings" in out
+    assert "smtp.resend.com" in out
+    assert "login@example.com" in out
+
+
+def test_configure_auth_settings_api_failure_with_smtp_prints_smtp_instructions(
+    monkeypatch, capsys
+) -> None:
+    def raising_patch(self, path: str, body: dict) -> dict:
+        raise RuntimeError("API unavailable")
+
+    monkeypatch.setattr(SupabaseClient, "_patch", raising_patch)
+
+    client = SupabaseClient("my-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "Coach",
+        },
+    )
+    client.close()
+
+    out = capsys.readouterr().out
+    assert "Warning" in out
+    assert "SMTP Settings" in out
+    assert "smtp.resend.com" in out
+
+
+def test_configure_auth_settings_api_failure_without_smtp_omits_smtp_from_fallback(
+    monkeypatch, capsys
+) -> None:
+    def raising_patch(self, path: str, body: dict) -> dict:
+        raise RuntimeError("API unavailable")
+
+    monkeypatch.setattr(SupabaseClient, "_patch", raising_patch)
+
+    client = SupabaseClient("my-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=["https://example.vercel.app/**"],
+    )
+    client.close()
+
+    out = capsys.readouterr().out
+    assert "Warning" in out
+    assert "SMTP" not in out
+
+
+def test_configure_auth_settings_smtp_does_not_clobber_base_auth_fields(monkeypatch) -> None:
+    patched: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        SupabaseClient, "_patch", lambda self, path, body: patched.append((path, body)) or {}
+    )
+
+    client = SupabaseClient("my-token", "my-org")
+    client.configure_auth_settings(
+        "proj-ref",
+        site_url="https://example.vercel.app",
+        extra_redirect_urls=[],
+        smtp={
+            "host": "smtp.resend.com",
+            "port": 465,
+            "user": "resend",
+            "pass": "re_secret",
+            "admin_email": "login@example.com",
+            "sender_name": "",
+        },
+    )
+    client.close()
+
+    _, body = patched[0]
+    assert body["mailer_autoconfirm"] is True
+    assert body["mailer_otp_length"] == 6
+    assert "{{ .Token }}" in body["mailer_templates_magic_link_content"]
+    assert "{{ .ConfirmationURL }}" in body["mailer_templates_confirmation_content"]
+
+
+def test_bootstrap_settings_smtp_defaults() -> None:
+    s = _settings()
+    assert s.smtp_host == "smtp.resend.com"
+    assert s.smtp_port == 465
+    assert s.smtp_user == "resend"
+    assert s.smtp_pass == ""
+    assert s.smtp_admin_email == ""
+    assert s.smtp_sender_name == ""
+
+
+def test_bootstrap_settings_smtp_fields_loaded_from_env_file(tmp_path) -> None:
+    env_file = tmp_path / ".env.bootstrap"
+    env_file.write_text(
+        "SUPABASE_ACCESS_TOKEN=sbp_token\n"
+        "CF_API_TOKEN=cf-token\n"
+        "CF_ACCOUNT_ID=acct\n"
+        "OPENAI_API_KEY=openai-key\n"
+        "TAVILY_API_KEY=tavily-key\n"
+        "SMTP_HOST=smtp.example.com\n"
+        "SMTP_PORT=587\n"
+        "SMTP_USER=apikey\n"
+        "SMTP_PASS=re_supersecret\n"
+        "SMTP_ADMIN_EMAIL=alerts@example.com\n"
+        "SMTP_SENDER_NAME=MyApp Notifications\n"
+    )
+    settings = BootstrapSettings(_env_file=str(env_file))  # type: ignore[call-arg]
+    assert settings.smtp_host == "smtp.example.com"
+    assert settings.smtp_port == 587
+    assert settings.smtp_user == "apikey"
+    assert settings.smtp_pass == "re_supersecret"
+    assert settings.smtp_admin_email == "alerts@example.com"
+    assert settings.smtp_sender_name == "MyApp Notifications"

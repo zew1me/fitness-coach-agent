@@ -175,17 +175,33 @@ class CloudflareClient:
         print(f"  Created R2 token {token_name!r}.")
         return {"access_key_id": access_key_id, "secret_access_key": secret_access_key}
 
-    def get_public_base_url(self, bucket_name: str) -> str:
-        """Return the r2.dev public URL for the bucket, or empty string if not enabled."""
-        try:
-            data = self._get(f"/accounts/{self._account_id}/r2/buckets/{bucket_name}")
-            domains = data.get("result", {}).get("domains", [])
-            for d in domains:
-                if "r2.dev" in d.get("domain", ""):
-                    return f"https://{d['domain']}"
-        except Exception:
-            pass
-        return ""
+    def ensure_public_access(self, bucket_name: str) -> str:
+        """Enable the bucket's Cloudflare-managed r2.dev public dev URL and return it.
+
+        Idempotent: enabling an already-enabled bucket just returns the domain.
+        The r2.dev URL is rate-limited and intended for non-production traffic;
+        attach a custom domain (R2_PUBLIC_BASE_URL_* in .env.bootstrap) for prod.
+
+        Raises if Cloudflare returns no domain, so bootstrap fails loudly rather
+        than pushing an empty R2_PUBLIC_BASE_URL to Vercel.
+        """
+        path = f"/accounts/{self._account_id}/r2/buckets/{bucket_name}/domains/managed"
+        if self._dry_run:
+            print(f"  [dry-run] Would enable public dev URL on {bucket_name!r}.")
+            return ""
+
+        print(f"  Enabling public dev URL on {bucket_name!r}…")
+        domain = (self._put(path, {"enabled": True}).get("result", {}) or {}).get("domain", "")
+        if not domain:
+            # Some API versions omit the domain on the PUT response; read it back.
+            domain = (self._get(path).get("result", {}) or {}).get("domain", "")
+        if not domain:
+            raise RuntimeError(
+                f"Enabled public access on {bucket_name!r} but Cloudflare returned no "
+                "r2.dev domain. Check the bucket's Public Development URL in the dashboard."
+            )
+        print(f"  Public dev URL: https://{domain}")
+        return f"https://{domain}"
 
     def endpoint_url(self) -> str:
         return f"https://{self._account_id}.r2.cloudflarestorage.com"

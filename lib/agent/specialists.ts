@@ -1,5 +1,7 @@
-import { convertToModelMessages, generateText, Output, type LanguageModel, type UIMessage } from "ai";
+import { Agent, run } from "@openai/agents";
+import type { UIMessage } from "ai";
 
+import { toAgentInputItems } from "./agent-input";
 import { selectMessagesForModel } from "./message-context";
 import {
   type ContextSlices,
@@ -9,12 +11,17 @@ import {
 } from "./orchestration-types";
 import { buildSpecialistPrompt } from "./system-prompt";
 
-const SPECIALIST_ORDER: InternalSpecialistRole[] = ["intake", "nutrition", "recovery", "workout"];
+const SPECIALIST_ORDER: InternalSpecialistRole[] = [
+  "intake",
+  "nutrition",
+  "recovery",
+  "workout",
+];
 
 type RunSpecialistsOptions = {
   messagesAreModelSelected?: boolean;
   messages: UIMessage[];
-  model: LanguageModel;
+  model: string;
   roles: InternalSpecialistRole[];
   slices: ContextSlices;
 };
@@ -31,21 +38,27 @@ export async function runSpecialists({
   roles,
   slices,
 }: RunSpecialistsOptions): Promise<SpecialistReport[]> {
-  const selectedMessages = messagesAreModelSelected ? messages : selectMessagesForModel(messages);
+  const selectedMessages = messagesAreModelSelected
+    ? messages
+    : selectMessagesForModel(messages);
   const orderedRoles = orderRoles(roles);
   const reports: SpecialistReport[] = [];
 
   for (const role of orderedRoles) {
-    const { output } = await generateText({
-      messages: await convertToModelMessages(selectedMessages),
+    const agent = new Agent({
+      name: `${role[0]?.toUpperCase()}${role.slice(1)} specialist`,
+      instructions: buildSpecialistPrompt(role, slices[role]),
       model,
-      output: Output.object({
-        schema: specialistReportSchema,
-      }),
-      system: buildSpecialistPrompt(role, slices[role]),
+      outputType: specialistReportSchema,
+    });
+    const result = await run(agent, toAgentInputItems(selectedMessages), {
+      maxTurns: 1,
     });
 
-    reports.push(specialistReportSchema.parse(output));
+    if (!result.finalOutput) {
+      throw new Error(`Agent ${role} failed to produce output`);
+    }
+    reports.push(specialistReportSchema.parse(result.finalOutput));
   }
 
   return reports;

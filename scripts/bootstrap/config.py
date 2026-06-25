@@ -42,9 +42,31 @@ class BootstrapSettings(BaseSettings):
     # Vercel — authentication comes from the local `vercel` CLI; no token needed.
     production_domain: str = ""
 
+    # Custom SMTP (Resend) for auth emails. Applied identically to preview and
+    # production so magic-link / OTP delivery is at parity across environments.
+    # Leave smtp_pass and smtp_admin_email blank to keep Supabase's built-in
+    # email sender (rate-limited, not for production). smtp_pass is the Resend
+    # API key; the Resend SMTP username is the literal string "resend".
+    smtp_host: str = "smtp.resend.com"
+    smtp_port: int = 465
+    smtp_user: str = "resend"
+    smtp_pass: str = ""
+    smtp_admin_email: str = ""
+    smtp_sender_name: str = ""
+
     # App secrets passed through to Vercel env vars
     openai_api_key: str
     tavily_api_key: str
+
+    # Sentry observability. Two distinct DSNs (separate Sentry Client Keys):
+    #   sentry_dsn        — server/edge/python (SENTRY_DSN); treated as a secret.
+    #   sentry_public_dsn — browser (NEXT_PUBLIC_SENTRY_DSN); inlined into the client
+    #                       bundle, so it is public and not sensitive.
+    # sentry_auth_token is a build-time secret used by withSentryConfig to upload
+    # source maps. Leave any blank to skip provisioning that var.
+    sentry_dsn: str = ""
+    sentry_public_dsn: str = ""
+    sentry_auth_token: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env.bootstrap",
