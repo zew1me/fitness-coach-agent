@@ -16,6 +16,7 @@
     "test": "vitest run",
     "check": "bun run lint && bun run typecheck && bun run test",
     "test:oai": "vitest run --config vitest.oai.config.ts",
+    "test:db": "RUN_DB_TESTS=1 uv run pytest -m db tests/python/",
     "test:ui": "playwright test",
     "format": "prettier --write .",
     "shrink:gpx": "bun scripts/shrink-gpx.ts",

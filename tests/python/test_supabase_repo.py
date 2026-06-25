@@ -683,3 +683,86 @@ async def test_chat_turn_lease_rejects_active_owner_and_allows_expired_lease() -
             lease_id="other-lease",
             ttl_seconds=60,
         )
+
+
+def test_athlete_profile_specialization_pct_defaults_to_none() -> None:
+    """Regression guard: default must be None, not 80 (issue #254).
+
+    If this fails someone reverted int|None=None back to int=80 in athlete.py.
+    """
+    profile = AthleteProfile(user_id="x")
+    assert profile.specialization_pct is None
+
+
+@pytest.mark.asyncio
+async def test_update_athlete_profile_fields_drops_null_specialization_pct() -> None:
+    """None specialization_pct must be excluded from the upsert payload.
+
+    A multi-sport athlete may have no single-sport specialization. The AI sends
+    specialization_pct=None; the repo filter must drop it so Postgres is never asked
+    to store an explicit NULL on a partial update (preserving whatever was stored).
+    """
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    await repo.update_athlete_profile_fields(
+        "athlete-multi",
+        {
+            "primary_sports": ["cycling", "running"],
+            "specialization_pct": None,
+            "weekly_available_hours": 8,
+        },
+    )
+
+    # FakeSupabaseClient.table() returns a fresh query builder each call, so _upserted_payload
+    # lives only on the ephemeral instance. execute() appends to the shared _rows list though,
+    # so inspect the row that landed in the backing store.
+    rows = client._tables["athlete_profiles"]._rows
+    assert len(rows) == 1, f"expected 1 row after upsert, got {len(rows)}"
+    upserted = rows[0]
+    assert "specialization_pct" not in upserted, (
+        "specialization_pct=None must be filtered out before reaching the DB"
+    )
+    assert upserted.get("primary_sports") == ["cycling", "running"]
+    assert upserted.get("weekly_available_hours") == 8
+
+
+@pytest.mark.asyncio
+async def test_upsert_athlete_profile_allows_null_specialization_pct() -> None:
+    """upsert_athlete_profile must tolerate specialization_pct=None on the model.
+
+    Multi-sport athletes have no single-sport specialization. The column is nullable
+    after migration 20260624055541, so the model must accept None and the upsert must succeed.
+
+    Unlike update_athlete_profile_fields (which filters out None values), upsert sends
+    the full model_dump payload — specialization_pct is present as explicit null.
+    After migration 20260624055541 the column accepts null, so this reaches the DB correctly.
+    """
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    profile = AthleteProfile(
+        user_id="athlete-multi2",
+        primary_sports=["cycling", "running"],
+        specialization_pct=None,
+    )
+    assert profile.specialization_pct is None
+
+    saved = await repo.upsert_athlete_profile(profile)
+    assert saved.user_id == "athlete-multi2"
+    assert saved.specialization_pct is None
+
+    # Verify the upsert payload explicitly contains specialization_pct=None (not omitted).
+    # upsert_athlete_profile uses model_dump and sends all fields; it is the nullable
+    # column (migration 20260624055541) that makes this safe.  Contrast with
+    # update_athlete_profile_fields which drops None values via _safe_athlete_profile_fields.
+    # FakeSupabaseClient.table() returns a fresh query builder each call; use _rows instead
+    # (execute() appends to the shared backing list).
+    rows = client._tables["athlete_profiles"]._rows
+    assert len(rows) == 1, f"expected 1 row after upsert, got {len(rows)}"
+    payload = rows[0]
+    assert "specialization_pct" in payload, (
+        "upsert_athlete_profile must send specialization_pct explicitly (as null), "
+        "not omit it — omission would be semantically ambiguous in a full upsert"
+    )
+    assert payload["specialization_pct"] is None
