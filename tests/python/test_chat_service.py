@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from backend.models.athlete import AthleteProfile
 from backend.models.chat import ChatMessage, ChatModelState, ChatPersistRequest, ChatThread
-from backend.services.chat import ChatService
+from backend.services.chat import ChatService, _decode_message_cursor, _encode_message_cursor
 
 
 class OnboardingRepo:
@@ -182,6 +182,24 @@ async def test_persist_message_defaults_metadata_to_empty_dict() -> None:
     )
 
     assert repo.create_calls[0]["metadata"] == {}
+
+
+def test_message_cursor_round_trips_message_ids_with_delimiters() -> None:
+    created_at = datetime(2026, 4, 19, 12, 30, tzinfo=UTC)
+    message = ChatMessage(
+        content="Older message",
+        created_at=created_at,
+        id="message|with|pipes",
+        metadata={},
+        parts=[{"type": "text", "text": "Older message"}],
+        role="assistant",
+        thread_id="thread-1",
+        user_id="athlete-1",
+    )
+
+    cursor = _encode_message_cursor(message)
+
+    assert _decode_message_cursor(cursor) == (created_at, "message|with|pipes")
 
 
 class ModelStateRepo(OnboardingRepo):

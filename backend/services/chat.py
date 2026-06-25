@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from datetime import datetime
 from typing import Any, Literal
 
@@ -20,16 +23,29 @@ CHAT_MESSAGE_PAGE_SIZE = 50
 
 
 def _encode_message_cursor(message: ChatMessage) -> str:
-    return f"{message.created_at.isoformat()}|{message.id}"
+    payload = json.dumps(
+        {"created_at": message.created_at.isoformat(), "id": message.id},
+        separators=(",", ":"),
+    )
+    return base64.urlsafe_b64encode(payload.encode()).decode("ascii")
 
 
 def _decode_message_cursor(cursor: str) -> tuple[datetime, str]:
     try:
-        timestamp, message_id = cursor.rsplit("|", 1)
-        created_at = datetime.fromisoformat(timestamp)
-    except ValueError as exc:
+        decoded = base64.urlsafe_b64decode(cursor.encode("ascii")).decode()
+        payload = json.loads(decoded)
+        created_at = datetime.fromisoformat(payload["created_at"])
+        message_id = payload["id"]
+    except (
+        binascii.Error,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         raise ValueError("Invalid chat message cursor.") from exc
-    if not message_id:
+    if not isinstance(message_id, str) or not message_id:
         raise ValueError("Invalid chat message cursor.")
     return created_at, message_id
 

@@ -311,6 +311,7 @@ class ModelStateChatService:
 
     async def replace_model_state(self, user_id: str, **kwargs) -> ChatModelState:
         assert user_id == "athlete-1"
+        assert kwargs["lease_id"] == "lease-1"
         if kwargs["expected_version"] != self.state.version:
             raise ValueError("Chat model state version conflict.")
         self.state = self.state.model_copy(
