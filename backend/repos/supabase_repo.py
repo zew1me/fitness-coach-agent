@@ -548,7 +548,7 @@ class SupabaseRepository:
         }
         created = (
             client.table("chat_model_states")
-            .upsert(payload, on_conflict="user_id", ignore_duplicates=True)
+            .upsert(payload, on_conflict="thread_id", ignore_duplicates=True)
             .execute()
         )
         created_rows = created.data or []

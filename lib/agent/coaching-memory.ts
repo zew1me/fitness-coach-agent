@@ -18,8 +18,8 @@ export const coachingMemoryRecordSchema = z.object({
   lifecycle: z.enum(["active", "superseded", "resolved", "dismissed"]),
   supersededBy: z.string().optional(),
   plannedDate: z.iso.date().optional(),
-  followUpAt: z
-    .iso.datetime({ offset: true })
+  followUpAt: z.iso
+    .datetime({ offset: true })
     .transform((value) => new Date(value).toISOString())
     .optional(),
   outcome: z.string().optional(),
@@ -124,7 +124,9 @@ export function oldestDueFollowUp(
         record.followUpAt &&
         new Date(record.followUpAt) <= now,
     )
-    .sort((left, right) =>
-      String(left.followUpAt).localeCompare(String(right.followUpAt)),
+    .sort(
+      (left, right) =>
+        new Date(left.followUpAt ?? 0).getTime() -
+        new Date(right.followUpAt ?? 0).getTime(),
     )[0];
 }

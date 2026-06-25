@@ -1475,6 +1475,9 @@ async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoi
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         initial = await client.get("/api/chat/model-state")
+        await client.post(
+            "/api/chat/model-state/lease", json={"lease_id": "lease-1", "ttl_seconds": 60}
+        )
         replaced = await client.put(
             "/api/chat/model-state",
             json={
@@ -1498,6 +1501,9 @@ async def test_chat_model_state_replace_rejects_stale_version(
 ) -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        await client.post(
+            "/api/chat/model-state/lease", json={"lease_id": "lease-1", "ttl_seconds": 60}
+        )
         response = await client.put(
             "/api/chat/model-state",
             json={
