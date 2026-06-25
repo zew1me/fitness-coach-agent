@@ -7,30 +7,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "../../components/app-shell";
 import { ThemeSwitcher } from "../../components/theme-switcher";
 
+import { createLocalStorageMock } from "./test-utils";
+
 const STORAGE_KEY = "fitness-theme-preference";
 
-type LocalStorageMock = {
-  clear(): void;
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-};
-
-const localStorageMock: LocalStorageMock = ((): LocalStorageMock => {
-  let store: Record<string, string> = {};
-  return {
-    clear(): void {
-      store = {};
-    },
-    getItem(key: string): string | null {
-      return store[key] ?? null;
-    },
-    setItem(key: string, value: string): void {
-      store[key] = value;
-    },
-  };
-})();
+const localStorageMock = createLocalStorageMock();
 
 beforeEach(() => {
+  // Components use the classic JSX runtime under vitest and reference a global
+  // `React`, so this stub is required despite CodeRabbit flagging it as unused.
   vi.stubGlobal("React", React);
   vi.stubGlobal("localStorage", localStorageMock);
   localStorageMock.clear();
@@ -65,7 +50,7 @@ describe("ThemeSwitcher", () => {
     ).toBe("true");
   });
 
-  it("renders in the app shell alongside page content", () => {
+  it("renders page content without injecting a floating switcher", () => {
     render(
       <AppShell>
         <main>Training dashboard</main>
@@ -73,6 +58,7 @@ describe("ThemeSwitcher", () => {
     );
 
     expect(screen.getByText("Training dashboard")).toBeTruthy();
-    expect(screen.getByRole("group", { name: /theme selector/i })).toBeTruthy();
+    // The switcher now lives in the account flyout, not the global shell.
+    expect(screen.queryByRole("group", { name: /theme selector/i })).toBeNull();
   });
 });

@@ -72,6 +72,9 @@ beforeEach(() => {
     value: localStorageMock,
   });
   vi.stubGlobal("localStorage", localStorageMock);
+  // ThemeSwitcher (rendered in the account menu) compiles JSX to a global
+  // `React` reference under vitest's classic runtime, so provide it.
+  vi.stubGlobal("React", React);
   vi.spyOn(window, "matchMedia").mockReturnValue({
     matches: false,
     addEventListener: vi.fn(),

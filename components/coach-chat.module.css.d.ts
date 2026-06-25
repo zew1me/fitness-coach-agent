@@ -2,6 +2,7 @@
 declare const styles: {
   readonly actionRow: string;
   readonly accountButton: string;
+  readonly accountIcon: string;
   readonly accountMenu: string;
   readonly accountMenuWrap: string;
   readonly accountSummary: string;
@@ -57,6 +58,7 @@ declare const styles: {
   readonly messagesPane: string;
   readonly menuItem: string;
   readonly menuForm: string;
+  readonly menuThemeRow: string;
   readonly meta: string;
   readonly page: string;
   readonly planCard: string;
@@ -85,8 +87,6 @@ declare const styles: {
   readonly uploadRow: string;
   readonly uploadStatus: string;
   readonly waitingStatus: string;
-  readonly themeOption: string;
-  readonly themeRow: string;
   readonly userBubble: string;
 };
 

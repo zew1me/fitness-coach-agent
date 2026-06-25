@@ -207,13 +207,6 @@ textarea {
   box-shadow: var(--shadow);
 }
 
-.app-theme-switcher {
-  position: fixed;
-  top: 0.875rem;
-  right: 0.875rem;
-  z-index: 50;
-}
-
 .theme-toggle button {
   display: inline-flex;
   align-items: center;
@@ -505,14 +498,5 @@ textarea {
   .header-controls {
     width: 100%;
     justify-content: space-between;
-  }
-
-  .theme-toggle button span {
-    display: none;
-  }
-
-  .app-theme-switcher {
-    top: 0.75rem;
-    right: 0.75rem;
   }
 }

@@ -76,10 +76,10 @@ export function ThemeSwitcher(): JSX.Element {
           aria-pressed={mode === entry}
           key={entry}
           onClick={() => setTheme(entry)}
+          title={labelForMode(entry)}
           type="button"
         >
           <ThemeModeIcon mode={entry} />
-          <span>{labelForMode(entry)}</span>
         </button>
       ))}
     </div>
