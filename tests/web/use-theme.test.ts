@@ -4,24 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useTheme } from "../../lib/use-theme";
 
+import { createLocalStorageMock } from "./test-utils";
+
 const STORAGE_KEY = "fitness-theme-preference";
 
-type LocalStorageMock = {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-  clear(): void;
-};
-
-const localStorageMock: LocalStorageMock = ((): LocalStorageMock => {
-  let store: Record<string, string> = {};
-  return {
-    getItem(key: string): string | null { return store[key] ?? null; },
-    setItem(key: string, value: string): void { store[key] = value; },
-    removeItem(key: string): void { delete store[key]; },
-    clear(): void { store = {}; },
-  };
-})();
+const localStorageMock = createLocalStorageMock();
 
 beforeEach(() => {
   vi.stubGlobal("localStorage", localStorageMock);
@@ -92,5 +79,40 @@ describe("useTheme", () => {
       result.current.setTheme("system");
     });
     expect(document.documentElement.dataset["theme"]).toBe("dark");
+  });
+
+  it("updates the resolved theme when the system preference changes in system mode", () => {
+    let mediaListener: ((event: MediaQueryListEvent) => void) | undefined;
+    vi.spyOn(window, "matchMedia").mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn((_eventName, listener) => {
+        mediaListener = listener as (event: MediaQueryListEvent) => void;
+      }),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList);
+
+    renderHook(() => useTheme());
+
+    mediaListener?.({ matches: true } as MediaQueryListEvent);
+
+    expect(document.documentElement.dataset["theme"]).toBe("dark");
+    expect(document.documentElement.dataset["themeMode"]).toBe("system");
+  });
+
+  it("removes the matchMedia listener on unmount", () => {
+    const removeEventListener = vi.fn();
+    vi.spyOn(window, "matchMedia").mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener,
+    } as unknown as MediaQueryList);
+
+    const { unmount } = renderHook(() => useTheme());
+    unmount();
+
+    expect(removeEventListener).toHaveBeenCalledWith(
+      "change",
+      expect.any(Function),
+    );
   });
 });
