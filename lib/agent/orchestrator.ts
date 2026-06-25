@@ -276,9 +276,12 @@ export function streamCoachTurn({
         await Sentry.startSpan(
           {
             name: "fitness-coach-turn",
-            op: "ai.agent",
+            // OpenTelemetry GenAI semantic conventions so Sentry/OTel backends
+            // recognise this as an agent-invocation span.
+            op: "gen_ai.invoke_agent",
             attributes: {
-              "ai.model": MODEL,
+              "gen_ai.system": "openai",
+              "gen_ai.request.model": MODEL,
               "user.id": context.profile.user_id,
             },
           },

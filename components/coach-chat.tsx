@@ -27,10 +27,9 @@ import { useAthleteProfile } from "../lib/use-athlete-profile";
 import { useBrowserSession } from "../lib/use-browser-session";
 import { useChatThread } from "../lib/use-chat-thread";
 import { useIsMobile } from "../lib/use-is-mobile";
-import { useTheme } from "../lib/use-theme";
-import type { ThemeMode } from "../lib/use-theme";
 
 import styles from "./coach-chat.module.css";
+import { ThemeSwitcher } from "./theme-switcher";
 
 type LocalAttachment = {
   id: string;
@@ -704,6 +703,9 @@ function AccountMenu({
         <span>Signed in</span>
         <strong>{accountLabel(profile)}</strong>
       </div>
+      <div className={styles.menuThemeRow}>
+        <ThemeSwitcher />
+      </div>
       <button
         className={styles.menuItem}
         onClick={onOpenProfile}
@@ -759,10 +761,30 @@ function ChatTopbar({
             aria-label="Account menu"
             className={styles.accountButton}
             onClick={() => setOpen((prev) => !prev)}
+            title="Account"
             type="button"
           >
-            Account
-            <span aria-hidden="true">⌄</span>
+            <svg
+              aria-hidden="true"
+              className={styles.accountIcon}
+              viewBox="0 0 24 24"
+            >
+              <circle
+                cx="12"
+                cy="8"
+                fill="none"
+                r="3.5"
+                stroke="currentColor"
+                strokeWidth="1.8"
+              />
+              <path
+                d="M5 19.5a7 7 0 0 1 14 0"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeWidth="1.8"
+              />
+            </svg>
           </button>
           {open ? (
             <AccountMenu
@@ -1120,8 +1142,6 @@ function ProfileDrawer({
   onClose,
   profile,
   setProfile,
-  themeMode,
-  setTheme,
   saving,
   status,
   onSave,
@@ -1130,8 +1150,6 @@ function ProfileDrawer({
   onClose: () => void;
   profile: AthleteProfile | null;
   setProfile: (_profile: AthleteProfile) => void;
-  themeMode: ThemeMode;
-  setTheme: (_mode: ThemeMode) => void;
   saving: boolean;
   status: string | null;
   onSave: () => void;
@@ -1162,21 +1180,6 @@ function ProfileDrawer({
           >
             Close
           </button>
-        </div>
-
-        <div className={styles.themeRow}>
-          {(["light", "system", "dark"] as ThemeMode[]).map((option) => (
-            <label className={styles.themeOption} key={option}>
-              <input
-                checked={themeMode === option}
-                name="theme"
-                onChange={() => setTheme(option)}
-                type="radio"
-                value={option}
-              />
-              {option.charAt(0).toUpperCase() + option.slice(1)}
-            </label>
-          ))}
         </div>
 
         <ProfileDrawerBody
@@ -1284,7 +1287,6 @@ function CoachChatBody({
   const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const { mode: themeMode, setTheme } = useTheme();
   const isMobile = useIsMobile();
 
   const persistedMessages = threadData.thread.messages;
@@ -1649,9 +1651,7 @@ function CoachChatBody({
         profile={athleteProfile.profile}
         saving={athleteProfile.saving}
         setProfile={athleteProfile.setProfile}
-        setTheme={setTheme}
         status={athleteProfile.status}
-        themeMode={themeMode}
       />
     </main>
   );
