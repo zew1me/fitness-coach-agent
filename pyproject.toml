@@ -75,3 +75,7 @@ include = ["api", "backend", "tests/python"]
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 asyncio_mode = "auto"
+addopts = "-m 'not db'"
+markers = [
+  "db: integration tests that require a live Supabase connection (run with: uv run pytest -m db)",
+]

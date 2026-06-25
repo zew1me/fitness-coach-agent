@@ -40,7 +40,7 @@ class AthleteProfile(BaseModel):
     primary_sports: list[str] = Field(default_factory=list)
     weekly_available_hours: float | None = None
     coaching_state: str = "onboarding"
-    specialization_pct: int = 80
+    specialization_pct: int | None = None
     onboarding_collected: dict[str, bool] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
     injuries_rehab: list[str] = Field(default_factory=list)
