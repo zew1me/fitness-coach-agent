@@ -6,12 +6,14 @@ athlete-visible chat transcript.
 
 ## Motivation
 
-The OpenAI Agents SDK replay model requires the full item history on every turn.
-In a serverless environment each request starts cold, so the model state must be
-loaded from a database. Without compaction, history grows without bound; once the
-context window of the underlying model is approached the request will either fail
-or degrade. Compaction shrinks model history automatically while the user's
-visible message thread (`chat_messages`) remains intact.
+Previous to this, we would send the OpenAI Agents SDK the full item history on every turn.
+Without compaction, history grows without bound; once the context window of the underlying 
+model is approached the request will either fail or degrade. We also see latency increase, 
+as well as token usage as the conversation history goes. Given the way this app is modeled
+as a single chat thread (maybe in the future this changes, but there will still be a single
+primary chat thread in most incantations I can think of), user experience decreases due to 
+latency the longer they use the app. Compaction shrinks model history automatically while 
+the user's visible message thread (`chat_messages`) remains intact.
 
 ---
 
@@ -130,8 +132,8 @@ or API glitch from silently erasing the conversation.
 ```
 
 Thresholds are declared in `lib/agent/orchestrator.ts` (forced pre-turn
-compaction at 220k/260k tokens) and in the `DurableCompactionSession`
-constructor defaults (auto-compaction at 120k tokens or 40 non-user items).
+compaction at soft and hard limit of tokens) and in the `DurableCompactionSession`
+constructor defaults (auto-compaction at N tokens or M non-user items).
 
 ---
 
