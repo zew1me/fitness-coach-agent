@@ -5,7 +5,7 @@
  * The root cause: `specialization_pct` was NOT NULL in the DB schema with a
  * DEFAULT of 80.  When the AI omits the field for a multi-sport athlete the
  * column had no DEFAULT on drifted preview DBs, causing a constraint violation.
- * Migration 0005 drops NOT NULL + DEFAULT; NULL is now the correct sentinel.
+ * Migration 20260624055541 drops NOT NULL + DEFAULT; NULL is now the correct sentinel.
  *
  * These tests verify the *client-side* contract:
  *
@@ -212,7 +212,7 @@ test.describe("chat onboarding — multi-sport null specialization_pct (#254)", 
     // After the turn the chat surface reloads the athlete summary; return the
     // post-update profile with specialization_pct = null (triathlete, no
     // single-sport specialization).  This is the state that existed only as a
-    // 500 before migration 0005.
+    // 500 before migration 20260624055541.
     await page.route("**/api/engine/get-athlete-summary", (route) =>
       route.fulfill({
         status: 200,
@@ -227,7 +227,7 @@ test.describe("chat onboarding — multi-sport null specialization_pct (#254)", 
     await expect(page.getByTestId("composer-row")).toBeVisible();
 
     // New user types their sport — the key onboarding message that would have
-    // triggered the NOT NULL constraint violation pre-migration-0005.
+    // triggered the NOT NULL constraint violation pre-migration-20260624055541.
     await page
       .locator("textarea")
       .fill("I'm a triathlete — cycling, running, swimming");

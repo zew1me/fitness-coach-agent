@@ -8,13 +8,13 @@ These tests are excluded from the default gate (uv run pytest) via
 addopts = "-m 'not db'" in pyproject.toml.  They are not run in CI
 and must be run manually against a local or preview Supabase project.
 
-Red/green context for migration 0005
+Red/green context for migration 20260624055541
 --------------------------------------
-Before applying 0005_specialization_pct_nullable.sql:
+Before applying 20260624055541_specialization_pct_nullable.sql:
   bun run db:reset            # replay migrations 0001-0004
   bun run test:db             # test_specialization_pct_* RED -> APIError NOT NULL
-After applying 0005:
-  bun run db:reset            # replay 0001-0005
+After applying 20260624055541:
+  bun run db:reset            # replay all migrations
   bun run test:db             # all db tests GREEN
 """
 
@@ -59,8 +59,8 @@ async def test_upsert_profile_with_null_specialization_pct(
 ) -> None:
     """A multi-sport athlete profile with specialization_pct=None must persist without error.
 
-    This is the canonical regression test for issue #254.  Before migration 0005 this
-    raises APIError because the column was NOT NULL.  After 0005 it stores NULL.
+    This is the canonical regression test for issue #254.  Before migration 20260624055541 this
+    raises APIError because the column was NOT NULL.  After 20260624055541 it stores NULL.
     """
     profile = AthleteProfile(
         user_id=unique_user,
@@ -133,8 +133,9 @@ async def test_new_profile_row_has_null_specialization_pct_not_default_80(
 ) -> None:
     """A brand-new profile row must store NULL for specialization_pct, not the old DEFAULT 80.
 
-    This tests the DROP DEFAULT path of migration 0005.  Before 0005, omitting the
-    field from the INSERT would fall back to DEFAULT 80.  After 0005 it stores NULL.
+    This tests the DROP DEFAULT path of migration 20260624055541.  Before that
+    migration, omitting the field from the INSERT would fall back to DEFAULT 80.
+    After it, the field stores NULL.
     The canonical failure for issue #254 came from the column having no DEFAULT on a
     drifted DB — this test verifies we converge on NULL everywhere.
     """
