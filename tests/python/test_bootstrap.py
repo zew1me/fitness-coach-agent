@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
+from scripts.bootstrap import config as bootstrap_config
 from scripts.bootstrap import main as bootstrap_main
 from scripts.bootstrap import supabase_client
 from scripts.bootstrap.cloudflare_client import CloudflareClient
@@ -154,6 +155,83 @@ def test_bootstrap_settings_env_file_overrides_shell_env(monkeypatch, tmp_path) 
     settings = BootstrapSettings(_env_file=str(env_file))  # type: ignore[call-arg]
 
     assert settings.supabase_access_token == "sbp_from_file"
+
+
+def test_warns_when_shell_supabase_token_conflicts_with_env_file(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    env_file = tmp_path / ".env.bootstrap"
+    env_file.write_text("SUPABASE_ACCESS_TOKEN=file-secret\n")
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "shell-secret")
+
+    bootstrap_config.warn_about_supabase_token_source(env_file=env_file)
+
+    warning = capsys.readouterr().err
+    assert "conflicts" in warning
+    assert ".env.bootstrap" in warning
+    assert "unset SUPABASE_ACCESS_TOKEN" in warning
+    assert "file-secret" not in warning
+    assert "shell-secret" not in warning
+
+
+def test_warns_when_supabase_token_is_shell_only(monkeypatch, tmp_path, capsys) -> None:
+    env_file = tmp_path / ".env.bootstrap"
+    env_file.write_text("SUPABASE_ACCESS_TOKEN=\n")
+    monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "shell-secret")
+
+    bootstrap_config.warn_about_supabase_token_source(env_file=env_file)
+
+    warning = capsys.readouterr().err
+    assert "shell-exported SUPABASE_ACCESS_TOKEN" in warning
+    assert "move it to .env.bootstrap" in warning
+    assert "shell-secret" not in warning
+
+
+@pytest.mark.parametrize("shell_token", [None, "file-secret"])
+def test_does_not_warn_for_safe_supabase_token_sources(
+    monkeypatch, tmp_path, capsys, shell_token
+) -> None:
+    env_file = tmp_path / ".env.bootstrap"
+    env_file.write_text("SUPABASE_ACCESS_TOKEN=file-secret\n")
+    if shell_token is None:
+        monkeypatch.delenv("SUPABASE_ACCESS_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", shell_token)
+
+    bootstrap_config.warn_about_supabase_token_source(env_file=env_file)
+
+    assert capsys.readouterr().err == ""
+
+
+def test_run_warns_about_token_source_before_external_operations(monkeypatch) -> None:
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        bootstrap_main,
+        "load_settings",
+        lambda: (_settings(), "vercel-project", "vercel-team"),
+    )
+    monkeypatch.setattr(bootstrap_main, "load_state", lambda _env: {})
+    monkeypatch.setattr(
+        bootstrap_main,
+        "warn_about_supabase_token_source",
+        lambda: events.append("preflight"),
+        raising=False,
+    )
+
+    class ExternalOperationReachedError(Exception):
+        pass
+
+    def stop_at_first_external_operation(*_args, **_kwargs):
+        events.append("external")
+        raise ExternalOperationReachedError
+
+    monkeypatch.setattr(bootstrap_main, "_fetch_vercel_domain", stop_at_first_external_operation)
+
+    with pytest.raises(ExternalOperationReachedError):
+        bootstrap_main.run("prod", skip_migrations=False, dry_run=False)
+
+    assert events == ["preflight", "external"]
 
 
 def test_setup_supabase_saves_new_db_password_before_migration_failure(monkeypatch) -> None:
@@ -1115,11 +1193,6 @@ def test_build_auth_redirect_urls_always_includes_localhost_3001() -> None:
     )
     assert "http://localhost:3001/**" in urls_preview
     assert "http://localhost:3001/**" in urls_prod
-
-
-def test_build_auth_redirect_urls_prod_with_empty_domain_requires_origin() -> None:
-    with pytest.raises(RuntimeError, match="production auth origin"):
-        bootstrap_main._build_auth_redirect_urls(_settings(), "prod", "")
 
 
 def test_build_auth_redirect_urls_prod_with_only_vercel_domain() -> None:

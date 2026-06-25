@@ -43,16 +43,20 @@ to the site root **without `?code`**.
 
 ## Applying parity to production
 
-With a populated `.env.bootstrap` (see `.env.bootstrap.example`), run:
+Put `SUPABASE_ACCESS_TOKEN` in `.env.bootstrap` (see `.env.bootstrap.example`), then clear any
+shell-exported copy before running bootstrap:
 
 ```bash
+unset SUPABASE_ACCESS_TOKEN
 bun run setup:prod   # uv run python -m scripts.bootstrap.main --env prod
 ```
 
-This requires `SUPABASE_ACCESS_TOKEN` (a Supabase personal access token) so the
-Management API call can patch the project. Add `SMTP_PASS` (your Resend API key)
-and `SMTP_ADMIN_EMAIL` (an address on a Resend-verified domain) to also push the
-SMTP sender; leave them blank to keep Supabase's built-in, rate-limited sender.
+`.env.bootstrap` is authoritative because bootstrap must use one stable credential for both the
+Supabase Management API and CLI subprocesses. Bootstrap warns before external operations if the
+shell token conflicts with the file or if only a shell token is configured; token values are never
+printed. Add `SMTP_PASS` (your Resend API key) and `SMTP_ADMIN_EMAIL` (an address on a
+Resend-verified domain) to also push the SMTP sender; leave them blank to keep Supabase's built-in,
+rate-limited sender.
 
 The expected production values (the bootstrap auto-detects the canonical Vercel
 alias — `fitness-coach-agent-phi.vercel.app` as of 2026-06-15, found under the
