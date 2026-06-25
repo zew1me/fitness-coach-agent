@@ -87,6 +87,26 @@ report no pending migrations. Otherwise, the only expected pending migration is:
 0004_chat_messages_parts.sql
 ```
 
+## Preview repair from June 2026 — specialization_pct nullable (20260624055541)
+
+The preview DB received a direct migration on 2026-06-24 that made
+`athlete_profiles.specialization_pct` nullable and dropped its `DEFAULT 80`.
+This was applied to stop a NOT NULL constraint violation when the coaching
+agent called `update_athlete_profile` without a known `specialization_pct`
+value. The migration was **not** in the local repo at the time it was applied.
+
+Repair path (already complete for preview):
+
+- Create `supabase/migrations/20260624055541_specialization_pct_nullable.sql`
+  with the exact SQL applied to preview so the local migration sequence
+  matches the remote history.
+- Change `AthleteProfile.specialization_pct` in `backend/models/athlete.py`
+  from `int = 80` to `int | None = None` so that rows where the field is
+  null parse correctly.
+
+Local and production environments will receive the migration on the next
+`db push` / deploy.
+
 ## If a future remote-only version appears
 
 First identify whether the remote-only version is a real schema change or an
