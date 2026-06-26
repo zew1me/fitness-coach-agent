@@ -79,14 +79,14 @@ class ConfidenceEntry(BaseModel):
     {field: score} map, which strict structured outputs cannot represent."""
 
     field: str
-    confidence: float
+    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class ScreenshotClassificationModel(BaseModel):
     screenshot_type: ScreenshotType
     source_app_hint: str | None = None
     date_range_hint: str | None = None
-    confidence: float
+    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class ActivityExtraction(BaseModel):
@@ -113,7 +113,7 @@ class WellnessDayEntry(BaseModel):
     resting_hr_bpm: int | None = None
     body_battery: int | None = None
     stress_score: int | None = None
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class WellnessMultiExtraction(BaseModel):
@@ -130,7 +130,7 @@ class WellnessSingleExtraction(BaseModel):
     body_battery: int | None = None
     stress_score: int | None = None
     subjective_energy: int | None = None
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class ChartDateRange(BaseModel):
@@ -156,7 +156,7 @@ class TrainingLoadPoint(BaseModel):
     ) = None
     label: str | None = None
     value: float | None = None
-    confidence: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class TrainingLoadChartExtraction(BaseModel):
