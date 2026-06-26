@@ -84,6 +84,12 @@ function trimBootstrapToBudget(
       return candidate;
     }
   }
+  // Every suffix exceeds the budget — seed the session cold rather than
+  // exceeding the token limit.  Log so this case is visible in production.
+  Sentry.logger.warn(
+    "coach: trimBootstrapToBudget: all messages exceed budget; session seeded cold",
+    { messageCount: messages.length },
+  );
   return [];
 }
 
