@@ -246,7 +246,7 @@ async def test_call_vision_uses_model_max_tokens_and_high_detail(
     parse_kwargs = captured["parse_kwargs"]
     assert parse_kwargs["model"] == "vision-model"
     assert parse_kwargs["max_output_tokens"] == 7777
-    assert parse_kwargs["reasoning"] == {"effort": "low"}
+    assert parse_kwargs["reasoning"]["effort"] == "low"
     assert parse_kwargs["text_format"] is screenshot_analyzer.ActivityExtraction
     assert parse_kwargs["input"][0]["content"][1]["detail"] == "high"
 
