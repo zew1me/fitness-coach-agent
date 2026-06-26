@@ -1621,9 +1621,6 @@ function CoachChatBody({
                   if (nextCursorRef.current !== requestedCursor) return;
                   setThreadData((current) => {
                     if (current.next_cursor !== requestedCursor) return current;
-                    setVisibleMessageCount(
-                      (visibleCount) => visibleCount + page.messages.length,
-                    );
                     return {
                       ...current,
                       next_cursor: page.next_cursor,
@@ -1636,6 +1633,9 @@ function CoachChatBody({
                       },
                     };
                   });
+                  setVisibleMessageCount(
+                    (visibleCount) => visibleCount + page.messages.length,
+                  );
                 })
                 .catch((error) =>
                   setThreadError(

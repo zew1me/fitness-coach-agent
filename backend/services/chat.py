@@ -123,7 +123,7 @@ class ChatService:
         limit: int = CHAT_MESSAGE_PAGE_SIZE,
         before: str | None = None,
     ) -> ChatMessagePage:
-        thread = await self._repo.get_or_create_chat_thread(user_id)
+        thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
         messages = await self._repo.list_chat_messages(
             thread.id,
             limit=limit,
