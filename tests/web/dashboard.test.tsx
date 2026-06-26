@@ -1775,6 +1775,138 @@ describe("CoachChat", () => {
     ).toBeTruthy();
   });
 
+  it("does not replay previously persisted hook messages after a thread refresh", async () => {
+    chatMocks.messages.push(
+      {
+        id: "old-user-carbs",
+        parts: [{ text: "total carbs?", type: "text" }],
+        role: "user",
+      },
+      {
+        id: "old-assistant-carbs",
+        parts: [{ text: "~400-450 g total is a good target.", type: "text" }],
+        role: "assistant",
+      },
+    );
+    let threadLoads = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read"],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        threadLoads += 1;
+        const messages =
+          threadLoads === 1
+            ? [
+                {
+                  id: "old-user-carbs",
+                  attachments: [],
+                  content: "total carbs?",
+                  created_at: "2026-04-04T09:00:00Z",
+                  metadata: {},
+                  parts: [{ text: "total carbs?", type: "text" }],
+                  role: "user",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+                {
+                  id: "old-assistant-carbs",
+                  attachments: [],
+                  content: "~400-450 g total is a good target.",
+                  created_at: "2026-04-04T09:01:00Z",
+                  metadata: {},
+                  parts: [
+                    {
+                      text: "~400-450 g total is a good target.",
+                      type: "text",
+                    },
+                  ],
+                  role: "assistant",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+              ]
+            : [
+                {
+                  id: "fresh-user",
+                  attachments: [],
+                  content: "Hi again! fresh morning",
+                  created_at: "2026-04-04T10:00:00Z",
+                  metadata: {},
+                  parts: [{ text: "Hi again! fresh morning", type: "text" }],
+                  role: "user",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+                {
+                  id: "fresh-assistant",
+                  attachments: [],
+                  content: "Morning, Nigel -- good to see you.",
+                  created_at: "2026-04-04T10:01:00Z",
+                  metadata: {},
+                  parts: [
+                    {
+                      text: "Morning, Nigel -- good to see you.",
+                      type: "text",
+                    },
+                  ],
+                  role: "assistant",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+              ];
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T10:01:00Z",
+                messages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    await screen.findByText(/total carbs\?/i);
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "Hi again! fresh morning" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await screen.findByText(/Morning, Nigel -- good to see you/i);
+    await waitFor(() => {
+      expect(screen.queryByText(/total carbs\?/i)).toBeNull();
+      expect(
+        screen.queryByText(/~400-450 g total is a good target/i),
+      ).toBeNull();
+    });
+  });
+
   it("renders friendly live tool status from the AI SDK useChat hook", async () => {
     chatMocks.messages.push({
       id: "tool-message-1",

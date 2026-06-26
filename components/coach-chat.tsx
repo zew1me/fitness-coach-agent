@@ -1301,6 +1301,7 @@ function CoachChatBody({
   const persistedMessages = threadData.thread.messages;
   const threadId = threadData.thread.id;
   const nextCursorRef = useRef(threadData.next_cursor ?? null);
+  const knownPersistedMessageIdsRef = useRef<Set<string>>(new Set());
   // Synchronous guard against double-click: state reads aren't atomic across
   // rapid events, so this ref is the authoritative in-flight check.
   const fetchingCursorRef = useRef<string | null>(null);
@@ -1314,6 +1315,18 @@ function CoachChatBody({
     () => persistedMessages.map(toUiMessage),
     [persistedMessages],
   );
+  // useChat keeps its own initial message state after thread refreshes. Track
+  // loaded DB ids so rows that page out of a refreshed slice are not replayed
+  // later as if they were new live messages.
+  const persistedMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    const knownIds = knownPersistedMessageIdsRef.current;
+    for (const message of persistedMessages) {
+      ids.add(message.id);
+      knownIds.add(message.id);
+    }
+    return ids;
+  }, [persistedMessages]);
   const { messages: liveMessages, sendMessage } = useChat({
     id: threadId,
     messages: chatMessages,
@@ -1332,15 +1345,24 @@ function CoachChatBody({
   });
   const composerBusy = sending || syncingThread;
   const displayedMessages = useMemo<ChatMessage[]>(() => {
-    const persistedIds = new Set(persistedMessages.map((m) => m.id));
+    const knownPersistedMessageIds = knownPersistedMessageIdsRef.current;
     const additional = liveMessages
-      .filter((m) => !persistedIds.has(m.id))
+      .filter(
+        (m) =>
+          !persistedMessageIds.has(m.id) && !knownPersistedMessageIds.has(m.id),
+      )
       .map((m) => toLiveChatMessage(m, threadId, token.user_id))
       .filter(
         (m): m is ChatMessage => m !== null && (m.parts ?? []).length > 0,
       );
     return [...persistedMessages, ...additional];
-  }, [liveMessages, persistedMessages, threadId, token.user_id]);
+  }, [
+    liveMessages,
+    persistedMessageIds,
+    persistedMessages,
+    threadId,
+    token.user_id,
+  ]);
 
   useEffect(() => {
     const scrollTarget = messageEndRef.current;
