@@ -653,7 +653,7 @@ async def analyze_screenshot_endpoint(
     payload: AnalyzeScreenshotRequest,
     _: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    from backend.engine.screenshot_analyzer import analyze_screenshot
+    from backend.services.screenshot import analyze_screenshot
 
     result = await analyze_screenshot(payload.image_url)
     return {

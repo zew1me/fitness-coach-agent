@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from openai import OpenAIError
 
-from backend.engine import screenshot_analyzer
+from backend.services import screenshot as screenshot_analyzer
 
 
 class _StatusError(OpenAIError):
