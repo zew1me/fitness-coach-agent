@@ -257,6 +257,10 @@ export function streamCoachTurn({
           // stateless mode so the user always gets a response.
           let leaseObtained = false;
           let leaseState: { thread_id?: string } | undefined;
+          // Flag set before throwing so the catch block can distinguish a
+          // legitimate 409 conflict (must propagate) from an infra error
+          // (degrade to stateless).  Avoids fragile string-prefix matching.
+          let isTurnConflict = false;
           try {
             const leaseResponse = await fetch(
               `${baseUrl}/api/chat/model-state/lease`,
@@ -275,16 +279,17 @@ export function streamCoachTurn({
               },
             );
             if (leaseResponse.status === 409) {
+              isTurnConflict = true;
               throw new Error(
                 `Unable to acquire chat turn lease (${leaseResponse.status})`,
               );
             }
             if (leaseResponse.ok) {
-              leaseAcquired = true;
-              leaseObtained = true;
               leaseState = (await leaseResponse.json()) as {
                 thread_id?: string;
               };
+              leaseAcquired = true;
+              leaseObtained = true;
             } else {
               Sentry.logger.warn(
                 "coach: lease infra error; degrading to stateless mode",
@@ -292,20 +297,20 @@ export function streamCoachTurn({
               );
             }
           } catch (leaseError) {
-            // Propagate abort and explicit conflict errors; swallow everything
-            // else so the turn can still run without durable state.
-            if (signal?.aborted) throw leaseError;
-            const leaseMsg =
-              leaseError instanceof Error
-                ? leaseError.message
-                : String(leaseError);
-            if (leaseMsg.startsWith("Unable to acquire")) throw leaseError;
+            // Propagate abort and genuine turn-conflict errors; swallow
+            // everything else so the turn can still run without durable state.
+            if (signal?.aborted || isTurnConflict) throw leaseError;
             Sentry.captureException(leaseError, {
               tags: { subsystem: "lease-acquire", degrading: "true" },
             });
             Sentry.logger.warn(
               "coach: lease fetch failed; degrading to stateless mode",
-              { error: leaseMsg },
+              {
+                error:
+                  leaseError instanceof Error
+                    ? leaseError.message
+                    : String(leaseError),
+              },
             );
           }
           if (leaseObtained && leaseState !== undefined) {
