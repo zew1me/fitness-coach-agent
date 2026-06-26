@@ -414,7 +414,9 @@ class SupabaseRepository:
 
     # ── Chat (unchanged from original) ────────────────────────
 
-    async def get_or_create_chat_thread(self, user_id: str) -> ChatThread:
+    async def get_or_create_chat_thread(
+        self, user_id: str, *, include_messages: bool = True
+    ) -> ChatThread:
         client = self._require_client()
         response = client.table("chat_threads").select("*").eq("user_id", user_id).execute()
         rows = response.data or []
@@ -433,6 +435,8 @@ class SupabaseRepository:
             if not created_rows:
                 raise RuntimeError("Supabase did not return the inserted chat thread row.")
             thread = self._parse_chat_thread(created_rows[0])
+        if not include_messages:
+            return thread
         messages = await self.list_chat_messages(thread.id)
         return thread.model_copy(update={"messages": messages})
 

@@ -3,13 +3,13 @@ import * as Sentry from "@sentry/nextjs";
 import {
   athleteProfileSchema,
   chatMessagePageSchema,
+  type ParsedChatMessagePage,
   uploadRequestSchema,
 } from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
   ChatThreadResponse,
-  ChatMessagePage,
   FitnessMetrics,
   PresignUploadRequest,
   PresignUploadResponse,
@@ -201,14 +201,14 @@ export async function loadChatThread(
 export async function loadChatMessages(
   before: string,
   fetchImpl: FetchLike = fetch,
-): Promise<ChatMessagePage> {
+): Promise<ParsedChatMessagePage> {
   const params = new URLSearchParams({ before, limit: "50" });
   const page = await authorizedFetch<unknown>(
     `/api/chat/messages?${params.toString()}`,
     { method: "GET" },
     fetchImpl,
   );
-  return chatMessagePageSchema.parse(page) as ChatMessagePage;
+  return chatMessagePageSchema.parse(page);
 }
 
 export async function createChatUploadIntent(

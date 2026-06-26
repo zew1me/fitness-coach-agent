@@ -10,20 +10,17 @@ import {
 import * as Sentry from "@sentry/nextjs";
 import OpenAI from "openai";
 
+import { modelStateSchema, type ModelState } from "../schemas";
+
 import {
   applyMemoryOperation,
   coachingMemoryRecordSchema,
   type CoachingMemoryOperation,
   type CoachingMemoryRecord,
 } from "./coaching-memory";
+import { fetchSignalWithTimeout } from "./fetch-signal";
 
-type ModelState = {
-  thread_id: string;
-  version: number;
-  items: AgentInputItem[];
-  coaching_memory: Array<Record<string, unknown>>;
-  compaction_metadata: Record<string, unknown>;
-};
+const MODEL_STATE_FETCH_TIMEOUT_MS = 10_000;
 
 type SessionOptions = {
   accessToken: string;
@@ -32,6 +29,7 @@ type SessionOptions = {
   fetch?: typeof fetch;
   leaseId: string;
   maxCasRetries?: number;
+  signal?: AbortSignal;
 };
 
 export type StoredContextEstimate = {
@@ -84,11 +82,15 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
       `${this.options.baseUrl}/api/chat/model-state`,
       {
         headers: this.headers(),
+        signal: fetchSignalWithTimeout(
+          this.options.signal,
+          MODEL_STATE_FETCH_TIMEOUT_MS,
+        ),
       },
     );
     if (!response.ok)
       throw new Error(`Unable to load model state (${response.status})`);
-    this.state = (await response.json()) as ModelState;
+    this.state = modelStateSchema.parse(await response.json());
     return this.state;
   }
 
@@ -106,6 +108,10 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
         {
           method: "PUT",
           headers: this.headers(),
+          signal: fetchSignalWithTimeout(
+            this.options.signal,
+            MODEL_STATE_FETCH_TIMEOUT_MS,
+          ),
           body: JSON.stringify({
             expected_version: current.version,
             lease_id: this.options.leaseId,
@@ -115,7 +121,7 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
       );
       if (response.ok) {
         this.casRetries = attempt;
-        this.state = (await response.json()) as ModelState;
+        this.state = modelStateSchema.parse(await response.json());
         return;
       }
       if (response.status !== 409 || attempt === attempts - 1) {
@@ -134,6 +140,7 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
 
   async getItems(limit?: number): Promise<AgentInputItem[]> {
     const items = (await this.load()).items;
+    if (limit !== undefined && limit <= 0) return [];
     return limit === undefined ? [...items] : items.slice(-limit);
   }
 
@@ -275,7 +282,10 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40);
     if (!shouldCompact || items.length === 0) return null;
 
+    const compactArgs: Partial<OpenAIResponsesCompactionArgs> = { ...args };
+    delete compactArgs.force;
     const compacted = await this.client.responses.compact({
+      ...compactArgs,
       model: this.options.model ?? "gpt-5.4-mini",
       input: items as OpenAI.Responses.ResponseInput,
     });

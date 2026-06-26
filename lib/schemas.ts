@@ -1,4 +1,7 @@
+import type { AgentInputItem } from "@openai/agents";
 import { z } from "zod";
+
+import type { ChatMessage } from "./types";
 
 export const athleteProfileSchema = z.object({
   coaching_state: z.string().min(1).default("onboarding"),
@@ -21,20 +24,58 @@ export const chatRequestMessageSchema = z.looseObject({
 });
 
 export const chatRequestBodySchema = z.union([
-  z.object({ message: chatRequestMessageSchema }),
-  z.object({ messages: z.array(chatRequestMessageSchema) }),
+  z.strictObject({
+    id: z.string().optional(),
+    message: chatRequestMessageSchema,
+    messages: z.never().optional(),
+  }),
+  z.strictObject({
+    id: z.string().optional(),
+    message: z.never().optional(),
+    messages: z.array(chatRequestMessageSchema),
+  }),
 ]);
 
+export type ChatRequestBody = z.infer<typeof chatRequestBodySchema>;
+
+const chatMessageMetadataSchema = z
+  .object({
+    message_kind: z.string().optional(),
+    pending_profile_field: z.string().nullable().optional(),
+    plan: z.unknown().optional(),
+  })
+  .catchall(z.unknown());
+
+export const chatMessageSchema = z
+  .object({
+    attachments: z.array(z.record(z.string(), z.unknown())),
+    content: z.string().default(""),
+    created_at: z.string(),
+    id: z.string().min(1),
+    metadata: chatMessageMetadataSchema,
+    parts: z.array(chatMessagePartSchema),
+    role: z.enum(["user", "assistant"]),
+    thread_id: z.string().min(1),
+    user_id: z.string().min(1),
+  })
+  .transform((message): ChatMessage => message as ChatMessage);
+
 export const chatMessagePageSchema = z.object({
-  messages: z.array(
-    z.looseObject({
-      id: z.string().min(1),
-      parts: z.array(chatMessagePartSchema),
-      role: z.enum(["user", "assistant"]),
-    }),
-  ),
+  messages: z.array(chatMessageSchema),
   next_cursor: z.string().nullable(),
 });
+
+export type ParsedChatMessagePage = z.infer<typeof chatMessagePageSchema>;
+
+export const modelStateSchema = z.object({
+  thread_id: z.string().min(1),
+  version: z.number().int().nonnegative(),
+  items: z.array(z.custom<AgentInputItem>()),
+  coaching_memory: z.array(z.record(z.string(), z.unknown())),
+  compaction_metadata: z.record(z.string(), z.unknown()),
+});
+
+export type ModelState = z.infer<typeof modelStateSchema>;
 
 export const uploadRequestSchema = z.object({
   content_length: z

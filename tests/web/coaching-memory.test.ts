@@ -61,6 +61,57 @@ describe("coaching memory lifecycle", () => {
     });
   });
 
+  it("rejects superseding a missing record", () => {
+    expect(() =>
+      applyMemoryOperation([], {
+        action: "supersede",
+        id: "missing",
+        replacement: {
+          id: "new",
+          category: "follow_up",
+          statement: "Do intervals",
+          confidence: 1,
+          sourceMessageIds: ["m2"],
+        },
+      }),
+    ).toThrow(/missing/i);
+  });
+
+  it("rejects supersede replacements that duplicate an existing record id", () => {
+    const records = [
+      coachingMemoryRecordSchema.parse({
+        id: "old",
+        category: "follow_up",
+        statement: "Do intervals",
+        confidence: 1,
+        sourceMessageIds: ["m1"],
+        lifecycle: "active",
+      }),
+      coachingMemoryRecordSchema.parse({
+        id: "duplicate",
+        category: "insight",
+        statement: "Prefers trails",
+        confidence: 0.8,
+        sourceMessageIds: ["m1"],
+        lifecycle: "active",
+      }),
+    ];
+
+    expect(() =>
+      applyMemoryOperation(records, {
+        action: "supersede",
+        id: "old",
+        replacement: {
+          id: "duplicate",
+          category: "follow_up",
+          statement: "Do intervals tomorrow",
+          confidence: 1,
+          sourceMessageIds: ["m2"],
+        },
+      }),
+    ).toThrow(/duplicate/i);
+  });
+
   it("makes a date-only plan due at noon UTC the following day", () => {
     expect(dueFollowUpAt({ plannedDate: "2026-06-20" })).toBe(
       "2026-06-21T12:00:00.000Z",
@@ -87,6 +138,19 @@ describe("coaching memory lifecycle", () => {
       lifecycle: "resolved",
       outcome: "Completed comfortably",
     });
+  });
+
+  it("rejects resolve and dismiss operations for missing record ids", () => {
+    expect(() =>
+      applyMemoryOperation([], {
+        action: "resolve",
+        id: "missing",
+        outcome: "Done",
+      }),
+    ).toThrow(/missing/i);
+    expect(() =>
+      applyMemoryOperation([], { action: "dismiss", id: "missing" }),
+    ).toThrow(/missing/i);
   });
 
   it("dismisses a record without an outcome", () => {

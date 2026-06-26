@@ -83,7 +83,17 @@ export function applyMemoryOperation(
     return [...records.filter((item) => item.id !== record.id), record];
   }
   if (operation.action === "supersede") {
+    if (!records.some((item) => item.id === operation.id)) {
+      throw new Error(
+        `Cannot supersede missing coaching memory record: ${operation.id}`,
+      );
+    }
     const replacement = activeRecord(operation.replacement);
+    if (records.some((item) => item.id === replacement.id)) {
+      throw new Error(
+        `Cannot supersede with duplicate coaching memory record: ${replacement.id}`,
+      );
+    }
     return [
       ...records.map((item) =>
         item.id === operation.id
@@ -96,6 +106,11 @@ export function applyMemoryOperation(
       ),
       replacement,
     ];
+  }
+  if (!records.some((item) => item.id === operation.id)) {
+    throw new Error(
+      `Cannot ${operation.action} missing coaching memory record: ${operation.id}`,
+    );
   }
   return records.map((item) =>
     item.id === operation.id

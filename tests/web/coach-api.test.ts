@@ -27,9 +27,15 @@ describe("loadChatMessages", () => {
     const page = {
       messages: [
         {
+          attachments: [],
+          content: "",
+          created_at: "2026-04-04T09:00:00Z",
           id: "message-1",
+          metadata: {},
           role: "user",
           parts: [{ type: "text", text: "hello" }],
+          thread_id: "thread-1",
+          user_id: "athlete-1",
         },
       ],
       next_cursor: null,
@@ -42,5 +48,27 @@ describe("loadChatMessages", () => {
       .mockResolvedValueOnce(jsonResponse(page));
 
     await expect(loadChatMessages("cursor", fetchMock)).resolves.toEqual(page);
+  });
+
+  it("rejects paginated messages missing persisted message fields", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ access_token: "token", user_id: "athlete-1" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          messages: [
+            {
+              id: "message-1",
+              role: "user",
+              parts: [{ type: "text", text: "hello" }],
+            },
+          ],
+          next_cursor: null,
+        }),
+      );
+
+    await expect(loadChatMessages("cursor", fetchMock)).rejects.toThrow();
   });
 });

@@ -8,7 +8,10 @@ import {
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
-import { chatRequestBodySchema } from "../../../lib/schemas";
+import {
+  chatRequestBodySchema,
+  type ChatRequestBody,
+} from "../../../lib/schemas";
 import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
@@ -205,7 +208,7 @@ async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  let parsedBody: { message?: unknown; messages?: unknown[] };
+  let parsedBody: ChatRequestBody;
   try {
     const serialized = await request.text();
     if (new TextEncoder().encode(serialized).byteLength > 256 * 1024) {
@@ -218,11 +221,12 @@ async function handleChatRequest(
   const strategy = process.env["COACH_CONTEXT_STRATEGY"] ?? "session";
   const messages = (
     strategy === "full_history"
-      ? (parsedBody.messages ??
-        (parsedBody.message ? [parsedBody.message] : []))
-      : parsedBody.message
+      ? "messages" in parsedBody
+        ? parsedBody.messages
+        : [parsedBody.message]
+      : "message" in parsedBody
         ? [parsedBody.message]
-        : (parsedBody.messages?.slice(-1) ?? [])
+        : parsedBody.messages.slice(-1)
   ) as UIMessage[];
   Sentry.logger.info("chat turn start", {
     user_id: token.user_id,

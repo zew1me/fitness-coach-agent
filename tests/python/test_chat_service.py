@@ -22,8 +22,12 @@ class OnboardingRepo:
         )
         self.create_calls: list[dict[str, Any]] = []
 
-    async def get_or_create_chat_thread(self, user_id: str) -> ChatThread:
-        return self.thread
+    async def get_or_create_chat_thread(
+        self, user_id: str, *, include_messages: bool = True
+    ) -> ChatThread:
+        if include_messages:
+            return self.thread
+        return self.thread.model_copy(update={"messages": []})
 
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         return AthleteProfile(user_id=user_id, coaching_state="onboarding")
@@ -212,6 +216,13 @@ class ModelStateRepo(OnboardingRepo):
             updated_at=now,
             user_id="athlete-1",
         )
+        self.thread_lookup_include_messages: list[bool] = []
+
+    async def get_or_create_chat_thread(
+        self, user_id: str, *, include_messages: bool = True
+    ) -> ChatThread:
+        self.thread_lookup_include_messages.append(include_messages)
+        return await super().get_or_create_chat_thread(user_id, include_messages=include_messages)
 
     async def get_or_create_chat_model_state(self, *, thread_id: str, user_id: str):
         assert thread_id == "thread-1"
@@ -270,6 +281,26 @@ async def test_model_state_service_acquires_and_releases_turn_lease() -> None:
 
     assert leased.lease_id == "lease-1"
     assert released.lease_id is None
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_uses_thread_lookup_without_messages() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    state = await service.get_model_state("athlete-1")
+    await service.replace_model_state(
+        "athlete-1",
+        expected_version=state.version,
+        lease_id="lease-1",
+        items=[],
+        coaching_memory=[],
+        compaction_metadata={},
+    )
+    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    await service.release_turn_lease("athlete-1", "lease-1")
+
+    assert repo.thread_lookup_include_messages == [False, False, False, False]
 
 
 def test_chat_persist_request_accepts_uuid_message_id() -> None:

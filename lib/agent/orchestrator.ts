@@ -3,6 +3,7 @@ import {
   MCPServerStreamableHttp,
   Runner,
   withTrace,
+  type AgentInputItem,
   type MCPServer,
 } from "@openai/agents";
 import * as Sentry from "@sentry/nextjs";
@@ -21,6 +22,7 @@ import {
 import { oldestDueFollowUp } from "./coaching-memory";
 import { buildContextSlices } from "./context-slices";
 import { planSpecialistDelegation } from "./delegation-planner";
+import { fetchSignalWithTimeout } from "./fetch-signal";
 import { releaseChatTurnLease } from "./lease-client";
 import { selectMessagesForModel } from "./message-context";
 import {
@@ -54,9 +56,35 @@ export type StreamCoachTurnOptions = {
 const MAX_COACH_STEPS = 4;
 const MODEL = "gpt-5.4-mini";
 const LAZY_SEED_TOKEN_BUDGET = 200_000;
+const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 
 function generateUuid(): string {
   return crypto.randomUUID();
+}
+
+function prepareBootstrapItems(
+  session: SupabaseAgentSession,
+  messages: UIMessage[],
+): AgentInputItem[] {
+  return toAgentInputItems(messages).map((item) =>
+    session.prepareHistoryItemForModelInput(item),
+  );
+}
+
+function trimBootstrapToBudget(
+  session: SupabaseAgentSession,
+  messages: UIMessage[],
+): UIMessage[] {
+  for (let start = 0; start < messages.length; start += 1) {
+    const candidate = messages.slice(start);
+    if (
+      estimateStoredContext(prepareBootstrapItems(session, candidate))
+        .estimatedTokens <= LAZY_SEED_TOKEN_BUDGET
+    ) {
+      return candidate;
+    }
+  }
+  return [];
 }
 
 async function initializeSessionFromTranscript(options: {
@@ -65,6 +93,7 @@ async function initializeSessionFromTranscript(options: {
   baseUrl: string;
   extraHeaders?: Record<string, string>;
   currentMessageIds: Set<string>;
+  signal?: AbortSignal;
 }): Promise<void> {
   if ((await options.session.getItems()).length > 0) return;
   let before: string | null = null;
@@ -78,6 +107,7 @@ async function initializeSessionFromTranscript(options: {
         Authorization: `Bearer ${options.accessToken}`,
         ...(options.extraHeaders ?? {}),
       },
+      signal: fetchSignalWithTimeout(options.signal, PRE_RUN_FETCH_TIMEOUT_MS),
     });
     if (!response.ok)
       throw new Error(`Unable to initialize model state (${response.status})`);
@@ -89,23 +119,21 @@ async function initializeSessionFromTranscript(options: {
       (message) => !options.currentMessageIds.has(message.id),
     );
     const candidate = [...older, ...selected];
-    const candidateItems = toAgentInputItems(candidate).map((item) =>
-      options.session.prepareHistoryItemForModelInput(item),
-    );
+    const candidateItems = prepareBootstrapItems(options.session, candidate);
     if (
       estimateStoredContext(candidateItems).estimatedTokens >
       LAZY_SEED_TOKEN_BUDGET
-    )
+    ) {
+      selected = trimBootstrapToBudget(options.session, candidate);
       break;
+    }
     selected = candidate;
     before = page.next_cursor;
   } while (before !== null);
 
   if (selected.length > 0) {
     await options.session.addItems(
-      toAgentInputItems(selected).map((item) =>
-        options.session.prepareHistoryItemForModelInput(item),
-      ),
+      prepareBootstrapItems(options.session, selected),
     );
   }
 }
@@ -219,6 +247,7 @@ export function streamCoachTurn({
                 ...(extraHeaders ?? {}),
               },
               body: JSON.stringify({ lease_id: leaseId, ttl_seconds: 300 }),
+              signal: fetchSignalWithTimeout(signal, PRE_RUN_FETCH_TIMEOUT_MS),
             },
           );
           if (!leaseResponse.ok)
@@ -234,6 +263,7 @@ export function streamCoachTurn({
             accessToken,
             baseUrl,
             leaseId,
+            ...(signal ? { signal } : {}),
             ...(extraHeaders ? { extraHeaders } : {}),
           });
           await initializeSessionFromTranscript({
@@ -244,6 +274,7 @@ export function streamCoachTurn({
             currentMessageIds: new Set(
               selectedMessages.map((message) => message.id),
             ),
+            ...(signal ? { signal } : {}),
           });
           const projected = [
             ...(await underlyingSession.getItems()),

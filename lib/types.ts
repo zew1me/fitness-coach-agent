@@ -107,8 +107,3 @@ export type ChatThreadResponse = {
   profile_complete: boolean;
   thread: ChatThread;
 };
-
-export type ChatMessagePage = {
-  messages: ChatMessage[];
-  next_cursor: string | null;
-};

@@ -109,6 +109,46 @@ describe("SupabaseAgentSession", () => {
     await expect(session.addItems([userItem("b")])).rejects.toThrow(/409/);
   });
 
+  it("returns no items when a non-positive limit is requested", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      response({
+        thread_id: "thread-1",
+        version: 1,
+        items: [userItem("a")],
+        coaching_memory: [],
+        compaction_metadata: {},
+      }),
+    );
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: fetchMock,
+    });
+
+    await expect(session.getItems(0)).resolves.toEqual([]);
+    await expect(session.getItems(-1)).resolves.toEqual([]);
+  });
+
+  it("validates loaded model state before returning it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      response({
+        thread_id: "thread-1",
+        items: [],
+        coaching_memory: [],
+        compaction_metadata: {},
+      }),
+    );
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: fetchMock,
+    });
+
+    await expect(session.getSessionId()).rejects.toThrow();
+  });
+
   it("removes historical image inputs before model replay while retaining extracted text", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
@@ -288,6 +328,53 @@ describe("DurableCompactionSession", () => {
     expect(underlying.replaceAll).toHaveBeenCalledWith(
       output,
       expect.objectContaining({ trigger: "forced" }),
+    );
+  });
+
+  it("forwards compaction request options other than force to the API", async () => {
+    const output = [userItem("compacted")];
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([userItem("x")]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 999_999,
+    });
+
+    await session.runCompaction({
+      force: true,
+      compactionMode: "input",
+      responseId: "resp_123",
+      store: true,
+    });
+
+    expect(client.responses.compact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        compactionMode: "input",
+        responseId: "resp_123",
+        store: true,
+      }),
     );
   });
 

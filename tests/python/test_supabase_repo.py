@@ -94,7 +94,7 @@ class FakeTableQuery:
         self._update_payload = payload
         return self
 
-    def execute(self) -> FakeResponse:  # noqa: C901
+    def execute(self) -> FakeResponse:  # noqa: C901, PLR0911
         if self._inserted_payload is not None:
             self._rows.append(self._inserted_payload)
             return FakeResponse([self._inserted_payload])
@@ -104,11 +104,13 @@ class FakeTableQuery:
         if self._upserted_payload is not None:
             conflict_column = self._upsert_conflict
             assert conflict_column is not None
-            if self._ignore_duplicates and any(
-                row.get(conflict_column) == self._upserted_payload.get(conflict_column)
-                for row in self._rows
-            ):
-                return FakeResponse([])
+            for index, row in enumerate(self._rows):
+                if row.get(conflict_column) != self._upserted_payload.get(conflict_column):
+                    continue
+                if self._ignore_duplicates:
+                    return FakeResponse([])
+                self._rows[index] = self._upserted_payload
+                return FakeResponse([self._upserted_payload])
             self._rows.append(self._upserted_payload)
             return FakeResponse([self._upserted_payload])
         if self._update_payload is not None:
@@ -172,6 +174,28 @@ class FakeSupabaseClient:
     def table(self, table_name: str) -> FakeTableQuery:
         # The real Supabase client returns a fresh query builder for each call.
         return FakeTableQuery(self._tables[table_name]._rows)
+
+
+def test_fake_table_upsert_replaces_existing_conflict_row() -> None:
+    rows: list[dict[str, object]] = [
+        {"external_id": "activity-1", "name": "Old"},
+        {"external_id": "activity-2", "name": "Keep"},
+    ]
+
+    response = (
+        FakeTableQuery(rows)
+        .upsert(
+            {"external_id": "activity-1", "name": "New"},
+            on_conflict="external_id",
+        )
+        .execute()
+    )
+
+    assert response.data == [{"external_id": "activity-1", "name": "New"}]
+    assert rows == [
+        {"external_id": "activity-1", "name": "New"},
+        {"external_id": "activity-2", "name": "Keep"},
+    ]
 
 
 @pytest.mark.asyncio

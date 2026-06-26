@@ -575,12 +575,14 @@ function MessageBubble({
 function MessageList({
   messages,
   hiddenMessageCount,
+  loadingOlder,
   onShowMore,
   messageEndRef,
   olderAvailable,
 }: Readonly<{
   messages: ChatMessage[];
   hiddenMessageCount: number;
+  loadingOlder: boolean;
   onShowMore: () => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
   olderAvailable: boolean;
@@ -590,6 +592,7 @@ function MessageList({
       {hiddenMessageCount > 0 || olderAvailable ? (
         <button
           className={styles.historyLoadButton}
+          disabled={loadingOlder}
           onClick={onShowMore}
           type="button"
         >
@@ -652,6 +655,7 @@ function EmptyChatLandingCard({
 function MessagesSection({
   messages,
   hiddenMessageCount,
+  loadingOlder,
   onShowMore,
   onPrefillStarter,
   messageEndRef,
@@ -660,6 +664,7 @@ function MessagesSection({
 }: Readonly<{
   messages: ChatMessage[];
   hiddenMessageCount: number;
+  loadingOlder: boolean;
   onShowMore: () => void;
   onPrefillStarter: (_text: string) => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
@@ -669,6 +674,7 @@ function MessagesSection({
   const messageList = (
     <MessageList
       hiddenMessageCount={hiddenMessageCount}
+      loadingOlder={loadingOlder}
       messageEndRef={messageEndRef}
       messages={messages}
       onShowMore={onShowMore}
@@ -1285,12 +1291,20 @@ function CoachChatBody({
   const [sending, setSending] = useState(false);
   const [syncingThread, setSyncingThread] = useState(false);
   const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
+  const [loadingOlderCursor, setLoadingOlderCursor] = useState<string | null>(
+    null,
+  );
   const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const isMobile = useIsMobile();
 
   const persistedMessages = threadData.thread.messages;
   const threadId = threadData.thread.id;
+  const nextCursorRef = useRef(threadData.next_cursor ?? null);
+
+  useEffect(() => {
+    nextCursorRef.current = threadData.next_cursor ?? null;
+  }, [threadData.next_cursor]);
 
   const chatMessages = useMemo<UIMessage[]>(
     () => persistedMessages.map(toUiMessage),
@@ -1586,6 +1600,7 @@ function CoachChatBody({
 
           <MessagesSection
             hiddenMessageCount={hiddenMessageCount}
+            loadingOlder={loadingOlderCursor !== null}
             messageEndRef={messageEndRef}
             messages={visibleMessages}
             onPrefillStarter={setComposer}
@@ -1597,24 +1612,39 @@ function CoachChatBody({
                 );
                 return;
               }
-              if (!threadData.next_cursor) return;
-              void loadChatMessages(threadData.next_cursor)
+              const requestedCursor = threadData.next_cursor;
+              if (!requestedCursor || loadingOlderCursor === requestedCursor)
+                return;
+              setLoadingOlderCursor(requestedCursor);
+              void loadChatMessages(requestedCursor)
                 .then((page) => {
-                  setThreadData((current) => ({
-                    ...current,
-                    next_cursor: page.next_cursor,
-                    thread: {
-                      ...current.thread,
-                      messages: [...page.messages, ...current.thread.messages],
-                    },
-                  }));
-                  setVisibleMessageCount(
-                    (current) => current + page.messages.length,
-                  );
+                  if (nextCursorRef.current !== requestedCursor) return;
+                  setThreadData((current) => {
+                    if (current.next_cursor !== requestedCursor) return current;
+                    setVisibleMessageCount(
+                      (visibleCount) => visibleCount + page.messages.length,
+                    );
+                    return {
+                      ...current,
+                      next_cursor: page.next_cursor,
+                      thread: {
+                        ...current.thread,
+                        messages: [
+                          ...page.messages,
+                          ...current.thread.messages,
+                        ],
+                      },
+                    };
+                  });
                 })
                 .catch((error) =>
                   setThreadError(
                     errorMessage(error, "Unable to load older messages."),
+                  ),
+                )
+                .finally(() =>
+                  setLoadingOlderCursor((current) =>
+                    current === requestedCursor ? null : current,
                   ),
                 );
             }}

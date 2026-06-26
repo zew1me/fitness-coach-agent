@@ -323,6 +323,110 @@ describe("CoachChat", () => {
     });
   });
 
+  it("does not prepend the same older page twice while pagination is in flight", async () => {
+    const threadMessages = Array.from({ length: 5 }, (_, index) => ({
+      id: `message-${index}`,
+      attachments: [],
+      content: `Recent message ${index}`,
+      created_at: `2026-04-04T09:0${index}:00Z`,
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    let resolveOlder:
+      | ((_value: Response | PromiseLike<Response>) => void)
+      | undefined;
+    const olderResponse = new Promise<Response>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              next_cursor: "cursor-1",
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: threadMessages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/messages?before=cursor-1&limit=50") {
+        return olderResponse;
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const showOlder = await screen.findByRole("button", {
+      name: /Show older messages/i,
+    });
+    fireEvent.click(showOlder);
+    fireEvent.click(showOlder);
+    resolveOlder?.(
+      new Response(
+        JSON.stringify({
+          messages: [
+            {
+              id: "older-1",
+              attachments: [],
+              content: "Older page message",
+              created_at: "2026-04-04T08:59:00Z",
+              metadata: {},
+              parts: [{ type: "text", text: "Older page message" }],
+              role: "assistant",
+              thread_id: "thread-1",
+              user_id: "athlete-1",
+            },
+          ],
+          next_cursor: null,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await screen.findByText("Older page message");
+
+    expect(
+      screen.getAllByText("Older page message", { exact: true }),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) =>
+          String(url) === "/api/chat/messages?before=cursor-1&limit=50",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("restores locally persisted chat history when the local thread endpoint is unavailable", async () => {
     localStorage.setItem(
       "fitness-coach.local-chat-thread.athlete-1",

@@ -7,12 +7,12 @@ athlete-visible chat transcript.
 ## Motivation
 
 Previous to this, we would send the OpenAI Agents SDK the full item history on every turn.
-Without compaction, history grows without bound; once the context window of the underlying 
-model is approached the request will either fail or degrade. We also see latency increase, 
+Without compaction, history grows without bound; once the context window of the underlying
+model is approached the request will either fail or degrade. We also see latency increase,
 as well as token usage as the conversation history goes. Given the way this app is modeled
 as a single chat thread (maybe in the future this changes, but there will still be a single
-primary chat thread in most incantations I can think of), user experience decreases due to 
-latency the longer they use the app. Compaction shrinks model history automatically while 
+primary chat thread in most incantations I can think of), user experience decreases due to
+latency the longer they use the app. Compaction shrinks model history automatically while
 the user's visible message thread (`chat_messages`) remains intact.
 
 ---
@@ -68,7 +68,7 @@ This makes writes idempotent under concurrent racing turns.
 
 ### Turn lease lifecycle
 
-```
+```text
 POST /api/chat/model-state/lease   →  acquire lease (TTL 300 s)
         ↓ turn runs
 PUT /api/chat/model-state          →  write items/memory (lease checked atomically)
@@ -101,7 +101,7 @@ Implements `SessionHistoryRewriteAwareSession` (the Agents SDK interface):
 Wraps `SupabaseAgentSession` and implements
 `OpenAIResponsesCompactionAwareSession`. The key method:
 
-```
+```text
 runCompaction(args?) → OpenAIResponsesCompactionResult | null
 ```
 
@@ -119,7 +119,7 @@ or API glitch from silently erasing the conversation.
 
 ## Compaction flow (one turn)
 
-```
+```text
 1. Acquire lease  →  POST /api/chat/model-state/lease
 2. Load state     →  GET  /api/chat/model-state
 3. Project token estimate for stored items + incoming messages
