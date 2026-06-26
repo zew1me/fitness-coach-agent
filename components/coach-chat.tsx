@@ -1304,6 +1304,7 @@ function CoachChatBody({
   // Synchronous guard against double-click: state reads aren't atomic across
   // rapid events, so this ref is the authoritative in-flight check.
   const fetchingCursorRef = useRef<string | null>(null);
+  const sendInFlightRef = useRef(false);
 
   useEffect(() => {
     nextCursorRef.current = threadData.next_cursor ?? null;
@@ -1497,9 +1498,10 @@ function CoachChatBody({
   }
 
   async function handleSend(): Promise<void> {
-    if (composerBusy) return;
+    if (sendInFlightRef.current || composerBusy) return;
     if (!hasSendableContent(composer, attachments)) return;
 
+    sendInFlightRef.current = true;
     setSending(true);
     setThreadError(null);
     try {
@@ -1547,6 +1549,7 @@ function CoachChatBody({
       setSyncingThread(false);
       setThreadError(errorMessage(error, "Unable to send your message."));
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
   }

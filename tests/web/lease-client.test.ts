@@ -1,6 +1,64 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { releaseChatTurnLease } from "../../lib/agent/lease-client";
+import {
+  LeaseAcquisitionError,
+  acquireChatTurnLease,
+  releaseChatTurnLease,
+} from "../../lib/agent/lease-client";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("acquireChatTurnLease", () => {
+  it("posts the lease request and returns the acquired thread state", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ thread_id: "thread-1" }), {
+        status: 200,
+      }),
+    );
+    const onLeaseAcquired = vi.fn();
+
+    const state = await acquireChatTurnLease({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      fetchImpl,
+      leaseId: "lease-1",
+      onLeaseAcquired,
+      ttlSeconds: 900,
+    });
+
+    expect(state).toEqual({ thread_id: "thread-1" });
+    expect(onLeaseAcquired).toHaveBeenCalledOnce();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({
+        body: JSON.stringify({ lease_id: "lease-1", ttl_seconds: 900 }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("throws a typed acquisition error for conflicts", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("conflict", { status: 409 }));
+
+    try {
+      await acquireChatTurnLease({
+        accessToken: "token",
+        baseUrl: "http://localhost",
+        fetchImpl,
+        leaseId: "lease-1",
+        ttlSeconds: 900,
+      });
+      throw new Error("Expected lease acquisition to fail.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(LeaseAcquisitionError);
+      expect((error as LeaseAcquisitionError).status).toBe(409);
+    }
+  });
+});
 
 describe("releaseChatTurnLease", () => {
   it("aborts a stalled release request after the helper timeout", async () => {

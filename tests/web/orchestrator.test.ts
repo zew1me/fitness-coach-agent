@@ -359,8 +359,9 @@ describe("streamCoachTurn", () => {
         String(url) === "http://localhost/api/chat/model-state" &&
         init?.method === "PUT",
     );
-    expect(modelStatePut).toBeDefined();
-    const body = JSON.parse(String(modelStatePut?.[1]?.body)) as {
+    const modelStatePutBody = modelStatePut?.[1]?.body;
+    expect(modelStatePutBody).toEqual(expect.any(String));
+    const body = JSON.parse(String(modelStatePutBody)) as {
       items: unknown[];
     };
     expect(body.items.length).toBeGreaterThan(0);
@@ -398,6 +399,38 @@ describe("streamCoachTurn", () => {
         body: expect.stringContaining('"lease_id"'),
         method: "DELETE",
       }),
+    );
+  });
+
+  it("does not fall back to stateless execution when another turn owns the lease", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        url === "http://localhost/api/chat/model-state/lease" &&
+        init?.method === "POST"
+      ) {
+        return Promise.resolve(new Response("conflict", { status: 409 }));
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      useDurableSession: true,
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({ method: "DELETE" }),
     );
   });
 
