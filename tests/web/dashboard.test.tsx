@@ -309,13 +309,15 @@ describe("CoachChat", () => {
       screen.getByRole("button", { name: /Show 10 older messages/i }),
     ).toBeTruthy();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: /Show 10 older messages/i }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("History message 0")).toBeTruthy();
+    const showOlder = screen.getByRole("button", {
+      name: /Show 10 older messages/i,
     });
+    await act(async () => {
+      fireEvent.click(showOlder);
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("History message 0")).toBeTruthy();
     await waitFor(() => {
       expect(
         screen.queryByRole("button", { name: /Show older messages/i }),
