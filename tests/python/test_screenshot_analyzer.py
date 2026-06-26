@@ -588,6 +588,111 @@ def _solid_png_data_url(
     return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
 
+@pytest.mark.asyncio
+async def test_activity_extraction_carries_additional_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = screenshot_analyzer.ActivityExtraction(
+        sport="cycling",
+        additional_observations=[
+            screenshot_analyzer.GenericObservation(label="Training Effect", value="3.2"),
+        ],
+    )
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return model
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.extract_from_screenshot(
+        "https://example.com/activity.png",
+        "activity_single",
+    )
+
+    assert result.data["additional_observations"] == [{"label": "Training Effect", "value": "3.2"}]
+
+
+@pytest.mark.asyncio
+async def test_wellness_day_entry_carries_additional_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = screenshot_analyzer.WellnessMultiExtraction(
+        entries=[
+            screenshot_analyzer.WellnessDayEntry(
+                date="2026-06-01",
+                sleep_score=78,
+                additional_observations=[
+                    screenshot_analyzer.GenericObservation(
+                        label="Skin Temperature", value="+0.3°C"
+                    ),
+                ],
+            )
+        ]
+    )
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return model
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.extract_from_screenshot(
+        "https://example.com/wellness.png",
+        "wellness_multi_day",
+    )
+
+    assert result.data["entries"][0]["additional_observations"] == [
+        {"label": "Skin Temperature", "value": "+0.3°C"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wellness_single_extraction_carries_additional_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = screenshot_analyzer.WellnessSingleExtraction(
+        sleep_score=82,
+        additional_observations=[
+            screenshot_analyzer.GenericObservation(label="Recovery Score", value="74"),
+        ],
+    )
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return model
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.extract_from_screenshot(
+        "https://example.com/wellness_single.png",
+        "wellness_single_day",
+    )
+
+    assert result.data["additional_observations"] == [{"label": "Recovery Score", "value": "74"}]
+
+
+@pytest.mark.asyncio
+async def test_training_load_chart_extraction_carries_additional_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = screenshot_analyzer.TrainingLoadChartExtraction(
+        source_app_hint="intervals.icu",
+        additional_observations=[
+            screenshot_analyzer.GenericObservation(label="Y-axis unit", value="TSS/day"),
+        ],
+    )
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return model
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.extract_from_screenshot(
+        "https://example.com/load.png",
+        "training_load_chart",
+    )
+
+    assert result.data["additional_observations"] == [{"label": "Y-axis unit", "value": "TSS/day"}]
+
+
 @pytest.mark.oai
 @pytest.mark.asyncio
 @pytest.mark.skipif(

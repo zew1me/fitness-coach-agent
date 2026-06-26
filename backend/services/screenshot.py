@@ -86,21 +86,29 @@ Provide your best source-app and date-range hints, and a confidence from 0.0 to 
 EXTRACT_ACTIVITY_PROMPT = """Extract any relevant athlete, event, or workout data shown in
 this screenshot — for example a single activity/workout summary and its key metrics.
 Use null for anything not clearly visible. Do not guess values. For each field you read,
-add a confidence entry naming the field and your confidence from 0.0 to 1.0."""
+add a confidence entry naming the field and your confidence from 0.0 to 1.0.
+Place any visible values that do not fit the fields above into additional_observations
+as label/value pairs."""
 
 EXTRACT_WELLNESS_MULTI_PROMPT = """Extract the daily wellness/recovery data shown in this
 screenshot. It may cover multiple days — return one entry per visible day.
-Use null for anything not clearly visible. Do not guess values."""
+Use null for anything not clearly visible. Do not guess values.
+For each day entry, place any visible values that do not fit the structured fields
+into additional_observations as label/value pairs."""
 
 EXTRACT_WELLNESS_SINGLE_PROMPT = """Extract the day's wellness/recovery data shown in this
-screenshot. Use null for anything not clearly visible. Do not guess values."""
+screenshot. Use null for anything not clearly visible. Do not guess values.
+Place any visible values that do not fit the fields above into additional_observations
+as label/value pairs."""
 
 EXTRACT_TRAINING_LOAD_CHART_PROMPT = """Extract data from this training load chart.
 It may show CTL/fitness, ATL/fatigue, TSB/form, training stress, or similar time-series
 lines. Capture the visible date range, axis labels, and readable value points (one series
 entry per readable point). Use null when dates or labels are not visible. Approximate a
 value only when the axis/grid makes it clear, and lower the confidence for approximate
-points. Do not guess hidden values."""
+points. Do not guess hidden values.
+Place any visible values that do not fit the fields above into additional_observations
+as label/value pairs."""
 
 EXTRACT_GENERIC_PROMPT = """Capture any athlete-relevant information visible in this
 screenshot — a training plan, workout calendar, or anything else a coach might want to

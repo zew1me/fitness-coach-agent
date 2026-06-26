@@ -25,6 +25,13 @@ class ConfidenceEntry(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class GenericObservation(BaseModel):
+    """A single label/value datum read off a screenshot we have no typed schema for."""
+
+    label: str
+    value: str | None = None
+
+
 class ScreenshotClassificationModel(BaseModel):
     screenshot_type: ScreenshotType
     source_app_hint: str | None = None
@@ -46,6 +53,7 @@ class ActivityExtraction(BaseModel):
     avg_cadence_rpm: int | None = None
     tss: float | None = None
     confidence: list[ConfidenceEntry] = Field(default_factory=list)
+    additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
 class WellnessDayEntry(BaseModel):
@@ -57,6 +65,7 @@ class WellnessDayEntry(BaseModel):
     body_battery: int | None = None
     stress_score: int | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
 class WellnessMultiExtraction(BaseModel):
@@ -74,6 +83,7 @@ class WellnessSingleExtraction(BaseModel):
     stress_score: int | None = None
     subjective_energy: int | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
 class ChartDateRange(BaseModel):
@@ -109,13 +119,7 @@ class TrainingLoadChartExtraction(BaseModel):
     y_axis_label: str | None = None
     series: list[TrainingLoadPoint] = Field(default_factory=list)
     visible_annotations: list[str] = Field(default_factory=list)
-
-
-class GenericObservation(BaseModel):
-    """A single label/value datum read off a screenshot we have no typed schema for."""
-
-    label: str
-    value: str | None = None
+    additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
 class GenericExtraction(BaseModel):
