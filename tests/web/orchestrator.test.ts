@@ -367,6 +367,40 @@ describe("streamCoachTurn", () => {
     expect(body.items.length).toBeLessThan(historyMessages.length);
   });
 
+  it("releases a durable-session lease when the acquired lease response has malformed JSON", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://localhost/api/chat/model-state/lease") {
+        if (init?.method === "POST") {
+          return Promise.resolve(new Response("{", { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      useDurableSession: true,
+    });
+    await response.text();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({
+        body: expect.stringContaining('"lease_id"'),
+        method: "DELETE",
+      }),
+    );
+  });
+
   it("passes an abort signal to durable pre-run fetches", async () => {
     const controller = new AbortController();
     let leaseSignal: AbortSignal | undefined;

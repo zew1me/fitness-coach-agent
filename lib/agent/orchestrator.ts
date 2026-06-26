@@ -291,10 +291,10 @@ export function streamCoachTurn({
               );
             }
             if (leaseResponse.ok) {
+              leaseAcquired = true;
               leaseState = (await leaseResponse.json()) as {
                 thread_id?: string;
               };
-              leaseAcquired = true;
               leaseObtained = true;
             } else {
               Sentry.logger.warn(

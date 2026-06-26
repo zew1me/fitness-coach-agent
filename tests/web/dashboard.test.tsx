@@ -429,6 +429,128 @@ describe("CoachChat", () => {
     ).toHaveLength(1);
   });
 
+  it("does not reveal stale older-page counts when the thread cursor changes before the page resolves", async () => {
+    const initialMessages = Array.from({ length: 50 }, (_, index) => ({
+      id: `message-${index}`,
+      attachments: [],
+      content: `Recent message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 9, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    const refreshedMessages = Array.from({ length: 70 }, (_, index) => ({
+      id: `refreshed-${index}`,
+      attachments: [],
+      content: `Refreshed message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 10, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    let threadLoads = 0;
+    let resolveOlder:
+      | ((_value: Response | PromiseLike<Response>) => void)
+      | undefined;
+    const olderResponse = new Promise<Response>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        threadLoads += 1;
+        const messages =
+          threadLoads === 1 ? initialMessages : refreshedMessages;
+        const nextCursor = threadLoads === 1 ? "cursor-1" : "cursor-2";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              next_cursor: nextCursor,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/messages?before=cursor-1&limit=50") {
+        return olderResponse;
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<CoachChat />);
+
+    const showOlder = await screen.findByRole("button", {
+      name: /^Show older messages$/i,
+    });
+    fireEvent.click(showOlder);
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await act(async () => {
+      resolveOlder?.(
+        new Response(
+          JSON.stringify({
+            messages: [
+              {
+                id: "stale-older-1",
+                attachments: [],
+                content: "Stale older page message",
+                created_at: "2026-04-04T08:59:00Z",
+                metadata: {},
+                parts: [{ type: "text", text: "Stale older page message" }],
+                role: "assistant",
+                thread_id: "thread-1",
+                user_id: "athlete-1",
+              },
+            ],
+            next_cursor: null,
+          }),
+          { status: 200 },
+        ),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Show 10 older messages/i }),
+      ).toBeTruthy();
+    });
+    expect(screen.queryByText("Stale older page message")).toBeNull();
+  });
+
   it("restores locally persisted chat history when the local thread endpoint is unavailable", async () => {
     localStorage.setItem(
       "fitness-coach.local-chat-thread.athlete-1",

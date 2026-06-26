@@ -1531,6 +1531,7 @@ function CoachChatBody({
       try {
         const refreshed = await loadChatThread();
         setThreadData(refreshed);
+        setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
       } catch (refreshError) {
         Sentry.logger.warn("chat thread refresh failed after send");
         console.error("Chat thread refresh failed after send", refreshError);
@@ -1561,6 +1562,7 @@ function CoachChatBody({
     try {
       const refreshed = await loadChatThread();
       setThreadData(refreshed);
+      setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
     } catch (refreshError) {
       Sentry.logger.warn("chat thread refresh failed after profile save");
       console.warn(
@@ -1628,6 +1630,9 @@ function CoachChatBody({
                   if (nextCursorRef.current !== requestedCursor) return;
                   setThreadData((current) => {
                     if (current.next_cursor !== requestedCursor) return current;
+                    setVisibleMessageCount(
+                      (visibleCount) => visibleCount + page.messages.length,
+                    );
                     return {
                       ...current,
                       next_cursor: page.next_cursor,
@@ -1640,9 +1645,6 @@ function CoachChatBody({
                       },
                     };
                   });
-                  setVisibleMessageCount(
-                    (visibleCount) => visibleCount + page.messages.length,
-                  );
                 })
                 .catch((error) =>
                   setThreadError(
