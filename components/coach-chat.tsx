@@ -1301,6 +1301,10 @@ function CoachChatBody({
   const persistedMessages = threadData.thread.messages;
   const threadId = threadData.thread.id;
   const nextCursorRef = useRef(threadData.next_cursor ?? null);
+  // Synchronous guard against double-click: state reads aren't atomic across
+  // rapid events, so this ref is the authoritative in-flight check.
+  const fetchingCursorRef = useRef<string | null>(null);
+  const sendInFlightRef = useRef(false);
 
   useEffect(() => {
     nextCursorRef.current = threadData.next_cursor ?? null;
@@ -1494,9 +1498,10 @@ function CoachChatBody({
   }
 
   async function handleSend(): Promise<void> {
-    if (composerBusy) return;
+    if (sendInFlightRef.current || composerBusy) return;
     if (!hasSendableContent(composer, attachments)) return;
 
+    sendInFlightRef.current = true;
     setSending(true);
     setThreadError(null);
     try {
@@ -1528,6 +1533,7 @@ function CoachChatBody({
       try {
         const refreshed = await loadChatThread();
         setThreadData(refreshed);
+        setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
       } catch (refreshError) {
         Sentry.logger.warn("chat thread refresh failed after send");
         console.error("Chat thread refresh failed after send", refreshError);
@@ -1543,6 +1549,7 @@ function CoachChatBody({
       setSyncingThread(false);
       setThreadError(errorMessage(error, "Unable to send your message."));
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
   }
@@ -1558,6 +1565,7 @@ function CoachChatBody({
     try {
       const refreshed = await loadChatThread();
       setThreadData(refreshed);
+      setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
     } catch (refreshError) {
       Sentry.logger.warn("chat thread refresh failed after profile save");
       console.warn(
@@ -1613,8 +1621,12 @@ function CoachChatBody({
                 return;
               }
               const requestedCursor = threadData.next_cursor;
-              if (!requestedCursor || loadingOlderCursor === requestedCursor)
+              if (
+                !requestedCursor ||
+                fetchingCursorRef.current === requestedCursor
+              )
                 return;
+              fetchingCursorRef.current = requestedCursor;
               setLoadingOlderCursor(requestedCursor);
               void loadChatMessages(requestedCursor)
                 .then((page) => {
@@ -1642,11 +1654,13 @@ function CoachChatBody({
                     errorMessage(error, "Unable to load older messages."),
                   ),
                 )
-                .finally(() =>
+                .finally(() => {
+                  if (fetchingCursorRef.current === requestedCursor)
+                    fetchingCursorRef.current = null;
                   setLoadingOlderCursor((current) =>
                     current === requestedCursor ? null : current,
-                  ),
-                );
+                  );
+                });
             }}
             profileComplete={threadData.profile_complete}
           />

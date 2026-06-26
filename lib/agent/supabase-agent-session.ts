@@ -287,7 +287,12 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     const compacted = await this.client.responses.compact({
       ...compactArgs,
       model: this.options.model ?? "gpt-5.4-mini",
-      input: items as OpenAI.Responses.ResponseInput,
+      // Strip input_image parts (and any other model-incompatible content)
+      // before compacting, matching the sanitization applied elsewhere via
+      // prepareHistoryItemForModelInput.
+      input: items.map((item) =>
+        this.prepareHistoryItemForModelInput(item),
+      ) as OpenAI.Responses.ResponseInput,
     });
     const output = compacted.output as AgentInputItem[];
     if (!Array.isArray(output) || output.length === 0) {

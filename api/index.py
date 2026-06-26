@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
 
+import httpx
 import sentry_sdk
 from fastapi import (
     Cookie,
@@ -22,6 +23,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
+from postgrest.exceptions import APIError as PostgRESTAPIError
 from pydantic import BaseModel
 
 from backend.config import settings
@@ -458,6 +460,9 @@ async def acquire_chat_turn_lease(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat lease acquire failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
 
 
@@ -472,6 +477,9 @@ async def release_chat_turn_lease(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat lease release failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
 
 

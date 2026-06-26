@@ -123,12 +123,15 @@ class ChatService:
         limit: int = CHAT_MESSAGE_PAGE_SIZE,
         before: str | None = None,
     ) -> ChatMessagePage:
-        thread = await self._repo.get_or_create_chat_thread(user_id)
+        thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
         messages = await self._repo.list_chat_messages(
             thread.id,
             limit=limit,
             before=_decode_message_cursor(before) if before is not None else None,
         )
+        # list_chat_messages queries DESC then reverses, so the slice is ascending
+        # (oldest-first).  messages[0] is therefore the oldest row in the page and
+        # is the correct "before" anchor for the next older page.
         next_cursor = _encode_message_cursor(messages[0]) if len(messages) == limit else None
         return ChatMessagePage(messages=messages, next_cursor=next_cursor)
 

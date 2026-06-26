@@ -23,7 +23,11 @@ import { oldestDueFollowUp } from "./coaching-memory";
 import { buildContextSlices } from "./context-slices";
 import { planSpecialistDelegation } from "./delegation-planner";
 import { fetchSignalWithTimeout } from "./fetch-signal";
-import { releaseChatTurnLease } from "./lease-client";
+import {
+  LeaseAcquisitionError,
+  acquireChatTurnLease,
+  releaseChatTurnLease,
+} from "./lease-client";
 import { selectMessagesForModel } from "./message-context";
 import {
   specialistReportsSchema,
@@ -57,6 +61,24 @@ const MAX_COACH_STEPS = 4;
 const MODEL = "gpt-5.4-mini";
 const LAZY_SEED_TOKEN_BUDGET = 200_000;
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
+const CHAT_TURN_LEASE_TTL_SECONDS = 900;
+
+type PrepareDurableSessionOptions = {
+  accessToken: string;
+  baseUrl: string;
+  context: AthleteContextBundle;
+  extraHeaders?: Record<string, string>;
+  leaseId: string;
+  markLeaseAcquired: () => void;
+  selectedMessages: UIMessage[];
+  signal?: AbortSignal;
+};
+
+type PreparedDurableSession = {
+  durableSession: DurableCompactionSession;
+  traceGroupId: string;
+  underlyingSession: SupabaseAgentSession;
+};
 
 function generateUuid(): string {
   return crypto.randomUUID();
@@ -84,6 +106,12 @@ function trimBootstrapToBudget(
       return candidate;
     }
   }
+  // Every suffix exceeds the budget — seed the session cold rather than
+  // exceeding the token limit.  Log so this case is visible in production.
+  Sentry.logger.warn(
+    "coach: trimBootstrapToBudget: all messages exceed budget; session seeded cold",
+    { messageCount: messages.length },
+  );
   return [];
 }
 
@@ -138,6 +166,20 @@ async function initializeSessionFromTranscript(options: {
   }
 }
 
+/**
+ * Returns true when the message contains at least one part with renderable
+ * content (non-empty text, tool calls/results, files, etc.).  A message whose
+ * only part is `step-start` — which happens when a turn fails before any model
+ * output is produced — is treated as empty and must not be persisted.
+ */
+function hasRenderableContent(parts: UIMessage["parts"]): boolean {
+  return parts.some((part) => {
+    if (part.type === "step-start") return false;
+    if (part.type === "text") return part.text.length > 0;
+    return true; // tool-invocation, tool-result, dynamic-tool, file, reasoning, …
+  });
+}
+
 async function persistAssistantMessage(
   options: Pick<
     StreamCoachTurnOptions,
@@ -146,7 +188,7 @@ async function persistAssistantMessage(
   responseMessage: UIMessage,
   finishReason: string | undefined,
 ): Promise<void> {
-  if (responseMessage.parts.length === 0) return;
+  if (!hasRenderableContent(responseMessage.parts)) return;
   try {
     const response = await fetch(`${options.baseUrl}/api/chat/messages`, {
       method: "POST",
@@ -179,6 +221,103 @@ async function persistAssistantMessage(
     const message = error instanceof Error ? error.message : String(error);
     console.error("[chat] persist assistant reply error:", message);
   }
+}
+
+async function acquireDurableLeaseState(
+  options: PrepareDurableSessionOptions,
+): Promise<{ thread_id?: string } | null> {
+  try {
+    return await acquireChatTurnLease({
+      accessToken: options.accessToken,
+      baseUrl: options.baseUrl,
+      ...(options.extraHeaders ? { extraHeaders: options.extraHeaders } : {}),
+      leaseId: options.leaseId,
+      onLeaseAcquired: options.markLeaseAcquired,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ttlSeconds: CHAT_TURN_LEASE_TTL_SECONDS,
+    });
+  } catch (leaseError) {
+    if (
+      options.signal?.aborted ||
+      (leaseError instanceof LeaseAcquisitionError && leaseError.status === 409)
+    ) {
+      throw leaseError;
+    }
+    Sentry.captureException(leaseError, {
+      tags: { subsystem: "lease-acquire", degrading: "true" },
+    });
+    Sentry.logger.warn(
+      "coach: lease fetch failed; degrading to stateless mode",
+      {
+        error:
+          leaseError instanceof Error ? leaseError.message : String(leaseError),
+      },
+    );
+    return null;
+  }
+}
+
+function createUnderlyingSession(
+  options: PrepareDurableSessionOptions,
+): SupabaseAgentSession {
+  return new SupabaseAgentSession({
+    accessToken: options.accessToken,
+    baseUrl: options.baseUrl,
+    leaseId: options.leaseId,
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.extraHeaders ? { extraHeaders: options.extraHeaders } : {}),
+  });
+}
+
+async function compactIfNeeded(
+  durableSession: DurableCompactionSession,
+  estimate: ReturnType<typeof estimateStoredContext>,
+): Promise<void> {
+  if (estimate.estimatedTokens < 220_000) return;
+  try {
+    await durableSession.runCompaction({
+      force: true,
+      compactionMode: "input",
+    });
+  } catch (error) {
+    if (estimate.estimatedTokens >= 260_000) throw error;
+    Sentry.captureException(error, {
+      tags: { subsystem: "forced-compaction" },
+      extra: { estimated_tokens: estimate.estimatedTokens },
+    });
+    Sentry.logger.warn("coach: forced compaction failed below hard limit", {
+      estimated_tokens: estimate.estimatedTokens,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function prepareDurableSession(
+  options: PrepareDurableSessionOptions,
+): Promise<PreparedDurableSession | null> {
+  const leaseState = await acquireDurableLeaseState(options);
+  if (leaseState === null) return null;
+
+  const traceGroupId = leaseState.thread_id ?? options.context.profile.user_id;
+  const underlyingSession = createUnderlyingSession(options);
+  await initializeSessionFromTranscript({
+    session: underlyingSession,
+    accessToken: options.accessToken,
+    baseUrl: options.baseUrl,
+    ...(options.extraHeaders ? { extraHeaders: options.extraHeaders } : {}),
+    currentMessageIds: new Set(
+      options.selectedMessages.map((message) => message.id),
+    ),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  const projected = [
+    ...(await underlyingSession.getItems()),
+    ...toAgentInputItems(options.selectedMessages),
+  ];
+  const estimate = estimateStoredContext(projected);
+  const durableSession = new DurableCompactionSession({ underlyingSession });
+  await compactIfNeeded(durableSession, estimate);
+  return { durableSession, traceGroupId, underlyingSession };
 }
 
 function createTavilyServer(url: string | undefined): MCPServer | null {
@@ -231,77 +370,28 @@ export function streamCoachTurn({
       const textState = { textId: "coach-response", textStarted: false };
 
       const leaseId = crypto.randomUUID();
-      let leaseAcquired = false;
+      const leaseStatus = { acquired: false };
       try {
         let durableSession: DurableCompactionSession | undefined;
         let underlyingSession: SupabaseAgentSession | undefined;
         let traceGroupId = context.profile.user_id;
         if (useDurableSession) {
-          const leaseResponse = await fetch(
-            `${baseUrl}/api/chat/model-state/lease`,
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-                ...(extraHeaders ?? {}),
-              },
-              body: JSON.stringify({ lease_id: leaseId, ttl_seconds: 300 }),
-              signal: fetchSignalWithTimeout(signal, PRE_RUN_FETCH_TIMEOUT_MS),
-            },
-          );
-          if (!leaseResponse.ok)
-            throw new Error(
-              `Unable to acquire chat turn lease (${leaseResponse.status})`,
-            );
-          leaseAcquired = true;
-          const leaseState = (await leaseResponse.json()) as {
-            thread_id?: string;
-          };
-          traceGroupId = leaseState.thread_id ?? traceGroupId;
-          underlyingSession = new SupabaseAgentSession({
+          const prepared = await prepareDurableSession({
             accessToken,
             baseUrl,
+            context,
+            ...(extraHeaders ? { extraHeaders } : {}),
             leaseId,
-            ...(signal ? { signal } : {}),
-            ...(extraHeaders ? { extraHeaders } : {}),
-          });
-          await initializeSessionFromTranscript({
-            session: underlyingSession,
-            accessToken,
-            baseUrl,
-            ...(extraHeaders ? { extraHeaders } : {}),
-            currentMessageIds: new Set(
-              selectedMessages.map((message) => message.id),
-            ),
+            markLeaseAcquired: () => {
+              leaseStatus.acquired = true;
+            },
+            selectedMessages,
             ...(signal ? { signal } : {}),
           });
-          const projected = [
-            ...(await underlyingSession.getItems()),
-            ...toAgentInputItems(selectedMessages),
-          ];
-          const estimate = estimateStoredContext(projected);
-          durableSession = new DurableCompactionSession({ underlyingSession });
-          if (estimate.estimatedTokens >= 220_000) {
-            try {
-              await durableSession.runCompaction({
-                force: true,
-                compactionMode: "input",
-              });
-            } catch (error) {
-              if (estimate.estimatedTokens >= 260_000) throw error;
-              Sentry.captureException(error, {
-                tags: { subsystem: "forced-compaction" },
-                extra: { estimated_tokens: estimate.estimatedTokens },
-              });
-              Sentry.logger.warn(
-                "coach: forced compaction failed below hard limit",
-                {
-                  estimated_tokens: estimate.estimatedTokens,
-                  error: error instanceof Error ? error.message : String(error),
-                },
-              );
-            }
+          if (prepared !== null) {
+            durableSession = prepared.durableSession;
+            underlyingSession = prepared.underlyingSession;
+            traceGroupId = prepared.traceGroupId;
           }
         }
         await Sentry.startSpan(
@@ -439,7 +529,7 @@ export function streamCoachTurn({
           message.replace(/key=[^&\s]+/g, "key=***"),
         );
       } finally {
-        if (leaseAcquired) {
+        if (leaseStatus.acquired) {
           try {
             await releaseChatTurnLease({
               accessToken,
