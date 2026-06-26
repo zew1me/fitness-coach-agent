@@ -138,6 +138,20 @@ async function initializeSessionFromTranscript(options: {
   }
 }
 
+/**
+ * Returns true when the message contains at least one part with renderable
+ * content (non-empty text, tool calls/results, files, etc.).  A message whose
+ * only part is `step-start` — which happens when a turn fails before any model
+ * output is produced — is treated as empty and must not be persisted.
+ */
+function hasRenderableContent(parts: UIMessage["parts"]): boolean {
+  return parts.some((part) => {
+    if (part.type === "step-start") return false;
+    if (part.type === "text") return part.text.length > 0;
+    return true; // tool-invocation, tool-result, dynamic-tool, file, reasoning, …
+  });
+}
+
 async function persistAssistantMessage(
   options: Pick<
     StreamCoachTurnOptions,
@@ -146,7 +160,7 @@ async function persistAssistantMessage(
   responseMessage: UIMessage,
   finishReason: string | undefined,
 ): Promise<void> {
-  if (responseMessage.parts.length === 0) return;
+  if (!hasRenderableContent(responseMessage.parts)) return;
   try {
     const response = await fetch(`${options.baseUrl}/api/chat/messages`, {
       method: "POST",
@@ -237,70 +251,111 @@ export function streamCoachTurn({
         let underlyingSession: SupabaseAgentSession | undefined;
         let traceGroupId = context.profile.user_id;
         if (useDurableSession) {
-          const leaseResponse = await fetch(
-            `${baseUrl}/api/chat/model-state/lease`,
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-                ...(extraHeaders ?? {}),
-              },
-              body: JSON.stringify({ lease_id: leaseId, ttl_seconds: 300 }),
-              signal: fetchSignalWithTimeout(signal, PRE_RUN_FETCH_TIMEOUT_MS),
-            },
-          );
-          if (!leaseResponse.ok)
-            throw new Error(
-              `Unable to acquire chat turn lease (${leaseResponse.status})`,
-            );
-          leaseAcquired = true;
-          const leaseState = (await leaseResponse.json()) as {
-            thread_id?: string;
-          };
-          traceGroupId = leaseState.thread_id ?? traceGroupId;
-          underlyingSession = new SupabaseAgentSession({
-            accessToken,
-            baseUrl,
-            leaseId,
-            ...(signal ? { signal } : {}),
-            ...(extraHeaders ? { extraHeaders } : {}),
-          });
-          await initializeSessionFromTranscript({
-            session: underlyingSession,
-            accessToken,
-            baseUrl,
-            ...(extraHeaders ? { extraHeaders } : {}),
-            currentMessageIds: new Set(
-              selectedMessages.map((message) => message.id),
-            ),
-            ...(signal ? { signal } : {}),
-          });
-          const projected = [
-            ...(await underlyingSession.getItems()),
-            ...toAgentInputItems(selectedMessages),
-          ];
-          const estimate = estimateStoredContext(projected);
-          durableSession = new DurableCompactionSession({ underlyingSession });
-          if (estimate.estimatedTokens >= 220_000) {
-            try {
-              await durableSession.runCompaction({
-                force: true,
-                compactionMode: "input",
-              });
-            } catch (error) {
-              if (estimate.estimatedTokens >= 260_000) throw error;
-              Sentry.captureException(error, {
-                tags: { subsystem: "forced-compaction" },
-                extra: { estimated_tokens: estimate.estimatedTokens },
-              });
-              Sentry.logger.warn(
-                "coach: forced compaction failed below hard limit",
-                {
-                  estimated_tokens: estimate.estimatedTokens,
-                  error: error instanceof Error ? error.message : String(error),
+          // Attempt to acquire the durable-session lease.  A 409 means another
+          // turn is genuinely in flight — fail fast.  Any other infra error
+          // (missing table, 500, 503, network timeout) degrades gracefully to
+          // stateless mode so the user always gets a response.
+          let leaseObtained = false;
+          let leaseState: { thread_id?: string } | undefined;
+          try {
+            const leaseResponse = await fetch(
+              `${baseUrl}/api/chat/model-state/lease`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  "Content-Type": "application/json",
+                  ...(extraHeaders ?? {}),
                 },
+                body: JSON.stringify({ lease_id: leaseId, ttl_seconds: 300 }),
+                signal: fetchSignalWithTimeout(
+                  signal,
+                  PRE_RUN_FETCH_TIMEOUT_MS,
+                ),
+              },
+            );
+            if (leaseResponse.status === 409) {
+              throw new Error(
+                `Unable to acquire chat turn lease (${leaseResponse.status})`,
               );
+            }
+            if (leaseResponse.ok) {
+              leaseAcquired = true;
+              leaseObtained = true;
+              leaseState = (await leaseResponse.json()) as {
+                thread_id?: string;
+              };
+            } else {
+              Sentry.logger.warn(
+                "coach: lease infra error; degrading to stateless mode",
+                { status: leaseResponse.status },
+              );
+            }
+          } catch (leaseError) {
+            // Propagate abort and explicit conflict errors; swallow everything
+            // else so the turn can still run without durable state.
+            if (signal?.aborted) throw leaseError;
+            const leaseMsg =
+              leaseError instanceof Error
+                ? leaseError.message
+                : String(leaseError);
+            if (leaseMsg.startsWith("Unable to acquire")) throw leaseError;
+            Sentry.captureException(leaseError, {
+              tags: { subsystem: "lease-acquire", degrading: "true" },
+            });
+            Sentry.logger.warn(
+              "coach: lease fetch failed; degrading to stateless mode",
+              { error: leaseMsg },
+            );
+          }
+          if (leaseObtained && leaseState !== undefined) {
+            traceGroupId = leaseState.thread_id ?? traceGroupId;
+            underlyingSession = new SupabaseAgentSession({
+              accessToken,
+              baseUrl,
+              leaseId,
+              ...(signal ? { signal } : {}),
+              ...(extraHeaders ? { extraHeaders } : {}),
+            });
+            await initializeSessionFromTranscript({
+              session: underlyingSession,
+              accessToken,
+              baseUrl,
+              ...(extraHeaders ? { extraHeaders } : {}),
+              currentMessageIds: new Set(
+                selectedMessages.map((message) => message.id),
+              ),
+              ...(signal ? { signal } : {}),
+            });
+            const projected = [
+              ...(await underlyingSession.getItems()),
+              ...toAgentInputItems(selectedMessages),
+            ];
+            const estimate = estimateStoredContext(projected);
+            durableSession = new DurableCompactionSession({
+              underlyingSession,
+            });
+            if (estimate.estimatedTokens >= 220_000) {
+              try {
+                await durableSession.runCompaction({
+                  force: true,
+                  compactionMode: "input",
+                });
+              } catch (error) {
+                if (estimate.estimatedTokens >= 260_000) throw error;
+                Sentry.captureException(error, {
+                  tags: { subsystem: "forced-compaction" },
+                  extra: { estimated_tokens: estimate.estimatedTokens },
+                });
+                Sentry.logger.warn(
+                  "coach: forced compaction failed below hard limit",
+                  {
+                    estimated_tokens: estimate.estimatedTokens,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  },
+                );
+              }
             }
           }
         }
