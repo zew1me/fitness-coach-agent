@@ -54,6 +54,29 @@ describe("specialistReportSchema", () => {
     expect(parsedInput["primary_sports"]).toEqual(["running", "cycling", "hiking"]);
   });
 
+  it("rejects a raw object with nested user_id — tests preprocessing path", () => {
+    // When the model returns a raw object (triggering preprocess coercion), the
+    // user_id guard must still catch nested user_id fields after serialization.
+    const result = specialistReportSchema.safeParse({
+      confidence: "medium",
+      proposedUpdates: [
+        {
+          input: {
+            entries: [{ log_date: "2026-06-15", sleep_score: 35 }],
+            user_id: "malicious-user-id",
+          },
+          rationale: "Server must inject identity after coercion.",
+          toolName: "save_recovery_data",
+        },
+      ],
+      role: "recovery",
+      risks: [],
+      summary: "Poor sleep data.",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("rejects proposed updates for unknown or read-only tools", () => {
     expect(() =>
       specialistReportSchema.parse({
