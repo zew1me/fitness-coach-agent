@@ -1301,6 +1301,9 @@ function CoachChatBody({
   const persistedMessages = threadData.thread.messages;
   const threadId = threadData.thread.id;
   const nextCursorRef = useRef(threadData.next_cursor ?? null);
+  // Synchronous guard against double-click: state reads aren't atomic across
+  // rapid events, so this ref is the authoritative in-flight check.
+  const fetchingCursorRef = useRef<string | null>(null);
 
   useEffect(() => {
     nextCursorRef.current = threadData.next_cursor ?? null;
@@ -1613,8 +1616,12 @@ function CoachChatBody({
                 return;
               }
               const requestedCursor = threadData.next_cursor;
-              if (!requestedCursor || loadingOlderCursor === requestedCursor)
+              if (
+                !requestedCursor ||
+                fetchingCursorRef.current === requestedCursor
+              )
                 return;
+              fetchingCursorRef.current = requestedCursor;
               setLoadingOlderCursor(requestedCursor);
               void loadChatMessages(requestedCursor)
                 .then((page) => {
@@ -1642,11 +1649,13 @@ function CoachChatBody({
                     errorMessage(error, "Unable to load older messages."),
                   ),
                 )
-                .finally(() =>
+                .finally(() => {
+                  if (fetchingCursorRef.current === requestedCursor)
+                    fetchingCursorRef.current = null;
                   setLoadingOlderCursor((current) =>
                     current === requestedCursor ? null : current,
-                  ),
-                );
+                  );
+                });
             }}
             profileComplete={threadData.profile_complete}
           />
