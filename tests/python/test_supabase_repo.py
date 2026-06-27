@@ -389,6 +389,23 @@ def test_athlete_profile_specialization_pct_defaults_to_none() -> None:
     assert profile.specialization_pct is None
 
 
+def test_onboarding_collected_null_values_coerced_to_false() -> None:
+    """Legacy DB rows with null section flags must not raise ValidationError."""
+    profile = AthleteProfile.model_validate(
+        {
+            "user_id": "u1",
+            "onboarding_collected": {"nutrition": None, "goals": True},
+        }
+    )
+    assert profile.onboarding_collected == {"nutrition": False, "goals": True}
+
+
+def test_onboarding_collected_missing_or_non_dict_coerced_to_empty() -> None:
+    """A missing or non-dict value must fall back to an empty dict, not crash."""
+    profile = AthleteProfile.model_validate({"user_id": "u1", "onboarding_collected": None})
+    assert profile.onboarding_collected == {}
+
+
 @pytest.mark.asyncio
 async def test_update_athlete_profile_fields_drops_null_specialization_pct() -> None:
     """None specialization_pct must be excluded from the upsert payload.

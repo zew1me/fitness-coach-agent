@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.config import settings
 from backend.logging_config import configure_logging
@@ -878,8 +878,39 @@ async def get_recent_activities(
 
 
 class SaveActivityFromTextRequest(BaseModel):
-    text: str
+    text: str = Field(min_length=1)
     activity_id: str | None = None
+
+
+async def _update_activity_from_text(
+    user_id: str,
+    activity_id: str,
+    text: str,
+) -> Mapping[str, object]:
+    from backend.engine.activity_text import (
+        ActivityTextExtractionUnavailable,
+        merge_activity_text_update,
+    )
+
+    try:
+        existing = await repo.get_activity(user_id, activity_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    try:
+        updated = await merge_activity_text_update(existing, text)
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        activity = await repo.update_activity(updated)
+    except RuntimeError as exc:
+        logger.exception(
+            "update_activity failed for user_id=%s activity_id=%s", user_id, activity_id
+        )
+        raise HTTPException(status_code=503, detail="Failed to update activity.") from exc
+    logger.info(
+        "save_activity_from_text user_id=%s activity_id=%s status=updated", user_id, activity_id
+    )
+    return {"activity": activity.model_dump(mode="json"), "status": "updated"}
 
 
 @app.post("/api/engine/save-activity-from-text")
@@ -890,20 +921,15 @@ async def save_activity_from_text(
     from backend.engine.activity_text import (
         ActivityTextExtractionUnavailable,
         build_activity_from_text,
-        merge_activity_text_update,
     )
 
     if not payload.text.strip():
         raise HTTPException(status_code=422, detail="Activity text must not be empty.")
 
     if payload.activity_id:
-        try:
-            existing = await repo.get_activity(user_context.user_id, payload.activity_id)
-            updated = await merge_activity_text_update(existing, payload.text)
-        except ActivityTextExtractionUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        activity = await repo.update_activity(updated)
-        return {"activity": activity.model_dump(mode="json"), "status": "updated"}
+        return await _update_activity_from_text(
+            user_context.user_id, payload.activity_id, payload.text
+        )
 
     try:
         profile = await repo.get_athlete_profile(user_context.user_id)
@@ -920,12 +946,22 @@ async def save_activity_from_text(
     except ActivityTextExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if result.activity is None:
+        logger.info(
+            "save_activity_from_text user_id=%s status=needs_clarification missing=%s",
+            user_context.user_id,
+            result.missing,
+        )
         return {
             "missing": result.missing,
             "raw_extraction": result.raw_extraction,
             "status": "needs_clarification",
         }
-    activity = await repo.create_activity(result.activity)
+    try:
+        activity = await repo.create_activity(result.activity)
+    except RuntimeError as exc:
+        logger.exception("create_activity failed for user_id=%s", user_context.user_id)
+        raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
+    logger.info("save_activity_from_text user_id=%s status=saved", user_context.user_id)
     return {"activity": activity.model_dump(mode="json"), "status": "saved"}
 
 

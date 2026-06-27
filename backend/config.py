@@ -39,9 +39,7 @@ class Settings(BaseSettings):
     supabase_service_role_key: str | None = None
     supabase_url: str | None = None
 
-    model_config = SettingsConfigDict(
-        env_file=(".env", ".env.local"), env_file_encoding="utf-8", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property
     def base_url(self) -> str:

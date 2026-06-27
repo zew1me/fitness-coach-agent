@@ -36,7 +36,10 @@ async function postEngine<TInput extends object>(
     );
 
     if (!response.ok) {
-      throw new Error(`Engine request failed for ${path}.`);
+      const body = await response.text().catch(() => "");
+      throw new Error(
+        `Engine request failed for ${path}: HTTP ${response.status} ${response.statusText}${body ? `. ${body}` : ""}`,
+      );
     }
 
     return await response.json();

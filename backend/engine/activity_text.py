@@ -148,19 +148,23 @@ async def extract_activity_text(text: str) -> ActivityTextExtraction:
             response.raise_for_status()
             payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("OpenAI activity text extraction failed: %s", exc)
+        logger.warning("OpenAI activity text extraction failed", exc_info=True)
         raise ActivityTextExtractionUnavailable(
             "OpenAI activity text extraction unavailable."
         ) from exc
 
     output_text = _extract_response_output_text(payload)
     if output_text is None:
+        logger.warning(
+            "OpenAI response contained no extractable output_text; output=%r",
+            payload.get("output"),
+        )
         raise ActivityTextExtractionUnavailable("OpenAI activity text extraction unavailable.")
 
     try:
         return ActivityTextExtraction.model_validate_json(output_text)
     except ValueError as exc:
-        logger.warning("OpenAI activity text extraction returned invalid JSON: %s", exc)
+        logger.warning("OpenAI activity text extraction returned invalid JSON", exc_info=True)
         raise ActivityTextExtractionUnavailable(
             "OpenAI activity text extraction unavailable."
         ) from exc
@@ -359,6 +363,64 @@ def _add_nutrition_summary(summary: dict[str, Any], extraction: ActivityTextExtr
         ]
 
 
+def _merge_nutrition_summary(summary: dict[str, Any], extraction: ActivityTextExtraction) -> None:
+    """Like _add_nutrition_summary but accumulates totals (update path)."""
+    carbs = sum(item.carbs_g or 0 for item in extraction.nutrition_estimates)
+    calories = sum(item.calories_kcal or 0 for item in extraction.nutrition_estimates)
+    if carbs > 0:
+        existing_carbs = summary.get("fueling", {}).get("carbs_g") or 0
+        summary["fueling"]["carbs_g"] = round(existing_carbs + carbs, 1)
+        summary["fueling"]["carbs_g_confidence"] = _weighted_confidence(
+            [(item.carbs_g, item.carbs_g_confidence) for item in extraction.nutrition_estimates]
+        )
+    if calories > 0:
+        existing_calories = summary.get("fueling", {}).get("calories_kcal") or 0
+        summary["fueling"]["calories_kcal"] = round(existing_calories + calories, 1)
+        summary["fueling"]["calories_kcal_confidence"] = _weighted_confidence(
+            [
+                (item.calories_kcal, item.calories_kcal_confidence)
+                for item in extraction.nutrition_estimates
+            ]
+        )
+    if extraction.nutrition_estimates:
+        existing_estimates = summary.get("fueling", {}).get("nutrition_estimates") or []
+        summary["fueling"]["nutrition_estimates"] = existing_estimates + [
+            item.model_dump(mode="json", exclude_none=True)
+            for item in extraction.nutrition_estimates
+        ]
+
+
+def _merge_context_summary(summary: dict[str, Any], extraction: ActivityTextExtraction) -> None:
+    """Like _add_context_summary but extends lists instead of replacing them (update path)."""
+    if extraction.food_items:
+        existing = summary.get("food_items") or []
+        summary["food_items"] = existing + [
+            item.model_dump(mode="json", exclude_none=True) for item in extraction.food_items
+        ]
+    if extraction.additional_important_data:
+        existing = summary.get("additional_important_data") or []
+        summary["additional_important_data"] = existing + [
+            item.model_dump(mode="json", exclude_none=True)
+            for item in extraction.additional_important_data
+        ]
+    _merge_nutrition_summary(summary, extraction)
+    if extraction.gut_comfort_1_10 is not None:
+        summary["fueling"]["gut_comfort_1_10"] = extraction.gut_comfort_1_10
+        summary["estimates"]["estimated_gut_comfort_1_10_confidence"] = (
+            extraction.gut_comfort_1_10_confidence
+        )
+    if extraction.overdid_it_flag is not None:
+        summary["subjective"]["overdid_it_flag"] = extraction.overdid_it_flag
+        summary["estimates"]["estimated_overdid_it_flag_confidence"] = (
+            extraction.overdid_it_flag_confidence
+        )
+    if extraction.athlete_notes is not None:
+        summary["subjective"]["athlete_notes"] = extraction.athlete_notes
+        summary["estimates"]["estimated_athlete_notes_confidence"] = (
+            extraction.athlete_notes_confidence
+        )
+
+
 def _weighted_confidence(values: list[tuple[float | None, float | None]]) -> float | None:
     weighted_values = [(value, confidence) for value, confidence in values if value and confidence]
     total = sum(value for value, _confidence in weighted_values)
@@ -506,7 +568,11 @@ async def build_activity_from_text(
 def _parse_iso_date(value: str | None) -> date:
     if value is None:
         raise ValueError("Activity date is required.")
-    return date.fromisoformat(value)
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        logger.warning("activity_date could not be parsed as ISO date: %r", value)
+        raise ActivityTextExtractionUnavailable("Could not parse activity date from text.") from exc
 
 
 def _activity_summary_for_update(existing: Activity) -> dict[str, Any]:
@@ -552,8 +618,7 @@ def _apply_text_update_fields(
         updated.fueling_notes = fueling_notes
     if extraction.athlete_notes is not None:
         updated.athlete_notes = extraction.athlete_notes
-        summary["subjective"]["athlete_notes"] = extraction.athlete_notes
-    _add_context_summary(summary, extraction)
+    _merge_context_summary(summary, extraction)
 
 
 async def merge_activity_text_update(

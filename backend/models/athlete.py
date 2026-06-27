@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Source of truth for a single fitness metric value.
 # "user" = athlete typed it; "file" = extracted from GPX/FIT/screenshot;
@@ -63,6 +63,13 @@ class AthleteProfile(BaseModel):
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_validator("onboarding_collected", mode="before")
+    @classmethod
+    def _coerce_onboarding_collected(cls, v: object) -> dict[str, bool]:
+        if not isinstance(v, dict):
+            return {}
+        return {k: False if val is None else bool(val) for k, val in v.items()}
 
     @property
     def age(self) -> int | None:

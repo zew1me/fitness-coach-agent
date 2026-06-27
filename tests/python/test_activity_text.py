@@ -249,6 +249,101 @@ async def test_merge_activity_text_update_preserves_original_source_and_adds_est
     assert updated.raw_extraction["text_updates"][-1]["source"] == "text_extract"
 
 
+@pytest.mark.asyncio
+async def test_build_activity_from_text_returns_needs_clarification_when_missing_fields() -> None:
+    async def incomplete_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            sport=None,
+            activity_date=None,
+        )
+
+    result = await build_activity_from_text(
+        "Felt great today.",
+        user_id="athlete-1",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=incomplete_extractor,
+    )
+
+    assert result.activity is None
+    assert "sport" in result.missing
+    assert "activity_date" in result.missing
+
+
+@pytest.mark.asyncio
+async def test_build_activity_from_text_raises_on_malformed_activity_date() -> None:
+    async def bad_date_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            sport="running",
+            sport_confidence=0.9,
+            activity_date="last Saturday",
+            activity_date_confidence=0.5,
+            moving_duration_seconds=3600,
+        )
+
+    with pytest.raises(ActivityTextExtractionUnavailable):
+        await build_activity_from_text(
+            "Ran last Saturday.",
+            user_id="athlete-1",
+            profile=AthleteProfile(user_id="athlete-1"),
+            thresholds=[],
+            extractor=bad_date_extractor,
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_activity_text_update_extends_populated_food_items() -> None:
+    existing = Activity(
+        id="activity-2",
+        user_id="athlete-1",
+        sport="running",
+        activity_date=date(2026, 6, 20),
+        source="fit_upload",
+        activity_summary={
+            "schema": "activity_summary_v1",
+            "session": {},
+            "fueling": {"carbs_g": 30.0, "calories_kcal": 120.0},
+            "subjective": {},
+            "estimates": {},
+            "data_quality": {"source": "fit_upload"},
+            "food_items": [{"name": "banana", "confidence": 0.9}],
+            "additional_important_data": [{"key": "mood", "value": "good", "confidence": 0.8}],
+        },
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            food_items=[ExtractedFoodItem(name="energy bar", quantity=1, confidence=0.85)],
+            additional_important_data=[
+                AdditionalImportantData(key="terrain", value="hilly", confidence=0.75)
+            ],
+            nutrition_estimates=[
+                NutritionEstimate(
+                    item_name="energy bar",
+                    carbs_g=40.0,
+                    carbs_g_confidence=0.7,
+                    calories_kcal=180.0,
+                    calories_kcal_confidence=0.7,
+                )
+            ],
+        )
+
+    updated = await merge_activity_text_update(
+        existing, "Also had an energy bar.", extractor=fake_extractor
+    )
+
+    food_names = [item["name"] for item in updated.activity_summary["food_items"]]
+    assert "banana" in food_names, "existing food_items must be preserved"
+    assert "energy bar" in food_names, "new food_items must be appended"
+
+    extra_keys = [item["key"] for item in updated.activity_summary["additional_important_data"]]
+    assert "mood" in extra_keys, "existing additional_important_data must be preserved"
+    assert "terrain" in extra_keys, "new additional_important_data must be appended"
+
+    assert updated.activity_summary["fueling"]["carbs_g"] == 70.0, "carbs must accumulate"
+    assert updated.activity_summary["fueling"]["calories_kcal"] == 300.0, "calories must accumulate"
+
+
 @pytest.mark.skipif(
     not (_RUN_OAI_TESTS and _OPENAI_CONFIGURED),
     reason="RUN_OAI_TESTS=1 and OPENAI_API_KEY are required for live OpenAI extraction.",
