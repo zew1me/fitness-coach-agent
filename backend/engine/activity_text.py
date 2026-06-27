@@ -367,23 +367,27 @@ def _merge_nutrition_summary(summary: dict[str, Any], extraction: ActivityTextEx
     """Like _add_nutrition_summary but accumulates totals (update path)."""
     carbs = sum(item.carbs_g or 0 for item in extraction.nutrition_estimates)
     calories = sum(item.calories_kcal or 0 for item in extraction.nutrition_estimates)
+    existing_estimates: list[dict[str, Any]] = (
+        summary.get("fueling", {}).get("nutrition_estimates") or []
+    )
+    merged_carbs_pairs = [
+        (e.get("carbs_g"), e.get("carbs_g_confidence")) for e in existing_estimates
+    ] + [(item.carbs_g, item.carbs_g_confidence) for item in extraction.nutrition_estimates]
+    merged_cal_pairs = [
+        (e.get("calories_kcal"), e.get("calories_kcal_confidence")) for e in existing_estimates
+    ] + [
+        (item.calories_kcal, item.calories_kcal_confidence)
+        for item in extraction.nutrition_estimates
+    ]
     if carbs > 0:
         existing_carbs = summary.get("fueling", {}).get("carbs_g") or 0
         summary["fueling"]["carbs_g"] = round(existing_carbs + carbs, 1)
-        summary["fueling"]["carbs_g_confidence"] = _weighted_confidence(
-            [(item.carbs_g, item.carbs_g_confidence) for item in extraction.nutrition_estimates]
-        )
+        summary["fueling"]["carbs_g_confidence"] = _weighted_confidence(merged_carbs_pairs)
     if calories > 0:
         existing_calories = summary.get("fueling", {}).get("calories_kcal") or 0
         summary["fueling"]["calories_kcal"] = round(existing_calories + calories, 1)
-        summary["fueling"]["calories_kcal_confidence"] = _weighted_confidence(
-            [
-                (item.calories_kcal, item.calories_kcal_confidence)
-                for item in extraction.nutrition_estimates
-            ]
-        )
+        summary["fueling"]["calories_kcal_confidence"] = _weighted_confidence(merged_cal_pairs)
     if extraction.nutrition_estimates:
-        existing_estimates = summary.get("fueling", {}).get("nutrition_estimates") or []
         summary["fueling"]["nutrition_estimates"] = existing_estimates + [
             item.model_dump(mode="json", exclude_none=True)
             for item in extraction.nutrition_estimates
@@ -633,9 +637,11 @@ def _apply_text_update_session_fields(
         summary["estimates"]["estimated_duration_moving_s_confidence"] = (
             extraction.moving_duration_seconds_confidence
         )
-    elif extraction.elapsed_duration_seconds is not None:
-        updated.duration_seconds = extraction.elapsed_duration_seconds
+    if extraction.elapsed_duration_seconds is not None:
+        if extraction.moving_duration_seconds is None:
+            updated.duration_seconds = extraction.elapsed_duration_seconds
         summary["session"]["duration_elapsed_s"] = extraction.elapsed_duration_seconds
+        summary["estimates"]["estimated_duration_elapsed_s"] = extraction.elapsed_duration_seconds
         summary["estimates"]["estimated_duration_elapsed_s_confidence"] = (
             extraction.elapsed_duration_seconds_confidence
         )

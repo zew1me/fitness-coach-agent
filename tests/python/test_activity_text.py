@@ -453,3 +453,116 @@ async def test_extract_activity_text_live_openai_returns_food_and_confidence() -
     assert any("gel" in item.name.lower() for item in extraction.food_items)
     assert extraction.nutrition_estimates
     assert sum(item.carbs_g or 0 for item in extraction.nutrition_estimates) > 0
+
+
+@pytest.mark.asyncio
+async def test_merge_sets_elapsed_fields_when_both_durations_extracted() -> None:
+    """When both moving and elapsed are in the extraction, both must appear in summary/estimates."""
+    existing = Activity(
+        id="activity-elapsed",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 6, 20),
+        duration_seconds=1800,
+        source="fit_upload",
+        activity_summary={
+            "schema": "activity_summary_v1",
+            "session": {},
+            "heart_rate": {},
+            "power": {},
+            "fueling": {},
+            "subjective": {},
+            "estimates": {},
+            "data_quality": {"source": "fit_upload"},
+            "food_items": [],
+            "additional_important_data": [],
+        },
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            moving_duration_seconds=1200,
+            moving_duration_seconds_confidence=0.9,
+            elapsed_duration_seconds=1500,
+            elapsed_duration_seconds_confidence=0.8,
+        )
+
+    updated = await merge_activity_text_update(
+        existing,
+        "Moving 20 min, elapsed 25 min.",
+        extractor=fake_extractor,
+    )
+
+    s = updated.activity_summary
+    assert updated.duration_seconds == 1200, "preferred duration must be moving"
+    assert s["session"]["duration_moving_s"] == 1200
+    assert s["session"]["duration_elapsed_s"] == 1500
+    assert s["estimates"]["estimated_duration_elapsed_s"] == 1500
+    assert s["estimates"]["estimated_duration_elapsed_s_confidence"] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_merge_nutrition_confidence_reflects_merged_totals() -> None:
+    """Merged confidence must weight existing + new estimates, not just the new extraction."""
+    existing = Activity(
+        id="activity-nutrition",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 6, 20),
+        duration_seconds=3600,
+        source="text_extract",
+        activity_summary={
+            "schema": "activity_summary_v1",
+            "session": {},
+            "heart_rate": {},
+            "power": {},
+            "fueling": {
+                "carbs_g": 40.0,
+                "carbs_g_confidence": 0.9,
+                "calories_kcal": 160.0,
+                "calories_kcal_confidence": 0.9,
+                "nutrition_estimates": [
+                    {
+                        "item_name": "gel 1",
+                        "carbs_g": 40.0,
+                        "carbs_g_confidence": 0.9,
+                        "calories_kcal": 160.0,
+                        "calories_kcal_confidence": 0.9,
+                    }
+                ],
+            },
+            "subjective": {},
+            "estimates": {},
+            "data_quality": {"source": "text_extract"},
+            "food_items": [],
+            "additional_important_data": [],
+        },
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            nutrition_estimates=[
+                NutritionEstimate(
+                    item_name="gel 2",
+                    carbs_g=20.0,
+                    carbs_g_confidence=0.5,
+                    calories_kcal=80.0,
+                    calories_kcal_confidence=0.5,
+                )
+            ]
+        )
+
+    updated = await merge_activity_text_update(
+        existing,
+        "Also had a second gel.",
+        extractor=fake_extractor,
+    )
+
+    fueling = updated.activity_summary["fueling"]
+    assert fueling["carbs_g"] == 60.0
+    assert fueling["calories_kcal"] == 240.0
+    # confidence must weight 40g@0.9 + 20g@0.5, not just 20g@0.5
+    expected_carbs_conf = round((40.0 * 0.9 + 20.0 * 0.5) / 60.0, 2)
+    assert fueling["carbs_g_confidence"] == expected_carbs_conf
+    expected_cal_conf = round((160.0 * 0.9 + 80.0 * 0.5) / 240.0, 2)
+    assert fueling["calories_kcal_confidence"] == expected_cal_conf
