@@ -222,6 +222,25 @@ async def test_get_athlete_profile_reads_supabase_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_athlete_profile_allows_null_onboarding_collected_values() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            athlete_rows=[
+                {
+                    "user_id": "athlete-1",
+                    "onboarding_collected": {"nutrition": None},
+                    "coaching_state": "onboarding",
+                }
+            ]
+        )
+    )
+
+    profile = await repo.get_athlete_profile("athlete-1")
+
+    assert profile.onboarding_collected == {"nutrition": None}
+
+
+@pytest.mark.asyncio
 async def test_get_athlete_profile_raises_for_missing_row() -> None:
     repo = SupabaseRepository(client=FakeSupabaseClient())
 
@@ -369,6 +388,24 @@ async def test_update_athlete_profile_fields_drops_unknown_optional_profile_enum
     )
 
     assert profile.hormone_status is None
+    assert profile.nutrition_notes == "Still save the valid sibling field"
+
+
+@pytest.mark.asyncio
+async def test_update_athlete_profile_fields_drops_unknown_threshold_sources() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    profile = await repo.update_athlete_profile_fields(
+        "athlete-6",
+        {
+            "max_hr_source": "watch_guess",
+            "weight_source": "scale",
+            "nutrition_notes": "Still save the valid sibling field",
+        },
+    )
+
+    assert profile.max_hr_source is None
+    assert profile.weight_source is None
     assert profile.nutrition_notes == "Still save the valid sibling field"
 
 

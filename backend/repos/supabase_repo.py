@@ -64,6 +64,8 @@ _PROFILE_ENUM_VALUES = {
     "biological_sex": {"male", "female", "not_specified"},
     "hormone_status": {"endogenous", "hrt_estrogen", "hrt_testosterone", "not_specified"},
     "coaching_state": {"onboarding", "calibrating", "active", "paused"},
+    "max_hr_source": {"user", "file", "estimated"},
+    "weight_source": {"user", "file", "estimated"},
 }
 
 _PROFILE_ENUM_ALIASES = {
@@ -73,6 +75,8 @@ _PROFILE_ENUM_ALIASES = {
     },
     "hormone_status": {},
     "coaching_state": {},
+    "max_hr_source": {},
+    "weight_source": {},
 }
 
 _NOT_SPECIFIED_ALIASES = {
