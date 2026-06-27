@@ -95,7 +95,10 @@ EXTRACT_WELLNESS_MULTI_PROMPT = """Extract the daily wellness/recovery data show
 screenshot. It may cover multiple days — return one entry per visible day.
 Use null for anything not clearly visible. Do not guess values.
 For each day entry, place any visible values that do not fit the structured fields
-into additional_observations as label/value pairs."""
+into that entry's additional_observations as label/value pairs.
+Place any header-level or screenshot-wide values (e.g. date range labels, summary
+stats, or app-level metadata) that do not belong to a specific day into the
+top-level additional_observations as label/value pairs."""
 
 EXTRACT_WELLNESS_SINGLE_PROMPT = """Extract the day's wellness/recovery data shown in this
 screenshot. Use null for anything not clearly visible. Do not guess values.

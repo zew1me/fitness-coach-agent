@@ -743,6 +743,34 @@ async def test_wellness_day_entry_carries_additional_observations(
 
 
 @pytest.mark.asyncio
+async def test_wellness_multi_extraction_carries_top_level_additional_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = screenshot_analyzer.WellnessMultiExtraction(
+        entries=[
+            screenshot_analyzer.WellnessDayEntry(date="2026-06-01", sleep_score=80),
+        ],
+        additional_observations=[
+            screenshot_analyzer.GenericObservation(label="Date Range", value="Jun 1-7 2026"),
+        ],
+    )
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return model
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.extract_from_screenshot(
+        "https://example.com/wellness_multi.png",
+        "wellness_multi_day",
+    )
+
+    assert result.data["additional_observations"] == [
+        {"label": "Date Range", "value": "Jun 1-7 2026"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_wellness_single_extraction_carries_additional_observations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

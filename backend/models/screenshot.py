@@ -70,6 +70,7 @@ class WellnessDayEntry(BaseModel):
 
 class WellnessMultiExtraction(BaseModel):
     entries: list[WellnessDayEntry] = Field(default_factory=list)
+    additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
 class WellnessSingleExtraction(BaseModel):
