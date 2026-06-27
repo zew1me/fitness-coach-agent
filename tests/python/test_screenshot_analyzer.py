@@ -96,6 +96,23 @@ def test_validate_vision_model_accepts_reasoning_models(model_name: str) -> None
     assert s.openai_vision_model == model_name
 
 
+@pytest.mark.parametrize(
+    ("status_code", "message", "expected"),
+    [
+        (400, "Unsupported parameter: reasoning is not supported with this model", True),
+        (400, "reasoning effort value is invalid for this model", True),
+        (400, "reasoning: not supported", True),
+        (400, "invalid api key", False),  # 400 but unrelated message
+        (400, "reasoning", False),  # 400 + "reasoning" but no unsupported/invalid keyword
+        (401, "reasoning is unsupported", False),  # wrong status
+        (500, "reasoning is unsupported", False),  # wrong status
+    ],
+)
+def test_is_reasoning_model_mismatch(status_code: int, message: str, expected: bool) -> None:
+    error = _StatusError(message, status_code)
+    assert screenshot_analyzer._is_reasoning_model_mismatch(error) is expected
+
+
 @pytest.mark.asyncio
 async def test_extract_from_screenshot_returns_model_data(
     monkeypatch: pytest.MonkeyPatch,
@@ -438,6 +455,69 @@ async def test_call_vision_transient_error_logs_at_warning(
     assert result is None
     assert caplog.records
     assert all(r.levelno == logging.WARNING for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_call_vision_reasoning_mismatch_captures_to_sentry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reasoning-not-supported 400 from OpenAI must be explicitly captured to Sentry
+    with the misconfigured model name and an operator-actionable hint — not swallowed as
+    a generic error log."""
+    captured: dict[str, typing.Any] = {}
+
+    class _FakeScope:
+        def __init__(self) -> None:
+            self.tags: dict[str, str] = {}
+            self.extras: dict[str, str] = {}
+
+        def set_tag(self, key: str, value: str) -> None:
+            self.tags[key] = value
+
+        def set_extra(self, key: str, value: str) -> None:
+            self.extras[key] = value
+
+        def __enter__(self) -> "_FakeScope":
+            return self
+
+        def __exit__(self, *_: typing.Any) -> bool:
+            return False
+
+    fake_scope = _FakeScope()
+    sentry_exceptions: list[Exception] = []
+
+    monkeypatch.setattr(screenshot_analyzer.sentry_sdk, "new_scope", lambda: fake_scope)
+    monkeypatch.setattr(
+        screenshot_analyzer.sentry_sdk, "capture_exception", sentry_exceptions.append
+    )
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(
+        screenshot_analyzer,
+        "AsyncOpenAI",
+        make_fake_openai(
+            captured,
+            error=_StatusError(
+                "Unsupported parameter: reasoning is not supported with this model", 400
+            ),
+        ),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=screenshot_analyzer.logger.name):
+        result = await screenshot_analyzer._call_vision(
+            "Extract fields",
+            "https://example.com/image.png",
+            screenshot_analyzer.ActivityExtraction,
+        )
+
+    assert result is None
+    assert len(sentry_exceptions) == 1
+    assert fake_scope.tags.get("error.category") == "reasoning_model_mismatch"
+    assert "vision_model" in fake_scope.extras
+    assert "operator_hint" in fake_scope.extras
+    assert "o1*" in fake_scope.extras["operator_hint"]
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+    assert any("does not support reasoning" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

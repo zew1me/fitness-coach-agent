@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, TypeVar
 
+import sentry_sdk
 from openai import AsyncOpenAI, OpenAIError
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
@@ -217,6 +218,23 @@ _HTTP_SERVER_ERROR_MIN = 500
 _TRANSIENT_CLIENT_ERRORS = frozenset({408, 429})
 
 
+def _is_reasoning_model_mismatch(error: OpenAIError) -> bool:
+    """Return True when OpenAI rejected the request because the configured model does not
+    support the `reasoning` parameter.
+
+    The startup validator in backend/config.py should prevent this, but a model swap via
+    env var without a restart (or a future model that wasn't added to the approved list)
+    could still reach here. We detect it explicitly so Sentry captures it with operator-
+    actionable context rather than surfacing as a generic 400.
+    """
+    if getattr(error, "status_code", None) != 400:  # noqa: PLR2004
+        return False
+    msg = str(error).lower()
+    return "reasoning" in msg and any(
+        kw in msg for kw in ("unsupported", "not supported", "invalid")
+    )
+
+
 def _is_permanent_openai_error(status_code: int | None) -> bool:
     """4xx (other than 408/429) are client/config errors — a bad key, model, or schema —
     that will recur on every screenshot, so surface them loudly. Timeouts, rate limits,
@@ -310,13 +328,37 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
             )
     except OpenAIError as error:
         status_code = getattr(error, "status_code", None)
-        log = logger.error if _is_permanent_openai_error(status_code) else logger.warning
-        log(
-            "screenshot vision request failed type=%s status=%s error=%s",
-            schema.__name__,
-            status_code,
-            error,
-        )
+        if _is_reasoning_model_mismatch(error):
+            # The model rejected the `reasoning` parameter — config mismatch that slipped
+            # past the startup validator. Capture explicitly so Sentry shows the operator
+            # which model is misconfigured, not just a raw 400.
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("error.category", "reasoning_model_mismatch")
+                scope.set_extra("vision_model", settings.openai_vision_model)
+                scope.set_extra(
+                    "operator_hint",
+                    f"Model {settings.openai_vision_model!r} rejected the reasoning parameter. "
+                    f"Set OPENAI_VISION_MODEL to a reasoning-capable model "
+                    f"(o1*, o3*, o4*, gpt-5*), or add its prefix to "
+                    f"_REASONING_CAPABLE_MODEL_PREFIXES in backend/config.py.",
+                )
+                sentry_sdk.capture_exception(error)
+            logger.exception(
+                "screenshot vision model config error: %r does not support reasoning — "
+                "set OPENAI_VISION_MODEL to a reasoning-capable model (o1*, o3*, o4*, gpt-5*); "
+                "type=%s status=%s",
+                settings.openai_vision_model,
+                schema.__name__,
+                status_code,
+            )
+        else:
+            log = logger.error if _is_permanent_openai_error(status_code) else logger.warning
+            log(
+                "screenshot vision request failed type=%s status=%s error=%s",
+                schema.__name__,
+                status_code,
+                error,
+            )
         return None
 
     logger.debug("openai vision call complete status=%s", response.status)
