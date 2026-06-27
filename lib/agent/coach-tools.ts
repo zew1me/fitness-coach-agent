@@ -10,7 +10,7 @@ export type CoachToolContext = {
   fetchImpl?: typeof fetch;
 };
 
-const ENGINE_TIMEOUT_MS = 30_000;
+const ENGINE_TIMEOUT_MS = 65_000;
 
 async function postEngine<TInput extends object>(
   context: CoachToolContext,

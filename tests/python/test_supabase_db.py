@@ -20,6 +20,8 @@ After applying 20260624055541:
 
 import os
 import uuid
+from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -36,6 +38,7 @@ _SUPABASE_CONFIGURED = bool(
 # in the environment (e.g. via .env.local / direnv pointing at a hosted project).
 # Set via: RUN_DB_TESTS=1 uv run pytest -m db   (or bun run test:db which sets it).
 _RUN_DB_TESTS = os.environ.get("RUN_DB_TESTS") == "1"
+_RUN_OAI_TESTS = os.environ.get("RUN_OAI_TESTS") == "1"
 _OPENAI_CONFIGURED = bool(os.environ.get("OPENAI_API_KEY"))
 
 pytestmark = [
@@ -152,8 +155,8 @@ async def test_new_profile_row_has_null_specialization_pct_not_default_80(
 
 
 @pytest.mark.skipif(
-    not _OPENAI_CONFIGURED,
-    reason="OPENAI_API_KEY is required for the activity text end-to-end DB test.",
+    not (_RUN_OAI_TESTS and _OPENAI_CONFIGURED),
+    reason="RUN_OAI_TESTS=1 and OPENAI_API_KEY are required for the activity text DB test.",
 )
 @pytest.mark.asyncio
 async def test_save_activity_from_text_endpoint_persists_real_activity_summary(
@@ -180,6 +183,11 @@ async def test_save_activity_from_text_endpoint_persists_real_activity_summary(
         )
     )
 
+    previous_override = api_index.app.dependency_overrides.get(
+        api_index.require_user_context,
+        None,
+    )
+    had_previous_override = api_index.require_user_context in api_index.app.dependency_overrides
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
         user_id=unique_user,
         scopes=["activities:write"],
@@ -188,22 +196,29 @@ async def test_save_activity_from_text_endpoint_persists_real_activity_summary(
     )
     monkeypatch.setattr(api_index, "repo", repo)
 
-    transport = ASGITransport(app=api_index.app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.post(
-            "/api/engine/save-activity-from-text",
-            json={
-                "text": (
-                    "Volunteer Park crit, Sat 13 Jun 2026 — 45 min race start at "
-                    "~12:56-13:00. Report: in race ~19 minutes then blew up; avg HR "
-                    "183 bpm, max 193 bpm; avg power 198 W, NP 243 W; I ate one "
-                    "Maurten Gel 100 and drank some Skratch; short high-power surges "
-                    "up to ~450 W for 8-15s."
-                )
-            },
-        )
-
-    api_index.app.dependency_overrides.clear()
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={
+                    "text": (
+                        "Volunteer Park crit, Sat 13 Jun 2026 — 45 min race start at "
+                        "~12:56-13:00. Report: in race ~19 minutes then blew up; avg HR "
+                        "183 bpm, max 193 bpm; avg power 198 W, NP 243 W; I ate one "
+                        "Maurten Gel 100 and drank some Skratch; short high-power surges "
+                        "up to ~450 W for 8-15s."
+                    )
+                },
+            )
+    finally:
+        if had_previous_override:
+            api_index.app.dependency_overrides[api_index.require_user_context] = cast(
+                Callable[..., Any],
+                previous_override,
+            )
+        else:
+            api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
 
     assert response.status_code == 200
     body = response.json()

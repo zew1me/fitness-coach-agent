@@ -422,11 +422,25 @@ def _merge_context_summary(summary: dict[str, Any], extraction: ActivityTextExtr
 
 
 def _weighted_confidence(values: list[tuple[float | None, float | None]]) -> float | None:
-    weighted_values = [(value, confidence) for value, confidence in values if value and confidence]
+    weighted_values = [
+        (value, confidence)
+        for value, confidence in values
+        if value is not None and confidence is not None
+    ]
     total = sum(value for value, _confidence in weighted_values)
     if total <= 0:
         return None
     return round(sum(value * confidence for value, confidence in weighted_values) / total, 2)
+
+
+def _try_parse_iso_date(value: str | None) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        logger.warning("activity_date could not be parsed as ISO date: %r", value)
+        return None
 
 
 def _build_summary(
@@ -516,11 +530,12 @@ async def build_activity_from_text(
         or extraction.avg_power_watts
         or extraction.rpe
     )
+    activity_date = _try_parse_iso_date(extraction.activity_date)
     missing = [
         name
         for name, value in (
             ("sport", extraction.sport),
-            ("activity_date", extraction.activity_date),
+            ("activity_date", activity_date),
             ("duration or metric", useful_activity_signal),
         )
         if value is None
@@ -535,6 +550,7 @@ async def build_activity_from_text(
             missing=missing,
             raw_extraction=raw_extraction,
         )
+    assert activity_date is not None
 
     threshold = _threshold_for_sport(thresholds, extraction.sport)
     summary = _build_summary(
@@ -547,7 +563,7 @@ async def build_activity_from_text(
     activity = Activity(
         user_id=user_id,
         sport=extraction.sport or "general",
-        activity_date=_parse_iso_date(extraction.activity_date),
+        activity_date=activity_date,
         duration_seconds=duration_seconds,
         avg_hr_bpm=extraction.avg_hr_bpm,
         max_hr_bpm=extraction.max_hr_bpm,
@@ -568,11 +584,10 @@ async def build_activity_from_text(
 def _parse_iso_date(value: str | None) -> date:
     if value is None:
         raise ValueError("Activity date is required.")
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
-        logger.warning("activity_date could not be parsed as ISO date: %r", value)
-        raise ActivityTextExtractionUnavailable("Could not parse activity date from text.") from exc
+    parsed = _try_parse_iso_date(value)
+    if parsed is None:
+        raise ValueError("Activity date must be an ISO date.")
+    return parsed
 
 
 def _activity_summary_for_update(existing: Activity) -> dict[str, Any]:
@@ -606,9 +621,62 @@ def _activity_summary_for_update(existing: Activity) -> dict[str, Any]:
     return summary
 
 
+def _apply_text_update_session_fields(
+    updated: Activity,
+    summary: dict[str, Any],
+    extraction: ActivityTextExtraction,
+) -> None:
+    if extraction.moving_duration_seconds is not None:
+        updated.duration_seconds = extraction.moving_duration_seconds
+        summary["session"]["duration_moving_s"] = extraction.moving_duration_seconds
+        summary["estimates"]["estimated_duration_moving_s"] = extraction.moving_duration_seconds
+        summary["estimates"]["estimated_duration_moving_s_confidence"] = (
+            extraction.moving_duration_seconds_confidence
+        )
+    elif extraction.elapsed_duration_seconds is not None:
+        updated.duration_seconds = extraction.elapsed_duration_seconds
+        summary["session"]["duration_elapsed_s"] = extraction.elapsed_duration_seconds
+        summary["estimates"]["estimated_duration_elapsed_s_confidence"] = (
+            extraction.elapsed_duration_seconds_confidence
+        )
+
+
+def _apply_text_update_stream_fields(
+    updated: Activity,
+    summary: dict[str, Any],
+    extraction: ActivityTextExtraction,
+) -> None:
+    if extraction.avg_hr_bpm is not None:
+        updated.avg_hr_bpm = extraction.avg_hr_bpm
+        summary["heart_rate"]["avg_bpm"] = extraction.avg_hr_bpm
+        summary["estimates"]["estimated_avg_hr_bpm_confidence"] = extraction.avg_hr_bpm_confidence
+        summary["data_quality"]["has_hr"] = True
+    if extraction.max_hr_bpm is not None:
+        updated.max_hr_bpm = extraction.max_hr_bpm
+        summary["heart_rate"]["max_bpm"] = extraction.max_hr_bpm
+        summary["estimates"]["estimated_max_hr_bpm_confidence"] = extraction.max_hr_bpm_confidence
+        summary["data_quality"]["has_hr"] = True
+    if extraction.avg_power_watts is not None:
+        updated.avg_power_watts = extraction.avg_power_watts
+        summary["power"]["avg_w"] = extraction.avg_power_watts
+        summary["estimates"]["estimated_avg_power_watts_confidence"] = (
+            extraction.avg_power_watts_confidence
+        )
+        summary["data_quality"]["has_power"] = True
+    if extraction.normalized_power_watts is not None:
+        updated.normalized_power_watts = extraction.normalized_power_watts
+        summary["power"]["normalized_w"] = extraction.normalized_power_watts
+        summary["estimates"]["estimated_normalized_power_watts_confidence"] = (
+            extraction.normalized_power_watts_confidence
+        )
+        summary["data_quality"]["has_power"] = True
+
+
 def _apply_text_update_fields(
     updated: Activity, summary: dict[str, Any], extraction: ActivityTextExtraction
 ) -> None:
+    _apply_text_update_session_fields(updated, summary, extraction)
+    _apply_text_update_stream_fields(updated, summary, extraction)
     if extraction.rpe is not None:
         updated.rpe = extraction.rpe
         summary["subjective"]["rpe_1_10"] = extraction.rpe

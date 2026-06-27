@@ -69,7 +69,7 @@ class AthleteProfile(BaseModel):
     def _coerce_onboarding_collected(cls, v: object) -> dict[str, bool]:
         if not isinstance(v, dict):
             return {}
-        return {k: False if val is None else bool(val) for k, val in v.items()}
+        return {str(k): False if val is None else bool(val) for k, val in v.items()}
 
     @property
     def age(self) -> int | None:

@@ -238,6 +238,32 @@ async def test_create_activity_persists_structured_activity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_activity_builds_summary_when_activity_has_default_summary() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    activity = await repo.create_activity(
+        Activity(
+            user_id="athlete-1",
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            duration_seconds=3600,
+            distance_meters=10_000,
+            avg_hr_bpm=145,
+            source="gpx_upload",
+            raw_extraction={"rr_interval_count": 12},
+        )
+    )
+
+    assert activity.summary_schema_version == 1
+    assert activity.activity_summary["schema"] == "activity_summary_v1"
+    assert activity.activity_summary["session"]["sport"] == "running"
+    assert activity.activity_summary["session"]["duration_moving_s"] == 3600
+    assert activity.activity_summary["heart_rate"]["avg_bpm"] == 145
+    assert activity.activity_summary["data_quality"]["has_gps"] is True
+    assert activity.activity_summary["data_quality"]["has_rr_intervals"] is True
+
+
+@pytest.mark.asyncio
 async def test_upsert_athlete_profile_persists_dietary_restrictions() -> None:
     repo = SupabaseRepository(client=FakeSupabaseClient())
 

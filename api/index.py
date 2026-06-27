@@ -48,6 +48,7 @@ from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
     SupabaseRepository,
+    build_activity_summary_from_fields,
 )
 from backend.services.auth import (
     AuthService,
@@ -734,6 +735,9 @@ async def process_uploaded_file_endpoint(
             "rr_interval_count": len(parsed.rr_intervals_ms or []),
         },
     )
+    activity = activity.model_copy(
+        update={"activity_summary": build_activity_summary_from_fields(activity)}
+    )
     logger.info(
         "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
         user_context.user_id,
@@ -902,6 +906,8 @@ async def _update_activity_from_text(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         activity = await repo.update_activity(updated)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
     except RuntimeError as exc:
         logger.exception(
             "update_activity failed for user_id=%s activity_id=%s", user_id, activity_id
@@ -926,10 +932,11 @@ async def save_activity_from_text(
     if not payload.text.strip():
         raise HTTPException(status_code=422, detail="Activity text must not be empty.")
 
-    if payload.activity_id:
-        return await _update_activity_from_text(
-            user_context.user_id, payload.activity_id, payload.text
-        )
+    if payload.activity_id is not None:
+        activity_id = payload.activity_id.strip()
+        if not activity_id:
+            raise HTTPException(status_code=422, detail="Activity id must not be empty.")
+        return await _update_activity_from_text(user_context.user_id, activity_id, payload.text)
 
     try:
         profile = await repo.get_athlete_profile(user_context.user_id)

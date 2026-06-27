@@ -159,6 +159,39 @@ async def test_build_activity_from_text_extracts_rich_summary_and_estimates() ->
 
 
 @pytest.mark.asyncio
+async def test_build_activity_from_text_keeps_zero_confidence_in_weighted_average() -> None:
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-06-13",
+            moving_duration_seconds=3600,
+            nutrition_estimates=[
+                NutritionEstimate(
+                    item_name="known item",
+                    carbs_g=50,
+                    carbs_g_confidence=1.0,
+                ),
+                NutritionEstimate(
+                    item_name="unknown item",
+                    carbs_g=50,
+                    carbs_g_confidence=0.0,
+                ),
+            ],
+            sport="cycling",
+        )
+
+    result = await build_activity_from_text(
+        "Rode today and ate two things.",
+        user_id="athlete-1",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    assert result.activity is not None
+    assert result.activity.activity_summary["fueling"]["carbs_g_confidence"] == 0.5
+
+
+@pytest.mark.asyncio
 async def test_build_activity_from_text_requires_openai_extraction() -> None:
     async def failing_extractor(_text: str) -> ActivityTextExtraction:
         raise ActivityTextExtractionUnavailable("OpenAI activity text extraction unavailable.")
@@ -271,7 +304,7 @@ async def test_build_activity_from_text_returns_needs_clarification_when_missing
 
 
 @pytest.mark.asyncio
-async def test_build_activity_from_text_raises_on_malformed_activity_date() -> None:
+async def test_build_activity_from_text_clarifies_malformed_activity_date() -> None:
     async def bad_date_extractor(_text: str) -> ActivityTextExtraction:
         return ActivityTextExtraction(
             sport="running",
@@ -281,14 +314,16 @@ async def test_build_activity_from_text_raises_on_malformed_activity_date() -> N
             moving_duration_seconds=3600,
         )
 
-    with pytest.raises(ActivityTextExtractionUnavailable):
-        await build_activity_from_text(
-            "Ran last Saturday.",
-            user_id="athlete-1",
-            profile=AthleteProfile(user_id="athlete-1"),
-            thresholds=[],
-            extractor=bad_date_extractor,
-        )
+    result = await build_activity_from_text(
+        "Ran last Saturday.",
+        user_id="athlete-1",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=bad_date_extractor,
+    )
+
+    assert result.activity is None
+    assert "activity_date" in result.missing
 
 
 @pytest.mark.asyncio
@@ -342,6 +377,60 @@ async def test_merge_activity_text_update_extends_populated_food_items() -> None
 
     assert updated.activity_summary["fueling"]["carbs_g"] == 70.0, "carbs must accumulate"
     assert updated.activity_summary["fueling"]["calories_kcal"] == 300.0, "calories must accumulate"
+
+
+@pytest.mark.asyncio
+async def test_merge_activity_text_update_applies_metric_corrections() -> None:
+    existing = Activity(
+        id="activity-3",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 6, 20),
+        duration_seconds=1800,
+        avg_hr_bpm=140,
+        source="fit_upload",
+        activity_summary={
+            "schema": "activity_summary_v1",
+            "session": {"duration_moving_s": 1800},
+            "heart_rate": {"avg_bpm": 140},
+            "power": {},
+            "fueling": {},
+            "subjective": {},
+            "estimates": {},
+            "data_quality": {"source": "fit_upload", "has_hr": True, "has_power": False},
+            "food_items": [{"name": "banana", "confidence": 0.9}],
+        },
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            moving_duration_seconds=2400,
+            moving_duration_seconds_confidence=0.9,
+            avg_hr_bpm=150,
+            avg_hr_bpm_confidence=0.8,
+            max_hr_bpm=175,
+            max_hr_bpm_confidence=0.8,
+            avg_power_watts=220,
+            avg_power_watts_confidence=0.75,
+            normalized_power_watts=235,
+            normalized_power_watts_confidence=0.75,
+        )
+
+    updated = await merge_activity_text_update(
+        existing,
+        "Correction: moving time was 40 minutes, avg HR 150, max HR 175, avg power 220, NP 235.",
+        extractor=fake_extractor,
+    )
+
+    assert updated.duration_seconds == 2400
+    assert updated.avg_hr_bpm == 150
+    assert updated.max_hr_bpm == 175
+    assert updated.avg_power_watts == 220
+    assert updated.normalized_power_watts == 235
+    assert updated.activity_summary["session"]["duration_moving_s"] == 2400
+    assert updated.activity_summary["heart_rate"]["avg_bpm"] == 150
+    assert updated.activity_summary["power"]["normalized_w"] == 235
+    assert updated.activity_summary["food_items"][0]["name"] == "banana"
 
 
 @pytest.mark.skipif(
