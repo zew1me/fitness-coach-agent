@@ -310,7 +310,7 @@ describe("coachToolDefinitions", () => {
         }
       ).execute({ text: "Hard ride with two gels." });
 
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(30_001);
       expect(requestSignal?.aborted).toBe(false);
 
       resolveResponse?.(
