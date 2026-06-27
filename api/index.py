@@ -412,6 +412,9 @@ async def list_chat_messages(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat messages list failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return page.model_dump(mode="json")
 
 
@@ -423,6 +426,9 @@ async def get_chat_model_state(
         state = await chat_service.get_model_state(user_context.user_id)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat model state get failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
 
 
@@ -444,6 +450,9 @@ async def replace_chat_model_state(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat model state replace failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
 
 

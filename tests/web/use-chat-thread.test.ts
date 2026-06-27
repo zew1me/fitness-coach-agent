@@ -1,18 +1,28 @@
 // @vitest-environment jsdom
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  act,
+  renderHook,
+  type RenderHookResult,
+  waitFor,
+} from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadChatThread } from "../../lib/coach-api";
+import { loadChatMessages, loadChatThread } from "../../lib/coach-api";
 import {
+  type ChatThreadHook,
   readLocalChatThread,
   useChatThread,
   writeLocalChatThread,
 } from "../../lib/use-chat-thread";
 
 vi.mock("../../lib/coach-api", () => ({
+  loadChatMessages: vi.fn(),
   loadChatThread: vi.fn(),
 }));
 
+const loadChatMessagesMock = vi.mocked(loadChatMessages);
 const loadChatThreadMock = vi.mocked(loadChatThread);
 
 const TOKEN = {
@@ -70,6 +80,31 @@ function makeThread(messageCount: number): {
 
 let storage: LocalStorageMock;
 
+function createQueryWrapper(): ({
+  children,
+}: {
+  children: ReactNode;
+}) => ReturnType<typeof createElement> {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return function QueryWrapper({ children }: { children: ReactNode }) {
+    return createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      children,
+    );
+  };
+}
+
+function renderUseChatThread(
+  token: typeof TOKEN | null,
+): RenderHookResult<ChatThreadHook, unknown> {
+  return renderHook(() => useChatThread(token), {
+    wrapper: createQueryWrapper(),
+  });
+}
+
 beforeEach(() => {
   storage = createLocalStorageMock();
   vi.stubGlobal("localStorage", storage);
@@ -83,12 +118,13 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  loadChatMessagesMock.mockReset();
   loadChatThreadMock.mockReset();
 });
 
 describe("useChatThread", () => {
   it("starts idle when given no token", () => {
-    const { result } = renderHook(() => useChatThread(null));
+    const { result } = renderUseChatThread(null);
     expect(result.current.data).toBeNull();
     expect(result.current.loading).toBe(false);
     expect(loadChatThreadMock).not.toHaveBeenCalled();
@@ -100,7 +136,7 @@ describe("useChatThread", () => {
       thread as unknown as Awaited<ReturnType<typeof loadChatThread>>,
     );
 
-    const { result } = renderHook(() => useChatThread(TOKEN));
+    const { result } = renderUseChatThread(TOKEN);
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -112,7 +148,7 @@ describe("useChatThread", () => {
   it("applies data updates to the latest thread state", async () => {
     const thread = makeThread(1);
     loadChatThreadMock.mockResolvedValueOnce(thread as never);
-    const { result } = renderHook(() => useChatThread(TOKEN));
+    const { result } = renderUseChatThread(TOKEN);
     await waitFor(() => expect(result.current.data).toEqual(thread));
 
     act(() => {
@@ -138,7 +174,7 @@ describe("useChatThread", () => {
     );
     loadChatThreadMock.mockRejectedValueOnce(new Error("offline"));
 
-    const { result } = renderHook(() => useChatThread(TOKEN));
+    const { result } = renderUseChatThread(TOKEN);
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -150,7 +186,7 @@ describe("useChatThread", () => {
   it("surfaces the error when remote and local both fail", async () => {
     loadChatThreadMock.mockRejectedValueOnce(new Error("boom"));
 
-    const { result } = renderHook(() => useChatThread(TOKEN));
+    const { result } = renderUseChatThread(TOKEN);
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -165,7 +201,7 @@ describe("useChatThread", () => {
       thread as unknown as Awaited<ReturnType<typeof loadChatThread>>,
     );
 
-    renderHook(() => useChatThread(TOKEN));
+    renderUseChatThread(TOKEN);
 
     await waitFor(() => {
       const restored = readLocalChatThread(TOKEN.user_id);
@@ -179,12 +215,52 @@ describe("useChatThread", () => {
       thread as unknown as Awaited<ReturnType<typeof loadChatThread>>,
     );
 
-    renderHook(() => useChatThread(TOKEN));
+    renderUseChatThread(TOKEN);
 
     await waitFor(() => {
       expect(loadChatThreadMock).toHaveBeenCalledTimes(1);
     });
     expect(readLocalChatThread(TOKEN.user_id)).toBeNull();
+  });
+
+  it("fetches older message pages through the thread hook", async () => {
+    const thread = {
+      ...makeThread(1),
+      next_cursor: "cursor-1",
+    };
+    loadChatThreadMock.mockResolvedValueOnce(
+      thread as unknown as Awaited<ReturnType<typeof loadChatThread>>,
+    );
+    loadChatMessagesMock.mockResolvedValueOnce({
+      messages: [
+        {
+          attachments: [],
+          created_at: "2026-04-04T08:59:00Z",
+          id: "older-1",
+          metadata: {},
+          parts: [{ type: "text", text: "Older page" }],
+          role: "assistant",
+          thread_id: "thread-1",
+          user_id: TOKEN.user_id,
+        },
+      ],
+      next_cursor: null,
+    });
+
+    const { result } = renderUseChatThread(TOKEN);
+    await waitFor(() => expect(result.current.data).toEqual(thread));
+
+    let addedCount = 0;
+    await act(async () => {
+      addedCount = await result.current.fetchOlderMessages();
+    });
+
+    expect(addedCount).toBe(1);
+    expect(loadChatMessagesMock).toHaveBeenCalledWith("cursor-1");
+    expect(
+      result.current.data?.thread.messages.map((message) => message.id),
+    ).toEqual(["older-1", "m-0"]);
+    expect(result.current.olderAvailable).toBe(false);
   });
 });
 

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -39,6 +40,17 @@ vi.mock("@ai-sdk/react", () => ({
 }));
 
 import { CoachChat } from "../../components/coach-chat";
+
+function renderCoachChat(): ReturnType<typeof render> {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <CoachChat />
+    </QueryClientProvider>,
+  );
+}
 
 const originalFetch = globalThis.fetch;
 const uuidPattern =
@@ -97,7 +109,7 @@ describe("CoachChat", () => {
       ),
     ) as unknown as typeof fetch;
 
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Continue with magic link/i);
     expect(
@@ -117,7 +129,7 @@ describe("CoachChat", () => {
       ),
     ) as unknown as typeof fetch;
 
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Continue with magic link/i);
     expect(
@@ -160,7 +172,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Sorry, we're out running./i);
     expect(
@@ -230,7 +242,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/What should we work on next/i);
     expect(screen.getByText(/Welcome back coach-side/i)).toBeTruthy();
@@ -301,7 +313,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("History message 69");
     expect(screen.queryByText("History message 0")).toBeNull();
@@ -387,7 +399,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const showOlder = await screen.findByRole("button", {
       name: /Show older messages/i,
@@ -506,7 +518,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const showOlder = await screen.findByRole("button", {
       name: /^Show older messages$/i,
@@ -549,6 +561,105 @@ describe("CoachChat", () => {
       ).toBeTruthy();
     });
     expect(screen.queryByText("Stale older page message")).toBeNull();
+  });
+
+  it("does not surface stale older-page errors after the thread cursor changes", async () => {
+    const initialMessages = Array.from({ length: 50 }, (_, index) => ({
+      id: `message-${index}`,
+      attachments: [],
+      content: `Recent message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 9, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    const refreshedMessages = Array.from({ length: 70 }, (_, index) => ({
+      id: `refreshed-${index}`,
+      attachments: [],
+      content: `Refreshed message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 10, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    let threadLoads = 0;
+    let rejectOlder: ((_reason?: unknown) => void) | undefined;
+    const olderResponse = new Promise<Response>((_, reject) => {
+      rejectOlder = reject;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        threadLoads += 1;
+        const messages =
+          threadLoads === 1 ? initialMessages : refreshedMessages;
+        const nextCursor = threadLoads === 1 ? "cursor-1" : "cursor-2";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              next_cursor: nextCursor,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/messages?before=cursor-1&limit=50") {
+        return olderResponse;
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const showOlder = await screen.findByRole("button", {
+      name: /^Show older messages$/i,
+    });
+    fireEvent.click(showOlder);
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await act(async () => {
+      rejectOlder?.(new Error("stale older page failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Refreshed message 69")).toBeTruthy();
+    });
+    expect(screen.queryByText("Unable to load older messages.")).toBeNull();
+    expect(screen.queryByText("stale older page failed")).toBeNull();
   });
 
   it("restores locally persisted chat history when the local thread endpoint is unavailable", async () => {
@@ -617,7 +728,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("Saved local training note.");
     expect(screen.queryByText(/Sorry, we're out running/i)).toBeNull();
@@ -718,7 +829,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("Canonical server note.");
     expect(screen.queryByText("Stale duplicate note.")).toBeNull();
@@ -804,7 +915,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("Canonical server note.");
     await waitFor(() => {
@@ -886,7 +997,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Building your athlete profile/i);
     expect(screen.queryByText(userId)).toBeNull();
@@ -956,7 +1067,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByRole("heading", {
       name: /Start with your sport and goal/i,
@@ -1038,7 +1149,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const starter = await screen.findByRole("button", {
       name: /Running base and consistency/i,
@@ -1133,7 +1244,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Building your athlete profile/i);
     expect(screen.queryByText(new RegExp(userId))).toBeNull();
@@ -1267,7 +1378,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Here is today's ride/i);
     fireEvent.click(screen.getByRole("button", { name: /Account menu/i }));
@@ -1366,7 +1477,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, { target: { value: "I ran easy today." } });
@@ -1441,7 +1552,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, { target: { value: "I ran easy today." } });
@@ -1526,7 +1637,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, { target: { value: "I ran easy today." } });
@@ -1611,7 +1722,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
     vi.useFakeTimers();
@@ -1692,7 +1803,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Here's my ride summary/);
     const image = (await screen.findByAltText("ride.png")) as HTMLImageElement;
@@ -1767,7 +1878,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Welcome back coach-side/i);
     expect(
@@ -1891,7 +2002,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/total carbs\?/i);
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
@@ -1980,7 +2091,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Welcome back coach-side/i);
     expect(screen.getByText(/Looking up your info/i)).toBeTruthy();
@@ -2086,7 +2197,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -2214,7 +2325,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -2329,7 +2440,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -2458,7 +2569,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -2605,7 +2716,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const textarea = await screen.findByPlaceholderText(/Ask your coach/i);
 
@@ -2690,7 +2801,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const textarea = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.paste(textarea, {

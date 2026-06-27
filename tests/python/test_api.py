@@ -5,7 +5,8 @@ from hashlib import sha256
 from typing import Any, TypedDict, cast
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, HTTPError
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
 from backend.models.athlete import (
@@ -1586,6 +1587,56 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
         response = await client.request(method, path, json=json)
 
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "json", "service_method", "exception"),
+    [
+        ("GET", "/api/chat/messages", None, "list_messages", HTTPError("connection reset")),
+        ("GET", "/api/chat/model-state", None, "get_model_state", HTTPError("timeout")),
+        (
+            "PUT",
+            "/api/chat/model-state",
+            {
+                "expected_version": 0,
+                "lease_id": "lease-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+            "replace_model_state",
+            PostgRESTAPIError(
+                {
+                    "message": "schema cache unavailable",
+                    "code": "PGRST205",
+                    "hint": None,
+                    "details": None,
+                }
+            ),
+        ),
+    ],
+)
+async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
+    method: str,
+    path: str,
+    json: dict[str, object] | None,
+    service_method: str,
+    exception: Exception,
+    model_state_chat_service_fixture,
+) -> None:
+    service = model_state_chat_service_fixture
+
+    async def unavailable(*_args, **_kwargs):
+        raise exception
+
+    setattr(service, service_method, unavailable)
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.request(method, path, json=json)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Chat session service unavailable"
 
 
 @pytest.mark.asyncio
