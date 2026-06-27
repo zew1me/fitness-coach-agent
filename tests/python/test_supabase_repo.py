@@ -435,6 +435,29 @@ def test_onboarding_collected_missing_or_non_dict_coerced_to_empty() -> None:
         assert profile.onboarding_collected == {}, f"expected {{}} for {bad_value!r}"
 
 
+def test_onboarding_collected_string_false_coerced_to_bool_false() -> None:
+    """Legacy DB rows with string 'false' or '0' must not be flipped to True by bool()."""
+    profile = AthleteProfile.model_validate(
+        {
+            "user_id": "u1",
+            "onboarding_collected": {
+                "nutrition": "false",
+                "goals": "0",
+                "training": "true",
+                "metrics": "1",
+                "completed": True,
+            },
+        }
+    )
+    assert profile.onboarding_collected == {
+        "nutrition": False,
+        "goals": False,
+        "training": True,
+        "metrics": True,
+        "completed": True,
+    }
+
+
 @pytest.mark.asyncio
 async def test_update_athlete_profile_fields_drops_null_specialization_pct() -> None:
     """None specialization_pct must be excluded from the upsert payload.

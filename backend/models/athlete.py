@@ -8,6 +8,25 @@ from pydantic import BaseModel, Field, field_validator
 # "estimated" = derived by the system from workout patterns.
 ThresholdSource = Literal["user", "file", "estimated"]
 
+_FALSY_STRINGS = frozenset({"false", "0", "no", "off", ""})
+_TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
+
+
+def _coerce_bool(val: object) -> bool:
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        lower = val.strip().lower()
+        if lower in _FALSY_STRINGS:
+            return False
+        if lower in _TRUTHY_STRINGS:
+            return True
+    if isinstance(val, int | float):
+        return bool(val)
+    return bool(val)
+
 
 class ThresholdValue(BaseModel):
     """Structured metric value with provenance and temporal context."""
@@ -69,7 +88,7 @@ class AthleteProfile(BaseModel):
     def _coerce_onboarding_collected(cls, v: object) -> dict[str, bool]:
         if not isinstance(v, dict):
             return {}
-        return {str(k): False if val is None else bool(val) for k, val in v.items()}
+        return {str(k): _coerce_bool(val) for k, val in v.items()}
 
     @property
     def age(self) -> int | None:
