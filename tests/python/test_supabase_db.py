@@ -22,8 +22,11 @@ import os
 import uuid
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
-from backend.models.athlete import AthleteProfile
+import api.index as api_index
+from backend.models.athlete import AthleteProfile, SportThreshold
+from backend.models.auth import UserContext
 from backend.repos.supabase_repo import SupabaseRepository
 
 _SUPABASE_CONFIGURED = bool(
@@ -33,6 +36,7 @@ _SUPABASE_CONFIGURED = bool(
 # in the environment (e.g. via .env.local / direnv pointing at a hosted project).
 # Set via: RUN_DB_TESTS=1 uv run pytest -m db   (or bun run test:db which sets it).
 _RUN_DB_TESTS = os.environ.get("RUN_DB_TESTS") == "1"
+_OPENAI_CONFIGURED = bool(os.environ.get("OPENAI_API_KEY"))
 
 pytestmark = [
     pytest.mark.db,
@@ -145,3 +149,69 @@ async def test_new_profile_row_has_null_specialization_pct_not_default_80(
     assert profile.specialization_pct is None, (
         "New rows must have NULL specialization_pct, not the old DEFAULT 80"
     )
+
+
+@pytest.mark.skipif(
+    not _OPENAI_CONFIGURED,
+    reason="OPENAI_API_KEY is required for the activity text end-to-end DB test.",
+)
+@pytest.mark.asyncio
+async def test_save_activity_from_text_endpoint_persists_real_activity_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: SupabaseRepository,
+    unique_user: str,
+) -> None:
+    await repo.upsert_athlete_profile(
+        AthleteProfile(
+            user_id=unique_user,
+            coaching_state="active",
+            max_hr_bpm=195,
+            resting_hr_bpm=52,
+        )
+    )
+    await repo.upsert_sport_threshold(
+        SportThreshold(
+            user_id=unique_user,
+            sport="cycling",
+            lt1_power_watts=180,
+            lt2_power_watts=250,
+            lt1_hr_bpm=145,
+            lt2_hr_bpm=174,
+        )
+    )
+
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id=unique_user,
+        scopes=["activities:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-activity-from-text",
+            json={
+                "text": (
+                    "Volunteer Park crit, Sat 13 Jun 2026 — 45 min race start at "
+                    "~12:56-13:00. Report: in race ~19 minutes then blew up; avg HR "
+                    "183 bpm, max 193 bpm; avg power 198 W, NP 243 W; I ate one "
+                    "Maurten Gel 100 and drank some Skratch; short high-power surges "
+                    "up to ~450 W for 8-15s."
+                )
+            },
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "saved"
+    saved_activity = await repo.get_activity(unique_user, body["activity"]["id"])
+    assert saved_activity.source == "text_extract"
+    assert saved_activity.activity_summary["schema"] == "activity_summary_v1"
+    assert saved_activity.activity_summary["fueling"]["carbs_g"] > 0
+    assert saved_activity.activity_summary["fueling"]["calories_kcal"] > 0
+    assert saved_activity.activity_summary["food_items"]
+    assert saved_activity.activity_summary["thresholds_used"]["ftp_w"] == 250

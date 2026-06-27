@@ -877,6 +877,58 @@ async def get_recent_activities(
     return {"activities": [activity.model_dump(mode="json") for activity in activities]}
 
 
+class SaveActivityFromTextRequest(BaseModel):
+    text: str
+    activity_id: str | None = None
+
+
+@app.post("/api/engine/save-activity-from-text")
+async def save_activity_from_text(
+    payload: SaveActivityFromTextRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    from backend.engine.activity_text import (
+        ActivityTextExtractionUnavailable,
+        build_activity_from_text,
+        merge_activity_text_update,
+    )
+
+    if not payload.text.strip():
+        raise HTTPException(status_code=422, detail="Activity text must not be empty.")
+
+    if payload.activity_id:
+        try:
+            existing = await repo.get_activity(user_context.user_id, payload.activity_id)
+            updated = await merge_activity_text_update(existing, payload.text)
+        except ActivityTextExtractionUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        activity = await repo.update_activity(updated)
+        return {"activity": activity.model_dump(mode="json"), "status": "updated"}
+
+    try:
+        profile = await repo.get_athlete_profile(user_context.user_id)
+    except RecordNotFoundError:
+        profile = _AthleteProfile(user_id=user_context.user_id)
+    thresholds = await repo.get_active_thresholds(user_context.user_id)
+    try:
+        result = await build_activity_from_text(
+            payload.text,
+            user_id=user_context.user_id,
+            profile=profile,
+            thresholds=thresholds,
+        )
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if result.activity is None:
+        return {
+            "missing": result.missing,
+            "raw_extraction": result.raw_extraction,
+            "status": "needs_clarification",
+        }
+    activity = await repo.create_activity(result.activity)
+    return {"activity": activity.model_dump(mode="json"), "status": "saved"}
+
+
 class GeneratePlanStructureRequest(BaseModel):
     goal_id: str | None = None
 

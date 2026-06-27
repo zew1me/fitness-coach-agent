@@ -45,6 +45,7 @@ const zonesInputSchema = z.object({
 });
 
 const activityTextInputSchema = z.object({
+  activity_id: z.string().min(1).optional(),
   text: z.string().min(1),
 });
 

@@ -265,6 +265,14 @@ export function executeCoachTool(
     );
   }
 
+  if (name === "save_activity_from_text") {
+    return postEngine(
+      context,
+      "/api/engine/save-activity-from-text",
+      engineInput(input),
+    );
+  }
+
   if (name === "update_athlete_profile") {
     return updateAthleteProfile(input, context);
   }

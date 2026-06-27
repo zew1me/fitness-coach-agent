@@ -10,22 +10,24 @@ class Settings(BaseSettings):
     app_base_url: str = ""  # leave blank on Vercel preview; set explicitly for production
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None
+    openai_activity_text_model: str = "gpt-5.5"
+    openai_activity_text_timeout_seconds: float = 60.0
     openai_vision_model: str = "gpt-5.4-mini"
     openai_vision_timeout_seconds: float = 45.0
 
-    @field_validator("openai_vision_model")
+    @field_validator("openai_activity_text_model", "openai_vision_model")
     @classmethod
-    def validate_vision_model(cls, v: str) -> str:
+    def validate_openai_model(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
-            raise ValueError("openai_vision_model must not be empty or whitespace")
+            raise ValueError("OpenAI model names must not be empty or whitespace")
         return stripped
 
-    @field_validator("openai_vision_timeout_seconds")
+    @field_validator("openai_activity_text_timeout_seconds", "openai_vision_timeout_seconds")
     @classmethod
-    def validate_vision_timeout(cls, v: float) -> float:
+    def validate_openai_timeout(cls, v: float) -> float:
         if not math.isfinite(v) or v <= 0:
-            raise ValueError("openai_vision_timeout_seconds must be a finite number > 0")
+            raise ValueError("OpenAI timeouts must be finite numbers > 0")
         return v
 
     r2_account_id: str | None = None
@@ -37,7 +39,9 @@ class Settings(BaseSettings):
     supabase_service_role_key: str | None = None
     supabase_url: str | None = None
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(".env", ".env.local"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     @property
     def base_url(self) -> str:

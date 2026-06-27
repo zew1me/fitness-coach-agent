@@ -215,6 +215,73 @@ describe("coachToolDefinitions", () => {
     ]);
   });
 
+  it("executes save_activity_from_text by calling the engine text activity endpoint", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            activity: {
+              activity_summary: {
+                estimates: { estimated_duration_moving_s: 1140 },
+              },
+              id: "activity-1",
+              source: "text_extract",
+            },
+            status: "saved",
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        ),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["save_activity_from_text"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      activity_id: "activity-1",
+      text: "Add RPE 9 and two gels.",
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({
+      activity: {
+        activity_summary: {
+          estimates: { estimated_duration_moving_s: 1140 },
+        },
+        id: "activity-1",
+        source: "text_extract",
+      },
+      status: "saved",
+    });
+    expect(requests).toEqual([
+      {
+        body: {
+          activity_id: "activity-1",
+          text: "Add RPE 9 and two gels.",
+        },
+        url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
   it("forwards extra internal headers to engine tool calls", async () => {
     const requests: Array<{ headers: Headers; url: string }> = [];
     const fetchImpl = (

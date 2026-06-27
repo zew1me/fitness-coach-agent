@@ -213,6 +213,40 @@ class SupabaseRepository:
             raise RuntimeError("Supabase did not return the inserted activity row.")
         return Activity.model_validate(rows[0])
 
+    async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+        client = self._require_client()
+        response = (
+            client.table("activities")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("id", activity_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(
+                f"No activity found for user '{user_id}' and id '{activity_id}'."
+            )
+        return Activity.model_validate(rows[0])
+
+    async def update_activity(self, activity: Activity) -> Activity:
+        if activity.id is None:
+            raise ValueError("Activity id is required for update.")
+        client = self._require_client()
+        payload = activity.model_dump(mode="json", exclude={"created_at", "updated_at"})
+        response = (
+            client.table("activities")
+            .update(payload)
+            .eq("user_id", activity.user_id)
+            .eq("id", activity.id)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the updated activity row.")
+        return Activity.model_validate(rows[0])
+
     async def list_activities(
         self,
         user_id: str,

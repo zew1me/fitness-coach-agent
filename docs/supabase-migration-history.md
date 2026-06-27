@@ -120,3 +120,19 @@ instead of reporting drift.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset` locally).
 Preview already has this version recorded, so it is a no-op there.
+
+## 20260626000000 — activity summary object (2026-06-26)
+
+**File:** `supabase/migrations/20260626000000_activity_summary.sql`
+
+**Change:** Adds `activities.summary_schema_version` and
+`activities.activity_summary jsonb`, then refreshes the `activities.source`
+check constraint to include `tcx_upload`.
+
+**Why:** Activity ingest now stores a compact, rich summary object at ingest
+time so GPX/FIT/text-derived activities can retain coaching-grade aggregates,
+estimates, confidence scores, source quality, fueling, subjective notes, and
+distribution summaries without retaining raw time-series files indefinitely.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally).

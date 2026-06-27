@@ -222,6 +222,10 @@ async def test_create_activity_persists_structured_activity() -> None:
             tss=75.5,
             fueling_notes="Took one gel at 30 minutes",
             source="manual",
+            activity_summary={
+                "schema": "activity_summary_v1",
+                "load": {"primary_load": 75.5},
+            },
         )
     )
 
@@ -229,6 +233,7 @@ async def test_create_activity_persists_structured_activity() -> None:
     assert activity.sport == "running"
     assert activity.tss == 75.5
     assert activity.fueling_notes == "Took one gel at 30 minutes"
+    assert activity.activity_summary["load"]["primary_load"] == 75.5
     assert activity.id is not None
 
 
