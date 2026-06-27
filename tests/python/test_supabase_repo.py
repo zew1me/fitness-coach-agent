@@ -402,8 +402,11 @@ def test_onboarding_collected_null_values_coerced_to_false() -> None:
 
 def test_onboarding_collected_missing_or_non_dict_coerced_to_empty() -> None:
     """A missing or non-dict value must fall back to an empty dict, not crash."""
-    profile = AthleteProfile.model_validate({"user_id": "u1", "onboarding_collected": None})
-    assert profile.onboarding_collected == {}
+    for bad_value in (None, "yes", [], 42):
+        profile = AthleteProfile.model_validate(
+            {"user_id": "u1", "onboarding_collected": bad_value}
+        )
+        assert profile.onboarding_collected == {}, f"expected {{}} for {bad_value!r}"
 
 
 @pytest.mark.asyncio
