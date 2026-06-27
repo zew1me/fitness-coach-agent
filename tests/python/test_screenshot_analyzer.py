@@ -8,7 +8,9 @@ from typing import Any
 
 import pytest
 from openai import OpenAIError
+from pydantic import ValidationError
 
+from backend.config import Settings
 from backend.services import screenshot as screenshot_analyzer
 
 
@@ -77,6 +79,21 @@ def make_fake_openai(
             return False
 
     return FakeAsyncOpenAI
+
+
+@pytest.mark.parametrize("model_name", ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "davinci"])
+def test_validate_vision_model_rejects_non_reasoning_models(model_name: str) -> None:
+    with pytest.raises(ValidationError, match="not an approved reasoning-capable model"):
+        Settings(openai_vision_model=model_name)
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["o1", "o1-mini", "o3", "o3-mini", "o4-mini", "gpt-5", "gpt-5-mini", "gpt-5.4-mini"],
+)
+def test_validate_vision_model_accepts_reasoning_models(model_name: str) -> None:
+    s = Settings(openai_vision_model=model_name)
+    assert s.openai_vision_model == model_name
 
 
 @pytest.mark.asyncio
