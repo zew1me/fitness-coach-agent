@@ -136,3 +136,16 @@ distribution summaries without retaining raw time-series files indefinitely.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally).
+
+## PR preview branch databases
+
+Supabase Git preview branches create and migrate a separate branch project per
+PR. Vercel PR preview deployments must use the matching branch project's
+Supabase environment variables. The long-lived shared preview project
+`psbteexygkspyotkyflc` is only a fallback for non-PR preview workflows.
+
+`bun run build` runs `scripts/verify-preview-supabase-env.ts` before `next build`
+and fails Vercel PR preview builds when Supabase URLs still point at
+`psbteexygkspyotkyflc`. Fix this by connecting the Supabase Vercel integration
+so it creates branch-scoped Vercel preview variables, then redeploy the PR
+preview.
