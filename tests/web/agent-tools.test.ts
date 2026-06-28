@@ -282,6 +282,60 @@ describe("coachToolDefinitions", () => {
     ]);
   });
 
+  it("routes goal updates to the engine and strips any client-sent user_id", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: "goal-new", status: "active" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["update_goals"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      action: "create",
+      goal: {
+        goal_type: "event",
+        title: "Leadville 100",
+        sport: "cycling",
+      },
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ id: "goal-new", status: "active" });
+    expect(requests).toEqual([
+      {
+        body: {
+          action: "create",
+          goal: {
+            goal_type: "event",
+            title: "Leadville 100",
+            sport: "cycling",
+          },
+        },
+        url: "https://coach.test/api/engine/update-goals",
+      },
+    ]);
+  });
+
   it("keeps long activity text extraction requests alive past 30 seconds", async () => {
     vi.useFakeTimers();
     let requestSignal: AbortSignal | undefined;

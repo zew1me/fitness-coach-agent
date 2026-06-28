@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Any
 from urllib.parse import urlencode
 
 import httpx
@@ -51,7 +52,7 @@ from backend.models.chat import (
     ChatTurnLeaseRequest,
 )
 from backend.models.storage import PresignUploadRequest
-from backend.models.training import Activity
+from backend.models.training import Activity, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
