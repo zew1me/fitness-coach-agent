@@ -222,6 +222,10 @@ async def test_create_activity_persists_structured_activity() -> None:
             tss=75.5,
             fueling_notes="Took one gel at 30 minutes",
             source="manual",
+            activity_summary={
+                "schema": "activity_summary_v1",
+                "load": {"primary_load": 75.5},
+            },
         )
     )
 
@@ -229,7 +233,34 @@ async def test_create_activity_persists_structured_activity() -> None:
     assert activity.sport == "running"
     assert activity.tss == 75.5
     assert activity.fueling_notes == "Took one gel at 30 minutes"
+    assert activity.activity_summary["load"]["primary_load"] == 75.5
     assert activity.id is not None
+
+
+@pytest.mark.asyncio
+async def test_create_activity_builds_summary_when_activity_has_default_summary() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    activity = await repo.create_activity(
+        Activity(
+            user_id="athlete-1",
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            duration_seconds=3600,
+            distance_meters=10_000,
+            avg_hr_bpm=145,
+            source="gpx_upload",
+            raw_extraction={"rr_interval_count": 12},
+        )
+    )
+
+    assert activity.summary_schema_version == 1
+    assert activity.activity_summary["schema"] == "activity_summary_v1"
+    assert activity.activity_summary["session"]["sport"] == "running"
+    assert activity.activity_summary["session"]["duration_moving_s"] == 3600
+    assert activity.activity_summary["heart_rate"]["avg_bpm"] == 145
+    assert activity.activity_summary["data_quality"]["has_gps"] is True
+    assert activity.activity_summary["data_quality"]["has_rr_intervals"] is True
 
 
 @pytest.mark.asyncio
@@ -382,6 +413,49 @@ def test_athlete_profile_specialization_pct_defaults_to_none() -> None:
     """
     profile = AthleteProfile(user_id="x")
     assert profile.specialization_pct is None
+
+
+def test_onboarding_collected_null_values_coerced_to_false() -> None:
+    """Legacy DB rows with null section flags must not raise ValidationError."""
+    profile = AthleteProfile.model_validate(
+        {
+            "user_id": "u1",
+            "onboarding_collected": {"nutrition": None, "goals": True},
+        }
+    )
+    assert profile.onboarding_collected == {"nutrition": False, "goals": True}
+
+
+def test_onboarding_collected_missing_or_non_dict_coerced_to_empty() -> None:
+    """A missing or non-dict value must fall back to an empty dict, not crash."""
+    for bad_value in (None, "yes", [], 42):
+        profile = AthleteProfile.model_validate(
+            {"user_id": "u1", "onboarding_collected": bad_value}
+        )
+        assert profile.onboarding_collected == {}, f"expected {{}} for {bad_value!r}"
+
+
+def test_onboarding_collected_string_false_coerced_to_bool_false() -> None:
+    """Legacy DB rows with string 'false' or '0' must not be flipped to True by bool()."""
+    profile = AthleteProfile.model_validate(
+        {
+            "user_id": "u1",
+            "onboarding_collected": {
+                "nutrition": "false",
+                "goals": "0",
+                "training": "true",
+                "metrics": "1",
+                "completed": True,
+            },
+        }
+    )
+    assert profile.onboarding_collected == {
+        "nutrition": False,
+        "goals": False,
+        "training": True,
+        "metrics": True,
+        "completed": True,
+    }
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { createCoachTools } from "../../lib/agent/coach-tools";
@@ -213,6 +213,116 @@ describe("coachToolDefinitions", () => {
         url: "https://coach.test/api/engine/update-athlete-profile",
       },
     ]);
+  });
+
+  it("executes save_activity_from_text by calling the engine text activity endpoint", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            activity: {
+              activity_summary: {
+                estimates: { estimated_duration_moving_s: 1140 },
+              },
+              id: "activity-1",
+              source: "text_extract",
+            },
+            status: "saved",
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        ),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["save_activity_from_text"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      activity_id: "activity-1",
+      text: "Add RPE 9 and two gels.",
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({
+      activity: {
+        activity_summary: {
+          estimates: { estimated_duration_moving_s: 1140 },
+        },
+        id: "activity-1",
+        source: "text_extract",
+      },
+      status: "saved",
+    });
+    expect(requests).toEqual([
+      {
+        body: {
+          activity_id: "activity-1",
+          text: "Add RPE 9 and two gels.",
+        },
+        url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
+  it("keeps long activity text extraction requests alive past 30 seconds", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    let resolveResponse:
+      | ((response: Response | PromiseLike<Response>) => void)
+      | undefined;
+    const fetchImpl = (
+      _url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => {
+        resolveResponse = resolve;
+      });
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    try {
+      const resultPromise = (
+        tools["save_activity_from_text"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ text: "Hard ride with two gels." });
+
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(requestSignal?.aborted).toBe(false);
+
+      resolveResponse?.(
+        new Response(JSON.stringify({ status: "saved" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+      await expect(resultPromise).resolves.toEqual({ status: "saved" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("forwards extra internal headers to engine tool calls", async () => {

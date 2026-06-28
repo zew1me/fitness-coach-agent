@@ -1,5 +1,6 @@
 import base64
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, TypedDict, cast
@@ -23,6 +24,7 @@ from backend.models.auth import (
 )
 from backend.models.training import Activity, DailyLoadSnapshot, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
+from backend.repos.supabase_repo import RecordNotFoundError
 from backend.services.auth import AuthService
 
 
@@ -141,8 +143,53 @@ class EngineRepository:
     async def list_activities(self, user_id: str, *, sport=None, since=None, limit: int = 50):
         return []
 
+    async def create_activity(self, activity: Activity) -> Activity:
+        return activity.model_copy(update={"id": "activity-1"})
+
+    async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+        return Activity(
+            id=activity_id,
+            user_id=user_id,
+            sport="cycling",
+            activity_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            source="fit_upload",
+            activity_summary={
+                "schema": "activity_summary_v1",
+                "session": {"sport": "cycling"},
+                "fueling": {},
+                "subjective": {},
+                "data_quality": {"source": "fit_upload"},
+            },
+            raw_extraction={"filename": "race.fit"},
+        )
+
+    async def update_activity(self, activity: Activity) -> Activity:
+        return activity
+
     async def upsert_load_snapshots(self, user_id: str, snapshots: list[dict], sport=None) -> None:
         self.snapshots = snapshots
+
+
+_DEPENDENCY_OVERRIDE_MISSING = object()
+
+
+def _override_require_user_context(user_context: UserContext):
+    previous = api_index.app.dependency_overrides.get(
+        api_index.require_user_context,
+        _DEPENDENCY_OVERRIDE_MISSING,
+    )
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: user_context
+
+    def restore() -> None:
+        if previous is _DEPENDENCY_OVERRIDE_MISSING:
+            api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
+        else:
+            api_index.app.dependency_overrides[api_index.require_user_context] = cast(
+                Callable[..., Any],
+                previous,
+            )
+
+    return restore
 
 
 class InMemoryOAuthRepository:
@@ -488,6 +535,10 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     assert body["activity"]["sport"] == "running"
     assert body["activity"]["source_file_key"] == object_key
     assert body["activity"]["source"] == "gpx_upload"
+    assert body["activity"]["summary_schema_version"] == 1
+    assert body["activity"]["activity_summary"]["schema"] == "activity_summary_v1"
+    assert body["activity"]["activity_summary"]["session"]["sport"] == "running"
+    assert body["activity"]["activity_summary"]["data_quality"]["has_gps"] is True
     assert captured == {"user_id": "athlete-1", "object_key": object_key}
     assert sensitive_filename not in caplog.text
     assert "filename_suffix=.gpx" in caplog.text
@@ -559,6 +610,9 @@ async def test_process_uploaded_file_parses_tcx_with_hrv_metadata(
     body = response.json()
     assert body["activity"]["source"] == "tcx_upload"
     assert body["activity"]["avg_hr_bpm"] == 142
+    assert body["activity"]["activity_summary"]["schema"] == "activity_summary_v1"
+    assert body["activity"]["activity_summary"]["heart_rate"]["avg_bpm"] == 142
+    assert body["activity"]["activity_summary"]["data_quality"]["has_rr_intervals"] is True
     assert body["activity"]["raw_extraction"]["rr_interval_count"] == 4
     assert body["activity"]["raw_extraction"]["hrv"]["quality"] == "insufficient_rr_intervals"
 
@@ -1232,6 +1286,299 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
     assert activities[0]["activity_date"] == "2026-04-10"
     assert activities[0]["distance_meters"] == 8000
     assert activities[0]["tss"] == 55
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_persists_summary_and_estimates(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import (
+        ActivityTextExtraction,
+        AdditionalImportantData,
+        NutritionEstimate,
+    )
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_activity: Activity | None = None
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.created_activity = activity
+            return activity.model_copy(update={"id": "activity-1"})
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-06-13",
+            activity_date_confidence=0.9,
+            additional_important_data=[
+                AdditionalImportantData(key="race_context", value="blew up", confidence=0.8)
+            ],
+            avg_hr_bpm=183,
+            avg_hr_bpm_confidence=0.95,
+            avg_power_watts=198,
+            avg_power_watts_confidence=0.95,
+            elapsed_duration_seconds=2700,
+            elapsed_duration_seconds_confidence=0.8,
+            food_items=[],
+            max_hr_bpm=193,
+            max_hr_bpm_confidence=0.95,
+            moving_duration_seconds=1140,
+            moving_duration_seconds_confidence=0.86,
+            normalized_power_watts=243,
+            normalized_power_watts_confidence=0.95,
+            nutrition_estimates=[
+                NutritionEstimate(
+                    calories_kcal=412,
+                    calories_kcal_confidence=0.9,
+                    carbs_g=103,
+                    carbs_g_confidence=0.95,
+                    item_name="reported CHO",
+                    source_title=None,
+                    source_url=None,
+                )
+            ],
+            sport="cycling",
+            sport_confidence=0.86,
+            sub_sport="criterium",
+            sub_sport_confidence=0.84,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={
+                    "text": (
+                        "Volunteer Park crit, Sat 13 Jun 2026 — 45 min race start at "
+                        "~12:56-13:00. Report: in race ~19 minutes then blew up; "
+                        "avg HR 183 bpm, max 193 bpm; avg power 198 W, NP 243 W; "
+                        "CHO used ~103 g; short high-power surges up to ~450 W for "
+                        "8-15s; felt competitive for first 19 minutes."
+                    )
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "saved"
+    assert body["activity"]["id"] == "activity-1"
+    assert body["activity"]["source"] == "text_extract"
+    assert body["activity"]["activity_summary"]["estimates"]["estimated_duration_moving_s"] == 1140
+    assert body["activity"]["activity_summary"]["thresholds_used"]["ftp_w"] == 250
+    assert body["activity"]["activity_summary"]["fueling"]["carbs_g"] == 103
+    assert repository.created_activity is not None
+    assert repository.created_activity.tss == 29.9
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_fails_when_openai_extraction_unavailable(
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtractionUnavailable
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.create_called = False
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.create_called = True
+            return activity
+
+    async def failing_extract_activity_text(_text: str):
+        raise ActivityTextExtractionUnavailable("OpenAI activity text extraction unavailable.")
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", failing_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"text": "Ran yesterday and ate a gel."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "OpenAI activity text extraction unavailable."
+    assert repository.create_called is False
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_updates_existing_activity(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction, NutritionEstimate
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.updated_activity: Activity | None = None
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.updated_activity = activity
+            return activity
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            food_items=[],
+            gut_comfort_1_10=8,
+            gut_comfort_1_10_confidence=0.8,
+            nutrition_estimates=[
+                NutritionEstimate(
+                    calories_kcal=200,
+                    calories_kcal_confidence=0.5,
+                    carbs_g=50,
+                    carbs_g_confidence=0.5,
+                    item_name="2 generic energy gels",
+                    source_title=None,
+                    source_url=None,
+                )
+            ],
+            overdid_it_flag=True,
+            overdid_it_flag_confidence=0.9,
+            rpe=9,
+            rpe_confidence=0.8,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={
+                    "activity_id": "activity-1",
+                    "text": "Add that I took 2 gels, gut felt 8/10, RPE 9, and I overdid it.",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["activity"]["source"] == "fit_upload"
+    assert body["activity"]["rpe"] == 9
+    assert body["activity"]["activity_summary"]["subjective"]["overdid_it_flag"] is True
+    assert repository.updated_activity is not None
+    assert repository.updated_activity.source == "fit_upload"
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_rejects_blank_activity_id(monkeypatch) -> None:
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.create_called = False
+            self.update_called = False
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.create_called = True
+            return activity
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.update_called = True
+            return activity
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "   ", "text": "Add RPE 9."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.create_called is False
+    assert repository.update_called is False
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_update_missing_activity_returns_404(monkeypatch) -> None:
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_called = False
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            raise RecordNotFoundError(
+                f"No activity found for user '{user_id}' and id '{activity_id}'."
+            )
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.update_called = True
+            return activity
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "missing-activity", "text": "Add RPE 9."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Activity not found."
+    assert repository.update_called is False
 
 
 @pytest.mark.asyncio

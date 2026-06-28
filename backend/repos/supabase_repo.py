@@ -29,6 +29,8 @@ class RecordNotFoundError(LookupError):
 
 
 _DROP_FIELD = object()
+SUMMARY_SCHEMA_VERSION = 1
+SUMMARY_SCHEMA_NAME = "activity_summary_v1"
 
 _PROFILE_FIELDS = {
     "display_name",
@@ -128,6 +130,103 @@ def _safe_athlete_profile_fields(fields: dict) -> dict[str, object]:
     return safe_fields
 
 
+def _base_activity_summary(activity: Activity) -> dict[str, Any]:
+    source = activity.source
+    raw_extraction = activity.raw_extraction or {}
+    has_power = activity.avg_power_watts is not None or activity.normalized_power_watts is not None
+    has_hr = activity.avg_hr_bpm is not None or activity.max_hr_bpm is not None
+    has_gps = activity.distance_meters is not None or activity.elevation_gain_meters is not None
+    return {
+        "schema": SUMMARY_SCHEMA_NAME,
+        "session": {
+            "sport": activity.sport,
+            "date_start": activity.activity_date.isoformat(),
+        },
+        "thresholds_used": {},
+        "heart_rate": {},
+        "power": {},
+        "pace": {},
+        "cadence": {},
+        "load": {},
+        "durability": {},
+        "terrain": {},
+        "environment": {},
+        "fueling": {},
+        "readiness": {},
+        "subjective": {},
+        "food_items": [],
+        "additional_important_data": [],
+        "estimates": {},
+        "data_quality": {
+            "source": source,
+            "has_power": has_power,
+            "has_hr": has_hr,
+            "has_gps": has_gps,
+            "has_rr_intervals": bool(raw_extraction.get("rr_interval_count")),
+            "estimated_from_text": source == "text_extract",
+        },
+    }
+
+
+def _add_activity_session_summary(summary: dict[str, Any], activity: Activity) -> None:
+    if activity.started_at is not None:
+        summary["session"]["started_at"] = activity.started_at.isoformat()
+    if activity.duration_seconds is not None:
+        summary["session"]["duration_moving_s"] = activity.duration_seconds
+    if activity.distance_meters is not None:
+        summary["session"]["distance_m"] = activity.distance_meters
+    if activity.elevation_gain_meters is not None:
+        summary["terrain"]["elevation_gain_m"] = activity.elevation_gain_meters
+
+
+def _add_activity_stream_summary(summary: dict[str, Any], activity: Activity) -> None:
+    if activity.avg_hr_bpm is not None:
+        summary["heart_rate"]["avg_bpm"] = activity.avg_hr_bpm
+    if activity.max_hr_bpm is not None:
+        summary["heart_rate"]["max_bpm"] = activity.max_hr_bpm
+    if activity.avg_power_watts is not None:
+        summary["power"]["avg_w"] = activity.avg_power_watts
+    if activity.normalized_power_watts is not None:
+        summary["power"]["normalized_w"] = activity.normalized_power_watts
+    if activity.avg_pace_sec_per_km is not None:
+        summary["pace"]["avg_sec_per_km"] = activity.avg_pace_sec_per_km
+    if activity.avg_cadence_rpm is not None:
+        summary["cadence"]["avg_rpm"] = activity.avg_cadence_rpm
+
+
+def _add_activity_context_summary(summary: dict[str, Any], activity: Activity) -> None:
+    if activity.tss is not None:
+        summary["load"]["primary_load"] = activity.tss
+    if activity.intensity_factor is not None:
+        summary["power"]["intensity_factor"] = activity.intensity_factor
+    if activity.rpe is not None:
+        summary["subjective"]["rpe_1_10"] = activity.rpe
+    if activity.athlete_notes is not None:
+        summary["subjective"]["athlete_notes"] = activity.athlete_notes
+    if activity.fueling_notes is not None:
+        summary["fueling"]["notes"] = activity.fueling_notes
+
+
+def build_activity_summary_from_fields(activity: Activity) -> dict[str, Any]:
+    summary = _base_activity_summary(activity)
+    _add_activity_session_summary(summary, activity)
+    _add_activity_stream_summary(summary, activity)
+    _add_activity_context_summary(summary, activity)
+    return summary
+
+
+def _activity_payload(activity: Activity) -> dict[str, Any]:
+    activity_to_persist = activity
+    if not activity.activity_summary:
+        activity_to_persist = activity.model_copy(
+            update={
+                "summary_schema_version": SUMMARY_SCHEMA_VERSION,
+                "activity_summary": build_activity_summary_from_fields(activity),
+            }
+        )
+    return activity_to_persist.model_dump(mode="json", exclude={"created_at", "updated_at"})
+
+
 class SupabaseRepository:
     """Supabase-backed adapter for all domain persistence."""
 
@@ -204,13 +303,47 @@ class SupabaseRepository:
 
     async def create_activity(self, activity: Activity) -> Activity:
         client = self._require_client()
-        payload = activity.model_dump(mode="json", exclude={"created_at", "updated_at"})
+        payload = _activity_payload(activity)
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = client.table("activities").insert(payload).execute()
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted activity row.")
+        return Activity.model_validate(rows[0])
+
+    async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+        client = self._require_client()
+        response = (
+            client.table("activities")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("id", activity_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(
+                f"No activity found for user '{user_id}' and id '{activity_id}'."
+            )
+        return Activity.model_validate(rows[0])
+
+    async def update_activity(self, activity: Activity) -> Activity:
+        if activity.id is None:
+            raise ValueError("Activity id is required for update.")
+        client = self._require_client()
+        payload = _activity_payload(activity)
+        response = (
+            client.table("activities")
+            .update(payload)
+            .eq("user_id", activity.user_id)
+            .eq("id", activity.id)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the updated activity row.")
         return Activity.model_validate(rows[0])
 
     async def list_activities(

@@ -10,7 +10,7 @@ export type CoachToolContext = {
   fetchImpl?: typeof fetch;
 };
 
-const ENGINE_TIMEOUT_MS = 30_000;
+const ENGINE_TIMEOUT_MS = 65_000;
 
 async function postEngine<TInput extends object>(
   context: CoachToolContext,
@@ -36,7 +36,10 @@ async function postEngine<TInput extends object>(
     );
 
     if (!response.ok) {
-      throw new Error(`Engine request failed for ${path}.`);
+      const body = await response.text().catch(() => "");
+      throw new Error(
+        `Engine request failed for ${path}: HTTP ${response.status} ${response.statusText}${body ? `. ${body}` : ""}`,
+      );
     }
 
     return await response.json();
@@ -261,6 +264,14 @@ export function executeCoachTool(
     return postEngine(
       context,
       "/api/engine/get-recent-activities",
+      engineInput(input),
+    );
+  }
+
+  if (name === "save_activity_from_text") {
+    return postEngine(
+      context,
+      "/api/engine/save-activity-from-text",
       engineInput(input),
     );
   }

@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.config import settings
 from backend.logging_config import configure_logging
@@ -48,6 +48,7 @@ from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
     SupabaseRepository,
+    build_activity_summary_from_fields,
 )
 from backend.services.auth import (
     AuthService,
@@ -734,6 +735,9 @@ async def process_uploaded_file_endpoint(
             "rr_interval_count": len(parsed.rr_intervals_ms or []),
         },
     )
+    activity = activity.model_copy(
+        update={"activity_summary": build_activity_summary_from_fields(activity)}
+    )
     logger.info(
         "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
         user_context.user_id,
@@ -875,6 +879,97 @@ async def get_recent_activities(
         len(activities),
     )
     return {"activities": [activity.model_dump(mode="json") for activity in activities]}
+
+
+class SaveActivityFromTextRequest(BaseModel):
+    text: str = Field(min_length=1)
+    activity_id: str | None = None
+
+
+async def _update_activity_from_text(
+    user_id: str,
+    activity_id: str,
+    text: str,
+) -> Mapping[str, object]:
+    from backend.services.activity_text import (
+        ActivityTextExtractionUnavailable,
+        merge_activity_text_update,
+    )
+
+    try:
+        existing = await repo.get_activity(user_id, activity_id)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    try:
+        updated = await merge_activity_text_update(existing, text)
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        activity = await repo.update_activity(updated)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    except RuntimeError as exc:
+        logger.exception(
+            "update_activity failed for user_id=%s activity_id=%s", user_id, activity_id
+        )
+        raise HTTPException(status_code=503, detail="Failed to update activity.") from exc
+    logger.info(
+        "save_activity_from_text user_id=%s activity_id=%s status=updated", user_id, activity_id
+    )
+    return {"activity": activity.model_dump(mode="json"), "status": "updated"}
+
+
+@app.post("/api/engine/save-activity-from-text")
+async def save_activity_from_text(
+    payload: SaveActivityFromTextRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    from backend.services.activity_text import (
+        ActivityTextExtractionUnavailable,
+        build_activity_from_text,
+    )
+
+    if not payload.text.strip():
+        raise HTTPException(status_code=422, detail="Activity text must not be empty.")
+
+    if payload.activity_id is not None:
+        activity_id = payload.activity_id.strip()
+        if not activity_id:
+            raise HTTPException(status_code=422, detail="Activity id must not be empty.")
+        return await _update_activity_from_text(user_context.user_id, activity_id, payload.text)
+
+    try:
+        profile = await repo.get_athlete_profile(user_context.user_id)
+    except RecordNotFoundError:
+        profile = _AthleteProfile(user_id=user_context.user_id)
+    thresholds = await repo.get_active_thresholds(user_context.user_id)
+    try:
+        result = await build_activity_from_text(
+            payload.text,
+            user_id=user_context.user_id,
+            profile=profile,
+            thresholds=thresholds,
+        )
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if result.activity is None:
+        logger.info(
+            "save_activity_from_text user_id=%s status=needs_clarification missing=%s",
+            user_context.user_id,
+            result.missing,
+        )
+        return {
+            "missing": result.missing,
+            "raw_extraction": result.raw_extraction,
+            "status": "needs_clarification",
+        }
+    try:
+        activity = await repo.create_activity(result.activity)
+    except RuntimeError as exc:
+        logger.exception("create_activity failed for user_id=%s", user_context.user_id)
+        raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
+    logger.info("save_activity_from_text user_id=%s status=saved", user_context.user_id)
+    return {"activity": activity.model_dump(mode="json"), "status": "saved"}
 
 
 class GeneratePlanStructureRequest(BaseModel):
