@@ -239,6 +239,7 @@ class ModelStateRepo(OnboardingRepo):
         replacement = kwargs["replacement"]
         assert isinstance(replacement, ChatModelStateReplaceRequest)
         assert replacement.expected_version == self.model_state.version
+        assert replacement.lease_id == self.model_state.lease_id
         self.model_state = self.model_state.model_copy(
             update={
                 "items": replacement.items,
@@ -265,6 +266,7 @@ async def test_model_state_service_keeps_private_state_outside_thread_bootstrap(
     service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
     state = await service.get_model_state("athlete-1")
+    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
     updated = await service.replace_model_state(
         "athlete-1",
         ChatModelStateReplaceRequest(
@@ -299,6 +301,7 @@ async def test_model_state_service_uses_thread_lookup_without_messages() -> None
     service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
     state = await service.get_model_state("athlete-1")
+    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
     await service.replace_model_state(
         "athlete-1",
         ChatModelStateReplaceRequest(
@@ -309,7 +312,6 @@ async def test_model_state_service_uses_thread_lookup_without_messages() -> None
             compaction_metadata={},
         ),
     )
-    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
     await service.release_turn_lease("athlete-1", "lease-1")
 
     assert repo.thread_lookup_include_messages == [False, False, False, False]

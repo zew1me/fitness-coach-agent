@@ -196,6 +196,9 @@ export function useChatThread(
       try {
         return { kind: "initial", thread: await loadChatThread(fetch, signal) };
       } catch (error) {
+        if (signal.aborted) {
+          throw error;
+        }
         const localThread = readLocalChatThread(token.user_id);
         if (localThread !== null) {
           return { kind: "initial", thread: localThread };

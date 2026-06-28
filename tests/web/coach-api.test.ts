@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { loadChatMessages } from "../../lib/coach-api";
+import { loadChatMessages, loadChatThread } from "../../lib/coach-api";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -70,5 +70,48 @@ describe("loadChatMessages", () => {
       );
 
     await expect(loadChatMessages("cursor", fetchMock)).rejects.toThrow();
+  });
+});
+
+describe("loadChatThread", () => {
+  it("rejects malformed thread responses", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ access_token: "token", user_id: "athlete-1" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          attachments_enabled: true,
+          profile_complete: true,
+          thread: { id: "thread-1", messages: [] },
+        }),
+      );
+
+    await expect(loadChatThread(fetchMock)).rejects.toThrow();
+  });
+
+  it("returns a valid thread response", async () => {
+    const thread = {
+      attachments_enabled: true,
+      next_cursor: null,
+      profile_complete: true,
+      thread: {
+        created_at: "2026-04-04T09:00:00Z",
+        id: "thread-1",
+        messages: [],
+        state: {},
+        updated_at: "2026-04-04T09:00:00Z",
+        user_id: "athlete-1",
+      },
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ access_token: "token", user_id: "athlete-1" }),
+      )
+      .mockResolvedValueOnce(jsonResponse(thread));
+
+    await expect(loadChatThread(fetchMock)).resolves.toEqual(thread);
   });
 });

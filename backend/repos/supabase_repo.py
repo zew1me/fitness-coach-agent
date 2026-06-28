@@ -1,6 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from backend.config import settings
 from backend.models.athlete import (
@@ -426,9 +426,11 @@ class SupabaseRepository:
         )
         return [Goal.model_validate(r) for r in (response.data or [])]
 
-    async def update_goal(self, goal_id: str, updates: dict) -> Goal:
+    async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
         client = self._require_client()
-        response = client.table("goals").update(updates).eq("id", goal_id).execute()
+        response = (
+            client.table("goals").update(updates).eq("id", goal_id).eq("user_id", user_id).execute()
+        )
         rows = response.data or []
         if not rows:
             raise RecordNotFoundError(f"Goal '{goal_id}' not found.")
@@ -601,6 +603,10 @@ class SupabaseRepository:
         query = client.table("chat_messages").select("*").eq("thread_id", thread_id)
         if before is not None:
             created_at, message_id = before
+            try:
+                UUID(message_id)
+            except ValueError as exc:
+                raise ValueError("Invalid chat message cursor.") from exc
             timestamp = created_at.isoformat()
             query = query.or_(
                 f"created_at.lt.{timestamp},and(created_at.eq.{timestamp},id.lt.{message_id})"

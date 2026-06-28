@@ -183,6 +183,28 @@ describe("useChatThread", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("does not fall back to local storage after an aborted remote load", async () => {
+    const localThread = makeThread(3);
+    writeLocalChatThread(
+      localThread as unknown as Parameters<typeof writeLocalChatThread>[0],
+      TOKEN.user_id,
+    );
+    loadChatThreadMock.mockImplementationOnce((_fetchImpl, signal) => {
+      if (signal) {
+        Object.defineProperty(signal, "aborted", { value: true });
+      }
+      return Promise.reject(new Error("cancelled"));
+    });
+
+    const { result } = renderUseChatThread(TOKEN);
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.data).toBeNull();
+    expect(result.current.error).toBe("cancelled");
+  });
+
   it("surfaces the error when remote and local both fail", async () => {
     loadChatThreadMock.mockRejectedValueOnce(new Error("boom"));
 

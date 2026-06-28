@@ -3,13 +3,14 @@ import * as Sentry from "@sentry/nextjs";
 import {
   athleteProfileSchema,
   chatMessagePageSchema,
+  chatThreadResponseSchema,
   type ParsedChatMessagePage,
+  type ParsedChatThreadResponse,
   uploadRequestSchema,
 } from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
-  ChatThreadResponse,
   FitnessMetrics,
   PresignUploadRequest,
   PresignUploadResponse,
@@ -186,11 +187,13 @@ export async function saveProfile(
 export async function loadChatThread(
   fetchImpl: FetchLike = fetch,
   signal?: AbortSignal,
-): Promise<ChatThreadResponse> {
-  const thread = await authorizedFetch<ChatThreadResponse>(
-    "/api/chat/thread",
-    { method: "GET", signal: signal ?? null },
-    fetchImpl,
+): Promise<ParsedChatThreadResponse> {
+  const thread = chatThreadResponseSchema.parse(
+    await authorizedFetch<unknown>(
+      "/api/chat/thread",
+      { method: "GET", signal: signal ?? null },
+      fetchImpl,
+    ),
   );
   Sentry.logger.debug("chat thread loaded", {
     message_count: thread.thread.messages.length,

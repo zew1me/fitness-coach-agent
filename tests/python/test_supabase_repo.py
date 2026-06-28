@@ -25,7 +25,7 @@ class FakeTableQuery:
         self._is_null: set[str] = set()
         self._inserted_payload: dict[str, object] | None = None
         self._inserted_payloads: list[dict[str, object]] | None = None
-        self._upserted_payload: dict[str, object] | None = None
+        self._upserted_payloads: list[dict[str, object]] | None = None
         self._upsert_conflict: str | None = None
         self._ignore_duplicates = False
         self._update_payload: dict[str, object] | None = None
@@ -80,13 +80,13 @@ class FakeTableQuery:
 
     def upsert(
         self,
-        payload: dict[str, object],
+        payload: dict[str, object] | list[dict[str, object]],
         on_conflict: str,
         *,
         ignore_duplicates: bool = False,
     ) -> "FakeTableQuery":
         assert on_conflict
-        self._upserted_payload = payload
+        self._upserted_payloads = payload if isinstance(payload, list) else [payload]
         self._upsert_conflict = on_conflict
         self._ignore_duplicates = ignore_duplicates
         return self
@@ -95,32 +95,34 @@ class FakeTableQuery:
         self._update_payload = payload
         return self
 
-    def execute(self) -> FakeResponse:  # noqa: C901, PLR0911
+    def execute(self) -> FakeResponse:  # noqa: C901
         if self._inserted_payload is not None:
             self._rows.append(self._inserted_payload)
             return FakeResponse([self._inserted_payload])
         if self._inserted_payloads is not None:
             self._rows.extend(self._inserted_payloads)
             return FakeResponse(self._inserted_payloads)
-        if self._upserted_payload is not None:
+        if self._upserted_payloads is not None:
             conflict_columns = [
                 column.strip()
                 for column in (self._upsert_conflict or "").split(",")
                 if column.strip()
             ]
             assert conflict_columns
-            for index, row in enumerate(self._rows):
-                if any(
-                    row.get(column) != self._upserted_payload.get(column)
-                    for column in conflict_columns
-                ):
-                    continue
-                if self._ignore_duplicates:
-                    return FakeResponse([])
-                self._rows[index] = self._upserted_payload
-                return FakeResponse([self._upserted_payload])
-            self._rows.append(self._upserted_payload)
-            return FakeResponse([self._upserted_payload])
+            upserted_rows: list[dict[str, object]] = []
+            for payload in self._upserted_payloads:
+                for index, row in enumerate(self._rows):
+                    if any(row.get(column) != payload.get(column) for column in conflict_columns):
+                        continue
+                    if self._ignore_duplicates:
+                        break
+                    self._rows[index] = payload
+                    upserted_rows.append(payload)
+                    break
+                else:
+                    self._rows.append(payload)
+                    upserted_rows.append(payload)
+            return FakeResponse(upserted_rows)
         if self._update_payload is not None:
             updated = []
             for row in self._matching_rows():
@@ -168,11 +170,13 @@ class FakeSupabaseClient:
         chat_message_rows: list[dict[str, object]] | None = None,
         chat_attachment_rows: list[dict[str, object]] | None = None,
         chat_model_state_rows: list[dict[str, object]] | None = None,
+        daily_load_snapshot_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._tables = {
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
             "sport_thresholds": FakeTableQuery(threshold_rows or []),
             "activities": FakeTableQuery(activity_rows or []),
+            "daily_load_snapshots": FakeTableQuery(daily_load_snapshot_rows or []),
             "chat_threads": FakeTableQuery(chat_thread_rows or []),
             "chat_messages": FakeTableQuery(chat_message_rows or []),
             "chat_attachments": FakeTableQuery(chat_attachment_rows or []),
@@ -233,6 +237,61 @@ def test_fake_table_upsert_matches_composite_conflict_key() -> None:
         {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "run", "ctl": 11},
         {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "bike", "ctl": 20},
     ]
+
+
+def test_fake_table_upsert_handles_batch_payloads() -> None:
+    rows: list[dict[str, object]] = [
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "run", "ctl": 10},
+    ]
+
+    response = (
+        FakeTableQuery(rows)
+        .upsert(
+            [
+                {
+                    "user_id": "athlete-1",
+                    "snapshot_date": "2026-06-28",
+                    "sport": "run",
+                    "ctl": 11,
+                },
+                {
+                    "user_id": "athlete-1",
+                    "snapshot_date": "2026-06-29",
+                    "sport": "run",
+                    "ctl": 12,
+                },
+            ],
+            on_conflict="user_id,snapshot_date,sport",
+        )
+        .execute()
+    )
+
+    assert response.data == [
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "run", "ctl": 11},
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-29", "sport": "run", "ctl": 12},
+    ]
+    assert rows == response.data
+
+
+@pytest.mark.asyncio
+async def test_upsert_load_snapshots_handles_batch_payloads() -> None:
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    await repo.upsert_load_snapshots(
+        "athlete-1",
+        [
+            {"snapshot_date": date(2026, 6, 28), "daily_tss": 50, "ctl": 10, "atl": 12, "tsb": -2},
+            {"snapshot_date": date(2026, 6, 29), "daily_tss": 60, "ctl": 11, "atl": 13, "tsb": -2},
+        ],
+        sport="cycling",
+    )
+
+    rows = client._tables["daily_load_snapshots"]._rows
+    assert len(rows) == 2
+    assert [row["snapshot_date"] for row in rows] == ["2026-06-28", "2026-06-29"]
+    assert all(row["user_id"] == "athlete-1" for row in rows)
+    assert all(row["sport"] == "cycling" for row in rows)
 
 
 @pytest.mark.asyncio
@@ -586,6 +645,11 @@ async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None
 @pytest.mark.asyncio
 async def test_chat_message_pagination_is_stable_for_equal_timestamps() -> None:
     created_at = "2026-06-20T12:00:00+00:00"
+    message_ids = (
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+        "00000000-0000-0000-0000-000000000003",
+    )
     rows: list[dict[str, object]] = [
         {
             "id": message_id,
@@ -598,7 +662,7 @@ async def test_chat_message_pagination_is_stable_for_equal_timestamps() -> None:
             "metadata": {},
             "created_at": created_at,
         }
-        for message_id in ("message-a", "message-b", "message-c")
+        for message_id in message_ids
     ]
     repo = SupabaseRepository(client=FakeSupabaseClient(chat_message_rows=rows))
 
@@ -609,8 +673,19 @@ async def test_chat_message_pagination_is_stable_for_equal_timestamps() -> None:
         before=(newest[0].created_at, newest[0].id),
     )
 
-    assert [message.id for message in newest] == ["message-b", "message-c"]
-    assert [message.id for message in older] == ["message-a"]
+    assert [message.id for message in newest] == [message_ids[1], message_ids[2]]
+    assert [message.id for message in older] == [message_ids[0]]
+
+
+@pytest.mark.asyncio
+async def test_chat_message_pagination_rejects_non_uuid_cursor_id() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    with pytest.raises(ValueError, match="Invalid chat message cursor"):
+        await repo.list_chat_messages(
+            "thread-1",
+            before=(datetime(2026, 6, 20, 12, tzinfo=UTC), "not,a,uuid"),
+        )
 
 
 @pytest.mark.asyncio

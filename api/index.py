@@ -24,7 +24,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, RedirectResponse
 from postgrest.exceptions import APIError as PostgRESTAPIError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from backend.config import settings
 from backend.logging_config import configure_logging
@@ -975,16 +975,24 @@ def _normalize_goal_fields(d: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def _sanitize_goal_update_fields(fields: dict[str, object]) -> dict[str, object]:
+    result = dict(fields)
+    for immutable_field in ("id", "user_id", "created_at", "updated_at"):
+        result.pop(immutable_field, None)
+    return result
+
+
 async def _apply_goal_action(user_id: str, payload: UpdateGoalsRequest) -> Goal:
     goal_dict = _normalize_goal_fields(payload.goal)
     if payload.action == "create":
         goal_dict.update({"user_id": user_id, "status": "active"})
         return await repo.create_goal(Goal.model_validate(goal_dict))
     if payload.action in ("update", "complete", "abandon"):
+        goal_dict = _sanitize_goal_update_fields(goal_dict)
         status_map = {"complete": "completed", "abandon": "abandoned"}
         if s := status_map.get(payload.action):
             goal_dict["status"] = s
-        return await repo.update_goal(payload.goal_id or "", goal_dict)
+        return await repo.update_goal(payload.goal_id or "", user_id, goal_dict)
     raise HTTPException(status_code=422, detail=f"Unknown action: {payload.action}")
 
 
@@ -1002,6 +1010,8 @@ async def update_goals_endpoint(
         result = await _apply_goal_action(user_context.user_id, payload)
     except HTTPException:
         raise
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -1032,6 +1042,8 @@ async def update_schedule_endpoint(
                 override = ScheduleOverride.model_validate({"user_id": user_id, **ov})
                 await repo.upsert_schedule_override(override)
             updated.append("overrides")
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     except Exception as exc:
         logger.exception("update_schedule failed user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Unable to update schedule.") from exc
@@ -1062,6 +1074,16 @@ class SaveActivityFromTextRequest(BaseModel):
     activity_id: str | None = None
 
 
+async def _activity_repo_call(awaitable, *, detail: str, log_message: str):
+    try:
+        return await awaitable
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("%s error_type=%s", log_message, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
 async def _update_activity_from_text(
     user_id: str,
     activity_id: str,
@@ -1073,7 +1095,11 @@ async def _update_activity_from_text(
     )
 
     try:
-        existing = await repo.get_activity(user_id, activity_id)
+        existing = await _activity_repo_call(
+            repo.get_activity(user_id, activity_id),
+            detail="Failed to load activity.",
+            log_message=f"get_activity failed for user_id={user_id} activity_id={activity_id}",
+        )
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Activity not found.") from exc
     try:
@@ -1081,7 +1107,11 @@ async def _update_activity_from_text(
     except ActivityTextExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
-        activity = await repo.update_activity(updated)
+        activity = await _activity_repo_call(
+            repo.update_activity(updated),
+            detail="Failed to update activity.",
+            log_message=f"update_activity failed for user_id={user_id} activity_id={activity_id}",
+        )
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Activity not found.") from exc
     except RuntimeError as exc:
@@ -1115,10 +1145,18 @@ async def save_activity_from_text(
         return await _update_activity_from_text(user_context.user_id, activity_id, payload.text)
 
     try:
-        profile = await repo.get_athlete_profile(user_context.user_id)
+        profile = await _activity_repo_call(
+            repo.get_athlete_profile(user_context.user_id),
+            detail="Failed to load athlete profile.",
+            log_message=f"get_athlete_profile failed for user_id={user_context.user_id}",
+        )
     except RecordNotFoundError:
         profile = _AthleteProfile(user_id=user_context.user_id)
-    thresholds = await repo.get_active_thresholds(user_context.user_id)
+    thresholds = await _activity_repo_call(
+        repo.get_active_thresholds(user_context.user_id),
+        detail="Failed to load athlete thresholds.",
+        log_message=f"get_active_thresholds failed for user_id={user_context.user_id}",
+    )
     try:
         result = await build_activity_from_text(
             payload.text,
@@ -1140,7 +1178,11 @@ async def save_activity_from_text(
             "status": "needs_clarification",
         }
     try:
-        activity = await repo.create_activity(result.activity)
+        activity = await _activity_repo_call(
+            repo.create_activity(result.activity),
+            detail="Failed to save activity.",
+            log_message=f"create_activity failed for user_id={user_context.user_id}",
+        )
     except RuntimeError as exc:
         logger.exception("create_activity failed for user_id=%s", user_context.user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc

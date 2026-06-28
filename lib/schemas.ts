@@ -53,7 +53,7 @@ export const chatMessageSchema = z
     created_at: z.string(),
     id: z.string().min(1),
     metadata: chatMessageMetadataSchema,
-    parts: z.array(chatMessagePartSchema),
+    parts: z.array(chatMessagePartSchema).default([]),
     role: z.enum(["user", "assistant"]),
     thread_id: z.string().min(1),
     user_id: z.string().min(1),
@@ -66,6 +66,22 @@ export const chatMessagePageSchema = z.object({
 });
 
 export type ParsedChatMessagePage = z.infer<typeof chatMessagePageSchema>;
+
+export const chatThreadResponseSchema = z.object({
+  attachments_enabled: z.boolean(),
+  next_cursor: z.string().nullable().default(null),
+  profile_complete: z.boolean(),
+  thread: z.object({
+    created_at: z.string(),
+    id: z.string().min(1),
+    messages: z.array(chatMessageSchema),
+    state: z.record(z.string(), z.unknown()),
+    updated_at: z.string(),
+    user_id: z.string().min(1),
+  }),
+});
+
+export type ParsedChatThreadResponse = z.infer<typeof chatThreadResponseSchema>;
 
 export const modelStateSchema = z.object({
   thread_id: z.string().min(1),

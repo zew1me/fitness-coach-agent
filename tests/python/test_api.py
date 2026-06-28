@@ -14,6 +14,7 @@ from backend.models.athlete import (
     AthleteProfile,
     RecoveryLog,
     ScheduleAvailability,
+    ScheduleOverride,
     SportThreshold,
 )
 from backend.models.auth import (
@@ -1341,6 +1342,123 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_update_goals_validation_errors_return_422(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        async def create_goal(self, goal: Goal) -> Goal:
+            return goal
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", GoalRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "create", "goal": {"goal_type": "event"}},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized(
+    monkeypatch,
+) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(
+                id=goal_id,
+                user_id=user_id,
+                goal_type="event",
+                title=str(updates.get("title", "Updated goal")),
+            )
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "complete",
+                    "goal_id": "goal-1",
+                    "goal": {
+                        "id": "other-goal",
+                        "user_id": "other-user",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-02T00:00:00Z",
+                        "title": "Updated goal",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.update_call == (
+        "goal-1",
+        "athlete-1",
+        {"title": "Updated goal", "status": "completed"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_schedule_validation_errors_return_422(monkeypatch) -> None:
+    class ScheduleRepository(EngineRepository):
+        async def upsert_schedule(self, schedule: ScheduleAvailability) -> ScheduleAvailability:
+            return schedule
+
+        async def upsert_schedule_override(self, override: ScheduleOverride) -> ScheduleOverride:
+            return override
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["schedule:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ScheduleRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-schedule",
+                json={"overrides": [{"override_date": "not-a-date", "available": True}]},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_save_activity_from_text_persists_summary_and_estimates(monkeypatch) -> None:
     from backend.services import activity_text
     from backend.services.activity_text import (
@@ -1631,6 +1749,132 @@ async def test_save_activity_from_text_update_missing_activity_returns_404(monke
     assert response.status_code == 404
     assert response.json()["detail"] == "Activity not found."
     assert repository.update_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_method", "expected_detail"),
+    [
+        ("get_athlete_profile", "Failed to load athlete profile."),
+        ("get_active_thresholds", "Failed to load athlete thresholds."),
+        ("create_activity", "Failed to save activity."),
+    ],
+)
+async def test_save_activity_from_text_create_maps_repository_failures_to_503(
+    failing_method: str,
+    expected_detail: str,
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextBuildResult
+
+    class ActivityRepository(EngineRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            if failing_method == "get_athlete_profile":
+                raise HTTPError("profile unavailable")
+            return await super().get_athlete_profile(user_id)
+
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            if failing_method == "get_active_thresholds":
+                raise HTTPError("thresholds unavailable")
+            return await super().get_active_thresholds(user_id)
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            if failing_method == "create_activity":
+                raise HTTPError("insert unavailable")
+            return activity
+
+    async def fake_build_activity_from_text(*_args, **_kwargs) -> ActivityTextBuildResult:
+        return ActivityTextBuildResult(
+            activity=Activity(
+                user_id="athlete-1",
+                sport="cycling",
+                activity_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+                source="text_extract",
+            ),
+            missing=[],
+            raw_extraction={},
+        )
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+    monkeypatch.setattr(activity_text, "build_activity_from_text", fake_build_activity_from_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"text": "Rode hard yesterday."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == expected_detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_method", "expected_detail"),
+    [
+        ("get_activity", "Failed to load activity."),
+        ("update_activity", "Failed to update activity."),
+    ],
+)
+async def test_save_activity_from_text_update_maps_repository_failures_to_503(
+    failing_method: str,
+    expected_detail: str,
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+
+    class ActivityRepository(EngineRepository):
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            if failing_method == "get_activity":
+                raise HTTPError("activity load unavailable")
+            return await super().get_activity(user_id, activity_id)
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            if failing_method == "update_activity":
+                raise HTTPError("activity update unavailable")
+            return activity
+
+    async def fake_merge_activity_text_update(existing: Activity, _text: str) -> Activity:
+        return existing.model_copy(update={"rpe": 9})
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+    monkeypatch.setattr(
+        activity_text, "merge_activity_text_update", fake_merge_activity_text_update
+    )
+
+    try:
+        transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Add RPE 9."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == expected_detail
 
 
 @pytest.mark.asyncio
