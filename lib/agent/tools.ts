@@ -192,7 +192,8 @@ export const coachToolDefinitions = {
     "Create, update, complete, or abandon athlete goals.",
     z.object({
       action: z.enum(["abandon", "complete", "create", "update"]),
-      goal: goalSchema,
+      // Nullable, not required: complete/abandon act on goal_id alone and carry no goal.
+      goal: goalSchema.nullable(),
       goal_id: z.string().min(1).optional(),
     }),
   ),

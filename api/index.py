@@ -1024,6 +1024,8 @@ async def update_goals_endpoint(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("update_goals failed user_id=%s", user_context.user_id)
         raise HTTPException(status_code=503, detail="Unable to update goals.") from exc

@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import ValidationError
 
 from backend.models.training import Goal
@@ -18,6 +20,20 @@ def _normalize_goal_fields(d: dict[str, object]) -> dict[str, object]:
     result = dict(d)
     if "course_profile_notes" in result and "course_profile" not in result:
         result["course_profile"] = result.pop("course_profile_notes")
+    target_date = result.get("target_date")
+    if isinstance(target_date, str):
+        try:
+            date.fromisoformat(target_date)
+        except ValueError as exc:
+            raise InvalidGoalPayloadError(
+                [
+                    {
+                        "loc": ("goal", "target_date"),
+                        "msg": "target_date must be an ISO date (YYYY-MM-DD).",
+                        "type": "value_error.date",
+                    }
+                ]
+            ) from exc
     return result
 
 
@@ -51,5 +67,15 @@ class GoalService:
             status_map = {"complete": "completed", "abandon": "abandoned"}
             if s := status_map.get(action):
                 goal_dict["status"] = s
+            if action == "update" and not goal_dict:
+                raise InvalidGoalPayloadError(
+                    [
+                        {
+                            "loc": ("goal",),
+                            "msg": "No goal fields provided to update.",
+                            "type": "value_error",
+                        }
+                    ]
+                )
             return await repo.update_goal(goal_id or "", user_id, goal_dict)
         raise UnknownGoalActionError(f"Unknown action: {action}")

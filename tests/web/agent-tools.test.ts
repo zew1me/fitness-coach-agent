@@ -71,8 +71,23 @@ describe("coachToolDefinitions", () => {
       },
     });
 
-    expect(parsed.goal.title).toBe("Hill climb");
-    expect(parsed.goal.course_elevation_gain_meters).toBe(700);
+    expect(parsed.goal?.title).toBe("Hill climb");
+    expect(parsed.goal?.course_elevation_gain_meters).toBe(700);
+  });
+
+  it("accepts complete and abandon actions without a goal payload", () => {
+    for (const action of ["complete", "abandon"] as const) {
+      const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action,
+        goal: null,
+        goal_id: "goal-1",
+      });
+
+      expect(
+        parsed.success,
+        `${action} should be a valid update_goals call`,
+      ).toBe(true);
+    }
   });
 
   it("emits OpenAI-compatible schemas for all coach tools", () => {
