@@ -185,10 +185,11 @@ export async function saveProfile(
 
 export async function loadChatThread(
   fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<ChatThreadResponse> {
   const thread = await authorizedFetch<ChatThreadResponse>(
     "/api/chat/thread",
-    { method: "GET" },
+    { method: "GET", signal: signal ?? null },
     fetchImpl,
   );
   Sentry.logger.debug("chat thread loaded", {
@@ -201,11 +202,12 @@ export async function loadChatThread(
 export async function loadChatMessages(
   before: string,
   fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<ParsedChatMessagePage> {
   const params = new URLSearchParams({ before, limit: "50" });
   const page = await authorizedFetch<unknown>(
     `/api/chat/messages?${params.toString()}`,
-    { method: "GET" },
+    { method: "GET", signal: signal ?? null },
     fetchImpl,
   );
   return chatMessagePageSchema.parse(page);

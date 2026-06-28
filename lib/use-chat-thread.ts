@@ -181,12 +181,12 @@ export function useChatThread(
       return nextCursor ?? undefined;
     },
     initialPageParam: null,
-    queryFn: async ({ pageParam }) => {
+    queryFn: async ({ pageParam, signal }) => {
       if (token === null) {
         throw new Error("Missing chat token.");
       }
       if (pageParam !== null) {
-        const page = await loadChatMessages(pageParam);
+        const page = await loadChatMessages(pageParam, fetch, signal);
         return {
           kind: "older",
           messages: page.messages,
@@ -194,7 +194,7 @@ export function useChatThread(
         };
       }
       try {
-        return { kind: "initial", thread: await loadChatThread() };
+        return { kind: "initial", thread: await loadChatThread(fetch, signal) };
       } catch (error) {
         const localThread = readLocalChatThread(token.user_id);
         if (localThread !== null) {
@@ -228,6 +228,7 @@ export function useChatThread(
 
   const setData = useCallback(
     (update: ChatThreadDataUpdate) => {
+      void queryClient.cancelQueries({ queryKey });
       queryClient.setQueryData<ChatThreadQueryData>(queryKey, (current) => {
         const currentThread = mergeThreadPages(current);
         let nextThread: ChatThreadResponse;
@@ -255,6 +256,7 @@ export function useChatThread(
 
   const refetch = useCallback(async (): Promise<void> => {
     setManualError(null);
+    await queryClient.cancelQueries({ queryKey });
     const thread = await loadChatThread();
     queryClient.setQueryData<ChatThreadQueryData>(queryKey, {
       pageParams: [null],

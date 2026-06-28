@@ -753,10 +753,11 @@ class SupabaseRepository:
         now = datetime.now(UTC)
         if (
             current.lease_id is not None
-            and current.lease_id != lease_id
             and current.lease_expires_at is not None
             and current.lease_expires_at > now
         ):
+            if current.lease_id == lease_id:
+                return current
             raise ValueError("A chat turn is already in progress.")
         client = self._require_client()
         response = (

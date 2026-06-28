@@ -377,7 +377,9 @@ class ModelStateChatService:
     ) -> ChatModelState:
         assert user_id == "athlete-1"
         assert ttl_seconds == 60
-        self.state = self.state.model_copy(update={"lease_id": lease_id})
+        self.state = self.state.model_copy(
+            update={"lease_id": lease_id, "version": self.state.version + 1}
+        )
         return self.state
 
     async def release_turn_lease(self, user_id: str, lease_id: str) -> ChatModelState:
@@ -1829,7 +1831,7 @@ async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoi
         replaced = await client.put(
             "/api/chat/model-state",
             json={
-                "expected_version": 2,
+                "expected_version": 3,
                 "lease_id": "lease-1",
                 "items": [{"role": "user", "content": "hello"}],
                 "coaching_memory": [],

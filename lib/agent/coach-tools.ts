@@ -221,28 +221,16 @@ function executeDeterministicEngineTool(
   input: unknown,
   context: CoachToolContext,
 ): unknown {
-  if (name === "calculate_zones") {
-    return postEngine(
-      context,
-      "/api/engine/calculate-zones",
-      engineInput(input),
-    );
-  }
-
-  if (name === "estimate_thresholds") {
-    return postEngine(
-      context,
-      "/api/engine/estimate-thresholds",
-      engineInput(input),
-    );
-  }
-
-  if (name === "generate_training_plan") {
-    return postEngine(
-      context,
-      "/api/engine/generate-plan-structure",
-      engineInput(input),
-    );
+  const paths: Record<string, string> = {
+    calculate_zones: "/api/engine/calculate-zones",
+    estimate_thresholds: "/api/engine/estimate-thresholds",
+    generate_training_plan: "/api/engine/generate-plan-structure",
+    update_goals: "/api/engine/update-goals",
+    update_schedule: "/api/engine/update-schedule",
+  };
+  const path = paths[name];
+  if (path) {
+    return postEngine(context, path, engineInput(input));
   }
 
   return null;

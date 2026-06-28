@@ -256,7 +256,11 @@ describe("useChatThread", () => {
     });
 
     expect(addedCount).toBe(1);
-    expect(loadChatMessagesMock).toHaveBeenCalledWith("cursor-1");
+    expect(loadChatMessagesMock).toHaveBeenCalledWith(
+      "cursor-1",
+      fetch,
+      expect.any(AbortSignal),
+    );
     expect(
       result.current.data?.thread.messages.map((message) => message.id),
     ).toEqual(["older-1", "m-0"]);

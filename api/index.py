@@ -32,6 +32,8 @@ from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
 )
 from backend.models.athlete import (
+    ScheduleAvailability,
+    ScheduleOverride,
     SportThreshold,
 )
 from backend.models.auth import (
@@ -49,7 +51,7 @@ from backend.models.chat import (
     ChatTurnLeaseRequest,
 )
 from backend.models.storage import PresignUploadRequest
-from backend.models.training import Activity
+from backend.models.training import Activity, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -965,6 +967,82 @@ async def update_athlete_profile(
 class GetRecentActivitiesRequest(BaseModel):
     sport: str | None = None
     limit: int = 20
+
+
+class UpdateGoalsRequest(BaseModel):
+    action: str
+    goal: dict[str, object]
+    goal_id: str | None = None
+
+
+def _normalize_goal_fields(d: dict[str, object]) -> dict[str, object]:
+    result = dict(d)
+    if "course_profile_notes" in result and "course_profile" not in result:
+        result["course_profile"] = result.pop("course_profile_notes")
+    return result
+
+
+async def _apply_goal_action(user_id: str, payload: UpdateGoalsRequest) -> Goal:
+    goal_dict = _normalize_goal_fields(payload.goal)
+    if payload.action == "create":
+        goal_dict.update({"user_id": user_id, "status": "active"})
+        return await repo.create_goal(Goal.model_validate(goal_dict))
+    if payload.action in ("update", "complete", "abandon"):
+        status_map = {"complete": "completed", "abandon": "abandoned"}
+        if s := status_map.get(payload.action):
+            goal_dict["status"] = s
+        return await repo.update_goal(payload.goal_id or "", goal_dict)
+    raise HTTPException(status_code=422, detail=f"Unknown action: {payload.action}")
+
+
+@app.post("/api/engine/update-goals")
+async def update_goals_endpoint(
+    payload: UpdateGoalsRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    if payload.action in ("update", "complete", "abandon") and not payload.goal_id:
+        raise HTTPException(
+            status_code=422,
+            detail="goal_id required for update/complete/abandon",
+        )
+    try:
+        result = await _apply_goal_action(user_context.user_id, payload)
+    except HTTPException:
+        raise
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("update_goals failed user_id=%s", user_context.user_id)
+        raise HTTPException(status_code=503, detail="Unable to update goals.") from exc
+    return result.model_dump(mode="json")
+
+
+class UpdateScheduleRequest(BaseModel):
+    weekly_pattern: dict[str, object] | None = None
+    overrides: list[dict[str, object]] | None = None
+
+
+@app.post("/api/engine/update-schedule")
+async def update_schedule_endpoint(
+    payload: UpdateScheduleRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    updated: list[str] = []
+    try:
+        if payload.weekly_pattern is not None:
+            schedule = ScheduleAvailability(user_id=user_id, weekly_pattern=payload.weekly_pattern)
+            await repo.upsert_schedule(schedule)
+            updated.append("weekly_pattern")
+        if payload.overrides:
+            for ov in payload.overrides:
+                override = ScheduleOverride.model_validate({"user_id": user_id, **ov})
+                await repo.upsert_schedule_override(override)
+            updated.append("overrides")
+    except Exception as exc:
+        logger.exception("update_schedule failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Unable to update schedule.") from exc
+    return {"updated": updated}
 
 
 @app.post("/api/engine/get-recent-activities")

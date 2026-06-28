@@ -104,8 +104,9 @@ class FakeTableQuery:
         if self._upserted_payload is not None:
             conflict_column = self._upsert_conflict
             assert conflict_column is not None
+            conflict_columns = [c.strip() for c in conflict_column.split(",")]
             for index, row in enumerate(self._rows):
-                if row.get(conflict_column) != self._upserted_payload.get(conflict_column):
+                if any(row.get(c) != self._upserted_payload.get(c) for c in conflict_columns):
                     continue
                 if self._ignore_duplicates:
                     return FakeResponse([])
