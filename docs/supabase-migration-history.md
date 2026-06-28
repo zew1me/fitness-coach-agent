@@ -8,6 +8,7 @@
 - `0004_chat_messages_parts.sql` — AI SDK message-parts persistence
 - `20260624055541_specialization_pct_nullable.sql` — nullable sport specialization for multi-sport athletes
 - `20260625172251_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
+- `20260626000000_activity_summary.sql` — rich activity summary persistence
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -166,12 +167,29 @@ there, two symptoms appeared together:
 **Remedy:** reset the ephemeral preview branch via the Supabase API
 (`reset_branch`, MCP) — **not** a new committed migration and **not** a local
 rename. The reset recreates the branch DB and replays the current git migration
-files (`0001`–`0004`, `20260624055541`, `20260625172251`) in order, which clears
-the `0005` orphan and creates `chat_model_states`. For an ephemeral,
-`with_data:false` Git preview branch, resetting is preferred over CLI
-`migration repair`: it replays the canonical local files instead of hand-editing
-remote history, and there is no branch data to lose.
+files (`0001`–`0004`, `20260624055541`, `20260625172251`, and later timestamp
+migrations such as `20260626000000`) in order, which clears the `0005` orphan
+and creates `chat_model_states`. For an ephemeral, `with_data:false` Git preview
+branch, resetting is preferred over CLI `migration repair`: it replays the
+canonical local files instead of hand-editing remote history, and there is no
+branch data to lose.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Production/parent never recorded the `0005` orphan, so the timestamp
 migration applies cleanly there on merge.
+
+## 20260626000000 — activity summary object (2026-06-26)
+
+**File:** `supabase/migrations/20260626000000_activity_summary.sql`
+
+**Change:** Adds `activities.summary_schema_version` and
+`activities.activity_summary jsonb`, then refreshes the `activities.source`
+check constraint to include `tcx_upload`.
+
+**Why:** Activity ingest now stores a compact, rich summary object at ingest
+time so GPX/FIT/text-derived activities can retain coaching-grade aggregates,
+estimates, confidence scores, source quality, fueling, subjective notes, and
+distribution summaries without retaining raw time-series files indefinitely.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally).
