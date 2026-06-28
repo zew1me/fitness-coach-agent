@@ -12,6 +12,7 @@ from backend.models.chat import (
     ChatMessage,
     ChatMessagePage,
     ChatModelState,
+    ChatModelStateReplaceRequest,
     ChatThreadBootstrap,
     MessageAttachment,
     MessagePart,
@@ -139,25 +140,16 @@ class ChatService:
         thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
         return await self._repo.get_or_create_chat_model_state(thread_id=thread.id, user_id=user_id)
 
-    async def replace_model_state(  # noqa: PLR0913
+    async def replace_model_state(
         self,
         user_id: str,
-        *,
-        expected_version: int,
-        lease_id: str,
-        items: list[dict[str, Any]],
-        coaching_memory: list[dict[str, Any]],
-        compaction_metadata: dict[str, Any],
+        replacement: ChatModelStateReplaceRequest,
     ) -> ChatModelState:
         thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
         return await self._repo.replace_chat_model_state(
             thread_id=thread.id,
             user_id=user_id,
-            expected_version=expected_version,
-            lease_id=lease_id,
-            items=items,
-            coaching_memory=coaching_memory,
-            compaction_metadata=compaction_metadata,
+            replacement=replacement,
         )
 
     async def acquire_turn_lease(

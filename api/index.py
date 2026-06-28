@@ -441,14 +441,7 @@ async def replace_chat_model_state(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        state = await chat_service.replace_model_state(
-            user_context.user_id,
-            expected_version=payload.expected_version,
-            lease_id=payload.lease_id,
-            items=payload.items,
-            coaching_memory=payload.coaching_memory,
-            compaction_metadata=payload.compaction_metadata,
-        )
+        state = await chat_service.replace_model_state(user_context.user_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:

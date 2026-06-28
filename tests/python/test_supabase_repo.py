@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from backend.models.athlete import AthleteProfile, SportThreshold
+from backend.models.chat import ChatModelStateReplaceRequest
 from backend.models.training import Activity
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -102,11 +103,17 @@ class FakeTableQuery:
             self._rows.extend(self._inserted_payloads)
             return FakeResponse(self._inserted_payloads)
         if self._upserted_payload is not None:
-            conflict_column = self._upsert_conflict
-            assert conflict_column is not None
-            conflict_columns = [c.strip() for c in conflict_column.split(",")]
+            conflict_columns = [
+                column.strip()
+                for column in (self._upsert_conflict or "").split(",")
+                if column.strip()
+            ]
+            assert conflict_columns
             for index, row in enumerate(self._rows):
-                if any(row.get(c) != self._upserted_payload.get(c) for c in conflict_columns):
+                if any(
+                    row.get(column) != self._upserted_payload.get(column)
+                    for column in conflict_columns
+                ):
                     continue
                 if self._ignore_duplicates:
                     return FakeResponse([])
@@ -196,6 +203,35 @@ def test_fake_table_upsert_replaces_existing_conflict_row() -> None:
     assert rows == [
         {"external_id": "activity-1", "name": "New"},
         {"external_id": "activity-2", "name": "Keep"},
+    ]
+
+
+def test_fake_table_upsert_matches_composite_conflict_key() -> None:
+    rows: list[dict[str, object]] = [
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "run", "ctl": 10},
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "bike", "ctl": 20},
+    ]
+
+    response = (
+        FakeTableQuery(rows)
+        .upsert(
+            {
+                "user_id": "athlete-1",
+                "snapshot_date": "2026-06-28",
+                "sport": "run",
+                "ctl": 11,
+            },
+            on_conflict="user_id,snapshot_date,sport",
+        )
+        .execute()
+    )
+
+    assert response.data == [
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "run", "ctl": 11}
+    ]
+    assert rows == [
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "run", "ctl": 11},
+        {"user_id": "athlete-1", "snapshot_date": "2026-06-28", "sport": "bike", "ctl": 20},
     ]
 
 
@@ -603,11 +639,13 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
     updated = await repo.replace_chat_model_state(
         thread_id="thread-1",
         user_id="athlete-1",
-        expected_version=3,
-        lease_id="lease-1",
-        items=[{"role": "user", "content": "compacted"}],
-        coaching_memory=[],
-        compaction_metadata={"trigger": "token_threshold"},
+        replacement=ChatModelStateReplaceRequest(
+            expected_version=3,
+            lease_id="lease-1",
+            items=[{"role": "user", "content": "compacted"}],
+            coaching_memory=[],
+            compaction_metadata={"trigger": "token_threshold"},
+        ),
     )
 
     assert updated.version == 4
@@ -695,11 +733,13 @@ async def test_chat_model_state_replace_rejects_non_owner_lease() -> None:
         await repo.replace_chat_model_state(
             thread_id="thread-1",
             user_id="athlete-1",
-            expected_version=3,
-            lease_id="other-lease",
-            items=[{"role": "user", "content": "intruder"}],
-            coaching_memory=[],
-            compaction_metadata={},
+            replacement=ChatModelStateReplaceRequest(
+                expected_version=3,
+                lease_id="other-lease",
+                items=[{"role": "user", "content": "intruder"}],
+                coaching_memory=[],
+                compaction_metadata={},
+            ),
         )
 
     assert client._tables["chat_model_states"]._rows[0]["items"] == original_items
@@ -731,11 +771,13 @@ async def test_chat_model_state_rejects_stale_version() -> None:
         await repo.replace_chat_model_state(
             thread_id="thread-1",
             user_id="athlete-1",
-            expected_version=3,
-            lease_id="lease-1",
-            items=[],
-            coaching_memory=[],
-            compaction_metadata={},
+            replacement=ChatModelStateReplaceRequest(
+                expected_version=3,
+                lease_id="lease-1",
+                items=[],
+                coaching_memory=[],
+                compaction_metadata={},
+            ),
         )
 
 
@@ -767,8 +809,15 @@ async def test_chat_turn_lease_rejects_active_owner_and_allows_expired_lease() -
         lease_id="new-lease",
         ttl_seconds=60,
     )
+    retried = await repo.acquire_chat_turn_lease(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        lease_id="new-lease",
+        ttl_seconds=60,
+    )
 
     assert leased.lease_id == "new-lease"
+    assert retried.version == leased.version
     with pytest.raises(ValueError, match="already in progress"):
         await repo.acquire_chat_turn_lease(
             thread_id="thread-1",

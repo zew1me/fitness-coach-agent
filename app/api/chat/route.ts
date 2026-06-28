@@ -122,6 +122,22 @@ function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
   return null;
 }
 
+function messagesForContextStrategy(
+  parsedBody: ChatRequestBody,
+  strategy: string,
+): UIMessage[] {
+  if (strategy === "full_history") {
+    if ("messages" in parsedBody) {
+      return parsedBody.messages as UIMessage[];
+    }
+    return [parsedBody.message] as UIMessage[];
+  }
+  if ("message" in parsedBody) {
+    return [parsedBody.message] as UIMessage[];
+  }
+  return parsedBody.messages.slice(-1) as UIMessage[];
+}
+
 async function persistUserMessage(
   request: Request,
   token: BrowserTokenResponse,
@@ -202,8 +218,6 @@ async function extractImageContent(
   }
 }
 
-// Request parsing, persistence, enrichment, and strategy selection are one bounded HTTP boundary.
-// eslint-disable-next-line complexity
 async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
@@ -219,15 +233,7 @@ async function handleChatRequest(
     return jsonError("Invalid request body.", 400);
   }
   const strategy = process.env["COACH_CONTEXT_STRATEGY"] ?? "session";
-  const messages = (
-    strategy === "full_history"
-      ? "messages" in parsedBody
-        ? parsedBody.messages
-        : [parsedBody.message]
-      : "message" in parsedBody
-        ? [parsedBody.message]
-        : parsedBody.messages.slice(-1)
-  ) as UIMessage[];
+  const messages = messagesForContextStrategy(parsedBody, strategy);
   Sentry.logger.info("chat turn start", {
     user_id: token.user_id,
     message_count: messages.length,

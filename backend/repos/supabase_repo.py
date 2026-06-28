@@ -13,6 +13,7 @@ from backend.models.athlete import (
 from backend.models.chat import (
     ChatMessage,
     ChatModelState,
+    ChatModelStateReplaceRequest,
     ChatThread,
     MessageAttachment,
     MessagePart,
@@ -707,23 +708,19 @@ class SupabaseRepository:
             raise RuntimeError("Supabase did not return the chat model state row.")
         return self._parse_chat_model_state(concurrent_rows[0])
 
-    async def replace_chat_model_state(  # noqa: PLR0913
+    async def replace_chat_model_state(
         self,
         *,
         thread_id: str,
         user_id: str,
-        expected_version: int,
-        lease_id: str,
-        items: list[dict[str, Any]],
-        coaching_memory: list[dict[str, Any]],
-        compaction_metadata: dict[str, Any],
+        replacement: ChatModelStateReplaceRequest,
     ) -> ChatModelState:
         client = self._require_client()
         payload = {
-            "items": items,
-            "coaching_memory": coaching_memory,
-            "compaction_metadata": compaction_metadata,
-            "version": expected_version + 1,
+            "items": replacement.items,
+            "coaching_memory": replacement.coaching_memory,
+            "compaction_metadata": replacement.compaction_metadata,
+            "version": replacement.expected_version + 1,
             "updated_at": datetime.now(UTC).isoformat(),
         }
         response = (
@@ -731,8 +728,8 @@ class SupabaseRepository:
             .update(payload)
             .eq("thread_id", thread_id)
             .eq("user_id", user_id)
-            .eq("version", expected_version)
-            .eq("lease_id", lease_id)
+            .eq("version", replacement.expected_version)
+            .eq("lease_id", replacement.lease_id)
             .gt("lease_expires_at", datetime.now(UTC).isoformat())
             .execute()
         )

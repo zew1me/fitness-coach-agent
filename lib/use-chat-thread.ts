@@ -153,7 +153,7 @@ export type ChatThreadHook = ChatThreadState & {
   loadingOlder: boolean;
   fetchOlderMessages: () => Promise<number>;
   refetch: () => Promise<void>;
-  setData: (_update: ChatThreadDataUpdate) => void;
+  setData: (_update: ChatThreadDataUpdate) => Promise<void>;
   setError: (_error: string | null) => void;
 };
 
@@ -227,8 +227,8 @@ export function useChatThread(
   }, [data, token]);
 
   const setData = useCallback(
-    (update: ChatThreadDataUpdate) => {
-      void queryClient.cancelQueries({ queryKey });
+    async (update: ChatThreadDataUpdate) => {
+      await queryClient.cancelQueries({ queryKey });
       queryClient.setQueryData<ChatThreadQueryData>(queryKey, (current) => {
         const currentThread = mergeThreadPages(current);
         let nextThread: ChatThreadResponse;
@@ -257,7 +257,7 @@ export function useChatThread(
   const refetch = useCallback(async (): Promise<void> => {
     setManualError(null);
     await queryClient.cancelQueries({ queryKey });
-    const thread = await loadChatThread();
+    const thread = await loadChatThread(fetch, new AbortController().signal);
     queryClient.setQueryData<ChatThreadQueryData>(queryKey, {
       pageParams: [null],
       pages: [{ kind: "initial", thread }],

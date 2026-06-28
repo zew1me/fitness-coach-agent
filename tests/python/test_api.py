@@ -23,7 +23,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.chat import ChatModelState
+from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest
 from backend.models.training import Activity, DailyLoadSnapshot, Goal
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
@@ -356,17 +356,19 @@ class ModelStateChatService:
         assert user_id == "athlete-1"
         return self.state
 
-    async def replace_model_state(self, user_id: str, **kwargs) -> ChatModelState:
+    async def replace_model_state(
+        self, user_id: str, replacement: ChatModelStateReplaceRequest
+    ) -> ChatModelState:
         assert user_id == "athlete-1"
-        if kwargs["lease_id"] != self.state.lease_id:
+        if replacement.lease_id != self.state.lease_id:
             raise ValueError("Chat turn lease is no longer owned by this request.")
-        if kwargs["expected_version"] != self.state.version:
+        if replacement.expected_version != self.state.version:
             raise ValueError("Chat model state version conflict.")
         self.state = self.state.model_copy(
             update={
-                "items": kwargs["items"],
-                "coaching_memory": kwargs["coaching_memory"],
-                "compaction_metadata": kwargs["compaction_metadata"],
+                "items": replacement.items,
+                "coaching_memory": replacement.coaching_memory,
+                "compaction_metadata": replacement.compaction_metadata,
                 "version": self.state.version + 1,
             }
         )

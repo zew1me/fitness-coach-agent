@@ -151,8 +151,8 @@ describe("useChatThread", () => {
     const { result } = renderUseChatThread(TOKEN);
     await waitFor(() => expect(result.current.data).toEqual(thread));
 
-    act(() => {
-      result.current.setData((current) => ({
+    await act(async () => {
+      await result.current.setData((current) => ({
         ...current,
         thread: {
           ...current.thread,

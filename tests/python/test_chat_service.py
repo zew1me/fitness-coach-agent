@@ -6,7 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from backend.models.athlete import AthleteProfile
-from backend.models.chat import ChatMessage, ChatModelState, ChatPersistRequest, ChatThread
+from backend.models.chat import (
+    ChatMessage,
+    ChatModelState,
+    ChatModelStateReplaceRequest,
+    ChatPersistRequest,
+    ChatThread,
+)
 from backend.services.chat import ChatService, _decode_message_cursor, _encode_message_cursor
 
 
@@ -230,12 +236,14 @@ class ModelStateRepo(OnboardingRepo):
         return self.model_state
 
     async def replace_chat_model_state(self, **kwargs):
-        assert kwargs["expected_version"] == self.model_state.version
+        replacement = kwargs["replacement"]
+        assert isinstance(replacement, ChatModelStateReplaceRequest)
+        assert replacement.expected_version == self.model_state.version
         self.model_state = self.model_state.model_copy(
             update={
-                "items": kwargs["items"],
-                "coaching_memory": kwargs["coaching_memory"],
-                "compaction_metadata": kwargs["compaction_metadata"],
+                "items": replacement.items,
+                "coaching_memory": replacement.coaching_memory,
+                "compaction_metadata": replacement.compaction_metadata,
                 "version": self.model_state.version + 1,
             }
         )
@@ -259,11 +267,13 @@ async def test_model_state_service_keeps_private_state_outside_thread_bootstrap(
     state = await service.get_model_state("athlete-1")
     updated = await service.replace_model_state(
         "athlete-1",
-        expected_version=state.version,
-        lease_id="lease-1",
-        items=[{"role": "user", "content": "hello"}],
-        coaching_memory=[],
-        compaction_metadata={"reason": "seed"},
+        ChatModelStateReplaceRequest(
+            expected_version=state.version,
+            lease_id="lease-1",
+            items=[{"role": "user", "content": "hello"}],
+            coaching_memory=[],
+            compaction_metadata={"reason": "seed"},
+        ),
     )
 
     assert updated.items == [{"role": "user", "content": "hello"}]
@@ -291,11 +301,13 @@ async def test_model_state_service_uses_thread_lookup_without_messages() -> None
     state = await service.get_model_state("athlete-1")
     await service.replace_model_state(
         "athlete-1",
-        expected_version=state.version,
-        lease_id="lease-1",
-        items=[],
-        coaching_memory=[],
-        compaction_metadata={},
+        ChatModelStateReplaceRequest(
+            expected_version=state.version,
+            lease_id="lease-1",
+            items=[],
+            coaching_memory=[],
+            compaction_metadata={},
+        ),
     )
     await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
     await service.release_turn_lease("athlete-1", "lease-1")
