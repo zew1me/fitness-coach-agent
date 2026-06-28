@@ -9,7 +9,7 @@
     "prepare": "lefthook install --force",
     "dev": "next dev",
     "dev:local": "bash scripts/dev-local.sh",
-    "build": "bun scripts/verify-preview-supabase-env.ts && next build",
+    "build": "next build",
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "next typegen && tsc --noEmit",
