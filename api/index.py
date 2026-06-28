@@ -891,7 +891,7 @@ async def _update_activity_from_text(
     activity_id: str,
     text: str,
 ) -> Mapping[str, object]:
-    from backend.engine.activity_text import (
+    from backend.services.activity_text import (
         ActivityTextExtractionUnavailable,
         merge_activity_text_update,
     )
@@ -924,7 +924,7 @@ async def save_activity_from_text(
     payload: SaveActivityFromTextRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    from backend.engine.activity_text import (
+    from backend.services.activity_text import (
         ActivityTextExtractionUnavailable,
         build_activity_from_text,
     )

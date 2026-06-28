@@ -1290,8 +1290,8 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
 
 @pytest.mark.asyncio
 async def test_save_activity_from_text_persists_summary_and_estimates(monkeypatch) -> None:
-    from backend.engine import activity_text
-    from backend.engine.activity_text import (
+    from backend.services import activity_text
+    from backend.services.activity_text import (
         ActivityTextExtraction,
         AdditionalImportantData,
         NutritionEstimate,
@@ -1388,8 +1388,8 @@ async def test_save_activity_from_text_persists_summary_and_estimates(monkeypatc
 async def test_save_activity_from_text_fails_when_openai_extraction_unavailable(
     monkeypatch,
 ) -> None:
-    from backend.engine import activity_text
-    from backend.engine.activity_text import ActivityTextExtractionUnavailable
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtractionUnavailable
 
     class ActivityRepository(EngineRepository):
         def __init__(self) -> None:
@@ -1431,8 +1431,8 @@ async def test_save_activity_from_text_fails_when_openai_extraction_unavailable(
 
 @pytest.mark.asyncio
 async def test_save_activity_from_text_updates_existing_activity(monkeypatch) -> None:
-    from backend.engine import activity_text
-    from backend.engine.activity_text import ActivityTextExtraction, NutritionEstimate
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction, NutritionEstimate
 
     class ActivityRepository(EngineRepository):
         def __init__(self) -> None:

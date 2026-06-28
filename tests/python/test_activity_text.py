@@ -3,7 +3,9 @@ from datetime import date
 
 import pytest
 
-from backend.engine.activity_text import (
+from backend.models.athlete import AthleteProfile, SportThreshold
+from backend.models.training import Activity
+from backend.services.activity_text import (
     ActivityTextExtraction,
     ActivityTextExtractionUnavailable,
     AdditionalImportantData,
@@ -12,8 +14,6 @@ from backend.engine.activity_text import (
     build_activity_from_text,
     merge_activity_text_update,
 )
-from backend.models.athlete import AthleteProfile, SportThreshold
-from backend.models.training import Activity
 
 ISSUE_209_TEXT = (
     "Volunteer Park crit, Sat 13 Jun 2026 — 45 min race start at ~12:56-13:00. "
@@ -439,7 +439,7 @@ async def test_merge_activity_text_update_applies_metric_corrections() -> None:
 )
 @pytest.mark.asyncio
 async def test_extract_activity_text_live_openai_returns_food_and_confidence() -> None:
-    from backend.engine.activity_text import extract_activity_text
+    from backend.services.activity_text import extract_activity_text
 
     extraction = await extract_activity_text(
         "I rode a hard 52 minute lunch crit today. I ate one Maurten Gel 100 "
