@@ -196,6 +196,62 @@ describe("SupabaseAgentSession", () => {
       },
     ]);
   });
+
+  it("rewrites a historical input_file with file.id to text using file_id label", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+    });
+    const prepared = session.prepareHistoryItemForModelInput({
+      role: "user",
+      content: [
+        {
+          type: "input_file",
+          file: { id: "file-abc123" },
+          filename: "activity.fit",
+        },
+      ],
+    } as AgentInputItem) as { content: Array<{ type: string; text?: string }> };
+
+    expect(prepared.content).toEqual([
+      {
+        type: "input_text",
+        text: "Uploaded file: activity.fit\nfile_id=file-abc123",
+      },
+    ]);
+  });
+
+  it("rewrites a historical input_file with both url and id to include both labels", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+    });
+    const prepared = session.prepareHistoryItemForModelInput({
+      role: "user",
+      content: [
+        {
+          type: "input_file",
+          file: {
+            url: "https://files.example/activity.fit",
+            id: "file-abc123",
+          },
+          filename: "activity.fit",
+        },
+      ],
+    } as AgentInputItem) as { content: Array<{ type: string; text?: string }> };
+
+    expect(prepared.content).toEqual([
+      {
+        type: "input_text",
+        text:
+          "Uploaded file: activity.fit\n" +
+          "public_url=https://files.example/activity.fit\n" +
+          "file_id=file-abc123",
+      },
+    ]);
+  });
 });
 
 describe("DurableCompactionSession", () => {
