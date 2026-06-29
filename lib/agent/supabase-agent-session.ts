@@ -67,10 +67,10 @@ function extractFileRef(record: Record<string, unknown>): {
   if (typeof file === "string") return { publicUrl: file };
   if (file !== null && typeof file === "object") {
     const f = file as Record<string, unknown>;
-    return {
-      publicUrl: typeof f["url"] === "string" ? f["url"] : undefined,
-      fileId: typeof f["id"] === "string" ? f["id"] : undefined,
-    };
+    const out: { publicUrl?: string; fileId?: string } = {};
+    if (typeof f["url"] === "string") out.publicUrl = f["url"];
+    if (typeof f["id"] === "string") out.fileId = f["id"];
+    return out;
   }
   return {};
 }
