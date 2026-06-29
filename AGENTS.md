@@ -99,6 +99,17 @@ The legacy columns `chat_messages.content` (denormalized text mirror) and the se
 
 **Current reality.** Chat image attachments are now persisted to `chat_messages.parts` as R2 `public_url` references (issue #163 fix). The client refuses to send a message whose attachment lacks a `public_url`, so any base64 `data:` URL in `parts[i].url` is a stale row from before the fix landed. Whether R2 is referenced by anything else in the running app is **issue #164**.
 
+### Unsupported file attachments → text (do not send to the model as `input_file`)
+
+OpenAI's Responses API only ingests images and PDFs. Athletes attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
+
+Contract: every non-image file part is converted to an `input_text` description that **preserves the link** (`public_url` / `object_key`) so the coach can still resolve it — files are never dropped. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
+
+**Durable session caveat.** The durable model state (`chat_model_states.items`, used when `COACH_CONTEXT_STRATEGY` ≠ `full_history`) replays every stored item each turn, so one poisoned `input_file` breaks the thread permanently. Two defenses, both required:
+
+- `SupabaseAgentSession.prepareHistoryItemForModelInput` (`lib/agent/supabase-agent-session.ts`) strips `input_image` and rewrites any already-stored `input_file` → link-preserving text. The SDK applies this to history before every model turn, so old threads self-heal on the run path.
+- The delegation planner reads `getItems()` **raw**, so legacy poisoned rows also need a one-time data rewrite of `chat_model_states.items` (per environment — preview and production are separate Supabase projects).
+
 ## Environment Variables
 
 See `.env.example`. Required:
@@ -178,3 +189,12 @@ You MUST pass hooks all of the time!
 - Zod schemas in `lib/schemas.ts` for all API validation boundaries
 - All Python async handlers use `async def`
 - Bearer token auth: clients pass `Authorization: Bearer <jwt>`; server validates via `require_user_context()`
+
+<!-- lean-ctx -->
+
+## lean-ctx
+
+lean-ctx is active — the MCP tools replace native equivalents.
+Full rules: LEAN-CTX.md (open on demand — do not auto-load).
+
+<!-- /lean-ctx -->

@@ -59,6 +59,37 @@ function usageDetail(value: unknown, key: string): number {
   return typeof detail === "number" ? detail : 0;
 }
 
+// Rewrite an `input_file` content part into a text description.  OpenAI cannot
+// ingest the activity files athletes attach (.fit/.gpx), and `filename`
+// alongside a `file_url`/`file_id` reference is rejected outright.  New history
+// is sanitized upstream in `toAgentInputItems`; this defends the model-input and
+// compaction paths against any `input_file` already persisted before that fix.
+function unsupportedFileContentToText(part: { type: string }): {
+  type: "input_text";
+  text: string;
+} {
+  const record = part as unknown as Record<string, unknown>;
+  const file = record["file"];
+  let reference: string | undefined;
+  if (typeof file === "string") {
+    reference = file;
+  } else if (file !== null && typeof file === "object") {
+    const fileRecord = file as Record<string, unknown>;
+    if (typeof fileRecord["url"] === "string") reference = fileRecord["url"];
+    else if (typeof fileRecord["id"] === "string") reference = fileRecord["id"];
+  }
+  const filename =
+    typeof record["filename"] === "string" && record["filename"].length > 0
+      ? (record["filename"] as string)
+      : "uploaded file";
+  return {
+    type: "input_text",
+    text:
+      `Uploaded file: ${filename}` +
+      (reference ? `\npublic_url=${reference}` : ""),
+  };
+}
+
 export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   private readonly options: SessionOptions;
   private state: ModelState | null = null;
@@ -172,10 +203,15 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
       !Array.isArray(item.content)
     )
       return item;
-    return {
-      ...item,
-      content: item.content.filter((part) => part.type !== "input_image"),
-    } as AgentInputItem;
+    const content = (item.content as Array<{ type: string }>).flatMap(
+      (part) => {
+        if (part.type === "input_image") return [];
+        if (part.type === "input_file")
+          return [unsupportedFileContentToText(part)];
+        return [part];
+      },
+    );
+    return { ...item, content } as AgentInputItem;
   }
 
   async addItems(items: AgentInputItem[]): Promise<void> {

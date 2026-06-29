@@ -167,6 +167,35 @@ describe("SupabaseAgentSession", () => {
       { type: "input_text", text: "Extracted: recovery score 42" },
     ]);
   });
+
+  it("rewrites a historical input_file to text while preserving the file link", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+    });
+    const prepared = session.prepareHistoryItemForModelInput({
+      role: "user",
+      content: [
+        { type: "input_text", text: "Here is my ride." },
+        {
+          type: "input_file",
+          file: { url: "https://files.example/activity.fit" },
+          filename: "activity.fit",
+        },
+      ],
+    } as AgentInputItem) as { content: Array<{ type: string; text?: string }> };
+
+    expect(prepared.content).toEqual([
+      { type: "input_text", text: "Here is my ride." },
+      {
+        type: "input_text",
+        text:
+          "Uploaded file: activity.fit\n" +
+          "public_url=https://files.example/activity.fit",
+      },
+    ]);
+  });
 });
 
 describe("DurableCompactionSession", () => {
