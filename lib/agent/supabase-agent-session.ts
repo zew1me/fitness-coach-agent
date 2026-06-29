@@ -59,6 +59,22 @@ function usageDetail(value: unknown, key: string): number {
   return typeof detail === "number" ? detail : 0;
 }
 
+function extractFileRef(record: Record<string, unknown>): {
+  publicUrl?: string;
+  fileId?: string;
+} {
+  const file = record["file"];
+  if (typeof file === "string") return { publicUrl: file };
+  if (file !== null && typeof file === "object") {
+    const f = file as Record<string, unknown>;
+    return {
+      publicUrl: typeof f["url"] === "string" ? f["url"] : undefined,
+      fileId: typeof f["id"] === "string" ? f["id"] : undefined,
+    };
+  }
+  return {};
+}
+
 // Rewrite an `input_file` content part into a text description.  OpenAI cannot
 // ingest the activity files athletes attach (.fit/.gpx), and `filename`
 // alongside a `file_url`/`file_id` reference is rejected outright.  New history
@@ -69,15 +85,7 @@ function unsupportedFileContentToText(part: { type: string }): {
   text: string;
 } {
   const record = part as unknown as Record<string, unknown>;
-  const file = record["file"];
-  let reference: string | undefined;
-  if (typeof file === "string") {
-    reference = file;
-  } else if (file !== null && typeof file === "object") {
-    const fileRecord = file as Record<string, unknown>;
-    if (typeof fileRecord["url"] === "string") reference = fileRecord["url"];
-    else if (typeof fileRecord["id"] === "string") reference = fileRecord["id"];
-  }
+  const { publicUrl, fileId } = extractFileRef(record);
   const filename =
     typeof record["filename"] === "string" && record["filename"].length > 0
       ? (record["filename"] as string)
@@ -86,7 +94,8 @@ function unsupportedFileContentToText(part: { type: string }): {
     type: "input_text",
     text:
       `Uploaded file: ${filename}` +
-      (reference ? `\npublic_url=${reference}` : ""),
+      (publicUrl ? `\npublic_url=${publicUrl}` : "") +
+      (fileId ? `\nfile_id=${fileId}` : ""),
   };
 }
 
