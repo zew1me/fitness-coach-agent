@@ -2,6 +2,8 @@
 <!-- lean-ctx-rules -->
 <!-- version: 1 -->
 
+# lean-ctx
+
 CRITICAL: ALWAYS use lean-ctx tools instead of native equivalents. This is NOT optional.
 
 MANDATORY MAPPING:
