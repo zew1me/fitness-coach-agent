@@ -267,12 +267,12 @@ async def test_model_state_service_keeps_private_state_outside_thread_bootstrap(
     repo = ModelStateRepo()
     service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
-    state = await service.get_model_state("athlete-1")
-    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    await service.get_model_state("athlete-1")
+    leased = await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
     updated = await service.replace_model_state(
         "athlete-1",
         ChatModelStateReplaceRequest(
-            expected_version=state.version,
+            expected_version=leased.version,
             lease_id="lease-1",
             items=[{"role": "user", "content": "hello"}],
             coaching_memory=[],
@@ -302,12 +302,12 @@ async def test_model_state_service_uses_thread_lookup_without_messages() -> None
     repo = ModelStateRepo()
     service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
 
-    state = await service.get_model_state("athlete-1")
-    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    await service.get_model_state("athlete-1")
+    leased = await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
     await service.replace_model_state(
         "athlete-1",
         ChatModelStateReplaceRequest(
-            expected_version=state.version,
+            expected_version=leased.version,
             lease_id="lease-1",
             items=[],
             coaching_memory=[],
