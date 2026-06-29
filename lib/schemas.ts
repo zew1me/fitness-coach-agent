@@ -46,19 +46,35 @@ const chatMessageMetadataSchema = z
   })
   .catchall(z.unknown());
 
-export const chatMessageSchema = z
-  .object({
-    attachments: z.array(z.record(z.string(), z.unknown())),
-    content: z.string().default(""),
-    created_at: z.string(),
-    id: z.string().min(1),
-    metadata: chatMessageMetadataSchema,
-    parts: z.array(chatMessagePartSchema).default([]),
-    role: z.enum(["user", "assistant"]),
-    thread_id: z.string().min(1),
-    user_id: z.string().min(1),
-  })
-  .transform((message): ChatMessage => message as ChatMessage);
+export const chatMessageSchema = z.preprocess(
+  (raw) => {
+    if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+      const msg = raw as Record<string, unknown>;
+      if (!Array.isArray(msg["parts"])) {
+        const content = msg["content"];
+        const parts =
+          typeof content === "string" && content.length > 0
+            ? [{ type: "text", text: content }]
+            : [];
+        return { ...msg, parts };
+      }
+    }
+    return raw;
+  },
+  z
+    .object({
+      attachments: z.array(z.record(z.string(), z.unknown())),
+      content: z.string().default(""),
+      created_at: z.string(),
+      id: z.string().min(1),
+      metadata: chatMessageMetadataSchema,
+      parts: z.array(chatMessagePartSchema),
+      role: z.enum(["user", "assistant"]),
+      thread_id: z.string().min(1),
+      user_id: z.string().min(1),
+    })
+    .transform((message): ChatMessage => message as ChatMessage),
+);
 
 export const chatMessagePageSchema = z.object({
   messages: z.array(chatMessageSchema),
