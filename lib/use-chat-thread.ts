@@ -164,6 +164,7 @@ export function useChatThread(
   const queryKey = chatThreadQueryKey(token);
   const [manualError, setManualError] = useState<string | null>(null);
   const fetchingOlderRef = useRef(false);
+  const manualRefetchControllerRef = useRef<AbortController | null>(null);
 
   const query = useInfiniteQuery<
     ChatThreadPage,
@@ -231,6 +232,8 @@ export function useChatThread(
 
   const setData = useCallback(
     async (update: ChatThreadDataUpdate) => {
+      manualRefetchControllerRef.current?.abort();
+      manualRefetchControllerRef.current = null;
       await queryClient.cancelQueries({ queryKey });
       queryClient.setQueryData<ChatThreadQueryData>(queryKey, (current) => {
         const currentThread = mergeThreadPages(current);
@@ -258,13 +261,18 @@ export function useChatThread(
   }, []);
 
   const refetch = useCallback(async (): Promise<void> => {
+    manualRefetchControllerRef.current?.abort();
+    const controller = new AbortController();
+    manualRefetchControllerRef.current = controller;
     setManualError(null);
     await queryClient.cancelQueries({ queryKey });
-    const thread = await loadChatThread(fetch, new AbortController().signal);
-    queryClient.setQueryData<ChatThreadQueryData>(queryKey, {
-      pageParams: [null],
-      pages: [{ kind: "initial", thread }],
-    });
+    const thread = await loadChatThread(fetch, controller.signal);
+    if (!controller.signal.aborted) {
+      queryClient.setQueryData<ChatThreadQueryData>(queryKey, {
+        pageParams: [null],
+        pages: [{ kind: "initial", thread }],
+      });
+    }
   }, [queryClient, queryKey]);
 
   const fetchOlderMessages = useCallback(async (): Promise<number> => {
