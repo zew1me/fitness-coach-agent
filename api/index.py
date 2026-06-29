@@ -986,7 +986,11 @@ async def _apply_goal_action(user_id: str, payload: UpdateGoalsRequest) -> Goal:
     goal_dict = _normalize_goal_fields(payload.goal)
     if payload.action == "create":
         goal_dict.update({"user_id": user_id, "status": "active"})
-        return await repo.create_goal(Goal.model_validate(goal_dict))
+        try:
+            validated_goal = Goal.model_validate(goal_dict)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        return await repo.create_goal(validated_goal)
     if payload.action in ("update", "complete", "abandon"):
         goal_dict = _sanitize_goal_update_fields(goal_dict)
         status_map = {"complete": "completed", "abandon": "abandoned"}
@@ -1010,8 +1014,6 @@ async def update_goals_endpoint(
         result = await _apply_goal_action(user_context.user_id, payload)
     except HTTPException:
         raise
-    except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
