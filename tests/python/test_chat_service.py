@@ -251,7 +251,9 @@ class ModelStateRepo(OnboardingRepo):
         return self.model_state
 
     async def acquire_chat_turn_lease(self, **kwargs):
-        self.model_state = self.model_state.model_copy(update={"lease_id": kwargs["lease_id"]})
+        self.model_state = self.model_state.model_copy(
+            update={"lease_id": kwargs["lease_id"], "version": self.model_state.version + 1}
+        )
         return self.model_state
 
     async def release_chat_turn_lease(self, **kwargs):
