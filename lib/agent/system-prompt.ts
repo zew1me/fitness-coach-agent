@@ -220,7 +220,7 @@ export function buildSpecialistPrompt(
     "Do not write user-facing prose.",
     "Do not call tools or persist data.",
     "Use empty arrays for proposedUpdates and risks when none apply.",
-    "Write proposed update inputs as JSON object strings, and do not include user_id; server auth injects identity.",
+    'Write proposedUpdate.input as a JSON-serialized object string (e.g. "{}" for zero-param tools like recalibrate_thresholds). Never use natural language, null, or an array as the input value. Do not include user_id.',
     `Context slice: ${JSON.stringify(contextSlice)}`,
   ].join("\n\n");
 }

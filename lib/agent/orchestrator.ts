@@ -434,17 +434,29 @@ export function streamCoachTurn({
                     "coach: delegation failed; continuing lead-only",
                   );
                 }
-                const reports = specialistReportsSchema.parse(
-                  await runSpecialists({
-                    messages: selectedMessages,
-                    messagesAreModelSelected: true,
-                    model: MODEL,
-                    roles: delegationPlan.delegations.map((item) => item.role),
-                    delegations: delegationPlan.delegations,
-                    coachingMemory,
-                    slices: buildContextSlices(context),
-                  }),
-                ) as SpecialistReport[];
+                let reports: SpecialistReport[] = [];
+                try {
+                  reports = specialistReportsSchema.parse(
+                    await runSpecialists({
+                      messages: selectedMessages,
+                      messagesAreModelSelected: true,
+                      model: MODEL,
+                      roles: delegationPlan.delegations.map(
+                        (item) => item.role,
+                      ),
+                      delegations: delegationPlan.delegations,
+                      coachingMemory,
+                      slices: buildContextSlices(context),
+                    }),
+                  ) as SpecialistReport[];
+                } catch (error) {
+                  Sentry.captureException(error, {
+                    tags: { subsystem: "specialists" },
+                  });
+                  Sentry.logger.warn(
+                    "coach: specialist run failed; continuing lead-only",
+                  );
+                }
                 const tavilyServer = createTavilyServer(tavilyMcpUrl);
                 if (tavilyServer !== null) await tavilyServer.connect();
 
