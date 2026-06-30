@@ -55,17 +55,38 @@ function hasUserIdKey(value: unknown): boolean {
   );
 }
 
-const proposedUpdateInputSchema = z
-  .string()
-  .min(2)
-  .superRefine((input, context) => {
-    try {
-      const parsed = JSON.parse(input) as unknown;
-      if (
-        parsed === null ||
-        typeof parsed !== "object" ||
-        Array.isArray(parsed)
-      ) {
+// Models using structured outputs sometimes return a raw object instead of a
+// JSON-encoded string for `input`.  Preprocess coerces it to a string so the
+// downstream superRefine validation and user_id guard still run correctly.
+// The JSON Schema emitted to OpenAI remains {"type":"string"} because
+// zod-to-json-schema ignores the preprocess wrapper.
+const proposedUpdateInputSchema = z.preprocess(
+  (val) =>
+    typeof val === "object" && val !== null && !Array.isArray(val)
+      ? JSON.stringify(val)
+      : val,
+  z
+    .string()
+    .min(2)
+    .superRefine((input, context) => {
+      try {
+        const parsed = JSON.parse(input) as unknown;
+        if (
+          parsed === null ||
+          typeof parsed !== "object" ||
+          Array.isArray(parsed)
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              "Specialist proposed update input must be a JSON object string.",
+          });
+          return;
+        }
+        if (!hasUserIdKey(parsed)) {
+          return;
+        }
+      } catch {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           message:
@@ -73,24 +94,14 @@ const proposedUpdateInputSchema = z
         });
         return;
       }
-      if (!hasUserIdKey(parsed)) {
-        return;
-      }
-    } catch {
+
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "Specialist proposed update input must be a JSON object string.",
+          "Specialist proposed updates must not include user_id; server auth injects identity.",
       });
-      return;
-    }
-
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "Specialist proposed updates must not include user_id; server auth injects identity.",
-    });
-  });
+    }),
+);
 
 export const proposedUpdateSchema = z
   .object({
