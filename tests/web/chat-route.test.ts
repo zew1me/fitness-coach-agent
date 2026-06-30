@@ -332,7 +332,7 @@ describe("app/api/chat route", () => {
     errorSpy.mockRestore();
   });
 
-  it("delegates exactly one selected model window for long chat turns", async () => {
+  it("uses only the latest message when a legacy client sends full history", async () => {
     const messages = Array.from({ length: 40 }, (_, index) => ({
       id: `message-${index}`,
       parts: [{ text: `Message ${index}`, type: "text" as const }],
@@ -370,22 +370,41 @@ describe("app/api/chat route", () => {
 
     expect(streamCoachTurn).toHaveBeenCalledWith(
       expect.objectContaining({
-        messages: [
-          expect.objectContaining({
-            id: "context-window-notice",
-            parts: [
-              {
-                text: expect.stringContaining("previous 16 chat messages"),
-                type: "text",
-              },
-            ],
-            role: "system",
-          }),
-          ...messages.slice(16),
-        ],
+        messages: [messages.at(-1)],
         messagesAreModelSelected: true,
+        useDurableSession: true,
       }),
     );
+  });
+
+  it("rejects a serialized turn larger than 256 KiB", async () => {
+    globalThis.fetch = vi.fn((url: RequestInfo | URL) =>
+      Promise.resolve(
+        String(url).endsWith("/api/oauth/browser-token")
+          ? new Response(
+              JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+              { status: 200 },
+            )
+          : new Response("{}", { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({
+          message: {
+            id: "large",
+            role: "user",
+            parts: [{ type: "text", text: "x".repeat(257 * 1024) }],
+          },
+        }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    expect(streamCoachTurn).not.toHaveBeenCalled();
   });
 
   it("keeps short conversations intact for model context", () => {

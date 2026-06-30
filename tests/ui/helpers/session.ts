@@ -34,11 +34,16 @@ export async function mockAuthenticatedSession(page: Page): Promise<void> {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
+        attachments_enabled: true,
+        next_cursor: null,
+        profile_complete: false,
         thread: {
           id: "thread-test-1",
           messages: [],
+          state: {},
           created_at: "2026-01-01T00:00:00Z",
           updated_at: "2026-01-01T00:00:00Z",
+          user_id: TEST_USER_ID,
         },
       }),
     }),

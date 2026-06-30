@@ -7,11 +7,7 @@ import Link from "next/link";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, JSX, ReactNode, RefObject } from "react";
 
-import {
-  createChatUploadIntent,
-  loadChatThread,
-  uploadFile,
-} from "../lib/coach-api";
+import { createChatUploadIntent, uploadFile } from "../lib/coach-api";
 import { errorMessage } from "../lib/errors";
 import { siteConfig } from "../lib/site";
 import type {
@@ -574,24 +570,30 @@ function MessageBubble({
 function MessageList({
   messages,
   hiddenMessageCount,
+  loadingOlder,
   onShowMore,
   messageEndRef,
+  olderAvailable,
 }: Readonly<{
   messages: ChatMessage[];
   hiddenMessageCount: number;
+  loadingOlder: boolean;
   onShowMore: () => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
+  olderAvailable: boolean;
 }>): JSX.Element {
   return (
     <div className={styles.messageStack}>
-      {hiddenMessageCount > 0 ? (
+      {hiddenMessageCount > 0 || olderAvailable ? (
         <button
           className={styles.historyLoadButton}
+          disabled={loadingOlder}
           onClick={onShowMore}
           type="button"
         >
-          Show {Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older
-          messages
+          {hiddenMessageCount > 0
+            ? `Show ${Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older messages`
+            : "Show older messages"}
         </button>
       ) : null}
       {messages.map((message) => (
@@ -648,24 +650,30 @@ function EmptyChatLandingCard({
 function MessagesSection({
   messages,
   hiddenMessageCount,
+  loadingOlder,
   onShowMore,
   onPrefillStarter,
   messageEndRef,
   profileComplete,
+  olderAvailable,
 }: Readonly<{
   messages: ChatMessage[];
   hiddenMessageCount: number;
+  loadingOlder: boolean;
   onShowMore: () => void;
   onPrefillStarter: (_text: string) => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
   profileComplete: boolean;
+  olderAvailable: boolean;
 }>): JSX.Element {
   const messageList = (
     <MessageList
       hiddenMessageCount={hiddenMessageCount}
+      loadingOlder={loadingOlder}
       messageEndRef={messageEndRef}
       messages={messages}
       onShowMore={onShowMore}
+      olderAvailable={olderAvailable}
     />
   );
   if (!onlyWelcomeMessage(messages)) {
@@ -1242,7 +1250,10 @@ function SignedInChat({
   return (
     <CoachChatBody
       athleteProfile={athleteProfile}
-      setThreadData={thread.setData}
+      fetchOlderMessages={thread.fetchOlderMessages}
+      loadingOlder={thread.loadingOlder}
+      olderAvailable={thread.olderAvailable}
+      refetchThread={thread.refetch}
       setThreadError={thread.setError}
       threadData={thread.data}
       threadError={thread.error}
@@ -1255,14 +1266,20 @@ function CoachChatBody({
   token,
   threadData,
   threadError,
-  setThreadData,
+  fetchOlderMessages,
+  loadingOlder,
+  olderAvailable,
+  refetchThread,
   setThreadError,
   athleteProfile,
 }: Readonly<{
   token: BrowserTokenResponse;
   threadData: ChatThreadResponse;
   threadError: string | null;
-  setThreadData: (_thread: ChatThreadResponse) => void;
+  fetchOlderMessages: () => Promise<number>;
+  loadingOlder: boolean;
+  olderAvailable: boolean;
+  refetchThread: () => Promise<void>;
   setThreadError: (_error: string | null) => void;
   athleteProfile: AthleteProfileHook;
 }>): JSX.Element {
@@ -1280,30 +1297,67 @@ function CoachChatBody({
 
   const persistedMessages = threadData.thread.messages;
   const threadId = threadData.thread.id;
+  const knownPersistedMessageIdsRef = useRef<Set<string>>(new Set());
+  const olderRequestVersionRef = useRef(0);
+  // Synchronous guard against double-click: state reads aren't atomic across
+  // rapid events, so this ref is the authoritative in-flight check.
+  const sendInFlightRef = useRef(false);
 
   const chatMessages = useMemo<UIMessage[]>(
     () => persistedMessages.map(toUiMessage),
     [persistedMessages],
   );
+  // useChat keeps its own initial message state after thread refreshes. Track
+  // loaded DB ids so rows that page out of a refreshed slice are not replayed
+  // later as if they were new live messages.
+  const persistedMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const message of persistedMessages) {
+      ids.add(message.id);
+    }
+    return ids;
+  }, [persistedMessages]);
+  useEffect(() => {
+    for (const message of persistedMessages) {
+      knownPersistedMessageIdsRef.current.add(message.id);
+    }
+  }, [persistedMessages]);
   const { messages: liveMessages, sendMessage } = useChat({
     id: threadId,
     messages: chatMessages,
     transport: new DefaultChatTransport({
       api: "/api/chat",
       credentials: "include",
+      prepareSendMessagesRequest: ({
+        messages,
+      }): { body: Record<string, unknown> } => ({
+        body:
+          process.env["NEXT_PUBLIC_COACH_CONTEXT_STRATEGY"] === "full_history"
+            ? { messages }
+            : { message: messages.at(-1) },
+      }),
     }),
   });
   const composerBusy = sending || syncingThread;
   const displayedMessages = useMemo<ChatMessage[]>(() => {
-    const persistedIds = new Set(persistedMessages.map((m) => m.id));
+    const knownPersistedMessageIds = knownPersistedMessageIdsRef.current;
     const additional = liveMessages
-      .filter((m) => !persistedIds.has(m.id))
+      .filter(
+        (m) =>
+          !persistedMessageIds.has(m.id) && !knownPersistedMessageIds.has(m.id),
+      )
       .map((m) => toLiveChatMessage(m, threadId, token.user_id))
       .filter(
         (m): m is ChatMessage => m !== null && (m.parts ?? []).length > 0,
       );
     return [...persistedMessages, ...additional];
-  }, [liveMessages, persistedMessages, threadId, token.user_id]);
+  }, [
+    liveMessages,
+    persistedMessageIds,
+    persistedMessages,
+    threadId,
+    token.user_id,
+  ]);
 
   useEffect(() => {
     const scrollTarget = messageEndRef.current;
@@ -1461,9 +1515,10 @@ function CoachChatBody({
   }
 
   async function handleSend(): Promise<void> {
-    if (composerBusy) return;
+    if (sendInFlightRef.current || composerBusy) return;
     if (!hasSendableContent(composer, attachments)) return;
 
+    sendInFlightRef.current = true;
     setSending(true);
     setThreadError(null);
     try {
@@ -1493,8 +1548,9 @@ function CoachChatBody({
       setSending(false);
       setSyncingThread(true);
       try {
-        const refreshed = await loadChatThread();
-        setThreadData(refreshed);
+        olderRequestVersionRef.current += 1;
+        await refetchThread();
+        setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
       } catch (refreshError) {
         Sentry.logger.warn("chat thread refresh failed after send");
         console.error("Chat thread refresh failed after send", refreshError);
@@ -1510,6 +1566,7 @@ function CoachChatBody({
       setSyncingThread(false);
       setThreadError(errorMessage(error, "Unable to send your message."));
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
   }
@@ -1523,8 +1580,9 @@ function CoachChatBody({
     const saved = await athleteProfile.save();
     if (saved === null) return;
     try {
-      const refreshed = await loadChatThread();
-      setThreadData(refreshed);
+      olderRequestVersionRef.current += 1;
+      await refetchThread();
+      setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
     } catch (refreshError) {
       Sentry.logger.warn("chat thread refresh failed after profile save");
       console.warn(
@@ -1567,14 +1625,43 @@ function CoachChatBody({
 
           <MessagesSection
             hiddenMessageCount={hiddenMessageCount}
+            loadingOlder={loadingOlder}
             messageEndRef={messageEndRef}
             messages={visibleMessages}
             onPrefillStarter={setComposer}
-            onShowMore={() =>
-              setVisibleMessageCount(
-                (current) => current + MESSAGE_RENDER_BATCH_SIZE,
-              )
-            }
+            olderAvailable={olderAvailable}
+            onShowMore={() => {
+              if (hiddenMessageCount > 0) {
+                setVisibleMessageCount(
+                  (current) => current + MESSAGE_RENDER_BATCH_SIZE,
+                );
+                return;
+              }
+              if (!olderAvailable || loadingOlder) {
+                return;
+              }
+              const requestVersion = olderRequestVersionRef.current;
+              void fetchOlderMessages()
+                .then((addedCount) => {
+                  if (olderRequestVersionRef.current !== requestVersion) return;
+                  if (addedCount > 0) {
+                    setVisibleMessageCount(
+                      (visibleCount) => visibleCount + addedCount,
+                    );
+                  }
+                })
+                .catch((error) => {
+                  if (olderRequestVersionRef.current !== requestVersion) return;
+                  setThreadError(
+                    errorMessage(error, "Unable to load older messages."),
+                  );
+                })
+                .finally(() => {
+                  if (olderRequestVersionRef.current === requestVersion) {
+                    olderRequestVersionRef.current += 1;
+                  }
+                });
+            }}
             profileComplete={threadData.profile_complete}
           />
 

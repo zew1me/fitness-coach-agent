@@ -1,5 +1,19 @@
 # Supabase Migration History
 
+## Canonical migration sequence
+
+- `0001_schema.sql` — initial application schema
+- `0002_nutrition.sql` — nutrition tracking
+- `0003_fitness_thresholds.sql` — threshold provenance
+- `0004_chat_messages_parts.sql` — AI SDK message-parts persistence
+- `20260624055541_specialization_pct_nullable.sql` — nullable sport specialization for multi-sport athletes
+- `20260625172251_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
+- `20260626000000_activity_summary.sql` — rich activity summary persistence
+
+`20260625172251` deliberately stores compactable model context separately from
+`chat_messages`. Applying or resetting model state must never rewrite the
+athlete-visible transcript.
+
 Supabase checks can fail with:
 
 ```text
@@ -120,3 +134,62 @@ instead of reporting drift.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset` locally).
 Preview already has this version recorded, so it is a no-op there.
+
+## 20260625172251 — chat model state (2026-06-25)
+
+**File:** `supabase/migrations/20260625172251_chat_model_state.sql`
+
+**Change:** creates `public.chat_model_states` (durable, versioned Agents SDK
+replay state and turn leases). See the table definition in the migration file.
+
+**Version note:** This migration was first committed as `0005_chat_model_state.sql`
+([commit `514705c`](https://github.com/zew1me/fitness-coach-agent/commit/514705c))
+and then renamed to the timestamp version `20260625172251`
+([commit `8410b5c`](https://github.com/zew1me/fitness-coach-agent/commit/8410b5c))
+to converge with the timestamp-based history. Do **not** rename it back to `0005`
+to match a stale branch-only remote version — that is the anti-pattern called out
+above.
+
+### Preview branch repair (PR #258, 2026-06-26)
+
+The rename left an orphaned `0005` version recorded in the PR #258 Git preview
+branch DB (`algomspgrabvcosiwkqq`). Because `20260625172251` had not applied
+there, two symptoms appeared together:
+
+- The **Supabase Preview** check failed with
+  `Remote migration versions not found in local migrations directory`, and the
+  branch sat in `MIGRATIONS_FAILED`.
+- The deployed app threw
+  `PGRST205: Could not find the table 'public.chat_model_states'`
+  (`backend/repos/supabase_repo.py`, `acquire_chat_turn_lease`), because the
+  table was never created.
+
+**Remedy:** reset the ephemeral preview branch via the Supabase API
+(`reset_branch`, MCP) — **not** a new committed migration and **not** a local
+rename. The reset recreates the branch DB and replays the current git migration
+files (`0001`–`0004`, `20260624055541`, `20260625172251`, and later timestamp
+migrations such as `20260626000000`) in order, which clears the `0005` orphan
+and creates `chat_model_states`. For an ephemeral, `with_data:false` Git preview
+branch, resetting is preferred over CLI `migration repair`: it replays the
+canonical local files instead of hand-editing remote history, and there is no
+branch data to lose.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Production/parent never recorded the `0005` orphan, so the timestamp
+migration applies cleanly there on merge.
+
+## 20260626000000 — activity summary object (2026-06-26)
+
+**File:** `supabase/migrations/20260626000000_activity_summary.sql`
+
+**Change:** Adds `activities.summary_schema_version` and
+`activities.activity_summary jsonb`, then refreshes the `activities.source`
+check constraint to include `tcx_upload`.
+
+**Why:** Activity ingest now stores a compact, rich summary object at ingest
+time so GPX/FIT/text-derived activities can retain coaching-grade aggregates,
+estimates, confidence scores, source quality, fueling, subjective notes, and
+distribution summaries without retaining raw time-series files indefinitely.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally).

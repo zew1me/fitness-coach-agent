@@ -19,6 +19,7 @@ const orchestratorMocks = vi.hoisted(() => {
     Promise.resolve({
       completed: Promise.resolve(),
       finalOutput: "Keep tomorrow easy.",
+      state: { usage: undefined },
       *[Symbol.asyncIterator]() {
         for (const event of events) yield event;
       },
@@ -88,10 +89,6 @@ vi.mock("ai", async (importOriginal) => {
 
 vi.mock("../../lib/agent/context-slices", () => ({
   buildContextSlices: vi.fn(() => ({})),
-}));
-
-vi.mock("../../lib/agent/intent-router", () => ({
-  routeTurnIntent: vi.fn(() => ({ kind: "general", specialists: [] })),
 }));
 
 vi.mock("../../lib/agent/message-context", async (importOriginal) => {
@@ -275,5 +272,235 @@ describe("streamCoachTurn", () => {
         }),
       ]),
     );
+  });
+
+  it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {
+    const historyMessages = Array.from({ length: 60 }, (_, index) => ({
+      id: `history-${index}`,
+      parts: [{ type: "text", text: "x".repeat(20_000) }],
+      role: index % 2 === 0 ? "user" : "assistant",
+    }));
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://localhost/api/chat/model-state/lease") {
+        if (init?.method === "POST") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                thread_id: "thread-1",
+                version: 1,
+                items: [],
+                coaching_memory: [],
+                compaction_metadata: {},
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      if (url === "http://localhost/api/chat/model-state") {
+        if (init?.method === "PUT") {
+          const body = JSON.parse(String(init.body)) as {
+            items: unknown[];
+          };
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                thread_id: "thread-1",
+                version: 2,
+                items: body.items,
+                coaching_memory: [],
+                compaction_metadata: {},
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              thread_id: "thread-1",
+              version: 1,
+              items: [],
+              coaching_memory: [],
+              compaction_metadata: {},
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "http://localhost/api/chat/messages?limit=100") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ messages: historyMessages, next_cursor: null }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      useDurableSession: true,
+    });
+    await response.text();
+
+    const modelStatePut = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url) === "http://localhost/api/chat/model-state" &&
+        init?.method === "PUT",
+    );
+    const modelStatePutBody = modelStatePut?.[1]?.body;
+    expect(modelStatePutBody).toEqual(expect.any(String));
+    const body = JSON.parse(String(modelStatePutBody)) as {
+      items: unknown[];
+    };
+    expect(body.items.length).toBeGreaterThan(0);
+    expect(body.items.length).toBeLessThan(historyMessages.length);
+  });
+
+  it("releases a durable-session lease when the acquired lease response has malformed JSON", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://localhost/api/chat/model-state/lease") {
+        if (init?.method === "POST") {
+          return Promise.resolve(new Response("{", { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      useDurableSession: true,
+    });
+    await response.text();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({
+        body: expect.stringContaining('"lease_id"'),
+        method: "DELETE",
+      }),
+    );
+  });
+
+  it("does not fall back to stateless execution when another turn owns the lease", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (
+        url === "http://localhost/api/chat/model-state/lease" &&
+        init?.method === "POST"
+      ) {
+        return Promise.resolve(new Response("conflict", { status: 409 }));
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      useDurableSession: true,
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("passes an abort signal to durable pre-run fetches", async () => {
+    const controller = new AbortController();
+    let leaseSignal: AbortSignal | undefined;
+    let historySignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://localhost/api/chat/model-state/lease") {
+        if (init?.method === "POST") {
+          leaseSignal = init.signal ?? undefined;
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                thread_id: "thread-1",
+                version: 1,
+                items: [],
+                coaching_memory: [],
+                compaction_metadata: {},
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      if (url === "http://localhost/api/chat/model-state") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              thread_id: "thread-1",
+              version: 1,
+              items: [],
+              coaching_memory: [],
+              compaction_metadata: {},
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "http://localhost/api/chat/messages?limit=100") {
+        historySignal = init?.signal ?? undefined;
+        return Promise.resolve(
+          new Response(JSON.stringify({ messages: [], next_cursor: null }), {
+            status: 200,
+          }),
+        );
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      signal: controller.signal,
+      useDurableSession: true,
+    });
+    await response.text();
+
+    expect(leaseSignal).toBeInstanceOf(AbortSignal);
+    expect(historySignal).toBeInstanceOf(AbortSignal);
+    controller.abort();
+    expect(leaseSignal?.aborted).toBe(true);
+    expect(historySignal?.aborted).toBe(true);
   });
 });

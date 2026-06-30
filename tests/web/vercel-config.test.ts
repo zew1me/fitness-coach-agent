@@ -13,16 +13,22 @@ type VercelConfig = {
 
 describe("vercel routing", () => {
   const config = JSON.parse(
-    readFileSync(new URL("../../vercel.json", import.meta.url), "utf8")
+    readFileSync(new URL("../../vercel.json", import.meta.url), "utf8"),
   ) as VercelConfig;
 
   function rewrittenDestination(path: string): string | undefined {
-    return config.rewrites?.find((rewrite) => matchesSource(rewrite.source, path))?.destination;
+    return config.rewrites?.find((rewrite) =>
+      matchesSource(rewrite.source, path),
+    )?.destination;
   }
 
   function matchesSource(source: string, path: string): boolean {
     if (source === path) {
       return true;
+    }
+    if (source.endsWith("/(.*)")) {
+      const prefix = source.slice(0, -"(.*)".length);
+      return path.startsWith(prefix);
     }
     if (!source.includes(":path*")) {
       return false;
@@ -38,16 +44,27 @@ describe("vercel routing", () => {
         { source: "/api/oauth/:path*", destination: "/api/index.py" },
         { source: "/api/engine/:path*", destination: "/api/index.py" },
         { source: "/api/files/:path*", destination: "/api/index.py" },
-        { source: "/api/chat/thread", destination: "/api/index.py" },
-        { source: "/api/chat/messages", destination: "/api/index.py" },
-        { source: "/api/chat/attachments/:path*", destination: "/api/index.py" }
-      ])
+        { source: "/api/chat/(.*)", destination: "/api/index.py" },
+      ]),
     );
-    expect(rewrittenDestination("/api/oauth/browser-token")).toBe("/api/index.py");
-    expect(rewrittenDestination("/api/oauth/browser-session")).toBe("/api/index.py");
-    expect(rewrittenDestination("/api/engine/get-athlete-summary")).toBe("/api/index.py");
+    expect(rewrittenDestination("/api/oauth/browser-token")).toBe(
+      "/api/index.py",
+    );
+    expect(rewrittenDestination("/api/oauth/browser-session")).toBe(
+      "/api/index.py",
+    );
+    expect(rewrittenDestination("/api/engine/get-athlete-summary")).toBe(
+      "/api/index.py",
+    );
     expect(rewrittenDestination("/api/chat/thread")).toBe("/api/index.py");
-    expect(rewrittenDestination("/api/chat/attachments/presign")).toBe("/api/index.py");
+    expect(rewrittenDestination("/api/chat/messages")).toBe("/api/index.py");
+    expect(rewrittenDestination("/api/chat/attachments/presign")).toBe(
+      "/api/index.py",
+    );
+    expect(rewrittenDestination("/api/chat/model-state")).toBe("/api/index.py");
+    expect(rewrittenDestination("/api/chat/model-state/lease")).toBe(
+      "/api/index.py",
+    );
   });
 
   it("does not rewrite the exact Next.js chat streaming route", () => {

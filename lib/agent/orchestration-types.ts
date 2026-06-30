@@ -12,19 +12,23 @@ export type InternalSpecialistRole = z.infer<
   typeof internalSpecialistRoleSchema
 >;
 
-export type TurnIntentKind =
-  | "general"
-  | "intake"
-  | "mixed"
-  | "nutrition"
-  | "plan_change"
-  | "recovery"
-  | "workout";
+export const specialistDelegationSchema = z
+  .object({
+    role: internalSpecialistRoleSchema,
+    objective: z.string().min(1),
+    conversationDetails: z.array(z.string()),
+    constraintsAndPriorDecisions: z.array(z.string()),
+    unresolvedQuestions: z.array(z.string()),
+    relevantCoachingMemoryIds: z.array(z.string()),
+  })
+  .strict();
 
-export type TurnIntent = {
-  kind: TurnIntentKind;
-  specialists: InternalSpecialistRole[];
-};
+export const delegationPlanSchema = z
+  .object({ delegations: z.array(specialistDelegationSchema).max(2) })
+  .strict();
+
+export type SpecialistDelegation = z.infer<typeof specialistDelegationSchema>;
+export type DelegationPlan = z.infer<typeof delegationPlanSchema>;
 
 const proposedWriteToolNameSchema = z.enum([
   "save_activity_from_text",

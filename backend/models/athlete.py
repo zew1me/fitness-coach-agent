@@ -1,12 +1,31 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Source of truth for a single fitness metric value.
 # "user" = athlete typed it; "file" = extracted from GPX/FIT/screenshot;
 # "estimated" = derived by the system from workout patterns.
 ThresholdSource = Literal["user", "file", "estimated"]
+
+_FALSY_STRINGS = frozenset({"false", "0", "no", "off", ""})
+_TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
+
+
+def _coerce_bool(val: object) -> bool | None:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        lower = val.strip().lower()
+        if lower in _FALSY_STRINGS:
+            return False
+        if lower in _TRUTHY_STRINGS:
+            return True
+    if isinstance(val, int | float):
+        return bool(val)
+    return bool(val)
 
 
 class ThresholdValue(BaseModel):
@@ -41,7 +60,7 @@ class AthleteProfile(BaseModel):
     weekly_available_hours: float | None = None
     coaching_state: str = "onboarding"
     specialization_pct: int | None = None
-    onboarding_collected: dict[str, bool] = Field(default_factory=dict)
+    onboarding_collected: dict[str, bool | None] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
     injuries_rehab: list[str] = Field(default_factory=list)
     notes: str | None = None
@@ -63,6 +82,13 @@ class AthleteProfile(BaseModel):
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_validator("onboarding_collected", mode="before")
+    @classmethod
+    def _coerce_onboarding_collected(cls, v: object) -> dict[str, bool | None]:
+        if not isinstance(v, dict):
+            return {}
+        return {str(k): _coerce_bool(val) for k, val in v.items()}
 
     @property
     def age(self) -> int | None:
