@@ -255,6 +255,21 @@ async function handleChatRequest(
     ? buildTavilyMcpUrl(tavilyApiKey)
     : undefined;
 
+  return streamCoachTurn({
+    accessToken: token.access_token,
+    baseUrl: requestOrigin(request),
+    context,
+    extraHeaders: vercelProtectionBypassHeaders(),
+    messages: modelMessages,
+    messagesAreModelSelected: true,
+    useDurableSession: strategy !== "full_history",
+    signal: request.signal,
+    streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+    ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),
+  });
+}
+
+export async function POST(request: Request): Promise<Response> {
   after(async () => {
     try {
       const flushed = await Sentry.flush(5000);
@@ -271,21 +286,7 @@ async function handleChatRequest(
       });
     }
   });
-  return streamCoachTurn({
-    accessToken: token.access_token,
-    baseUrl: requestOrigin(request),
-    context,
-    extraHeaders: vercelProtectionBypassHeaders(),
-    messages: modelMessages,
-    messagesAreModelSelected: true,
-    useDurableSession: strategy !== "full_history",
-    signal: request.signal,
-    streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
-    ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),
-  });
-}
 
-export async function POST(request: Request): Promise<Response> {
   let token: BrowserTokenResponse | null;
   try {
     token = await loadBrowserToken(request);
