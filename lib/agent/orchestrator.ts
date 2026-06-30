@@ -419,7 +419,10 @@ export function streamCoachTurn({
     execute: async ({ writer }) => {
       writer.write({ type: "start" });
       writer.write({ type: "start-step" });
-      const textState = { textId: "coach-response", textStarted: false };
+      const textState: StreamTextState = {
+        textId: "coach-response",
+        textStarted: false,
+      };
 
       const leaseId = crypto.randomUUID();
       const leaseStatus = { acquired: false };
