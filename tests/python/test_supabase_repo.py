@@ -556,6 +556,34 @@ async def test_create_goal_persists_row_with_generated_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_goal_is_scoped_to_owning_user() -> None:
+    client = FakeSupabaseClient(
+        goal_rows=[
+            {
+                "id": "goal-1",
+                "user_id": "athlete-1",
+                "goal_type": "event",
+                "title": "Other athlete goal",
+            },
+            {
+                "id": "goal-1",
+                "user_id": "athlete-2",
+                "goal_type": "event",
+                "title": "Own goal",
+                "course_profile": {"terrain": "trail"},
+            },
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    goal = await repo.get_goal("goal-1", "athlete-2")
+
+    assert goal.user_id == "athlete-2"
+    assert goal.title == "Own goal"
+    assert goal.course_profile == {"terrain": "trail"}
+
+
+@pytest.mark.asyncio
 async def test_update_goal_is_scoped_to_owning_user() -> None:
     """A caller cannot mutate another athlete's goal by passing its id."""
     from backend.models.training import Goal
