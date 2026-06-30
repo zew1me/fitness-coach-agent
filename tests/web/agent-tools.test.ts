@@ -89,6 +89,35 @@ describe("coachToolDefinitions", () => {
     }
   });
 
+  it("validates update_goals payloads by action", () => {
+    const partialUpdate =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "update",
+        goal_id: "goal-1",
+        goal: { title: "Sharpen for Leadville" },
+      });
+    const incompleteCreate =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "create",
+        goal: { title: "Sharpen for Leadville" },
+      });
+    const missingGoalId =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "complete",
+      });
+    const terminalGoalPayload =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "complete",
+        goal_id: "goal-1",
+        goal: { title: "Ignored title" },
+      });
+
+    expect(partialUpdate.success).toBe(true);
+    expect(incompleteCreate.success).toBe(false);
+    expect(missingGoalId.success).toBe(false);
+    expect(terminalGoalPayload.success).toBe(false);
+  });
+
   it("emits OpenAI-compatible schemas for all coach tools", () => {
     for (const [name, definition] of Object.entries(coachToolDefinitions)) {
       const jsonSchema = z.toJSONSchema(definition.inputSchema);

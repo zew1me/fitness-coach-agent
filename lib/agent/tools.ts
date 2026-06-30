@@ -25,6 +25,67 @@ const goalSchema = z.object({
   title: z.string().min(1),
 });
 
+const partialGoalSchema = goalSchema
+  .partial()
+  .refine(
+    (goal) => Object.keys(goal).length > 0,
+    "At least one goal field is required for update.",
+  );
+
+const updateGoalsInputSchema = z
+  .object({
+    action: z.enum(["abandon", "complete", "create", "update"]),
+    goal: partialGoalSchema.nullable().optional(),
+    goal_id: z.string().min(1).optional(),
+  })
+  .superRefine((input, context) => {
+    if (input.action === "create") {
+      const goalResult = goalSchema.safeParse(input.goal);
+      if (!goalResult.success) {
+        for (const issue of goalResult.error.issues) {
+          context.addIssue({
+            ...issue,
+            path: ["goal", ...issue.path],
+          });
+        }
+      }
+      return;
+    }
+
+    if (input.action === "update") {
+      if (!input.goal_id) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "goal_id is required for update.",
+          path: ["goal_id"],
+        });
+      }
+      if (input.goal == null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "goal is required for update.",
+          path: ["goal"],
+        });
+      }
+      return;
+    }
+
+    if (!input.goal_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "goal_id is required for complete/abandon.",
+        path: ["goal_id"],
+      });
+    }
+    if (input.goal !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "goal must be omitted for complete/abandon.",
+        path: ["goal"],
+      });
+    }
+  });
+
 const thresholdInputSchema = z.object({
   race_distance_meters: z.number().positive().nullable(),
   race_time_seconds: z.number().int().positive().nullable(),
@@ -190,12 +251,7 @@ export const coachToolDefinitions = {
   ),
   update_goals: defineTool(
     "Create, update, complete, or abandon athlete goals.",
-    z.object({
-      action: z.enum(["abandon", "complete", "create", "update"]),
-      // Optional: complete/abandon act on goal_id alone and carry no goal.
-      goal: goalSchema.nullable().optional(),
-      goal_id: z.string().min(1).optional(),
-    }),
+    updateGoalsInputSchema,
   ),
   update_athlete_profile: defineTool(
     "Persist extracted athlete profile fields.",
