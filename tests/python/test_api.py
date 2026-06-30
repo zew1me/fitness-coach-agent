@@ -426,6 +426,44 @@ async def test_chat_attachments_presign_requires_bearer_token() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/pdf",
+        "text/plain",
+        "application/zip",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ],
+)
+async def test_chat_attachments_presign_rejects_unsupported_type(content_type: str) -> None:
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["profile:read"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/chat/attachments/presign",
+                json={
+                    "filename": "file",
+                    "content_type": content_type,
+                    "content_length": 1024,
+                    "purpose": "chat-attachment",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 400
+    assert content_type in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_chat_attachments_upload_requires_bearer_token() -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:

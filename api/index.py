@@ -494,11 +494,39 @@ async def release_chat_turn_lease(
     return state.model_dump(mode="json")
 
 
+_ALLOWED_UPLOAD_TYPES: frozenset[str] = frozenset(
+    {
+        # Images — sent to the model as input_image via the Responses API
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        # Activity files — parsed server-side or described as text for the coach
+        "application/gpx+xml",
+        "application/vnd.garmin.fit",
+        "application/vnd.garmin.tcx+xml",
+    }
+)
+
+
+def _check_upload_content_type(content_type: str) -> None:
+    if content_type not in _ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Uploading {content_type} files is not supported. "
+                "Supported types: images (GIF, JPEG, PNG, WebP) "
+                "and activity files (.gpx, .fit, .tcx)."
+            ),
+        )
+
+
 @app.post("/api/chat/attachments/presign")
 async def presign_chat_upload(
     payload: PresignUploadRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    _check_upload_content_type(payload.content_type)
     try:
         presigned_upload = r2_service.create_presigned_upload(
             user_id=user_context.user_id, request=payload
@@ -518,6 +546,7 @@ async def presign_chat_upload(
 async def presign_upload(
     payload: PresignUploadRequest, user_context: UserContext = Depends(require_user_context)
 ) -> Mapping[str, object]:
+    _check_upload_content_type(payload.content_type)
     try:
         presigned_upload = r2_service.create_presigned_upload(
             user_id=user_context.user_id, request=payload
