@@ -1,6 +1,10 @@
+import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID, uuid4
+
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.config import settings
 from backend.models.athlete import (
@@ -33,6 +37,38 @@ class RecordNotFoundError(LookupError):
 _DROP_FIELD = object()
 SUMMARY_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_NAME = "activity_summary_v1"
+
+# After a deploy/migration, PostgREST briefly serves a stale schema cache and rejects
+# requests with PGRST205 ("Could not find the table ... in the schema cache") even
+# though the table exists. The window is usually sub-second, so a short retry rides it
+# out instead of surfacing a 503 that degrades the chat turn (Sentry PYTHON-FASTAPI-6).
+_SCHEMA_CACHE_ERROR_CODE = "PGRST205"
+_SCHEMA_CACHE_RETRY_ATTEMPTS = 3
+_SCHEMA_CACHE_RETRY_BACKOFF_SECONDS = 0.5
+
+_T = TypeVar("_T")
+
+
+async def _with_schema_cache_retry(operation: Callable[[], Awaitable[_T]]) -> _T:
+    """Run ``operation`` retrying only transient PostgREST schema-cache misses.
+
+    PostgREST rejects with PGRST205 *before* touching any rows, so re-running a
+    state-changing operation (e.g. the lease acquire) on this error is safe. Any
+    other error propagates immediately so real failures are not masked and the
+    caller's request timeout is not burned on doomed retries.
+    """
+    backoff = _SCHEMA_CACHE_RETRY_BACKOFF_SECONDS
+    for attempt in range(_SCHEMA_CACHE_RETRY_ATTEMPTS):
+        try:
+            return await operation()
+        except PostgRESTAPIError as exc:
+            if getattr(exc, "code", None) != _SCHEMA_CACHE_ERROR_CODE:
+                raise
+            if attempt == _SCHEMA_CACHE_RETRY_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(backoff * (attempt + 1))
+    raise AssertionError("unreachable: schema-cache retry loop exited without returning")
+
 
 _PROFILE_FIELDS = {
     "display_name",
@@ -752,36 +788,43 @@ class SupabaseRepository:
         lease_id: str,
         ttl_seconds: int,
     ) -> ChatModelState:
-        current = await self.get_or_create_chat_model_state(thread_id=thread_id, user_id=user_id)
-        now = datetime.now(UTC)
-        if (
-            current.lease_id is not None
-            and current.lease_expires_at is not None
-            and current.lease_expires_at > now
-        ):
-            if current.lease_id == lease_id:
-                return current
-            raise ValueError("A chat turn is already in progress.")
-        client = self._require_client()
-        response = (
-            client.table("chat_model_states")
-            .update(
-                {
-                    "lease_id": lease_id,
-                    "lease_expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(),
-                    "version": current.version + 1,
-                    "updated_at": now.isoformat(),
-                }
+        # The cache miss can hit the SELECT, the UPSERT, or the version-checked UPDATE;
+        # all are safe to re-run, so retry the whole operation rather than one query.
+        async def _attempt() -> ChatModelState:
+            current = await self.get_or_create_chat_model_state(
+                thread_id=thread_id, user_id=user_id
             )
-            .eq("thread_id", thread_id)
-            .eq("user_id", user_id)
-            .eq("version", current.version)
-            .execute()
-        )
-        rows = response.data or []
-        if not rows:
-            raise ValueError("A chat turn is already in progress.")
-        return self._parse_chat_model_state(rows[0])
+            now = datetime.now(UTC)
+            if (
+                current.lease_id is not None
+                and current.lease_expires_at is not None
+                and current.lease_expires_at > now
+            ):
+                if current.lease_id == lease_id:
+                    return current
+                raise ValueError("A chat turn is already in progress.")
+            client = self._require_client()
+            response = (
+                client.table("chat_model_states")
+                .update(
+                    {
+                        "lease_id": lease_id,
+                        "lease_expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(),
+                        "version": current.version + 1,
+                        "updated_at": now.isoformat(),
+                    }
+                )
+                .eq("thread_id", thread_id)
+                .eq("user_id", user_id)
+                .eq("version", current.version)
+                .execute()
+            )
+            rows = response.data or []
+            if not rows:
+                raise ValueError("A chat turn is already in progress.")
+            return self._parse_chat_model_state(rows[0])
+
+        return await _with_schema_cache_retry(_attempt)
 
     async def release_chat_turn_lease(
         self, *, thread_id: str, user_id: str, lease_id: str
