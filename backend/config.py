@@ -1,8 +1,25 @@
 import math
 import os
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Model families that support OpenAI's `reasoning` parameter on the Responses API.
+# The vision service always passes Reasoning(effort=...) — a non-reasoning model will
+# fail permanently at call time, so we reject the configuration at startup instead.
+#
+# When upgrading to a new reasoning model, add its name prefix here and confirm it
+# supports the `reasoning` parameter before deploying. Each entry covers the named
+# family and all newer variants (e.g. "o4" covers o4-mini, o4, o4-pro, etc.).
+_REASONING_CAPABLE_MODEL_PREFIXES: frozenset[str] = frozenset(
+    {
+        "o1",  # o1, o1-mini, o1-preview — and newer o1 variants
+        "o3",  # o3, o3-mini — and newer o3 variants
+        "o4",  # o4-mini — and newer o4 variants
+        "gpt-5",  # gpt-5, gpt-5-mini, gpt-5.4-mini — and newer gpt-5 variants
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -14,13 +31,36 @@ class Settings(BaseSettings):
     openai_activity_text_timeout_seconds: float = 60.0
     openai_vision_model: str = "gpt-5.4-mini"
     openai_vision_timeout_seconds: float = 45.0
+    # gpt-5.x vision is a reasoning model: reasoning draws down the output budget, so keep
+    # this generous — a truncated response is invalid even under strict structured outputs.
+    openai_vision_max_output_tokens: int = 8000
+    # Keep reasoning light: screenshot extraction is a perception task, not a reasoning one.
+    # Low effort leaves more of the token budget for output and reduces latency.
+    openai_vision_reasoning_effort: Literal["minimal", "low", "medium", "high"] = "low"
 
-    @field_validator("openai_activity_text_model", "openai_vision_model")
+    @field_validator("openai_activity_text_model")
     @classmethod
-    def validate_openai_model(cls, v: str) -> str:
+    def validate_openai_activity_text_model(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
             raise ValueError("OpenAI model names must not be empty or whitespace")
+        return stripped
+
+    @field_validator("openai_vision_model")
+    @classmethod
+    def validate_openai_vision_model(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("openai_vision_model must not be empty or whitespace")
+        if not any(stripped.startswith(prefix) for prefix in _REASONING_CAPABLE_MODEL_PREFIXES):
+            approved = ", ".join(sorted(f'"{p}*"' for p in _REASONING_CAPABLE_MODEL_PREFIXES))
+            raise ValueError(
+                f"openai_vision_model {stripped!r} is not an approved reasoning-capable model. "
+                f"The vision service passes OpenAI reasoning tokens and requires a model from "
+                f"an approved family: {approved}. "
+                f"To use a new reasoning model, add its name prefix to "
+                f"_REASONING_CAPABLE_MODEL_PREFIXES in backend/config.py."
+            )
         return stripped
 
     @field_validator("openai_activity_text_timeout_seconds", "openai_vision_timeout_seconds")
@@ -28,6 +68,21 @@ class Settings(BaseSettings):
     def validate_openai_timeout(cls, v: float) -> float:
         if not math.isfinite(v) or v <= 0:
             raise ValueError("OpenAI timeouts must be finite numbers > 0")
+        return v
+
+    @field_validator("openai_vision_max_output_tokens")
+    @classmethod
+    def validate_vision_max_output_tokens(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("openai_vision_max_output_tokens must be a positive integer")
+        return v
+
+    @field_validator("openai_vision_reasoning_effort", mode="before")
+    @classmethod
+    def normalize_vision_reasoning_effort(cls, v: object) -> object:
+        # Normalize so e.g. "Low" / " low " from the environment match the Literal.
+        if isinstance(v, str):
+            return v.strip().lower()
         return v
 
     r2_account_id: str | None = None
