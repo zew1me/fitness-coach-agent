@@ -1465,6 +1465,41 @@ async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized
 
 
 @pytest.mark.asyncio
+async def test_update_goals_complete_allows_omitted_goal(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Updated goal")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "complete", "goal_id": "goal-1"},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.update_call == ("goal-1", "athlete-1", {"status": "completed"})
+
+
+@pytest.mark.asyncio
 async def test_update_goals_create_rejects_malformed_target_date(monkeypatch) -> None:
     class GoalRepository(EngineRepository):
         def __init__(self) -> None:

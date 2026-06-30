@@ -79,7 +79,6 @@ describe("coachToolDefinitions", () => {
     for (const action of ["complete", "abandon"] as const) {
       const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
         action,
-        goal: null,
         goal_id: "goal-1",
       });
 
@@ -334,8 +333,18 @@ describe("coachToolDefinitions", () => {
       },
       user_id: "ignored-client-user",
     });
+    const completeResult = await (
+      tools["update_goals"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      action: "complete",
+      goal_id: "goal-new",
+      user_id: "ignored-client-user",
+    });
 
     expect(result).toEqual({ id: "goal-new", status: "active" });
+    expect(completeResult).toEqual({ id: "goal-new", status: "active" });
     expect(requests).toEqual([
       {
         body: {
@@ -345,6 +354,13 @@ describe("coachToolDefinitions", () => {
             title: "Leadville 100",
             sport: "cycling",
           },
+        },
+        url: "https://coach.test/api/engine/update-goals",
+      },
+      {
+        body: {
+          action: "complete",
+          goal_id: "goal-new",
         },
         url: "https://coach.test/api/engine/update-goals",
       },

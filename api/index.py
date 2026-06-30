@@ -1000,7 +1000,7 @@ class GetRecentActivitiesRequest(BaseModel):
 
 class UpdateGoalsRequest(BaseModel):
     action: str
-    goal: dict[str, object]
+    goal: dict[str, object] | None = None
     goal_id: str | None = None
 
 
@@ -1016,7 +1016,11 @@ async def update_goals_endpoint(
         )
     try:
         result = await goal_service.apply_action(
-            user_context.user_id, payload.action, payload.goal, payload.goal_id, repo=repo
+            user_context.user_id,
+            payload.action,
+            payload.goal or {},
+            payload.goal_id,
+            repo=repo,
         )
     except InvalidGoalPayloadError as exc:
         raise HTTPException(status_code=422, detail=exc.errors) from exc
