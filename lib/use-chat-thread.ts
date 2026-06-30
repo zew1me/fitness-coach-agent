@@ -6,6 +6,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ZodError } from "zod";
 
 import { loadChatMessages, loadChatThread } from "./coach-api";
 import { errorMessage } from "./errors";
@@ -198,6 +199,11 @@ export function useChatThread(
         return { kind: "initial", thread: await loadChatThread(fetch, signal) };
       } catch (error) {
         if (signal.aborted) {
+          throw error;
+        }
+        // Schema violations mean the server returned bad data — re-throw so the
+        // error surfaces rather than being silently masked by stale local cache.
+        if (error instanceof ZodError) {
           throw error;
         }
         const localThread = readLocalChatThread(token.user_id);
