@@ -25,10 +25,13 @@ type FetchLike = typeof fetch;
 const TRANSIENT_FETCH_RETRY_DELAYS_MS = [300, 900];
 
 function isTransientFetchError(error: unknown): boolean {
-  // WebKit emits `TypeError: Load failed`; other browsers emit different
-  // messages (e.g. "Failed to fetch") but the same TypeError type for a
-  // network-level abort. HTTP errors surface as plain Errors and are left
-  // alone so real outages still propagate.
+  // Heuristic: WebKit emits `TypeError: Load failed` and other engines emit
+  // `TypeError: Failed to fetch` for a network-level abort, so we retry on the
+  // TypeError *type* rather than brittle message matching. The tradeoff is that
+  // a genuine client-side TypeError (a programming bug) is also retried before
+  // surfacing — acceptable since it is still re-thrown after retries, just
+  // delayed. HTTP errors surface as plain Errors and are left alone so real
+  // outages still propagate immediately.
   return error instanceof TypeError;
 }
 
@@ -38,15 +41,15 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       resolve();
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -70,6 +73,13 @@ async function withRetry<T>(
       ) {
         throw error;
       }
+      // Recovery is silent for the user, so leave a breadcrumb — otherwise a
+      // rising retry rate (frequent WebKit drops or a flaky backend) stays
+      // invisible to monitoring while requests still appear healthy.
+      Sentry.logger.debug("transient fetch retry", {
+        attempt: attempt + 1,
+        backoff_ms: backoffMs,
+      });
       await delay(backoffMs, signal);
       // An abort that lands mid-backoff should stop here rather than burn
       // another token + thread fetch.

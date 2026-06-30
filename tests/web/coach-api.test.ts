@@ -201,6 +201,45 @@ describe("loadChatThread transient retry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
+  it("does not retry when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockRejectedValueOnce(new TypeError("Load failed"));
+
+    await expect(
+      loadChatThread(fetchMock, controller.signal),
+    ).rejects.toThrow();
+    // Initial token + thread only — no retry once aborted.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops retrying when the signal aborts mid-backoff", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockRejectedValueOnce(new TypeError("Load failed"))
+      // These would only be reached if a wasted retry fired after abort.
+      .mockResolvedValue(browserToken());
+
+    const promise = loadChatThread(fetchMock, controller.signal);
+    const assertion = expect(promise).rejects.toThrow("Load failed");
+    // Drain the initial token + thread (thread rejects); execution parks in the
+    // 300ms backoff with the first aborted-check already passed.
+    await vi.advanceTimersByTimeAsync(100);
+    // Abort lands mid-backoff — exercises delay()'s abort listener and the
+    // post-delay aborted guard.
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(300 + 900);
+    await assertion;
+    // Only the initial token + thread fired; no retry token/thread.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("does not retry a non-transient HTTP error", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
