@@ -116,8 +116,9 @@ class FakeTableQuery:
                         continue
                     if self._ignore_duplicates:
                         break
-                    self._rows[index] = payload
-                    upserted_rows.append(payload)
+                    merged = {**row, **payload}
+                    self._rows[index] = merged
+                    upserted_rows.append(merged)
                     break
                 else:
                     self._rows.append(payload)
