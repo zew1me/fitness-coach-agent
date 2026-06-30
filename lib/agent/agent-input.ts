@@ -1,6 +1,8 @@
 import type { AgentInputItem } from "@openai/agents";
 import type { UIMessage } from "ai";
 
+import { convertUnsupportedFilePartsToText } from "./message-context";
+
 // Safe: every UIMessage part is a plain object with a discriminant `type` field.
 function partRecord(part: UIMessage["parts"][number]): Record<string, unknown> {
   return part as unknown as Record<string, unknown>;
@@ -131,25 +133,32 @@ function assistantItems(message: UIMessage): AgentInputItem[] {
 }
 
 export function toAgentInputItems(messages: UIMessage[]): AgentInputItem[] {
-  return messages.flatMap((message): AgentInputItem[] => {
-    if (message.role === "assistant") return assistantItems(message);
+  // Replace unsupported (non-image) file parts — e.g. .fit/.gpx activity files —
+  // with text descriptions before building model items.  The live route already
+  // does this, but the durable-session bootstrap and delegation planner reach
+  // this chokepoint with raw transcript messages.  Idempotent: a second pass
+  // finds no remaining non-image file parts.
+  return convertUnsupportedFilePartsToText(messages).flatMap(
+    (message): AgentInputItem[] => {
+      if (message.role === "assistant") return assistantItems(message);
 
-    if (message.role === "system") {
-      const content = message.parts
-        .map((part) => (part.type === "text" ? part.text : ""))
-        .filter(Boolean)
-        .join("\n");
+      if (message.role === "system") {
+        const content = message.parts
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .filter(Boolean)
+          .join("\n");
+        if (content.length === 0) return [];
+        return [
+          {
+            role: "system",
+            content,
+          },
+        ];
+      }
+
+      const content = userContent(message);
       if (content.length === 0) return [];
-      return [
-        {
-          role: "system",
-          content,
-        },
-      ];
-    }
-
-    const content = userContent(message);
-    if (content.length === 0) return [];
-    return [{ role: "user", content }];
-  });
+      return [{ role: "user", content }];
+    },
+  );
 }

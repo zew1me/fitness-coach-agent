@@ -99,6 +99,19 @@ The legacy columns `chat_messages.content` (denormalized text mirror) and the se
 
 **Current reality.** Chat image attachments are now persisted to `chat_messages.parts` as R2 `public_url` references (issue #163 fix). The client refuses to send a message whose attachment lacks a `public_url`, so any base64 `data:` URL in `parts[i].url` is a stale row from before the fix landed. Whether R2 is referenced by anything else in the running app is **issue #164**.
 
+### Unsupported file attachments → text (do not send to the model as `input_file`)
+
+OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
+
+**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards both `/api/chat/attachments/presign` and `/api/files/presign-upload` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`. Everything else (including PDFs) returns 400 with a message telling the athlete to paste content as text.
+
+Contract: every non-image, non-rejected file part (i.e. `.fit` / `.gpx` activity files) is converted to an `input_text` description that **preserves the link** (`public_url` / `object_key`) so the coach can still resolve it — files are never dropped silently. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
+
+**Durable session caveat.** The durable model state (`chat_model_states.items`, used when `COACH_CONTEXT_STRATEGY` ≠ `full_history`) replays every stored item each turn, so one poisoned `input_file` breaks the thread permanently. Two defenses, both required:
+
+- `SupabaseAgentSession.prepareHistoryItemForModelInput` (`lib/agent/supabase-agent-session.ts`) strips `input_image` and rewrites any already-stored `input_file` → link-preserving text. The SDK applies this to history before every model turn, so old threads self-heal on the run path.
+- The delegation planner reads `getItems()` **raw**, so legacy poisoned rows also need a one-time data rewrite of `chat_model_states.items` (per environment — preview and production are separate Supabase projects).
+
 ## Environment Variables
 
 See `.env.example`. Required:

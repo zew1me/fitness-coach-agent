@@ -12,9 +12,9 @@ _FALSY_STRINGS = frozenset({"false", "0", "no", "off", ""})
 _TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
 
 
-def _coerce_bool(val: object) -> bool:
+def _coerce_bool(val: object) -> bool | None:
     if val is None:
-        return False
+        return None
     if isinstance(val, bool):
         return val
     if isinstance(val, str):
@@ -60,7 +60,7 @@ class AthleteProfile(BaseModel):
     weekly_available_hours: float | None = None
     coaching_state: str = "onboarding"
     specialization_pct: int | None = None
-    onboarding_collected: dict[str, bool] = Field(default_factory=dict)
+    onboarding_collected: dict[str, bool | None] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
     injuries_rehab: list[str] = Field(default_factory=list)
     notes: str | None = None
@@ -85,7 +85,7 @@ class AthleteProfile(BaseModel):
 
     @field_validator("onboarding_collected", mode="before")
     @classmethod
-    def _coerce_onboarding_collected(cls, v: object) -> dict[str, bool]:
+    def _coerce_onboarding_collected(cls, v: object) -> dict[str, bool | None]:
         if not isinstance(v, dict):
             return {}
         return {str(k): _coerce_bool(val) for k, val in v.items()}
