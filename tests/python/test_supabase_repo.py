@@ -2,10 +2,12 @@ import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.models.athlete import AthleteProfile, SportThreshold
 from backend.models.chat import ChatModelStateReplaceRequest
 from backend.models.training import Activity
+from backend.repos import supabase_repo
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
@@ -901,6 +903,114 @@ async def test_chat_turn_lease_rejects_active_owner_and_allows_expired_lease() -
             lease_id="other-lease",
             ttl_seconds=60,
         )
+
+
+def _schema_cache_miss_error(table: str = "public.chat_model_states") -> PostgRESTAPIError:
+    """Build the PostgREST PGRST205 error seen after a deploy reloads the schema cache."""
+    return PostgRESTAPIError(
+        {
+            "code": "PGRST205",
+            "message": f"Could not find the table '{table}' in the schema cache",
+            "details": None,
+            "hint": None,
+        }
+    )
+
+
+class _FailOnceClient:
+    """Wraps a fake client and raises ``error`` on the first ``execute()`` call only.
+
+    Reproduces the PostgREST schema-cache reload window: the first request after a
+    deploy/migration returns PGRST205, a moment later the same call succeeds.
+    """
+
+    def __init__(self, inner: FakeSupabaseClient, error: Exception) -> None:
+        self._inner = inner
+        self._error = error
+        self.calls = 0
+
+    def table(self, table_name: str) -> FakeTableQuery:
+        query = self._inner.table(table_name)
+        original_execute = query.execute
+        owner = self
+
+        def execute() -> FakeResponse:
+            owner.calls += 1
+            if owner.calls == 1:
+                raise owner._error
+            return original_execute()
+
+        query.execute = execute  # type: ignore[method-assign]
+        return query
+
+
+def _model_state_row(*, version: int = 1) -> dict[str, object]:
+    now = datetime.now(UTC).isoformat()
+    return {
+        "thread_id": "thread-1",
+        "user_id": "athlete-1",
+        "items": [],
+        "coaching_memory": [],
+        "compaction_metadata": {},
+        "schema_version": 1,
+        "version": version,
+        "lease_id": None,
+        "lease_expires_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+@pytest.mark.asyncio
+async def test_acquire_chat_turn_lease_retries_through_schema_cache_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove-It (Sentry PYTHON-FASTAPI-6): a transient PGRST205 schema-cache miss
+    after a deploy must be retried, not surfaced as a 503 that degrades chat."""
+    monkeypatch.setattr(supabase_repo, "_SCHEMA_CACHE_RETRY_BACKOFF_SECONDS", 0.0)
+    client = _FailOnceClient(
+        FakeSupabaseClient(chat_model_state_rows=[_model_state_row()]),
+        _schema_cache_miss_error(),
+    )
+    repo = SupabaseRepository(client=client)
+
+    leased = await repo.acquire_chat_turn_lease(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        lease_id="lease-1",
+        ttl_seconds=60,
+    )
+
+    assert leased.lease_id == "lease-1"
+    assert client.calls >= 2, "lease acquire should have retried past the schema-cache miss"
+
+
+@pytest.mark.asyncio
+async def test_acquire_chat_turn_lease_does_not_retry_unrelated_api_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only PGRST205 is transient; other PostgREST errors must surface immediately
+    so we neither mask real failures nor burn the client's lease-acquire timeout."""
+    monkeypatch.setattr(supabase_repo, "_SCHEMA_CACHE_RETRY_BACKOFF_SECONDS", 0.0)
+    permission_error = PostgRESTAPIError(
+        {"code": "42501", "message": "permission denied", "details": None, "hint": None}
+    )
+    client = _FailOnceClient(
+        FakeSupabaseClient(chat_model_state_rows=[_model_state_row()]),
+        permission_error,
+    )
+    repo = SupabaseRepository(client=client)
+
+    with pytest.raises(PostgRESTAPIError) as excinfo:
+        await repo.acquire_chat_turn_lease(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            lease_id="lease-1",
+            ttl_seconds=60,
+        )
+
+    assert excinfo.value.code == "42501"
+    assert client.calls == 1, "non-transient errors must not be retried"
 
 
 def test_athlete_profile_specialization_pct_defaults_to_none() -> None:
