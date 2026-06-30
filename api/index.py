@@ -51,7 +51,7 @@ from backend.models.chat import (
     ChatTurnLeaseRequest,
 )
 from backend.models.storage import PresignUploadRequest
-from backend.models.training import Activity, Goal
+from backend.models.training import Activity
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -67,6 +67,11 @@ from backend.services.auth import (
     OAuthLoginRequiredError,
 )
 from backend.services.chat import ChatService, ChatUnavailableError
+from backend.services.goal_service import (
+    GoalService,
+    InvalidGoalPayloadError,
+    UnknownGoalActionError,
+)
 from backend.services.r2 import R2Service
 
 configure_logging(debug=settings.app_env == "development")
@@ -117,6 +122,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
 auth_service = AuthService()
 chat_service = ChatService()
+goal_service = GoalService()
 repo = SupabaseRepository()
 r2_service = R2Service()
 
@@ -968,38 +974,6 @@ class UpdateGoalsRequest(BaseModel):
     goal_id: str | None = None
 
 
-def _normalize_goal_fields(d: dict[str, object]) -> dict[str, object]:
-    result = dict(d)
-    if "course_profile_notes" in result and "course_profile" not in result:
-        result["course_profile"] = result.pop("course_profile_notes")
-    return result
-
-
-def _sanitize_goal_update_fields(fields: dict[str, object]) -> dict[str, object]:
-    result = dict(fields)
-    for immutable_field in ("id", "user_id", "created_at", "updated_at"):
-        result.pop(immutable_field, None)
-    return result
-
-
-async def _apply_goal_action(user_id: str, payload: UpdateGoalsRequest) -> Goal:
-    goal_dict = _normalize_goal_fields(payload.goal)
-    if payload.action == "create":
-        goal_dict.update({"user_id": user_id, "status": "active"})
-        try:
-            validated_goal = Goal.model_validate(goal_dict)
-        except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors()) from exc
-        return await repo.create_goal(validated_goal)
-    if payload.action in ("update", "complete", "abandon"):
-        goal_dict = _sanitize_goal_update_fields(goal_dict)
-        status_map = {"complete": "completed", "abandon": "abandoned"}
-        if s := status_map.get(payload.action):
-            goal_dict["status"] = s
-        return await repo.update_goal(payload.goal_id or "", user_id, goal_dict)
-    raise HTTPException(status_code=422, detail=f"Unknown action: {payload.action}")
-
-
 @app.post("/api/engine/update-goals")
 async def update_goals_endpoint(
     payload: UpdateGoalsRequest,
@@ -1011,9 +985,13 @@ async def update_goals_endpoint(
             detail="goal_id required for update/complete/abandon",
         )
     try:
-        result = await _apply_goal_action(user_context.user_id, payload)
-    except HTTPException:
-        raise
+        result = await goal_service.apply_action(
+            user_context.user_id, payload.action, payload.goal, payload.goal_id, repo=repo
+        )
+    except InvalidGoalPayloadError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors) from exc
+    except UnknownGoalActionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
