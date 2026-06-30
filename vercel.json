@@ -4,9 +4,7 @@
     { "source": "/api/oauth/:path*", "destination": "/api/index.py" },
     { "source": "/api/engine/:path*", "destination": "/api/index.py" },
     { "source": "/api/files/:path*", "destination": "/api/index.py" },
-    { "source": "/api/chat/thread", "destination": "/api/index.py" },
-    { "source": "/api/chat/messages", "destination": "/api/index.py" },
-    { "source": "/api/chat/attachments/:path*", "destination": "/api/index.py" },
+    { "source": "/api/chat/(.*)", "destination": "/api/index.py" },
     { "source": "/api/mcp", "destination": "/api/index.py" },
     { "source": "/health", "destination": "/api/index.py" }
   ]

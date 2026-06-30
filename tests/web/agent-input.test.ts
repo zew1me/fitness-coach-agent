@@ -84,7 +84,11 @@ describe("toAgentInputItems", () => {
     expect(toAgentInputItems(messages)).toEqual([]);
   });
 
-  it("converts a non-image file attachment to input_file", () => {
+  it("converts an unsupported (non-image) file attachment to a text reference that preserves the public_url link", () => {
+    // OpenAI cannot ingest activity files (.fit/.gpx); sending them as
+    // `input_file` is rejected and poisons the durable session.  They must
+    // become text — but the link to the actual uploaded file (public_url /
+    // object_key) must survive so the coach can still reach the content.
     const messages: UIMessage[] = [
       {
         id: "message-1",
@@ -105,9 +109,12 @@ describe("toAgentInputItems", () => {
         role: "user",
         content: [
           {
-            type: "input_file",
-            file: { url: "https://files.example/activity.gpx" },
-            filename: "activity.gpx",
+            type: "input_text",
+            text:
+              "Uploaded file: activity.gpx\n" +
+              "content_type=application/gpx+xml\n" +
+              "public_url=https://files.example/activity.gpx\n" +
+              "object_key=activity.gpx",
           },
         ],
       },

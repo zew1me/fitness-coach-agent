@@ -48,8 +48,30 @@ class ChatThread(BaseModel):
 
 class ChatThreadBootstrap(BaseModel):
     attachments_enabled: bool
+    next_cursor: str | None = None
     profile_complete: bool
     thread: ChatThread
+
+
+class ChatMessagePage(BaseModel):
+    messages: list[ChatMessage]
+    next_cursor: str | None = None
+
+
+class ChatModelState(BaseModel):
+    """Private replay state for the Agents SDK; never returned in thread bootstrap."""
+
+    coaching_memory: list[dict[str, Any]] = Field(default_factory=list)
+    compaction_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    lease_expires_at: datetime | None = None
+    lease_id: str | None = None
+    schema_version: int = 1
+    thread_id: str
+    updated_at: datetime
+    user_id: str
+    version: int = Field(default=0, ge=0)
 
 
 class ChatPersistRequest(BaseModel):
@@ -58,3 +80,20 @@ class ChatPersistRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     parts: list[MessagePart] = Field(default_factory=list)
     role: Literal["user", "assistant"]
+
+
+class ChatModelStateReplaceRequest(BaseModel):
+    coaching_memory: list[dict[str, Any]] = Field(default_factory=list)
+    compaction_metadata: dict[str, Any] = Field(default_factory=dict)
+    expected_version: int = Field(ge=0)
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    lease_id: str = Field(min_length=1)
+
+
+class ChatTurnLeaseRequest(BaseModel):
+    lease_id: str = Field(min_length=1)
+    ttl_seconds: int = Field(default=300, ge=30, le=900)
+
+
+class ChatTurnLeaseReleaseRequest(BaseModel):
+    lease_id: str = Field(min_length=1)

@@ -1,10 +1,16 @@
 import * as Sentry from "@sentry/nextjs";
 
-import { athleteProfileSchema, uploadRequestSchema } from "./schemas";
+import {
+  athleteProfileSchema,
+  chatMessagePageSchema,
+  chatThreadResponseSchema,
+  type ParsedChatMessagePage,
+  type ParsedChatThreadResponse,
+  uploadRequestSchema,
+} from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
-  ChatThreadResponse,
   FitnessMetrics,
   PresignUploadRequest,
   PresignUploadResponse,
@@ -180,17 +186,34 @@ export async function saveProfile(
 
 export async function loadChatThread(
   fetchImpl: FetchLike = fetch,
-): Promise<ChatThreadResponse> {
-  const thread = await authorizedFetch<ChatThreadResponse>(
-    "/api/chat/thread",
-    { method: "GET" },
-    fetchImpl,
+  signal?: AbortSignal,
+): Promise<ParsedChatThreadResponse> {
+  const thread = chatThreadResponseSchema.parse(
+    await authorizedFetch<unknown>(
+      "/api/chat/thread",
+      { method: "GET", signal: signal ?? null },
+      fetchImpl,
+    ),
   );
   Sentry.logger.debug("chat thread loaded", {
     message_count: thread.thread.messages.length,
     thread_id: thread.thread.id,
   });
   return thread;
+}
+
+export async function loadChatMessages(
+  before: string,
+  fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
+): Promise<ParsedChatMessagePage> {
+  const params = new URLSearchParams({ before, limit: "50" });
+  const page = await authorizedFetch<unknown>(
+    `/api/chat/messages?${params.toString()}`,
+    { method: "GET", signal: signal ?? null },
+    fetchImpl,
+  );
+  return chatMessagePageSchema.parse(page);
 }
 
 export async function createChatUploadIntent(

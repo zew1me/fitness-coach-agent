@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
 
+import httpx
 import sentry_sdk
 from fastapi import (
     Cookie,
@@ -22,7 +23,8 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from postgrest.exceptions import APIError as PostgRESTAPIError
+from pydantic import BaseModel, Field, ValidationError
 
 from backend.config import settings
 from backend.logging_config import configure_logging
@@ -30,6 +32,8 @@ from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
 )
 from backend.models.athlete import (
+    ScheduleAvailability,
+    ScheduleOverride,
     SportThreshold,
 )
 from backend.models.auth import (
@@ -40,7 +44,12 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.chat import ChatPersistRequest
+from backend.models.chat import (
+    ChatModelStateReplaceRequest,
+    ChatPersistRequest,
+    ChatTurnLeaseReleaseRequest,
+    ChatTurnLeaseRequest,
+)
 from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
@@ -48,6 +57,7 @@ from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
     SupabaseRepository,
+    build_activity_summary_from_fields,
 )
 from backend.services.auth import (
     AuthService,
@@ -57,6 +67,11 @@ from backend.services.auth import (
     OAuthLoginRequiredError,
 )
 from backend.services.chat import ChatService, ChatUnavailableError
+from backend.services.goal_service import (
+    GoalService,
+    InvalidGoalPayloadError,
+    UnknownGoalActionError,
+)
 from backend.services.r2 import R2Service
 
 configure_logging(debug=settings.app_env == "development")
@@ -75,6 +90,7 @@ else:
     logging.getLogger(__name__).info("SENTRY_DSN is not set; server-side Sentry is disabled.")
 
 logger = logging.getLogger(__name__)
+MAX_CHAT_MESSAGE_PAGE_SIZE = 100
 
 
 async def log_startup() -> None:
@@ -106,6 +122,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
 auth_service = AuthService()
 chat_service = ChatService()
+goal_service = GoalService()
 repo = SupabaseRepository()
 r2_service = R2Service()
 
@@ -387,11 +404,129 @@ async def persist_chat_message(
     return message.model_dump(mode="json")
 
 
+@app.get("/api/chat/messages")
+async def list_chat_messages(
+    limit: int = 50,
+    before: str | None = None,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    if limit < 1 or limit > MAX_CHAT_MESSAGE_PAGE_SIZE:
+        raise HTTPException(
+            status_code=422,
+            detail=f"limit must be between 1 and {MAX_CHAT_MESSAGE_PAGE_SIZE}",
+        )
+    try:
+        page = await chat_service.list_messages(user_context.user_id, limit=limit, before=before)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat messages list failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return page.model_dump(mode="json")
+
+
+@app.get("/api/chat/model-state")
+async def get_chat_model_state(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.get_model_state(user_context.user_id)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat model state get failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return state.model_dump(mode="json")
+
+
+@app.put("/api/chat/model-state")
+async def replace_chat_model_state(
+    payload: ChatModelStateReplaceRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.replace_model_state(user_context.user_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat model state replace failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return state.model_dump(mode="json")
+
+
+@app.post("/api/chat/model-state/lease")
+async def acquire_chat_turn_lease(
+    payload: ChatTurnLeaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.acquire_turn_lease(
+            user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat lease acquire failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return state.model_dump(mode="json")
+
+
+@app.delete("/api/chat/model-state/lease")
+async def release_chat_turn_lease(
+    payload: ChatTurnLeaseReleaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.release_turn_lease(user_context.user_id, payload.lease_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat lease release failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return state.model_dump(mode="json")
+
+
+_ALLOWED_UPLOAD_TYPES: frozenset[str] = frozenset(
+    {
+        # Images — sent to the model as input_image via the Responses API
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        # Activity files — parsed server-side or described as text for the coach
+        "application/gpx+xml",
+        "application/vnd.garmin.fit",
+        "application/vnd.garmin.tcx+xml",
+    }
+)
+
+
+def _check_upload_content_type(content_type: str) -> None:
+    if content_type not in _ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Uploading {content_type} files is not supported. "
+                "Supported types: images (GIF, JPEG, PNG, WebP) "
+                "and activity files (.gpx, .fit, .tcx)."
+            ),
+        )
+
+
 @app.post("/api/chat/attachments/presign")
 async def presign_chat_upload(
     payload: PresignUploadRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    _check_upload_content_type(payload.content_type)
     try:
         presigned_upload = r2_service.create_presigned_upload(
             user_id=user_context.user_id, request=payload
@@ -411,6 +546,7 @@ async def presign_chat_upload(
 async def presign_upload(
     payload: PresignUploadRequest, user_context: UserContext = Depends(require_user_context)
 ) -> Mapping[str, object]:
+    _check_upload_content_type(payload.content_type)
     try:
         presigned_upload = r2_service.create_presigned_upload(
             user_id=user_context.user_id, request=payload
@@ -734,6 +870,9 @@ async def process_uploaded_file_endpoint(
             "rr_interval_count": len(parsed.rr_intervals_ms or []),
         },
     )
+    activity = activity.model_copy(
+        update={"activity_summary": build_activity_summary_from_fields(activity)}
+    )
     logger.info(
         "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
         user_context.user_id,
@@ -858,6 +997,68 @@ class GetRecentActivitiesRequest(BaseModel):
     limit: int = 20
 
 
+class UpdateGoalsRequest(BaseModel):
+    action: str
+    goal: dict[str, object]
+    goal_id: str | None = None
+
+
+@app.post("/api/engine/update-goals")
+async def update_goals_endpoint(
+    payload: UpdateGoalsRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    if payload.action in ("update", "complete", "abandon") and not payload.goal_id:
+        raise HTTPException(
+            status_code=422,
+            detail="goal_id required for update/complete/abandon",
+        )
+    try:
+        result = await goal_service.apply_action(
+            user_context.user_id, payload.action, payload.goal, payload.goal_id, repo=repo
+        )
+    except InvalidGoalPayloadError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors) from exc
+    except UnknownGoalActionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("update_goals failed user_id=%s", user_context.user_id)
+        raise HTTPException(status_code=503, detail="Unable to update goals.") from exc
+    return result.model_dump(mode="json")
+
+
+class UpdateScheduleRequest(BaseModel):
+    weekly_pattern: dict[str, object] | None = None
+    overrides: list[dict[str, object]] | None = None
+
+
+@app.post("/api/engine/update-schedule")
+async def update_schedule_endpoint(
+    payload: UpdateScheduleRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    updated: list[str] = []
+    try:
+        if payload.weekly_pattern is not None:
+            schedule = ScheduleAvailability(user_id=user_id, weekly_pattern=payload.weekly_pattern)
+            await repo.upsert_schedule(schedule)
+            updated.append("weekly_pattern")
+        if payload.overrides:
+            for ov in payload.overrides:
+                override = ScheduleOverride.model_validate({"user_id": user_id, **ov})
+                await repo.upsert_schedule_override(override)
+            updated.append("overrides")
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("update_schedule failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Unable to update schedule.") from exc
+    return {"updated": updated}
+
+
 @app.post("/api/engine/get-recent-activities")
 async def get_recent_activities(
     payload: GetRecentActivitiesRequest,
@@ -875,6 +1076,127 @@ async def get_recent_activities(
         len(activities),
     )
     return {"activities": [activity.model_dump(mode="json") for activity in activities]}
+
+
+class SaveActivityFromTextRequest(BaseModel):
+    text: str = Field(min_length=1)
+    activity_id: str | None = None
+
+
+async def _activity_repo_call(awaitable, *, detail: str, log_message: str):
+    try:
+        return await awaitable
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("%s error_type=%s", log_message, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
+async def _update_activity_from_text(
+    user_id: str,
+    activity_id: str,
+    text: str,
+) -> Mapping[str, object]:
+    from backend.services.activity_text import (
+        ActivityTextExtractionUnavailable,
+        merge_activity_text_update,
+    )
+
+    try:
+        existing = await _activity_repo_call(
+            repo.get_activity(user_id, activity_id),
+            detail="Failed to load activity.",
+            log_message=f"get_activity failed for user_id={user_id} activity_id={activity_id}",
+        )
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    try:
+        updated = await merge_activity_text_update(existing, text)
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        activity = await _activity_repo_call(
+            repo.update_activity(updated),
+            detail="Failed to update activity.",
+            log_message=f"update_activity failed for user_id={user_id} activity_id={activity_id}",
+        )
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    except RuntimeError as exc:
+        logger.exception(
+            "update_activity failed for user_id=%s activity_id=%s", user_id, activity_id
+        )
+        raise HTTPException(status_code=503, detail="Failed to update activity.") from exc
+    logger.info(
+        "save_activity_from_text user_id=%s activity_id=%s status=updated", user_id, activity_id
+    )
+    return {"activity": activity.model_dump(mode="json"), "status": "updated"}
+
+
+@app.post("/api/engine/save-activity-from-text")
+async def save_activity_from_text(
+    payload: SaveActivityFromTextRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    from backend.services.activity_text import (
+        ActivityTextExtractionUnavailable,
+        build_activity_from_text,
+    )
+
+    if not payload.text.strip():
+        raise HTTPException(status_code=422, detail="Activity text must not be empty.")
+
+    if payload.activity_id is not None:
+        activity_id = payload.activity_id.strip()
+        if not activity_id:
+            raise HTTPException(status_code=422, detail="Activity id must not be empty.")
+        return await _update_activity_from_text(user_context.user_id, activity_id, payload.text)
+
+    try:
+        profile = await _activity_repo_call(
+            repo.get_athlete_profile(user_context.user_id),
+            detail="Failed to load athlete profile.",
+            log_message=f"get_athlete_profile failed for user_id={user_context.user_id}",
+        )
+    except RecordNotFoundError:
+        profile = _AthleteProfile(user_id=user_context.user_id)
+    thresholds = await _activity_repo_call(
+        repo.get_active_thresholds(user_context.user_id),
+        detail="Failed to load athlete thresholds.",
+        log_message=f"get_active_thresholds failed for user_id={user_context.user_id}",
+    )
+    try:
+        result = await build_activity_from_text(
+            payload.text,
+            user_id=user_context.user_id,
+            profile=profile,
+            thresholds=thresholds,
+        )
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if result.activity is None:
+        logger.info(
+            "save_activity_from_text user_id=%s status=needs_clarification missing=%s",
+            user_context.user_id,
+            result.missing,
+        )
+        return {
+            "missing": result.missing,
+            "raw_extraction": result.raw_extraction,
+            "status": "needs_clarification",
+        }
+    try:
+        activity = await _activity_repo_call(
+            repo.create_activity(result.activity),
+            detail="Failed to save activity.",
+            log_message=f"create_activity failed for user_id={user_context.user_id}",
+        )
+    except RuntimeError as exc:
+        logger.exception("create_activity failed for user_id=%s", user_context.user_id)
+        raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
+    logger.info("save_activity_from_text user_id=%s status=saved", user_context.user_id)
+    return {"activity": activity.model_dump(mode="json"), "status": "saved"}
 
 
 class GeneratePlanStructureRequest(BaseModel):
