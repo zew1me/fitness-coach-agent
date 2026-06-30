@@ -71,7 +71,7 @@ class GoalService:
             except ValidationError as exc:
                 raise InvalidGoalPayloadError(exc.errors()) from exc
             return await repo.create_goal(validated_goal)
-        if action in ("update", "complete", "abandon"):
+        if action == "update":
             existing_course_profile = None
             if goal.get("course_profile_notes") is not None and goal_id:
                 existing_goal = await repo.get_goal(goal_id, user_id)
@@ -81,10 +81,8 @@ class GoalService:
                 existing_course_profile=existing_course_profile,
             )
             goal_dict = _sanitize_goal_update_fields(goal_dict)
-            status_map = {"complete": "completed", "abandon": "abandoned"}
-            if s := status_map.get(action):
-                goal_dict["status"] = s
-            if action == "update" and not goal_dict:
+            goal_dict = {key: value for key, value in goal_dict.items() if value is not None}
+            if not goal_dict:
                 raise InvalidGoalPayloadError(
                     [
                         {
@@ -95,4 +93,7 @@ class GoalService:
                     ]
                 )
             return await repo.update_goal(goal_id or "", user_id, goal_dict)
+        status_map = {"complete": "completed", "abandon": "abandoned"}
+        if status := status_map.get(action):
+            return await repo.update_goal(goal_id or "", user_id, {"status": status})
         raise UnknownGoalActionError(f"Unknown action: {action}")

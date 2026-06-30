@@ -1010,7 +1010,7 @@ async def update_goals_endpoint(
 ) -> Mapping[str, object]:
     if payload.action in ("update", "complete", "abandon") and not payload.goal_id:
         raise HTTPException(
-            status_code=422,
+            status_code=400,
             detail="goal_id required for update/complete/abandon",
         )
     try:
@@ -1024,7 +1024,7 @@ async def update_goals_endpoint(
     except InvalidGoalPayloadError as exc:
         raise HTTPException(status_code=422, detail=exc.errors) from exc
     except UnknownGoalActionError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
