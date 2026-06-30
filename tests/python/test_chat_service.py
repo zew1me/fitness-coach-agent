@@ -6,8 +6,14 @@ import pytest
 from pydantic import ValidationError
 
 from backend.models.athlete import AthleteProfile
-from backend.models.chat import ChatMessage, ChatPersistRequest, ChatThread
-from backend.services.chat import ChatService
+from backend.models.chat import (
+    ChatMessage,
+    ChatModelState,
+    ChatModelStateReplaceRequest,
+    ChatPersistRequest,
+    ChatThread,
+)
+from backend.services.chat import ChatService, _decode_message_cursor, _encode_message_cursor
 
 
 class OnboardingRepo:
@@ -22,8 +28,12 @@ class OnboardingRepo:
         )
         self.create_calls: list[dict[str, Any]] = []
 
-    async def get_or_create_chat_thread(self, user_id: str) -> ChatThread:
-        return self.thread
+    async def get_or_create_chat_thread(
+        self, user_id: str, *, include_messages: bool = True
+    ) -> ChatThread:
+        if include_messages:
+            return self.thread
+        return self.thread.model_copy(update={"messages": []})
 
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         return AthleteProfile(user_id=user_id, coaching_state="onboarding")
@@ -182,6 +192,131 @@ async def test_persist_message_defaults_metadata_to_empty_dict() -> None:
     )
 
     assert repo.create_calls[0]["metadata"] == {}
+
+
+def test_message_cursor_round_trips_message_ids_with_delimiters() -> None:
+    created_at = datetime(2026, 4, 19, 12, 30, tzinfo=UTC)
+    message = ChatMessage(
+        content="Older message",
+        created_at=created_at,
+        id="message|with|pipes",
+        metadata={},
+        parts=[{"type": "text", "text": "Older message"}],
+        role="assistant",
+        thread_id="thread-1",
+        user_id="athlete-1",
+    )
+
+    cursor = _encode_message_cursor(message)
+
+    assert _decode_message_cursor(cursor) == (created_at, "message|with|pipes")
+
+
+class ModelStateRepo(OnboardingRepo):
+    def __init__(self) -> None:
+        super().__init__()
+        now = datetime(2026, 6, 20, tzinfo=UTC)
+        self.model_state = ChatModelState(
+            created_at=now,
+            thread_id="thread-1",
+            updated_at=now,
+            user_id="athlete-1",
+        )
+        self.thread_lookup_include_messages: list[bool] = []
+
+    async def get_or_create_chat_thread(
+        self, user_id: str, *, include_messages: bool = True
+    ) -> ChatThread:
+        self.thread_lookup_include_messages.append(include_messages)
+        return await super().get_or_create_chat_thread(user_id, include_messages=include_messages)
+
+    async def get_or_create_chat_model_state(self, *, thread_id: str, user_id: str):
+        assert thread_id == "thread-1"
+        assert user_id == "athlete-1"
+        return self.model_state
+
+    async def replace_chat_model_state(self, **kwargs):
+        replacement = kwargs["replacement"]
+        assert isinstance(replacement, ChatModelStateReplaceRequest)
+        assert replacement.expected_version == self.model_state.version
+        assert replacement.lease_id == self.model_state.lease_id
+        self.model_state = self.model_state.model_copy(
+            update={
+                "items": replacement.items,
+                "coaching_memory": replacement.coaching_memory,
+                "compaction_metadata": replacement.compaction_metadata,
+                "version": self.model_state.version + 1,
+            }
+        )
+        return self.model_state
+
+    async def acquire_chat_turn_lease(self, **kwargs):
+        self.model_state = self.model_state.model_copy(
+            update={"lease_id": kwargs["lease_id"], "version": self.model_state.version + 1}
+        )
+        return self.model_state
+
+    async def release_chat_turn_lease(self, **kwargs):
+        assert kwargs["lease_id"] == self.model_state.lease_id
+        self.model_state = self.model_state.model_copy(update={"lease_id": None})
+        return self.model_state
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_keeps_private_state_outside_thread_bootstrap() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    await service.get_model_state("athlete-1")
+    leased = await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    updated = await service.replace_model_state(
+        "athlete-1",
+        ChatModelStateReplaceRequest(
+            expected_version=leased.version,
+            lease_id="lease-1",
+            items=[{"role": "user", "content": "hello"}],
+            coaching_memory=[],
+            compaction_metadata={"reason": "seed"},
+        ),
+    )
+
+    assert updated.items == [{"role": "user", "content": "hello"}]
+    bootstrap = await service.bootstrap_thread("athlete-1")
+    assert "model_state" not in bootstrap.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_acquires_and_releases_turn_lease() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    leased = await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    released = await service.release_turn_lease("athlete-1", "lease-1")
+
+    assert leased.lease_id == "lease-1"
+    assert released.lease_id is None
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_uses_thread_lookup_without_messages() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    await service.get_model_state("athlete-1")
+    leased = await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    await service.replace_model_state(
+        "athlete-1",
+        ChatModelStateReplaceRequest(
+            expected_version=leased.version,
+            lease_id="lease-1",
+            items=[],
+            coaching_memory=[],
+            compaction_metadata={},
+        ),
+    )
+    await service.release_turn_lease("athlete-1", "lease-1")
+
+    assert repo.thread_lookup_include_messages == [False, False, False, False]
 
 
 def test_chat_persist_request_accepts_uuid_message_id() -> None:

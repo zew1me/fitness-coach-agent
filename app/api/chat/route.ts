@@ -8,7 +8,10 @@ import {
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
-import { chatRequestBodySchema } from "../../../lib/schemas";
+import {
+  chatRequestBodySchema,
+  type ChatRequestBody,
+} from "../../../lib/schemas";
 import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
@@ -119,6 +122,22 @@ function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
   return null;
 }
 
+function messagesForContextStrategy(
+  parsedBody: ChatRequestBody,
+  strategy: string,
+): UIMessage[] {
+  if (strategy === "full_history") {
+    if ("messages" in parsedBody) {
+      return parsedBody.messages as UIMessage[];
+    }
+    return [parsedBody.message] as UIMessage[];
+  }
+  if ("message" in parsedBody) {
+    return [parsedBody.message] as UIMessage[];
+  }
+  return parsedBody.messages.slice(-1) as UIMessage[];
+}
+
 async function persistUserMessage(
   request: Request,
   token: BrowserTokenResponse,
@@ -203,16 +222,22 @@ async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  let parsedBody;
+  let parsedBody: ChatRequestBody;
   try {
-    parsedBody = chatRequestBodySchema.parse(await request.json());
+    const serialized = await request.text();
+    if (new TextEncoder().encode(serialized).byteLength > 256 * 1024) {
+      return jsonError("Turn exceeds the 256 KiB request limit.", 413);
+    }
+    parsedBody = chatRequestBodySchema.parse(JSON.parse(serialized));
   } catch {
     return jsonError("Invalid request body.", 400);
   }
-  const messages = (parsedBody.messages ?? []) as UIMessage[];
+  const strategy = process.env["COACH_CONTEXT_STRATEGY"] ?? "session";
+  const messages = messagesForContextStrategy(parsedBody, strategy);
   Sentry.logger.info("chat turn start", {
     user_id: token.user_id,
     message_count: messages.length,
+    context_strategy: strategy,
   });
   const modelMessages = await appendImageExtractionsToMessages(
     convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
@@ -236,6 +261,7 @@ async function handleChatRequest(
     extraHeaders: vercelProtectionBypassHeaders(),
     messages: modelMessages,
     messagesAreModelSelected: true,
+    useDurableSession: strategy !== "full_history",
     signal: request.signal,
     streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
     ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),

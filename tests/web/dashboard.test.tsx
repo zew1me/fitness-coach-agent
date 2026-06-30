@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -39,6 +40,17 @@ vi.mock("@ai-sdk/react", () => ({
 }));
 
 import { CoachChat } from "../../components/coach-chat";
+
+function renderCoachChat(): ReturnType<typeof render> {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <CoachChat />
+    </QueryClientProvider>,
+  );
+}
 
 const originalFetch = globalThis.fetch;
 const uuidPattern =
@@ -97,7 +109,7 @@ describe("CoachChat", () => {
       ),
     ) as unknown as typeof fetch;
 
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Continue with magic link/i);
     expect(
@@ -117,7 +129,7 @@ describe("CoachChat", () => {
       ),
     ) as unknown as typeof fetch;
 
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Continue with magic link/i);
     expect(
@@ -160,7 +172,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Sorry, we're out running./i);
     expect(
@@ -230,7 +242,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/What should we work on next/i);
     expect(screen.getByText(/Welcome back coach-side/i)).toBeTruthy();
@@ -301,7 +313,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("History message 69");
     expect(screen.queryByText("History message 0")).toBeNull();
@@ -309,18 +321,345 @@ describe("CoachChat", () => {
       screen.getByRole("button", { name: /Show 10 older messages/i }),
     ).toBeTruthy();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: /Show 10 older messages/i }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("History message 0")).toBeTruthy();
+    const showOlder = screen.getByRole("button", {
+      name: /Show 10 older messages/i,
     });
+    await act(async () => {
+      fireEvent.click(showOlder);
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("History message 0")).toBeTruthy();
     await waitFor(() => {
       expect(
         screen.queryByRole("button", { name: /Show older messages/i }),
       ).toBeNull();
     });
+  });
+
+  it("does not prepend the same older page twice while pagination is in flight", async () => {
+    const threadMessages = Array.from({ length: 5 }, (_, index) => ({
+      id: `message-${index}`,
+      attachments: [],
+      content: `Recent message ${index}`,
+      created_at: `2026-04-04T09:0${index}:00Z`,
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    let resolveOlder:
+      | ((_value: Response | PromiseLike<Response>) => void)
+      | undefined;
+    const olderResponse = new Promise<Response>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              next_cursor: "cursor-1",
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: threadMessages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/messages?before=cursor-1&limit=50") {
+        return olderResponse;
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const showOlder = await screen.findByRole("button", {
+      name: /Show older messages/i,
+    });
+    fireEvent.click(showOlder);
+    fireEvent.click(showOlder);
+    resolveOlder?.(
+      new Response(
+        JSON.stringify({
+          messages: [
+            {
+              id: "older-1",
+              attachments: [],
+              content: "Older page message",
+              created_at: "2026-04-04T08:59:00Z",
+              metadata: {},
+              parts: [{ type: "text", text: "Older page message" }],
+              role: "assistant",
+              thread_id: "thread-1",
+              user_id: "athlete-1",
+            },
+          ],
+          next_cursor: null,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await screen.findByText("Older page message");
+
+    expect(
+      screen.getAllByText("Older page message", { exact: true }),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) =>
+          String(url) === "/api/chat/messages?before=cursor-1&limit=50",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not reveal stale older-page counts when the thread cursor changes before the page resolves", async () => {
+    const initialMessages = Array.from({ length: 50 }, (_, index) => ({
+      id: `message-${index}`,
+      attachments: [],
+      content: `Recent message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 9, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    const refreshedMessages = Array.from({ length: 70 }, (_, index) => ({
+      id: `refreshed-${index}`,
+      attachments: [],
+      content: `Refreshed message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 10, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    let threadLoads = 0;
+    let resolveOlder:
+      | ((_value: Response | PromiseLike<Response>) => void)
+      | undefined;
+    const olderResponse = new Promise<Response>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        threadLoads += 1;
+        const messages =
+          threadLoads === 1 ? initialMessages : refreshedMessages;
+        const nextCursor = threadLoads === 1 ? "cursor-1" : "cursor-2";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              next_cursor: nextCursor,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/messages?before=cursor-1&limit=50") {
+        return olderResponse;
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const showOlder = await screen.findByRole("button", {
+      name: /^Show older messages$/i,
+    });
+    fireEvent.click(showOlder);
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await act(async () => {
+      resolveOlder?.(
+        new Response(
+          JSON.stringify({
+            messages: [
+              {
+                id: "stale-older-1",
+                attachments: [],
+                content: "Stale older page message",
+                created_at: "2026-04-04T08:59:00Z",
+                metadata: {},
+                parts: [{ type: "text", text: "Stale older page message" }],
+                role: "assistant",
+                thread_id: "thread-1",
+                user_id: "athlete-1",
+              },
+            ],
+            next_cursor: null,
+          }),
+          { status: 200 },
+        ),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Show 10 older messages/i }),
+      ).toBeTruthy();
+    });
+    expect(screen.queryByText("Stale older page message")).toBeNull();
+  });
+
+  it("does not surface stale older-page errors after the thread cursor changes", async () => {
+    const initialMessages = Array.from({ length: 50 }, (_, index) => ({
+      id: `message-${index}`,
+      attachments: [],
+      content: `Recent message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 9, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    const refreshedMessages = Array.from({ length: 70 }, (_, index) => ({
+      id: `refreshed-${index}`,
+      attachments: [],
+      content: `Refreshed message ${index}`,
+      created_at: new Date(Date.UTC(2026, 3, 4, 10, index, 0)).toISOString(),
+      metadata: {},
+      role: index % 2 === 0 ? "user" : "assistant",
+      thread_id: "thread-1",
+      user_id: "athlete-1",
+    }));
+    let threadLoads = 0;
+    let rejectOlder: ((_reason?: unknown) => void) | undefined;
+    const olderResponse = new Promise<Response>((_, reject) => {
+      rejectOlder = reject;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        threadLoads += 1;
+        const messages =
+          threadLoads === 1 ? initialMessages : refreshedMessages;
+        const nextCursor = threadLoads === 1 ? "cursor-1" : "cursor-2";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              next_cursor: nextCursor,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/messages?before=cursor-1&limit=50") {
+        return olderResponse;
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const showOlder = await screen.findByRole("button", {
+      name: /^Show older messages$/i,
+    });
+    fireEvent.click(showOlder);
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await act(async () => {
+      rejectOlder?.(new Error("stale older page failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Refreshed message 69")).toBeTruthy();
+    });
+    expect(screen.queryByText("Unable to load older messages.")).toBeNull();
+    expect(screen.queryByText("stale older page failed")).toBeNull();
   });
 
   it("restores locally persisted chat history when the local thread endpoint is unavailable", async () => {
@@ -389,7 +728,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("Saved local training note.");
     expect(screen.queryByText(/Sorry, we're out running/i)).toBeNull();
@@ -490,7 +829,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("Canonical server note.");
     expect(screen.queryByText("Stale duplicate note.")).toBeNull();
@@ -576,7 +915,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText("Canonical server note.");
     await waitFor(() => {
@@ -658,7 +997,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Building your athlete profile/i);
     expect(screen.queryByText(userId)).toBeNull();
@@ -728,7 +1067,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByRole("heading", {
       name: /Start with your sport and goal/i,
@@ -810,7 +1149,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const starter = await screen.findByRole("button", {
       name: /Running base and consistency/i,
@@ -905,7 +1244,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Building your athlete profile/i);
     expect(screen.queryByText(new RegExp(userId))).toBeNull();
@@ -1039,7 +1378,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Here is today's ride/i);
     fireEvent.click(screen.getByRole("button", { name: /Account menu/i }));
@@ -1138,7 +1477,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, { target: { value: "I ran easy today." } });
@@ -1151,6 +1490,79 @@ describe("CoachChat", () => {
       });
     });
     expect(fetchMock).not.toHaveBeenCalledWith("/api/chat", expect.anything());
+  });
+
+  it("ignores rapid duplicate send events while the first send is in flight", async () => {
+    let resolveSend: (() => void) | null = null;
+    chatMocks.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const threadResponse = {
+      attachments_enabled: false,
+      profile_complete: true,
+      thread: {
+        id: "thread-1",
+        user_id: "athlete-1",
+        state: {},
+        created_at: "2026-04-04T09:00:00Z",
+        updated_at: "2026-04-04T09:00:00Z",
+        messages: [
+          {
+            id: "message-1",
+            attachments: [],
+            content: "Welcome back coach-side.",
+            created_at: "2026-04-04T09:00:00Z",
+            metadata: {
+              message_kind: "welcome",
+            },
+            role: "assistant",
+            thread_id: "thread-1",
+            user_id: "athlete-1",
+          },
+        ],
+      },
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read"],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(JSON.stringify(threadResponse), { status: 200 }),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    const sendButton = screen.getByRole("button", { name: /^Send$/i });
+    fireEvent.click(sendButton);
+    fireEvent.click(sendButton);
+
+    expect(chatMocks.sendMessage).toHaveBeenCalledOnce();
+
+    await act(() => Promise.resolve(resolveSend?.()));
   });
 
   it("shows a thread sync status while reloading after a sent message", async () => {
@@ -1225,7 +1637,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, { target: { value: "I ran easy today." } });
@@ -1310,7 +1722,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const input = await screen.findByPlaceholderText(/Ask your coach/i);
     vi.useFakeTimers();
@@ -1391,7 +1803,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Here's my ride summary/);
     const image = (await screen.findByAltText("ride.png")) as HTMLImageElement;
@@ -1466,12 +1878,144 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Welcome back coach-side/i);
     expect(
       screen.getByText(/Keep this one easy while I shape the plan/i),
     ).toBeTruthy();
+  });
+
+  it("does not replay previously persisted hook messages after a thread refresh", async () => {
+    chatMocks.messages.push(
+      {
+        id: "old-user-carbs",
+        parts: [{ text: "total carbs?", type: "text" }],
+        role: "user",
+      },
+      {
+        id: "old-assistant-carbs",
+        parts: [{ text: "~400-450 g total is a good target.", type: "text" }],
+        role: "assistant",
+      },
+    );
+    let threadLoads = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read"],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        threadLoads += 1;
+        const messages =
+          threadLoads === 1
+            ? [
+                {
+                  id: "old-user-carbs",
+                  attachments: [],
+                  content: "total carbs?",
+                  created_at: "2026-04-04T09:00:00Z",
+                  metadata: {},
+                  parts: [{ text: "total carbs?", type: "text" }],
+                  role: "user",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+                {
+                  id: "old-assistant-carbs",
+                  attachments: [],
+                  content: "~400-450 g total is a good target.",
+                  created_at: "2026-04-04T09:01:00Z",
+                  metadata: {},
+                  parts: [
+                    {
+                      text: "~400-450 g total is a good target.",
+                      type: "text",
+                    },
+                  ],
+                  role: "assistant",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+              ]
+            : [
+                {
+                  id: "fresh-user",
+                  attachments: [],
+                  content: "Hi again! fresh morning",
+                  created_at: "2026-04-04T10:00:00Z",
+                  metadata: {},
+                  parts: [{ text: "Hi again! fresh morning", type: "text" }],
+                  role: "user",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+                {
+                  id: "fresh-assistant",
+                  attachments: [],
+                  content: "Morning, Nigel -- good to see you.",
+                  created_at: "2026-04-04T10:01:00Z",
+                  metadata: {},
+                  parts: [
+                    {
+                      text: "Morning, Nigel -- good to see you.",
+                      type: "text",
+                    },
+                  ],
+                  role: "assistant",
+                  thread_id: "thread-1",
+                  user_id: "athlete-1",
+                },
+              ];
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T10:01:00Z",
+                messages,
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    await screen.findByText(/total carbs\?/i);
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "Hi again! fresh morning" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await screen.findByText(/Morning, Nigel -- good to see you/i);
+    await waitFor(() => {
+      expect(screen.queryByText(/total carbs\?/i)).toBeNull();
+      expect(
+        screen.queryByText(/~400-450 g total is a good target/i),
+      ).toBeNull();
+    });
   });
 
   it("renders friendly live tool status from the AI SDK useChat hook", async () => {
@@ -1547,7 +2091,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     await screen.findByText(/Welcome back coach-side/i);
     expect(screen.getByText(/Looking up your info/i)).toBeTruthy();
@@ -1653,7 +2197,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -1781,7 +2325,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -1896,7 +2440,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -2025,7 +2569,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const { container } = render(<CoachChat />);
+    const { container } = renderCoachChat();
 
     await screen.findByPlaceholderText(/Ask your coach/i);
     const fileInput = container.querySelector(
@@ -2172,7 +2716,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const textarea = await screen.findByPlaceholderText(/Ask your coach/i);
 
@@ -2257,7 +2801,7 @@ describe("CoachChat", () => {
     });
 
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    render(<CoachChat />);
+    renderCoachChat();
 
     const textarea = await screen.findByPlaceholderText(/Ask your coach/i);
     fireEvent.paste(textarea, {

@@ -96,6 +96,27 @@ def test_validate_vision_model_accepts_reasoning_models(model_name: str) -> None
     assert s.openai_vision_model == model_name
 
 
+@pytest.mark.parametrize("model_name", ["", "   "])
+def test_validate_vision_model_rejects_empty(model_name: str) -> None:
+    with pytest.raises(ValidationError, match="must not be empty or whitespace"):
+        Settings(openai_vision_model=model_name)
+
+
+@pytest.mark.parametrize("model_name", ["", "   "])
+def test_validate_activity_text_model_rejects_empty(model_name: str) -> None:
+    with pytest.raises(ValidationError, match="must not be empty or whitespace"):
+        Settings(openai_activity_text_model=model_name)
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "davinci", "gpt-5.4-mini", "o4-mini"],
+)
+def test_validate_activity_text_model_accepts_any_non_empty_model(model_name: str) -> None:
+    s = Settings(openai_activity_text_model=model_name)
+    assert s.openai_activity_text_model == model_name
+
+
 @pytest.mark.parametrize(
     ("status_code", "message", "expected"),
     [

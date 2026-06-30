@@ -33,6 +33,8 @@ class Activity(BaseModel):
     source: str = "manual"
     source_file_key: str | None = None
     raw_extraction: dict[str, Any] | None = None
+    summary_schema_version: int = 1
+    activity_summary: dict[str, Any] = Field(default_factory=dict)
 
     planned_workout_id: str | None = None
 
