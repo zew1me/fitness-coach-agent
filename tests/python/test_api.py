@@ -1,7 +1,7 @@
 import base64
 import logging
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, TypedDict, cast
 

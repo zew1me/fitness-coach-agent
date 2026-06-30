@@ -267,10 +267,6 @@ export function executeCoachTool(
     );
   }
 
-  if (name === "update_goals") {
-    return postEngine(context, "/api/engine/update-goals", engineInput(input));
-  }
-
   if (name === "update_athlete_profile") {
     return updateAthleteProfile(input, context);
   }
