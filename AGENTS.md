@@ -101,9 +101,11 @@ The legacy columns `chat_messages.content` (denormalized text mirror) and the se
 
 ### Unsupported file attachments → text (do not send to the model as `input_file`)
 
-OpenAI's Responses API only ingests images and PDFs. Athletes attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
+OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
 
-Contract: every non-image file part is converted to an `input_text` description that **preserves the link** (`public_url` / `object_key`) so the coach can still resolve it — files are never dropped. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
+Contract: **currently, every non-image file part — including PDFs — is converted to an `input_text` description** that preserves the link (`public_url` / `object_key`) so the coach can still resolve it. Files are never dropped. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
+
+Note: native PDF ingestion via `input_file` is possible but not yet implemented — PDFs are not currently an athlete-facing upload type. If PDF support is added, narrow `convertUnsupportedFilePartsToText` to skip `application/pdf` and ensure `fileContentItem` omits `filename` when referencing by URL (they are mutually exclusive in the API).
 
 **Durable session caveat.** The durable model state (`chat_model_states.items`, used when `COACH_CONTEXT_STRATEGY` ≠ `full_history`) replays every stored item each turn, so one poisoned `input_file` breaks the thread permanently. Two defenses, both required:
 
