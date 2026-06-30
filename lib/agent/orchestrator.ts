@@ -10,6 +10,7 @@ import * as Sentry from "@sentry/nextjs";
 import {
   createUIMessageStream,
   createUIMessageStreamResponse,
+  type UIMessageStreamWriter,
   type UIMessage,
 } from "ai";
 
@@ -62,6 +63,10 @@ const MODEL = "gpt-5.4-mini";
 const LAZY_SEED_TOKEN_BUDGET = 200_000;
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 const CHAT_TURN_LEASE_TTL_SECONDS = 900;
+const ACKNOWLEDGEMENT_PROMPT =
+  "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
+const EMPTY_MODEL_RESPONSE =
+  "I'm here - could you say a bit more about what you'd like to work on?";
 
 type PrepareDurableSessionOptions = {
   accessToken: string;
@@ -80,8 +85,55 @@ type PreparedDurableSession = {
   underlyingSession: SupabaseAgentSession;
 };
 
+type StreamTextState = {
+  lastToolName?: string;
+  textId: string;
+  textStarted: boolean;
+};
+
 function generateUuid(): string {
   return crypto.randomUUID();
+}
+
+function buildToolAcknowledgement(toolName: string | undefined): string {
+  const acknowledgements: Record<string, string> = {
+    adjust_plan:
+      "Done - I've adjusted your plan. Want to review the changes or tune anything else?",
+    calculate_zones:
+      "Done - I've calculated your zones. Want to use them for your next workout?",
+    estimate_thresholds:
+      "Done - I've estimated your thresholds. Want to refine them with more recent workout data?",
+    generate_training_plan:
+      "Done - I've generated your training plan. Want to review the first few sessions together?",
+    process_uploaded_file:
+      "Done - I've processed that file. Want me to use it to update your plan?",
+    recalibrate_thresholds:
+      "Done - I've recalibrated your thresholds. Want to review what changed?",
+    save_activity_from_text:
+      "Saved that activity. Want me to factor it into your plan?",
+    update_athlete_profile:
+      "Done - I've updated your profile. Want to review the changes or adjust anything else?",
+    update_goals:
+      "Done - I've updated your goals. Want me to adapt your training around them?",
+    update_schedule:
+      "Done - I've updated your schedule. Want me to adjust your upcoming workouts around it?",
+  };
+  return (
+    acknowledgements[toolName ?? ""] ??
+    "Done - that's saved. What would you like to do next?"
+  );
+}
+
+function writeDeterministicText(
+  writer: UIMessageStreamWriter,
+  state: StreamTextState,
+  text: string,
+): void {
+  if (!state.textStarted) {
+    writer.write({ type: "text-start", id: state.textId });
+    state.textStarted = true;
+  }
+  writer.write({ type: "text-delta", id: state.textId, delta: text });
 }
 
 function prepareBootstrapItems(
@@ -505,6 +557,55 @@ export function streamCoachTurn({
                   }
                   await result.completed;
                   recordStageUsage("lead", result.state.usage);
+
+                  const ranTool =
+                    runContext.toolCalled ||
+                    textState.lastToolName !== undefined;
+                  if (ranTool && !textState.textStarted && !signal?.aborted) {
+                    try {
+                      const acknowledgement = new Agent<CoachAgentRunContext>({
+                        name: "Coach acknowledgement",
+                        instructions: ACKNOWLEDGEMENT_PROMPT,
+                        model: MODEL,
+                        mcpServers: [],
+                        tools: [],
+                      });
+                      const followup = await runner.run(
+                        acknowledgement,
+                        result.output,
+                        {
+                          context: runContext,
+                          maxTurns: 2,
+                          ...(signal ? { signal } : {}),
+                          stream: true,
+                        },
+                      );
+                      for await (const event of followup) {
+                        writeAgentStreamEvent(event, writer, textState);
+                      }
+                      await followup.completed;
+                      recordStageUsage("lead-followup", followup.state.usage);
+                    } catch (error) {
+                      if (!signal?.aborted) {
+                        Sentry.captureException(error, {
+                          tags: { subsystem: "coach-followup" },
+                        });
+                        Sentry.logger.warn(
+                          "coach: acknowledgement follow-up failed; using deterministic fallback",
+                        );
+                      }
+                    }
+                  }
+
+                  if (!textState.textStarted && !signal?.aborted) {
+                    writeDeterministicText(
+                      writer,
+                      textState,
+                      ranTool
+                        ? buildToolAcknowledgement(textState.lastToolName)
+                        : EMPTY_MODEL_RESPONSE,
+                    );
+                  }
                 } finally {
                   if (tavilyServer !== null) await tavilyServer.close();
                 }
