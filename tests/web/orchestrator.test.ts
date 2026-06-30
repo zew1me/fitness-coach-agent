@@ -2,6 +2,7 @@ import type { UIMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { streamCoachTurn } from "../../lib/agent/orchestrator";
+import { runSpecialists } from "../../lib/agent/specialists";
 
 import { athleteContextFixture } from "./agent-fixtures";
 
@@ -502,5 +503,45 @@ describe("streamCoachTurn", () => {
     controller.abort();
     expect(leaseSignal?.aborted).toBe(true);
     expect(historySignal?.aborted).toBe(true);
+  });
+
+  it("degrades to lead-only when a specialist report fails schema validation", async () => {
+    // A specialist sometimes returns natural language for a zero-param tool's
+    // `input` (e.g. recalibrate_thresholds) — uncoercible by the preprocess
+    // layer, so specialistReportsSchema.parse throws.  The orchestrator's
+    // try/catch must swallow that and still run the lead coach, rather than
+    // killing the turn and surfacing an empty assistant bubble.
+    vi.mocked(runSpecialists).mockResolvedValueOnce([
+      {
+        confidence: "low",
+        proposedUpdates: [
+          {
+            // Natural language, not a JSON object string — fails superRefine.
+            input: "recalibrate the thresholds for me",
+            rationale: "Athlete asked to recalibrate.",
+            toolName: "recalibrate_thresholds",
+          },
+        ],
+        role: "workout",
+        risks: [],
+        summary: "Recalibrate thresholds.",
+      },
+    ] as unknown as Awaited<ReturnType<typeof runSpecialists>>);
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    // Turn survives: lead coach still runs and streams a response.
+    await expect(response.text()).resolves.toContain("Keep tomorrow easy.");
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(
+      orchestratorMocks.agentConfigs.find(
+        (config) => config["name"] === "Lead coach",
+      ),
+    ).toBeDefined();
   });
 });

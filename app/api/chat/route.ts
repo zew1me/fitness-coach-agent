@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/nextjs";
 import { type UIMessage } from "ai";
+import { after } from "next/server";
 
 import {
   appendImageExtractionsToMessages,
@@ -269,6 +270,23 @@ async function handleChatRequest(
 }
 
 export async function POST(request: Request): Promise<Response> {
+  after(async () => {
+    try {
+      const flushed = await Sentry.flush(5000);
+      if (!flushed) {
+        console.warn("[chat] Sentry.flush timed out; some spans may be lost");
+        Sentry.logger.warn(
+          "chat: Sentry.flush timed out; some spans may be lost",
+        );
+      }
+    } catch (error) {
+      console.error("[chat] Sentry.flush threw unexpectedly:", error);
+      Sentry.logger.error("chat: Sentry.flush threw unexpectedly", {
+        error: String(error),
+      });
+    }
+  });
+
   let token: BrowserTokenResponse | null;
   try {
     token = await loadBrowserToken(request);
