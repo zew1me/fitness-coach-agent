@@ -66,7 +66,7 @@ const CHAT_TURN_LEASE_TTL_SECONDS = 900;
 const ACKNOWLEDGEMENT_PROMPT =
   "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
 const EMPTY_MODEL_RESPONSE =
-  "I'm here - could you say a bit more about what you'd like to work on?";
+  "Hey, can you remind me of where we are at?";
 
 type PrepareDurableSessionOptions = {
   accessToken: string;
