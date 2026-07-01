@@ -100,23 +100,23 @@ function buildToolAcknowledgement(toolName: string | undefined): string {
     adjust_plan:
       "I've adjusted your plan. Want to review the changes or tune anything else?",
     calculate_zones:
-      "Done - I've calculated your zones. Want to use them for your next workout?",
+      "Ok I've made some tweaks to your targets.",
     estimate_thresholds:
-      "Done - I've estimated your thresholds. Want to refine them with more recent workout data?",
+      "Thanks, I've factored the data you've shared into my notes.",
     generate_training_plan:
-      "Done - I've generated your training plan. Want to review the first few sessions together?",
+      "I've got a fresh training for you.",
     process_uploaded_file:
-      "Done - I've processed that file. Want me to use it to update your plan?",
+      "I've processed that file.",
     recalibrate_thresholds:
-      "Done - I've recalibrated your thresholds. Want to review what changed?",
+      "I made some adjustments to my notes.",
     save_activity_from_text:
-      "Saved that activity. Want me to factor it into your plan?",
+      "I took note of that activity.",
     update_athlete_profile:
-      "Done - I've updated your profile. Want to review the changes or adjust anything else?",
+      "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
     update_goals:
-      "Done - I've updated your goals. Want me to adapt your training around them?",
+      "Ok, I'm tracking that as a goal of yours.",
     update_schedule:
-      "Done - I've updated your schedule. Want me to adjust your upcoming workouts around it?",
+      "Ok, made some notes based on your availability. We can use this to adjust your upcoming workouts.",
   };
   return (
     acknowledgements[toolName ?? ""] ??
