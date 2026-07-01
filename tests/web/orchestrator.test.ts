@@ -404,7 +404,7 @@ describe("streamCoachTurn", () => {
     });
 
     await expect(response.text()).resolves.toContain(
-      "Done - I've updated your profile. Want to review the changes or adjust anything else?",
+      "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
     );
     expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
 
@@ -414,7 +414,7 @@ describe("streamCoachTurn", () => {
       >
     ).find(([url]) => String(url).endsWith("/api/chat/messages"));
     expect(String(persistCall?.[1]?.body)).toContain(
-      "Done - I've updated your profile. Want to review the changes or adjust anything else?",
+      "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
     );
   });
 
