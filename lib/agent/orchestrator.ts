@@ -65,8 +65,7 @@ const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 const CHAT_TURN_LEASE_TTL_SECONDS = 900;
 const ACKNOWLEDGEMENT_PROMPT =
   "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
-const EMPTY_MODEL_RESPONSE =
-  "Hey, can you remind me of where we are at?";
+const EMPTY_MODEL_RESPONSE = "Hey, can you remind me of where we are at?";
 
 type PrepareDurableSessionOptions = {
   accessToken: string;
@@ -99,28 +98,21 @@ function buildToolAcknowledgement(toolName: string | undefined): string {
   const acknowledgements: Record<string, string> = {
     adjust_plan:
       "I've adjusted your plan. Want to review the changes or tune anything else?",
-    calculate_zones:
-      "Ok I've made some tweaks to your targets.",
+    calculate_zones: "Ok I've made some tweaks to your targets.",
     estimate_thresholds:
       "Thanks, I've factored the data you've shared into my notes.",
-    generate_training_plan:
-      "I've got a fresh training for you.",
-    process_uploaded_file:
-      "I've processed that file.",
-    recalibrate_thresholds:
-      "I made some adjustments to my notes.",
-    save_activity_from_text:
-      "I took note of that activity.",
+    generate_training_plan: "I've got a fresh training for you.",
+    process_uploaded_file: "I've processed that file.",
+    recalibrate_thresholds: "I made some adjustments to my notes.",
+    save_activity_from_text: "I took note of that activity.",
     update_athlete_profile:
       "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
-    update_goals:
-      "Ok, I'm tracking that as a goal of yours.",
+    update_goals: "Ok, I'm tracking that as a goal of yours.",
     update_schedule:
       "Ok, made some notes based on your availability. We can use this to adjust your upcoming workouts.",
   };
   return (
-    acknowledgements[toolName ?? ""] ??
-    "Done - that's saved. What would you like to do next?"
+    acknowledgements[toolName ?? ""] ?? "Done. What would you like to do next?"
   );
 }
 
