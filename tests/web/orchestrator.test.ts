@@ -418,6 +418,35 @@ describe("streamCoachTurn", () => {
     );
   });
 
+  it("writes the generic fallback when a no-tool turn is silent", async () => {
+    orchestratorMocks.runEventSequences.push([]);
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    await expect(response.text()).resolves.toContain(
+      "Hey, can you remind me of where we are at?",
+    );
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain(
+      "Hey, can you remind me of where we are at?",
+    );
+  });
+
   it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {
     const historyMessages = Array.from({ length: 60 }, (_, index) => ({
       id: `history-${index}`,
