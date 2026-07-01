@@ -999,7 +999,7 @@ class GetRecentActivitiesRequest(BaseModel):
 
 class UpdateGoalsRequest(BaseModel):
     action: str
-    goal: dict[str, object]
+    goal: dict[str, object] | None = None
     goal_id: str | None = None
 
 
@@ -1010,19 +1010,25 @@ async def update_goals_endpoint(
 ) -> Mapping[str, object]:
     if payload.action in ("update", "complete", "abandon") and not payload.goal_id:
         raise HTTPException(
-            status_code=422,
+            status_code=400,
             detail="goal_id required for update/complete/abandon",
         )
     try:
         result = await goal_service.apply_action(
-            user_context.user_id, payload.action, payload.goal, payload.goal_id, repo=repo
+            user_context.user_id,
+            payload.action,
+            payload.goal or {},
+            payload.goal_id,
+            repo=repo,
         )
     except InvalidGoalPayloadError as exc:
         raise HTTPException(status_code=422, detail=exc.errors) from exc
     except UnknownGoalActionError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("update_goals failed user_id=%s", user_context.user_id)
         raise HTTPException(status_code=503, detail="Unable to update goals.") from exc

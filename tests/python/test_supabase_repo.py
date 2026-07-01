@@ -174,6 +174,7 @@ class FakeSupabaseClient:
         chat_attachment_rows: list[dict[str, object]] | None = None,
         chat_model_state_rows: list[dict[str, object]] | None = None,
         daily_load_snapshot_rows: list[dict[str, object]] | None = None,
+        goal_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._tables = {
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
@@ -184,6 +185,7 @@ class FakeSupabaseClient:
             "chat_messages": FakeTableQuery(chat_message_rows or []),
             "chat_attachments": FakeTableQuery(chat_attachment_rows or []),
             "chat_model_states": FakeTableQuery(chat_model_state_rows or []),
+            "goals": FakeTableQuery(goal_rows or []),
         }
 
     def table(self, table_name: str) -> FakeTableQuery:
@@ -537,6 +539,78 @@ async def test_update_athlete_profile_fields_drops_unknown_threshold_sources() -
     assert profile.max_hr_source is None
     assert profile.weight_source is None
     assert profile.nutrition_notes == "Still save the valid sibling field"
+
+
+@pytest.mark.asyncio
+async def test_create_goal_persists_row_with_generated_id() -> None:
+    from backend.models.training import Goal
+
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    created = await repo.create_goal(
+        Goal(user_id="athlete-1", goal_type="event", title="A race", sport="cycling")
+    )
+
+    assert created.id is not None
+    assert created.user_id == "athlete-1"
+    assert created.title == "A race"
+
+
+@pytest.mark.asyncio
+async def test_get_goal_is_scoped_to_owning_user() -> None:
+    client = FakeSupabaseClient(
+        goal_rows=[
+            {
+                "id": "goal-1",
+                "user_id": "athlete-1",
+                "goal_type": "event",
+                "title": "Other athlete goal",
+            },
+            {
+                "id": "goal-1",
+                "user_id": "athlete-2",
+                "goal_type": "event",
+                "title": "Own goal",
+                "course_profile": {"terrain": "trail"},
+            },
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    goal = await repo.get_goal("goal-1", "athlete-2")
+
+    assert goal.user_id == "athlete-2"
+    assert goal.title == "Own goal"
+    assert goal.course_profile == {"terrain": "trail"}
+
+
+@pytest.mark.asyncio
+async def test_update_goal_is_scoped_to_owning_user() -> None:
+    """A caller cannot mutate another athlete's goal by passing its id."""
+    from backend.models.training import Goal
+
+    client = FakeSupabaseClient(
+        goal_rows=[
+            {
+                "id": "goal-1",
+                "user_id": "athlete-2",
+                "goal_type": "event",
+                "title": "Someone else's race",
+                "status": "active",
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    with pytest.raises(RecordNotFoundError):
+        await repo.update_goal("goal-1", "athlete-1", {"status": "abandoned"})
+
+    # The owner can update it, and only the provided field changes.
+    updated = await repo.update_goal("goal-1", "athlete-2", {"status": "completed"})
+    assert isinstance(updated, Goal)
+    assert updated.status == "completed"
+    assert updated.title == "Someone else's race"
 
 
 @pytest.mark.asyncio
