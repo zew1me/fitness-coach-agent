@@ -98,7 +98,7 @@ function generateUuid(): string {
 function buildToolAcknowledgement(toolName: string | undefined): string {
   const acknowledgements: Record<string, string> = {
     adjust_plan:
-      "Done - I've adjusted your plan. Want to review the changes or tune anything else?",
+      "I've adjusted your plan. Want to review the changes or tune anything else?",
     calculate_zones:
       "Done - I've calculated your zones. Want to use them for your next workout?",
     estimate_thresholds:
