@@ -9,6 +9,7 @@
 - `20260624055541_specialization_pct_nullable.sql` — nullable sport specialization for multi-sport athletes
 - `20260625172251_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
 - `20260626000000_activity_summary.sql` — rich activity summary persistence
+- `20260702000000_agent_emails.sql` — inbound agent email storage for autonomous preview testing
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -190,6 +191,27 @@ check constraint to include `tcx_upload`.
 time so GPX/FIT/text-derived activities can retain coaching-grade aggregates,
 estimates, confidence scores, source quality, fueling, subjective notes, and
 distribution summaries without retaining raw time-series files indefinitely.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally).
+
+## 20260702000000 — agent email inbox rows (2026-07-02)
+
+**File:** `supabase/migrations/20260702000000_agent_emails.sql`
+
+**Change:** Creates `public.agent_emails` for signed Mailgun inbound email
+payloads. Rows store recipient, sender, subject, text and HTML bodies, raw
+Mailgun metadata, and `consumed_at` for reader tooling. The migration adds
+recipient/time indexes for newest-first lookup and unconsumed inbox queries.
+
+**Why:** Issue #264 needs agents to receive OTP, magic-link, and preview-test
+emails autonomously. Storing the small inbound payloads in Supabase keeps the
+flow on the existing Vercel/Supabase stack and avoids object storage for
+messages that should be short-lived.
+
+**Security note:** Row level security is enabled with no browser-facing
+policies. Ingestion and reader tooling must use server-only or local trusted
+service role credentials.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally).
