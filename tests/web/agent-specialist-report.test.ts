@@ -1,7 +1,10 @@
 import { zodSchema } from "ai";
 import { describe, expect, it } from "vitest";
 
-import { specialistReportSchema } from "../../lib/agent/orchestration-types";
+import {
+  specialistReportSchema,
+  specialistReportWireSchema,
+} from "../../lib/agent/orchestration-types";
 
 describe("specialistReportSchema", () => {
   it("accepts a valid specialist report with approved proposed updates", () => {
@@ -208,7 +211,13 @@ describe("specialistReportSchema", () => {
   });
 
   it("emits an OpenAI-compatible schema for structured outputs", async () => {
-    const jsonSchema = (await zodSchema(specialistReportSchema).jsonSchema) as {
+    // specialistReportWireSchema is what's actually passed as an Agent's
+    // outputType (see lib/agent/specialists.ts) — specialistReportSchema's
+    // extra superRefine checks aren't expressible as JSON Schema and would
+    // never be enforced by OpenAI's structured outputs anyway, so this must
+    // assert against the wire schema, not the full one.
+    const jsonSchema = (await zodSchema(specialistReportWireSchema)
+      .jsonSchema) as {
       properties?: Record<
         string,
         { items?: { properties?: Record<string, { type?: unknown }> } }

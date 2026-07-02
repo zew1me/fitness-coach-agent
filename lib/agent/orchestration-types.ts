@@ -211,14 +211,25 @@ const proposedUpdateInputSchema = z.preprocess(
   z.string().min(2),
 );
 
-export const proposedUpdateSchema = z
+// The OpenAI Agents SDK evaluates its own `outputType.parse()` the moment
+// `result.finalOutput` is *accessed* (not when `run()` resolves), so any
+// schema this feeds as `outputType` must not include our custom superRefine
+// checks below — those can't be expressed as JSON Schema, so OpenAI's
+// structured-output guarantee can't enforce them, and a refinement failure
+// there would throw before our own repair logic (repairSpecialistReport)
+// ever sees the raw data. proposedUpdateWireSchema is the structural-only
+// schema safe to use as `outputType`; proposedUpdateSchema below layers the
+// semantic refinements on top, applied by us afterward.
+const proposedUpdateWireSchema = z
   .object({
     input: proposedUpdateInputSchema,
     rationale: z.string().min(1),
     toolName: proposedWriteToolNameSchema,
   })
-  .strict()
-  .superRefine((update, context) => {
+  .strict();
+
+export const proposedUpdateSchema = proposedUpdateWireSchema.superRefine(
+  (update, context) => {
     let parsed: unknown;
     try {
       parsed = JSON.parse(update.input);
@@ -263,7 +274,21 @@ export const proposedUpdateSchema = z
         context.addIssue({ ...issue, path: ["input", ...issue.path] });
       }
     }
-  });
+  },
+);
+
+// Structural-only schema — safe to pass as an Agent's `outputType`. See the
+// comment on proposedUpdateWireSchema above for why the semantic refinements
+// must not be included here.
+export const specialistReportWireSchema = z
+  .object({
+    confidence: z.enum(["low", "medium", "high"]),
+    proposedUpdates: z.array(proposedUpdateWireSchema),
+    risks: z.array(z.string()),
+    role: internalSpecialistRoleSchema,
+    summary: z.string().min(1),
+  })
+  .strict();
 
 export const specialistReportSchema = z
   .object({
@@ -275,9 +300,80 @@ export const specialistReportSchema = z
   })
   .strict();
 
-export const specialistReportsSchema = z.array(specialistReportSchema);
-
 export type SpecialistReport = z.infer<typeof specialistReportSchema>;
+
+export type SpecialistReportRepairResult = {
+  droppedProposedUpdateCount: number;
+  report: SpecialistReport | null;
+};
+
+function extractProposedUpdatesArray(raw: unknown): unknown[] | null {
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    !("proposedUpdates" in raw) ||
+    !Array.isArray((raw as { proposedUpdates: unknown }).proposedUpdates)
+  ) {
+    return null;
+  }
+  return (raw as { proposedUpdates: unknown[] }).proposedUpdates;
+}
+
+function filterValidProposedUpdates(updates: unknown[]): {
+  droppedCount: number;
+  validUpdates: unknown[];
+} {
+  const validUpdates: unknown[] = [];
+  let droppedCount = 0;
+  for (const update of updates) {
+    const result = proposedUpdateSchema.safeParse(update);
+    if (result.success) {
+      validUpdates.push(result.data);
+    } else {
+      droppedCount += 1;
+    }
+  }
+  return { droppedCount, validUpdates };
+}
+
+// A specialist model occasionally proposes one malformed update (wrong tool
+// shape, unparseable JSON) inside an otherwise-valid report. Rejecting the
+// whole report over one bad proposedUpdate would throw away the specialist's
+// summary/risks/confidence too, so this repairs the report by dropping only
+// the proposedUpdates that fail validation and re-validating what remains.
+// If a raw value isn't a plausible report at all, or fails validation for
+// reasons other than its proposedUpdates, it's unrecoverable.
+export function repairSpecialistReport(
+  raw: unknown,
+): SpecialistReportRepairResult {
+  const direct = specialistReportSchema.safeParse(raw);
+  if (direct.success) {
+    return { droppedProposedUpdateCount: 0, report: direct.data };
+  }
+
+  const proposedUpdates = extractProposedUpdatesArray(raw);
+  if (proposedUpdates === null) {
+    return { droppedProposedUpdateCount: 0, report: null };
+  }
+
+  const { droppedCount, validUpdates } =
+    filterValidProposedUpdates(proposedUpdates);
+  if (droppedCount === 0) {
+    // Every proposedUpdate was individually valid, so the original failure
+    // came from elsewhere in the report — not something we can repair.
+    return { droppedProposedUpdateCount: 0, report: null };
+  }
+
+  const repaired = specialistReportSchema.safeParse({
+    ...(raw as Record<string, unknown>),
+    proposedUpdates: validUpdates,
+  });
+  if (!repaired.success) {
+    return { droppedProposedUpdateCount: 0, report: null };
+  }
+
+  return { droppedProposedUpdateCount: droppedCount, report: repaired.data };
+}
 
 type IntakeContextSlice = {
   goals: AthleteContextBundle["goals"];

@@ -20,6 +20,8 @@ const agentsMocks = vi.hoisted(() => {
       },
     }),
   );
+  const roleName = (agent: { name: string }): string =>
+    agent.name.toLowerCase().replace(" specialist", "");
 
   class Agent {
     name: string;
@@ -30,7 +32,7 @@ const agentsMocks = vi.hoisted(() => {
     }
   }
 
-  return { Agent, constructedAgents, run };
+  return { Agent, constructedAgents, roleName, run };
 });
 
 vi.mock("@openai/agents", () => ({
@@ -190,5 +192,80 @@ describe("runSpecialists with the Agents SDK", () => {
     expect(instructions).toContain('<data-block name="relevantMemory">');
     expect(instructions).toContain("\\`\\`\\`");
     expect(instructions).not.toContain("Lead-generated brief:");
+  });
+
+  it("keeps other specialists' reports when one specialist's report fails schema validation", async () => {
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.resolve({
+          state: { usage: undefined },
+          finalOutput: {
+            confidence: "low",
+            proposedUpdates: [],
+            risks: [],
+            role: "not-a-real-role",
+            summary: "Malformed report.",
+          },
+        });
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "high",
+          proposedUpdates: [],
+          risks: [],
+          role: agentsMocks.roleName(agent),
+          summary: `${agent.name} report`,
+        },
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual(["workout"]);
+  });
+
+  it("keeps other specialists' reports when one specialist's execution throws", async () => {
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.reject(new Error("Model request timed out"));
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "high",
+          proposedUpdates: [],
+          risks: [],
+          role: agentsMocks.roleName(agent),
+          summary: `${agent.name} report`,
+        },
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual(["workout"]);
   });
 });
