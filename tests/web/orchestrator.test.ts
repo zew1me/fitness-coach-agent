@@ -447,6 +447,41 @@ describe("streamCoachTurn", () => {
     );
   });
 
+  it("writes a visible fallback text part when the model errors before streaming text", async () => {
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(new Error("rate limit"));
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+    });
+
+    await response.text();
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    const body = JSON.parse(String(persistCall?.[1]?.body)) as {
+      parts: Array<Record<string, unknown>>;
+    };
+    expect(body.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: "Coach is unavailable right now. Please try again.",
+          type: "text",
+        }),
+      ]),
+    );
+  });
+
   it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {
     const historyMessages = Array.from({ length: 60 }, (_, index) => ({
       id: `history-${index}`,

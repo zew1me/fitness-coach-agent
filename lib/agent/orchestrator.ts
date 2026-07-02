@@ -623,6 +623,9 @@ export function streamCoachTurn({
           writer.write({ type: "abort", reason: "request aborted" });
           return;
         }
+        if (!textState.textStarted) {
+          writeDeterministicText(writer, textState, streamErrorMessage);
+        }
         finishAgentText(writer, textState);
         writer.write({ type: "error", errorText: streamErrorMessage });
         writer.write({ type: "finish-step" });

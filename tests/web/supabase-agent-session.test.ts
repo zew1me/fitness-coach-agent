@@ -252,6 +252,58 @@ describe("SupabaseAgentSession", () => {
       },
     ]);
   });
+
+  it("rewrites historical function calls to the Responses API call_id shape for model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      arguments: "{}",
+      status: "completed",
+    } as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toMatchObject({
+      type: "function_call",
+      call_id: "call-1",
+      name: "update_athlete_profile",
+      arguments: "{}",
+      status: "completed",
+    });
+    expect(prepared).not.toHaveProperty("callId");
+  });
+
+  it("rewrites historical function call results to function_call_output for model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call_result",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      output: JSON.stringify({ status: "pending_implementation" }),
+      status: "completed",
+    } as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toMatchObject({
+      type: "function_call_output",
+      call_id: "call-1",
+      output: JSON.stringify({ status: "pending_implementation" }),
+      status: "completed",
+    });
+    expect(prepared).not.toHaveProperty("callId");
+    expect(prepared).not.toHaveProperty("name");
+  });
 });
 
 describe("DurableCompactionSession", () => {

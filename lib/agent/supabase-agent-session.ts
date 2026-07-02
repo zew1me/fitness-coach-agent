@@ -99,6 +99,31 @@ function unsupportedFileContentToText(part: { type: string }): {
   };
 }
 
+function prepareFunctionItemForModelInput(
+  item: AgentInputItem,
+): AgentInputItem {
+  if (!("type" in item)) return item;
+  const record = item as unknown as Record<string, unknown>;
+  const callId = record["callId"] ?? record["call_id"];
+  if (typeof callId !== "string") return item;
+  if (item.type === "function_call") {
+    const rest = { ...record };
+    delete rest["callId"];
+    return { ...rest, call_id: callId } as unknown as AgentInputItem;
+  }
+  if (item.type === "function_call_result") {
+    const rest = { ...record };
+    delete rest["callId"];
+    delete rest["name"];
+    return {
+      ...rest,
+      type: "function_call_output",
+      call_id: callId,
+    } as unknown as AgentInputItem;
+  }
+  return item;
+}
+
 type OpenAICompactOptions = Partial<
   Pick<
     OpenAI.Responses.ResponseCompactParams,
@@ -242,6 +267,8 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   }
 
   prepareHistoryItemForModelInput(item: AgentInputItem): AgentInputItem {
+    const preparedFunctionItem = prepareFunctionItemForModelInput(item);
+    if (preparedFunctionItem !== item) return preparedFunctionItem;
     if (
       !("role" in item) ||
       item.role !== "user" ||
