@@ -1075,7 +1075,8 @@ def _recovery_log_from_entry(entry: Mapping[str, object], user_id: str) -> Recov
     fields = {key: value for key, value in entry.items() if key != "user_id"}
     if fields.get("log_date") is None:
         fields["log_date"] = datetime.now(UTC).date().isoformat()
-    return RecoveryLog.model_validate({**fields, "user_id": user_id})
+    fields["user_id"] = user_id
+    return RecoveryLog.model_validate(fields)
 
 
 @app.post("/api/engine/save-recovery-data")
