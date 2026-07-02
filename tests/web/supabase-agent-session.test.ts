@@ -252,6 +252,58 @@ describe("SupabaseAgentSession", () => {
       },
     ]);
   });
+
+  it("rewrites historical function calls to the Responses API call_id shape for model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      arguments: "{}",
+      status: "completed",
+    } as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toMatchObject({
+      type: "function_call",
+      call_id: "call-1",
+      name: "update_athlete_profile",
+      arguments: "{}",
+      status: "completed",
+    });
+    expect(prepared).not.toHaveProperty("callId");
+  });
+
+  it("rewrites historical function call results to function_call_output for model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call_result",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      output: JSON.stringify({ status: "pending_implementation" }),
+      status: "completed",
+    } as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toMatchObject({
+      type: "function_call_output",
+      call_id: "call-1",
+      output: JSON.stringify({ status: "pending_implementation" }),
+      status: "completed",
+    });
+    expect(prepared).not.toHaveProperty("callId");
+    expect(prepared).not.toHaveProperty("name");
+  });
 });
 
 describe("DurableCompactionSession", () => {
@@ -416,7 +468,7 @@ describe("DurableCompactionSession", () => {
     );
   });
 
-  it("forwards compaction request options other than force to the API", async () => {
+  it("maps compaction request options to the OpenAI compact API shape", async () => {
     const output = [userItem("compacted")];
     const underlying = {
       addItems: vi.fn(),
@@ -456,11 +508,14 @@ describe("DurableCompactionSession", () => {
 
     expect(client.responses.compact).toHaveBeenCalledWith(
       expect.objectContaining({
-        compactionMode: "input",
-        responseId: "resp_123",
-        store: true,
+        previous_response_id: "resp_123",
       }),
     );
+    const request = client.responses.compact.mock.calls[0]?.[0];
+    expect(request).not.toHaveProperty("force");
+    expect(request).not.toHaveProperty("compactionMode");
+    expect(request).not.toHaveProperty("responseId");
+    expect(request).not.toHaveProperty("store");
   });
 
   it("throws when compaction returns an empty output array", async () => {

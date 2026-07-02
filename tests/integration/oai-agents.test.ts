@@ -11,10 +11,19 @@
  *   2. Streaming lead-coach text turn
  *   3. End-to-end: specialists → lead coach text
  */
-import { Agent, Runner, run } from "@openai/agents";
+import {
+  Agent,
+  Runner,
+  run,
+  type AgentInputItem,
+  type SessionHistoryRewriteArgs,
+  type SessionHistoryRewriteAwareSession,
+} from "@openai/agents";
+import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 
 import { specialistReportSchema } from "../../lib/agent/orchestration-types";
+import { DurableCompactionSession } from "../../lib/agent/supabase-agent-session";
 
 const MODEL = "gpt-5-mini-2025-08-07";
 
@@ -26,6 +35,43 @@ const MINIMAL_USER_INPUT = [
     ],
   },
 ];
+
+class InMemoryCompactionSession implements SessionHistoryRewriteAwareSession {
+  constructor(private items: AgentInputItem[]) {}
+
+  getSessionId(): Promise<string> {
+    return Promise.resolve("oai-compaction-response-id-test");
+  }
+
+  getItems(limit?: number): Promise<AgentInputItem[]> {
+    return Promise.resolve(
+      limit === undefined ? [...this.items] : this.items.slice(-limit),
+    );
+  }
+
+  addItems(items: AgentInputItem[]): Promise<void> {
+    this.items.push(...items);
+    return Promise.resolve();
+  }
+
+  popItem(): Promise<AgentInputItem | undefined> {
+    return Promise.resolve(this.items.pop());
+  }
+
+  clearSession(): Promise<void> {
+    this.items = [];
+    return Promise.resolve();
+  }
+
+  replaceAll(items: AgentInputItem[]): Promise<void> {
+    this.items = structuredClone(items);
+    return Promise.resolve();
+  }
+
+  applyHistoryMutations(_args: SessionHistoryRewriteArgs): Promise<void> {
+    return Promise.resolve();
+  }
+}
 
 describe("OpenAI Agents SDK — Responses API integration", () => {
   it("accepts the specialist structured-output schema without a 400", async () => {
@@ -125,5 +171,35 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       `Saw event types: ${[...eventTypes].join(", ")}`,
     ).toBe(true);
     expect(eventTypes.has("response.output_text.delta")).toBe(false);
+  }, 60_000);
+
+  it("compacts with an Agents responseId without sending an unknown OpenAI parameter", async () => {
+    const client = new OpenAI();
+    const previous = await client.responses.create({
+      model: MODEL,
+      input: "Reply with exactly READY.",
+      store: true,
+    });
+    const store = new InMemoryCompactionSession(
+      MINIMAL_USER_INPUT as AgentInputItem[],
+    );
+    const session = new DurableCompactionSession({
+      underlyingSession: store,
+      client,
+      model: MODEL,
+    });
+
+    const result = await session.runCompaction({
+      force: true,
+      compactionMode: "input",
+      responseId: previous.id,
+      store: true,
+    });
+
+    expect(result).not.toBeNull();
+    const compacted = await store.getItems();
+    expect(
+      compacted.some((item) => "type" in item && item.type === "compaction"),
+    ).toBe(true);
   }, 60_000);
 });

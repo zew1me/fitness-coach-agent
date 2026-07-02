@@ -99,6 +99,67 @@ function unsupportedFileContentToText(part: { type: string }): {
   };
 }
 
+function prepareFunctionItemForModelInput(
+  item: AgentInputItem,
+): AgentInputItem {
+  if (!("type" in item)) return item;
+  const record = item as unknown as Record<string, unknown>;
+  const callId = record["callId"] ?? record["call_id"];
+  if (typeof callId !== "string") return item;
+  if (item.type === "function_call") {
+    const rest = { ...record };
+    delete rest["callId"];
+    return { ...rest, call_id: callId } as unknown as AgentInputItem;
+  }
+  if (item.type === "function_call_result") {
+    const rest = { ...record };
+    delete rest["callId"];
+    delete rest["name"];
+    return {
+      ...rest,
+      type: "function_call_output",
+      call_id: callId,
+    } as unknown as AgentInputItem;
+  }
+  return item;
+}
+
+type OpenAICompactOptions = Partial<
+  Pick<
+    OpenAI.Responses.ResponseCompactParams,
+    | "instructions"
+    | "previous_response_id"
+    | "prompt_cache_key"
+    | "prompt_cache_retention"
+    | "service_tier"
+  >
+>;
+
+type AgentsCompactionArgs = OpenAIResponsesCompactionArgs &
+  OpenAICompactOptions & {
+    responseId?: string | null;
+  };
+
+function toOpenAICompactOptions(
+  args: OpenAIResponsesCompactionArgs,
+): OpenAICompactOptions {
+  const source = args as AgentsCompactionArgs;
+  const options: OpenAICompactOptions = {};
+  const previousResponseId =
+    source.responseId ?? source.previous_response_id ?? undefined;
+  if (previousResponseId !== undefined)
+    options.previous_response_id = previousResponseId;
+  if (source.instructions !== undefined)
+    options.instructions = source.instructions;
+  if (source.prompt_cache_key !== undefined)
+    options.prompt_cache_key = source.prompt_cache_key;
+  if (source.prompt_cache_retention !== undefined)
+    options.prompt_cache_retention = source.prompt_cache_retention;
+  if (source.service_tier !== undefined)
+    options.service_tier = source.service_tier;
+  return options;
+}
+
 export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   private readonly options: SessionOptions;
   private state: ModelState | null = null;
@@ -206,6 +267,8 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   }
 
   prepareHistoryItemForModelInput(item: AgentInputItem): AgentInputItem {
+    const preparedFunctionItem = prepareFunctionItemForModelInput(item);
+    if (preparedFunctionItem !== item) return preparedFunctionItem;
     if (
       !("role" in item) ||
       item.role !== "user" ||
@@ -327,8 +390,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40);
     if (!shouldCompact || items.length === 0) return null;
 
-    const compactArgs: Partial<OpenAIResponsesCompactionArgs> = { ...args };
-    delete compactArgs.force;
+    const compactArgs = toOpenAICompactOptions(args);
     const compacted = await this.client.responses.compact({
       ...compactArgs,
       model: this.options.model ?? "gpt-5.4-mini",
