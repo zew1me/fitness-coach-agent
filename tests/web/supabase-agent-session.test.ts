@@ -416,7 +416,7 @@ describe("DurableCompactionSession", () => {
     );
   });
 
-  it("forwards compaction request options other than force to the API", async () => {
+  it("maps compaction request options to the OpenAI compact API shape", async () => {
     const output = [userItem("compacted")];
     const underlying = {
       addItems: vi.fn(),
@@ -456,11 +456,14 @@ describe("DurableCompactionSession", () => {
 
     expect(client.responses.compact).toHaveBeenCalledWith(
       expect.objectContaining({
-        compactionMode: "input",
-        responseId: "resp_123",
-        store: true,
+        previous_response_id: "resp_123",
       }),
     );
+    const request = client.responses.compact.mock.calls[0]?.[0];
+    expect(request).not.toHaveProperty("force");
+    expect(request).not.toHaveProperty("compactionMode");
+    expect(request).not.toHaveProperty("responseId");
+    expect(request).not.toHaveProperty("store");
   });
 
   it("throws when compaction returns an empty output array", async () => {

@@ -99,6 +99,42 @@ function unsupportedFileContentToText(part: { type: string }): {
   };
 }
 
+type OpenAICompactOptions = Partial<
+  Pick<
+    OpenAI.Responses.ResponseCompactParams,
+    | "instructions"
+    | "previous_response_id"
+    | "prompt_cache_key"
+    | "prompt_cache_retention"
+    | "service_tier"
+  >
+>;
+
+type AgentsCompactionArgs = OpenAIResponsesCompactionArgs &
+  OpenAICompactOptions & {
+    responseId?: string | null;
+  };
+
+function toOpenAICompactOptions(
+  args: OpenAIResponsesCompactionArgs,
+): OpenAICompactOptions {
+  const source = args as AgentsCompactionArgs;
+  const options: OpenAICompactOptions = {};
+  const previousResponseId =
+    source.responseId ?? source.previous_response_id ?? undefined;
+  if (previousResponseId !== undefined)
+    options.previous_response_id = previousResponseId;
+  if (source.instructions !== undefined)
+    options.instructions = source.instructions;
+  if (source.prompt_cache_key !== undefined)
+    options.prompt_cache_key = source.prompt_cache_key;
+  if (source.prompt_cache_retention !== undefined)
+    options.prompt_cache_retention = source.prompt_cache_retention;
+  if (source.service_tier !== undefined)
+    options.service_tier = source.service_tier;
+  return options;
+}
+
 export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   private readonly options: SessionOptions;
   private state: ModelState | null = null;
@@ -327,8 +363,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40);
     if (!shouldCompact || items.length === 0) return null;
 
-    const compactArgs: Partial<OpenAIResponsesCompactionArgs> = { ...args };
-    delete compactArgs.force;
+    const compactArgs = toOpenAICompactOptions(args);
     const compacted = await this.client.responses.compact({
       ...compactArgs,
       model: this.options.model ?? "gpt-5.4-mini",
