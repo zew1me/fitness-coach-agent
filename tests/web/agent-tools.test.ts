@@ -325,6 +325,134 @@ describe("coachToolDefinitions", () => {
     ]);
   });
 
+  it("routes save_recovery_data to the engine and strips any client-sent user_id", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ count: 1, saved: [{ id: "rec-1" }] }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["save_recovery_data"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      entries: [
+        {
+          hrv_ms: 48,
+          log_date: "2026-05-30",
+          sleep_duration_hours: 7.5,
+        },
+      ],
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ count: 1, saved: [{ id: "rec-1" }] });
+    expect(requests).toEqual([
+      {
+        body: {
+          entries: [
+            {
+              hrv_ms: 48,
+              log_date: "2026-05-30",
+              sleep_duration_hours: 7.5,
+            },
+          ],
+        },
+        url: "https://coach.test/api/engine/save-recovery-data",
+      },
+    ]);
+  });
+
+  it("passes through multiple save_recovery_data entries unmodified", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            count: 2,
+            saved: [{ id: "rec-1" }, { id: "rec-2" }],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        ),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const entries = [
+      { hrv_ms: 40, log_date: "2026-05-28" },
+      { hrv_ms: 45, log_date: "2026-05-29", notes: null },
+    ];
+    const result = await (
+      tools["save_recovery_data"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ entries });
+
+    expect(result).toEqual({
+      count: 2,
+      saved: [{ id: "rec-1" }, { id: "rec-2" }],
+    });
+    expect(requests).toEqual([
+      {
+        body: { entries },
+        url: "https://coach.test/api/engine/save-recovery-data",
+      },
+    ]);
+  });
+
+  it("surfaces engine failures when saving recovery data", async () => {
+    const fetchImpl = (): Promise<Response> =>
+      Promise.resolve(
+        new Response("Supabase is not configured.", { status: 503 }),
+      );
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    await expect(
+      (
+        tools["save_recovery_data"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ entries: [{ hrv_ms: 48 }] }),
+    ).rejects.toThrow(/save-recovery-data.*503/);
+  });
+
   it("routes goal updates to the engine and strips any client-sent user_id", async () => {
     const requests: Array<{ body: unknown; url: string }> = [];
     const fetchImpl = (
