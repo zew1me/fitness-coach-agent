@@ -225,6 +225,7 @@ function executeDeterministicEngineTool(
     calculate_zones: "/api/engine/calculate-zones",
     estimate_thresholds: "/api/engine/estimate-thresholds",
     generate_training_plan: "/api/engine/generate-plan-structure",
+    save_recovery_data: "/api/engine/save-recovery-data",
     update_goals: "/api/engine/update-goals",
     update_schedule: "/api/engine/update-schedule",
   };
