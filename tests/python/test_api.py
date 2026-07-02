@@ -1823,6 +1823,283 @@ async def test_update_schedule_validation_errors_return_422(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_save_recovery_data_persists_entries(monkeypatch) -> None:
+    class RecoveryRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.saved: list[RecoveryLog] = []
+
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            self.saved.append(log)
+            return log.model_copy(update={"id": f"recovery-{len(self.saved)}"})
+
+    repository = RecoveryRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-recovery-data",
+                json={
+                    "entries": [
+                        {
+                            "log_date": "2026-05-30",
+                            "hrv_ms": 48,
+                            "sleep_duration_hours": 7.5,
+                            "subjective_energy": 4,
+                            "notes": None,
+                            "user_id": "ignored-client-user",
+                        }
+                    ]
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 1
+    assert body["saved"][0]["id"] == "recovery-1"
+    assert len(repository.saved) == 1
+    saved = repository.saved[0]
+    # user_id is always derived from the bearer token, never the client payload.
+    assert saved.user_id == "athlete-1"
+    assert saved.log_date.isoformat() == "2026-05-30"
+    assert saved.hrv_ms == 48
+    assert saved.sleep_duration_hours == 7.5
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_defaults_missing_log_date_to_today(monkeypatch) -> None:
+    from datetime import UTC, datetime
+
+    class RecoveryRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.saved: list[RecoveryLog] = []
+
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            self.saved.append(log)
+            return log
+
+    repository = RecoveryRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-recovery-data",
+                json={"entries": [{"hrv_ms": 51}]},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.saved[0].log_date == datetime.now(UTC).date()
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_repo_not_configured_returns_503(monkeypatch) -> None:
+    class UnconfiguredRepository(EngineRepository):
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            raise RepositoryNotConfiguredError("Supabase is not configured.")
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", UnconfiguredRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-recovery-data",
+                json={"entries": [{"hrv_ms": 51, "log_date": "2026-05-30"}]},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Supabase is not configured."}
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_rejects_malformed_entry_without_partial_write(
+    monkeypatch,
+) -> None:
+    class RecoveryRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.saved: list[RecoveryLog] = []
+
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            self.saved.append(log)
+            return log
+
+    repository = RecoveryRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-recovery-data",
+                json={
+                    "entries": [
+                        {"log_date": "2026-05-30", "hrv_ms": 48},
+                        {"log_date": "not-a-date", "hrv_ms": 51},
+                    ]
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    # The valid first entry must not be persisted when a later entry is malformed.
+    assert repository.saved == []
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_requires_at_least_one_entry(monkeypatch) -> None:
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-recovery-data",
+                json={"entries": []},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_generic_repo_error_returns_503(monkeypatch) -> None:
+    class ExplodingRepository(EngineRepository):
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            raise RuntimeError("boom")
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ExplodingRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-recovery-data",
+                json={"entries": [{"hrv_ms": 51, "log_date": "2026-05-30"}]},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Unable to save recovery data."}
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_persists_multiple_entries_preserving_order(
+    monkeypatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    class RecoveryRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.saved: list[RecoveryLog] = []
+
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            self.saved.append(log)
+            return log.model_copy(update={"id": f"recovery-{len(self.saved)}"})
+
+    repository = RecoveryRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-recovery-data",
+                json={
+                    "entries": [
+                        {"log_date": "2026-05-28", "hrv_ms": 40},
+                        {"hrv_ms": 45},
+                        {"log_date": "2026-05-30", "hrv_ms": 50},
+                    ]
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 3
+    assert [entry["id"] for entry in body["saved"]] == [
+        "recovery-1",
+        "recovery-2",
+        "recovery-3",
+    ]
+    assert len(repository.saved) == 3
+    assert repository.saved[0].log_date.isoformat() == "2026-05-28"
+    # The entry without an explicit log_date defaults independently to today.
+    assert repository.saved[1].log_date == datetime.now(UTC).date()
+    assert repository.saved[2].log_date.isoformat() == "2026-05-30"
+    assert [log.user_id for log in repository.saved] == ["athlete-1"] * 3
+
+
+@pytest.mark.asyncio
 async def test_save_activity_from_text_persists_summary_and_estimates(monkeypatch) -> None:
     from backend.services import activity_text
     from backend.services.activity_text import (
