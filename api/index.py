@@ -4,7 +4,7 @@ import logging
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlencode
@@ -32,6 +32,7 @@ from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
 )
 from backend.models.athlete import (
+    RecoveryLog,
     ScheduleAvailability,
     ScheduleOverride,
     SportThreshold,
@@ -1063,6 +1064,46 @@ async def update_schedule_endpoint(
         logger.exception("update_schedule failed user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Unable to update schedule.") from exc
     return {"updated": updated}
+
+
+class SaveRecoveryDataRequest(BaseModel):
+    entries: list[dict[str, object]] = Field(min_length=1)
+
+
+def _recovery_log_from_entry(entry: Mapping[str, object], user_id: str) -> RecoveryLog:
+    # user_id is always derived from the bearer token; never trust the client payload.
+    fields = {key: value for key, value in entry.items() if key != "user_id"}
+    if fields.get("log_date") is None:
+        fields["log_date"] = datetime.now(UTC).date().isoformat()
+    fields["user_id"] = user_id
+    return RecoveryLog.model_validate(fields)
+
+
+@app.post("/api/engine/save-recovery-data")
+async def save_recovery_data_endpoint(
+    payload: SaveRecoveryDataRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    # Validate every entry up front so a malformed entry never leaves earlier
+    # entries partially persisted with a 422 that implies nothing was saved.
+    try:
+        logs = [_recovery_log_from_entry(entry, user_id) for entry in payload.entries]
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    saved: list[Mapping[str, object]] = []
+    try:
+        for log in logs:
+            persisted = await repo.upsert_recovery_log(log)
+            saved.append(persisted.model_dump(mode="json"))
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("save_recovery_data failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Unable to save recovery data.") from exc
+    logger.info("save_recovery_data user_id=%s count=%d", user_id, len(saved))
+    return {"saved": saved, "count": len(saved)}
 
 
 @app.post("/api/engine/get-recent-activities")
