@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { coachToolDefinitions } from "./tools";
 import type { AthleteContextBundle } from "./types";
 
 export const internalSpecialistRoleSchema = z.enum([
@@ -40,6 +41,148 @@ const proposedWriteToolNameSchema = z.enum([
   "adjust_plan",
   "recalibrate_thresholds",
 ]);
+type ProposedWriteToolName = z.infer<typeof proposedWriteToolNameSchema>;
+
+// Nested "full state" object schemas (e.g. profile fields, goal fields,
+// recovery entries) require every nullable field to be present, since the
+// lead coach's actual tool call supplies a fully-merged payload. A
+// specialist's proposed update is a preview of a patch, not that literal
+// call, so fields nested below the top level need to become optional before
+// we validate against them here — otherwise a specialist proposing "just
+// update weekly_available_hours" would fail schema validation for every
+// other untouched profile field.
+function partializeNestedObjects(schema: z.ZodTypeAny): z.ZodTypeAny {
+  if (schema instanceof z.ZodObject) {
+    const newShape: Record<string, z.ZodTypeAny> = {};
+    for (const [key, value] of Object.entries(schema.shape)) {
+      newShape[key] = partializeNestedObjects(value as z.ZodTypeAny);
+    }
+    return z.object(newShape).partial();
+  }
+  if (schema instanceof z.ZodArray) {
+    return z.array(partializeNestedObjects(schema.element as z.ZodTypeAny));
+  }
+  if (schema instanceof z.ZodOptional) {
+    return z.optional(partializeNestedObjects(schema.unwrap() as z.ZodTypeAny));
+  }
+  if (schema instanceof z.ZodNullable) {
+    return z.nullable(partializeNestedObjects(schema.unwrap() as z.ZodTypeAny));
+  }
+  if (schema instanceof z.ZodRecord) {
+    return z.record(
+      schema.keyType,
+      partializeNestedObjects(schema.valueType as z.ZodTypeAny),
+    );
+  }
+  return schema;
+}
+
+// The top-level fields of a tool's input schema (e.g. `text`, `plan_id`,
+// `reason`) are the actual content of the proposal and stay required exactly
+// as the real tool defines them; only fields nested below the top level get
+// relaxed via `partializeNestedObjects`.
+function relaxForProposedUpdate(schema: z.ZodTypeAny): z.ZodTypeAny {
+  if (!(schema instanceof z.ZodObject)) {
+    return schema;
+  }
+  const newShape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, value] of Object.entries(schema.shape)) {
+    newShape[key] = partializeNestedObjects(value as z.ZodTypeAny);
+  }
+  return z.object(newShape);
+}
+
+// The wire format for `proposedUpdate.input` must stay a plain JSON-encoded
+// string (see below), but once parsed it's validated against a relaxed
+// version of the same per-tool schema the lead coach's real tool call will
+// enforce, so a specialist can't propose a structurally-invalid payload for
+// the tool it names.
+const proposedUpdateToolInputSchemas: Record<
+  ProposedWriteToolName,
+  z.ZodTypeAny
+> = {
+  save_activity_from_text: relaxForProposedUpdate(
+    coachToolDefinitions.save_activity_from_text.inputSchema,
+  ),
+  save_recovery_data: relaxForProposedUpdate(
+    coachToolDefinitions.save_recovery_data.inputSchema,
+  ),
+  update_schedule: relaxForProposedUpdate(
+    coachToolDefinitions.update_schedule.inputSchema,
+  ),
+  // update_goals's real tool schema additionally requires a *complete*
+  // goal object when action is "create" (superRefine in tools.ts), since the
+  // real call persists it as-is. A proposedUpdate is a preview, not that
+  // literal call, so — consistent with every other tool here — only the
+  // structural shape is enforced; completeness for "create" is left to the
+  // lead coach's actual tool call.
+  update_goals: relaxForProposedUpdate(
+    coachToolDefinitions.update_goals.inputSchema,
+  ),
+  update_athlete_profile: relaxForProposedUpdate(
+    coachToolDefinitions.update_athlete_profile.inputSchema,
+  ),
+  generate_training_plan: relaxForProposedUpdate(
+    coachToolDefinitions.generate_training_plan.inputSchema,
+  ),
+  adjust_plan: relaxForProposedUpdate(
+    coachToolDefinitions.adjust_plan.inputSchema,
+  ),
+  recalibrate_thresholds: relaxForProposedUpdate(
+    coachToolDefinitions.recalibrate_thresholds.inputSchema,
+  ),
+};
+
+function unwrap(schema: z.ZodTypeAny): z.ZodTypeAny {
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) {
+    return unwrap(schema.unwrap() as z.ZodTypeAny);
+  }
+  return schema;
+}
+
+function isOptionalField(schema: z.ZodTypeAny): boolean {
+  return schema instanceof z.ZodOptional;
+}
+
+// Renders a shallow key map (e.g. "{fields: {display_name, ...}}") so the
+// specialist prompt can show each write tool's actual top-level and
+// one-level-nested key names — the wire shape validated above — instead of
+// leaving the model to guess the wrapper structure.
+function describeShape(schema: z.ZodTypeAny, depth: number): string {
+  const unwrapped = unwrap(schema);
+  if (depth <= 0) {
+    return "...";
+  }
+  if (unwrapped instanceof z.ZodObject) {
+    const entries = Object.entries(unwrapped.shape).map(
+      ([key, value]) =>
+        `${key}${isOptionalField(value as z.ZodTypeAny) ? "?" : ""}${
+          unwrap(value as z.ZodTypeAny) instanceof z.ZodObject ||
+          unwrap(value as z.ZodTypeAny) instanceof z.ZodArray ||
+          unwrap(value as z.ZodTypeAny) instanceof z.ZodRecord
+            ? `: ${describeShape(value as z.ZodTypeAny, depth - 1)}`
+            : ""
+        }`,
+    );
+    return `{${entries.join(", ")}}`;
+  }
+  if (unwrapped instanceof z.ZodArray) {
+    return `[${describeShape(unwrapped.element as z.ZodTypeAny, depth - 1)}]`;
+  }
+  if (unwrapped instanceof z.ZodRecord) {
+    return `{<key>: ${describeShape(unwrapped.valueType as z.ZodTypeAny, depth - 1)}}`;
+  }
+  return "";
+}
+
+// Computed once at module load and reused across every specialist prompt —
+// the shapes only change when a tool schema changes.
+export const proposedUpdateToolShapeHints = proposedWriteToolNameSchema.options
+  .map(
+    (toolName) =>
+      `${toolName} ${describeShape(coachToolDefinitions[toolName].inputSchema, 3)}`,
+  )
+  .join("; ");
 
 function hasUserIdKey(value: unknown): boolean {
   if (value === null || typeof value !== "object") {
@@ -57,50 +200,15 @@ function hasUserIdKey(value: unknown): boolean {
 
 // Models using structured outputs sometimes return a raw object instead of a
 // JSON-encoded string for `input`.  Preprocess coerces it to a string so the
-// downstream superRefine validation and user_id guard still run correctly.
-// The JSON Schema emitted to OpenAI remains {"type":"string"} because
+// downstream object-level superRefine can still parse and validate it. The
+// JSON Schema emitted to OpenAI remains {"type":"string"} because
 // zod-to-json-schema ignores the preprocess wrapper.
 const proposedUpdateInputSchema = z.preprocess(
   (val) =>
     typeof val === "object" && val !== null && !Array.isArray(val)
       ? JSON.stringify(val)
       : val,
-  z
-    .string()
-    .min(2)
-    .superRefine((input, context) => {
-      try {
-        const parsed = JSON.parse(input) as unknown;
-        if (
-          parsed === null ||
-          typeof parsed !== "object" ||
-          Array.isArray(parsed)
-        ) {
-          context.addIssue({
-            code: z.ZodIssueCode.custom,
-            message:
-              "Specialist proposed update input must be a JSON object string.",
-          });
-          return;
-        }
-        if (!hasUserIdKey(parsed)) {
-          return;
-        }
-      } catch {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "Specialist proposed update input must be a JSON object string.",
-        });
-        return;
-      }
-
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "Specialist proposed updates must not include user_id; server auth injects identity.",
-      });
-    }),
+  z.string().min(2),
 );
 
 export const proposedUpdateSchema = z
@@ -109,7 +217,53 @@ export const proposedUpdateSchema = z
     rationale: z.string().min(1),
     toolName: proposedWriteToolNameSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((update, context) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(update.input);
+    } catch {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Specialist proposed update input must be a JSON object string.",
+        path: ["input"],
+      });
+      return;
+    }
+
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Specialist proposed update input must be a JSON object string.",
+        path: ["input"],
+      });
+      return;
+    }
+
+    if (hasUserIdKey(parsed)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Specialist proposed updates must not include user_id; server auth injects identity.",
+        path: ["input"],
+      });
+      return;
+    }
+
+    const toolInputSchema = proposedUpdateToolInputSchemas[update.toolName];
+    const result = toolInputSchema.safeParse(parsed);
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        context.addIssue({ ...issue, path: ["input", ...issue.path] });
+      }
+    }
+  });
 
 export const specialistReportSchema = z
   .object({
