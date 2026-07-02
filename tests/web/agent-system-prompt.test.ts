@@ -196,6 +196,12 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain(
       "Use empty arrays for proposedUpdates and risks when none apply",
     );
+    // Regression guard for #288: the prompt must tell specialists the exact
+    // wrapper shape each write tool expects (e.g. `fields` for
+    // update_athlete_profile), not just "write a JSON object string".
+    expect(prompt).toContain("proposedUpdate.input must match");
+    expect(prompt).toContain("update_athlete_profile {fields:");
+    expect(prompt).toContain("save_recovery_data {entries:");
   });
 
   it("builds a lead coach prompt that includes specialist reports and final-response guidance", () => {
