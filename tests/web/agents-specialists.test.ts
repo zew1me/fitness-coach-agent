@@ -342,6 +342,63 @@ describe("runSpecialists with the Agents SDK", () => {
     expect(recoveryReport?.proposedUpdates).toHaveLength(0);
   });
 
+  it("corrects a valid-but-mismatched role to the specialist actually invoked", async () => {
+    const Sentry = await import("@sentry/nextjs");
+
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.resolve({
+          state: { usage: undefined },
+          finalOutput: {
+            confidence: "high",
+            proposedUpdates: [],
+            risks: [],
+            // Valid enum value, but wrong for the specialist that ran —
+            // schema validation alone can't catch this.
+            role: "workout",
+            summary: "Recovery advice mislabeled as workout.",
+          },
+        });
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "high",
+          proposedUpdates: [],
+          risks: [],
+          role: agentsMocks.roleName(agent),
+          summary: `${agent.name} report`,
+        },
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual([
+      "recovery",
+      "workout",
+    ]);
+    const recoveryReport = reports.find(
+      (report) => report.summary === "Recovery advice mislabeled as workout.",
+    );
+    expect(recoveryReport?.role).toBe("recovery");
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect.stringContaining('mismatched role "workout"'),
+      expect.objectContaining({ level: "warning" }),
+    );
+  });
+
   it("reports dropped proposedUpdates and unrecoverable reports to Sentry", async () => {
     const Sentry = await import("@sentry/nextjs");
 

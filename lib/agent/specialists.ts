@@ -102,6 +102,19 @@ async function runSingleSpecialist({
         `coach: ${role} specialist report failed schema validation`,
         { level: "warning", tags: { role, subsystem: "specialists" } },
       );
+      return null;
+    }
+    // The model sometimes returns a valid-but-wrong role (e.g. the recovery
+    // specialist reporting role: "workout"), which schema validation alone
+    // can't catch since role is just an enum. We know the true role
+    // authoritatively — it's whichever specialist we invoked — so correct it
+    // rather than discard an otherwise-usable report.
+    if (report.role !== role) {
+      Sentry.captureMessage(
+        `coach: ${role} specialist returned mismatched role "${report.role}"`,
+        { level: "warning", tags: { role, subsystem: "specialists" } },
+      );
+      return { ...report, role };
     }
     return report;
   } catch (error) {
@@ -126,27 +139,34 @@ export async function runSpecialists({
     ? messages
     : selectMessagesForModel(messages);
   const orderedRoles = orderRoles(roles);
-  const reports: SpecialistReport[] = [];
 
-  for (const role of orderedRoles) {
-    const delegation = delegations?.find(
-      (candidate) => candidate.role === role,
-    );
-    const relevantMemory = coachingMemory.filter((record) =>
-      delegation?.relevantCoachingMemoryIds.includes(String(record["id"])),
-    );
-    const report = await runSingleSpecialist({
-      delegation,
-      model,
-      relevantMemory,
-      role,
-      selectedMessages,
-      slices,
-    });
-    if (report) {
-      reports.push(report);
-    }
-  }
+  // Each role's delegation/memory lookup and specialist run is independent of
+  // every other role's — nothing in this loop reads a prior iteration's
+  // report — so the roles run concurrently. Promise.all preserves result
+  // order to match orderedRoles regardless of resolution timing, and
+  // runSingleSpecialist already isolates per-role failures (returns null
+  // instead of throwing), so one slow/failing specialist can't block or drop
+  // the others.
+  const results = await Promise.all(
+    orderedRoles.map((role) => {
+      const delegation = delegations?.find(
+        (candidate) => candidate.role === role,
+      );
+      const relevantMemory = coachingMemory.filter((record) =>
+        delegation?.relevantCoachingMemoryIds.includes(String(record["id"])),
+      );
+      return runSingleSpecialist({
+        delegation,
+        model,
+        relevantMemory,
+        role,
+        selectedMessages,
+        slices,
+      });
+    }),
+  );
 
-  return reports;
+  return results.filter(
+    (report): report is SpecialistReport => report !== null,
+  );
 }
