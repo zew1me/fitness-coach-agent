@@ -60,7 +60,17 @@ function partializeNestedObjects(schema: z.ZodTypeAny): z.ZodTypeAny {
     return z.object(newShape).partial();
   }
   if (schema instanceof z.ZodArray) {
-    return z.array(partializeNestedObjects(schema.element as z.ZodTypeAny));
+    // Reapply the original array's own checks (e.g. `.min(1)`) — rebuilding
+    // via z.array(newElement) alone drops them, which would let a
+    // specialist propose e.g. an empty `entries: []` for save_recovery_data
+    // even though the real tool requires at least one entry.
+    const relaxedElement = partializeNestedObjects(
+      schema.element as z.ZodTypeAny,
+    );
+    const arrayChecks = (schema.def.checks ?? []) as Parameters<
+      z.ZodArray<z.ZodTypeAny>["check"]
+    >;
+    return z.array(relaxedElement).check(...arrayChecks);
   }
   if (schema instanceof z.ZodOptional) {
     return z.optional(partializeNestedObjects(schema.unwrap() as z.ZodTypeAny));
@@ -144,10 +154,9 @@ function isOptionalField(schema: z.ZodTypeAny): boolean {
   return schema instanceof z.ZodOptional;
 }
 
-// Renders a shallow key map (e.g. "{fields: {display_name, ...}}") so the
-// specialist prompt can show each write tool's actual top-level and
-// one-level-nested key names — the wire shape validated above — instead of
-// leaving the model to guess the wrapper structure.
+// Renders a key map (e.g. "{fields: {display_name, ...}}"), recursing up to
+// `depth` levels, so the specialist prompt can show each write tool's actual
+// key names instead of leaving the model to guess the wrapper structure.
 function describeShape(schema: z.ZodTypeAny, depth: number): string {
   const unwrapped = unwrap(schema);
   if (depth <= 0) {
@@ -176,11 +185,15 @@ function describeShape(schema: z.ZodTypeAny, depth: number): string {
 }
 
 // Computed once at module load and reused across every specialist prompt —
-// the shapes only change when a tool schema changes.
+// the shapes only change when a tool schema changes. Built from
+// proposedUpdateToolInputSchemas (the relaxed schema actually validated
+// against), not the original tool schemas, so a nested field that's
+// optional for a proposedUpdate — but required for the tool's real call —
+// doesn't get shown to the model as required.
 export const proposedUpdateToolShapeHints = proposedWriteToolNameSchema.options
   .map(
     (toolName) =>
-      `${toolName} ${describeShape(coachToolDefinitions[toolName].inputSchema, 3)}`,
+      `${toolName} ${describeShape(proposedUpdateToolInputSchemas[toolName], 3)}`,
   )
   .join("; ");
 

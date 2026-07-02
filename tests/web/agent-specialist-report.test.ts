@@ -142,6 +142,69 @@ describe("specialistReportSchema", () => {
     ).toThrow();
   });
 
+  it("rejects an empty entries array for save_recovery_data (array-level .min(1) survives relaxation)", () => {
+    // Regression guard: relaxing a tool's nested object fields to optional
+    // must not also drop the *array's own* length constraint. entries must
+    // still contain at least one item even though each item's fields are
+    // individually optional for a proposedUpdate.
+    expect(() =>
+      specialistReportSchema.parse({
+        confidence: "medium",
+        proposedUpdates: [
+          {
+            input: JSON.stringify({ entries: [] }),
+            rationale: "No actual data provided.",
+            toolName: "save_recovery_data",
+          },
+        ],
+        role: "recovery",
+        risks: [],
+        summary: "Empty recovery data.",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a proposed update missing a required top-level field", () => {
+    // Regression guard: only fields nested below the top level relax to
+    // optional; a tool's own top-level required fields (e.g. `text` for
+    // save_activity_from_text) must stay required.
+    expect(() =>
+      specialistReportSchema.parse({
+        confidence: "medium",
+        proposedUpdates: [
+          {
+            input: JSON.stringify({}),
+            rationale: "Missing the required text field.",
+            toolName: "save_activity_from_text",
+          },
+        ],
+        role: "workout",
+        risks: [],
+        summary: "Incomplete activity proposal.",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts a partial weekly_pattern entry for update_schedule (ZodRecord branch)", () => {
+    const parsed = specialistReportSchema.parse({
+      confidence: "medium",
+      proposedUpdates: [
+        {
+          input: JSON.stringify({
+            weekly_pattern: { monday: { available: true } },
+          }),
+          rationale: "Athlete confirmed Monday availability.",
+          toolName: "update_schedule",
+        },
+      ],
+      role: "intake",
+      risks: [],
+      summary: "Monday is available.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.toolName).toBe("update_schedule");
+  });
+
   it("rejects a proposed update input that doesn't match the named tool's schema", () => {
     expect(() =>
       specialistReportSchema.parse({
