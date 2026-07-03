@@ -454,4 +454,58 @@ describe("runSpecialists with the Agents SDK", () => {
       expect.objectContaining({ level: "warning" }),
     );
   });
+
+  it("runs specialists concurrently and preserves SPECIALIST_ORDER regardless of resolution timing", async () => {
+    const callOrder: string[] = [];
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      const role = agentsMocks.roleName(agent);
+      callOrder.push(`start:${role}`);
+      // recovery is slower than workout, but SPECIALIST_ORDER lists recovery
+      // before workout — the returned report order must follow that fixed
+      // order, not whichever specialist happens to resolve first.
+      const delayMs = role === "recovery" ? 10 : 0;
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          callOrder.push(`end:${role}`);
+          resolve({
+            state: { usage: undefined },
+            finalOutput: {
+              confidence: "high",
+              proposedUpdates: [],
+              risks: [],
+              role,
+              summary: `${role} report`,
+            },
+          });
+        }, delayMs);
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    // Both specialists are started before either finishes, proving they run
+    // concurrently rather than one awaiting the other sequentially.
+    expect(callOrder.slice(0, 2)).toEqual(["start:recovery", "start:workout"]);
+    // workout (no delay) finishes before recovery (10ms delay) ...
+    expect(callOrder.indexOf("end:workout")).toBeLessThan(
+      callOrder.indexOf("end:recovery"),
+    );
+    // ... yet the returned report order still matches SPECIALIST_ORDER, not
+    // resolution order — Promise.all preserves input-array order.
+    expect(reports.map((report) => report.role)).toEqual([
+      "recovery",
+      "workout",
+    ]);
+  });
 });
