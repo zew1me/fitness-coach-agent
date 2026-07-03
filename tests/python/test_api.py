@@ -120,9 +120,7 @@ class EngineRepository:
             tsb=-8,
         )
 
-    async def list_recovery_logs(
-        self, user_id: str, *, since=None, limit: int = 14
-    ) -> list[RecoveryLog]:
+    async def list_recovery_logs(self, user_id: str, *, limit: int = 14) -> list[RecoveryLog]:
         return [
             RecoveryLog(
                 id="recovery-1",
@@ -143,7 +141,7 @@ class EngineRepository:
     async def get_active_plan(self, user_id: str):
         return None
 
-    async def list_activities(self, user_id: str, *, sport=None, since=None, limit: int = 50):
+    async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
         return []
 
     async def create_activity(self, activity: Activity) -> Activity:
@@ -480,7 +478,7 @@ async def test_chat_attachments_upload_validates_object_key_scope(
     # Mock R2 service to avoid actual S3 calls
     from backend.models.storage import PresignUploadResponse
 
-    async def mock_upload_file(*args, **kwargs):
+    async def mock_upload_file(**kwargs):
         return PresignUploadResponse(
             upload_url="",
             object_key="users/athlete-1/chat-attachment/2024/01/01/file.png",
@@ -529,7 +527,7 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
     object_key = "users/athlete-1/chat-attachment/2024/01/01/file.png"
     public_url = "https://cdn.example.com/file.png"
 
-    async def mock_upload_file(*args, **kwargs):
+    async def mock_upload_file(**kwargs):
         return PresignUploadResponse(
             upload_url="",
             object_key=object_key,
@@ -1337,7 +1335,7 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_get_recent_activities_returns_normalized_activity_list(monkeypatch) -> None:
     class ActivityRepository(EngineRepository):
-        async def list_activities(self, user_id: str, *, sport=None, since=None, limit: int = 50):
+        async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
             assert user_id == "athlete-1"
             assert sport == "running"
             assert limit == 2
@@ -1848,7 +1846,8 @@ class RecoveryRepository(EngineRepository):
 
 
 @pytest.mark.asyncio
-async def test_save_recovery_data_persists_entries(monkeypatch, recovery_user_context) -> None:
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_persists_entries(monkeypatch) -> None:
     repository = RecoveryRepository()
     monkeypatch.setattr(api_index, "repo", repository)
 
@@ -1884,9 +1883,8 @@ async def test_save_recovery_data_persists_entries(monkeypatch, recovery_user_co
 
 
 @pytest.mark.asyncio
-async def test_save_recovery_data_defaults_missing_log_date_to_today(
-    monkeypatch, recovery_user_context
-) -> None:
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_defaults_missing_log_date_to_today(monkeypatch) -> None:
     repository = RecoveryRepository()
     monkeypatch.setattr(api_index, "repo", repository)
 
@@ -1902,9 +1900,8 @@ async def test_save_recovery_data_defaults_missing_log_date_to_today(
 
 
 @pytest.mark.asyncio
-async def test_save_recovery_data_repo_not_configured_returns_503(
-    monkeypatch, recovery_user_context
-) -> None:
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_repo_not_configured_returns_503(monkeypatch) -> None:
     class UnconfiguredRepository(EngineRepository):
         async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
             raise RepositoryNotConfiguredError("Supabase is not configured.")
@@ -1923,8 +1920,9 @@ async def test_save_recovery_data_repo_not_configured_returns_503(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
 async def test_save_recovery_data_rejects_malformed_entry_without_partial_write(
-    monkeypatch, recovery_user_context
+    monkeypatch,
 ) -> None:
     repository = RecoveryRepository()
     monkeypatch.setattr(api_index, "repo", repository)
@@ -1947,9 +1945,8 @@ async def test_save_recovery_data_rejects_malformed_entry_without_partial_write(
 
 
 @pytest.mark.asyncio
-async def test_save_recovery_data_requires_at_least_one_entry(
-    monkeypatch, recovery_user_context
-) -> None:
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_requires_at_least_one_entry(monkeypatch) -> None:
     monkeypatch.setattr(api_index, "repo", EngineRepository())
 
     transport = ASGITransport(app=api_index.app)
