@@ -36,6 +36,7 @@ uv run pytest tests/python/test_api.py  # single test file
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
+uv run vulture                       # dead-code detection
 ```
 
 ## Architecture
@@ -158,6 +159,7 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | `ruff-format-check` | `uv run ruff format --check .`                                                |
 | `typecheck`         | `bun run typecheck`                                                           |
 | `ty`                | `uv run ty check`                                                             |
+| `vulture`           | `uv run vulture`                                                              |
 | `vitest`            | `bun run test`                                                                |
 | `pytest`            | `uv run pytest`                                                               |
 | `cpd`               | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
@@ -188,7 +190,7 @@ You MUST pass hooks all of the time!
 ## Code Conventions
 
 - TypeScript strict mode; ESLint zero-warnings policy
-- Python: Ruff linting + formatting, 100-char line length, `ty` for type checking
+- Python: Ruff linting + formatting, 100-char line length, `ty` for type checking, `vulture` for dead-code detection
 - Zod schemas in `lib/schemas.ts` for all API validation boundaries
 - All Python async handlers use `async def`
 - Bearer token auth: clients pass `Authorization: Bearer <jwt>`; server validates via `require_user_context()`
