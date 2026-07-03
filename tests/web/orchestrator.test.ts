@@ -17,13 +17,16 @@ type AgentEvent = {
 const orchestratorMocks = vi.hoisted(() => {
   const agentConfigs: Array<Record<string, unknown>> = [];
   const events: AgentEvent[] = [];
+  const runEventSequences: AgentEvent[][] = [];
   const agentsRun = vi.fn(() =>
     Promise.resolve({
       completed: Promise.resolve(),
       finalOutput: "Keep tomorrow easy.",
+      output: [{ role: "assistant", content: "result output" }],
       state: { usage: undefined },
       *[Symbol.asyncIterator]() {
-        for (const event of events) yield event;
+        const runEvents = runEventSequences.shift() ?? events;
+        for (const event of runEvents) yield event;
       },
     }),
   );
@@ -60,6 +63,7 @@ const orchestratorMocks = vi.hoisted(() => {
     agentConfigs,
     agentsRun,
     events,
+    runEventSequences,
     streamText,
     toUIMessageStreamResponse,
     withTrace,
@@ -126,6 +130,7 @@ function messages(): UIMessage[] {
 beforeEach(() => {
   orchestratorMocks.agentConfigs.length = 0;
   orchestratorMocks.events.length = 0;
+  orchestratorMocks.runEventSequences.length = 0;
   orchestratorMocks.events.push({
     type: "raw_model_stream_event",
     data: { type: "output_text_delta", delta: "Keep tomorrow easy." },
@@ -241,7 +246,7 @@ describe("streamCoachTurn", () => {
       },
       {
         type: "raw_model_stream_event",
-        data: { type: "response.output_text.delta", delta: "No active plan." },
+        data: { type: "output_text_delta", delta: "No active plan." },
       },
     );
     const fetchMock = vi.fn(() =>
@@ -255,7 +260,7 @@ describe("streamCoachTurn", () => {
       context: athleteContextFixture,
       messages: messages(),
     });
-    await response.text();
+    await expect(response.text()).resolves.toContain("No active plan.");
 
     const persistCall = (
       fetchMock.mock.calls as unknown as Array<
@@ -271,6 +276,208 @@ describe("streamCoachTurn", () => {
           state: "output-available",
           toolCallId: "call-1",
           type: "tool-get_active_plan",
+        }),
+      ]),
+    );
+    expect(body.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: "No active plan.",
+          type: "text",
+        }),
+      ]),
+    );
+  });
+
+  it("runs a tool-free acknowledgement turn when the lead tool turn streams no text", async () => {
+    orchestratorMocks.runEventSequences.push(
+      [
+        {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "update_athlete_profile",
+              arguments: "{}",
+            },
+          },
+        },
+        {
+          type: "run_item_stream_event",
+          name: "tool_output",
+          item: {
+            rawItem: {
+              type: "function_call_result",
+              callId: "call-1",
+              name: "update_athlete_profile",
+            },
+            output: { updated: true },
+          },
+        },
+      ],
+      [
+        {
+          type: "raw_model_stream_event",
+          data: {
+            type: "output_text_delta",
+            delta: "I've updated your profile. Want to adjust anything else?",
+          },
+        },
+      ],
+    );
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    await expect(response.text()).resolves.toContain(
+      "I've updated your profile. Want to adjust anything else?",
+    );
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
+    expect(
+      orchestratorMocks.agentConfigs.find(
+        (config) => config["name"] === "Coach acknowledgement",
+      ),
+    ).toMatchObject({
+      mcpServers: [],
+      tools: [],
+    });
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain(
+      "I've updated your profile. Want to adjust anything else?",
+    );
+  });
+
+  it("writes a deterministic tool acknowledgement when the follow-up turn is also silent", async () => {
+    orchestratorMocks.runEventSequences.push(
+      [
+        {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "update_athlete_profile",
+              arguments: "{}",
+            },
+          },
+        },
+        {
+          type: "run_item_stream_event",
+          name: "tool_output",
+          item: {
+            rawItem: {
+              type: "function_call_result",
+              callId: "call-1",
+              name: "update_athlete_profile",
+            },
+            output: { updated: true },
+          },
+        },
+      ],
+      [],
+    );
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    await expect(response.text()).resolves.toContain(
+      "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
+    );
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain(
+      "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
+    );
+  });
+
+  it("writes the generic fallback when a no-tool turn is silent", async () => {
+    orchestratorMocks.runEventSequences.push([]);
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    await expect(response.text()).resolves.toContain(
+      "Hey, can you remind me of where we are at?",
+    );
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain(
+      "Hey, can you remind me of where we are at?",
+    );
+  });
+
+  it("writes a visible fallback text part when the model errors before streaming text", async () => {
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(new Error("rate limit"));
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+    });
+
+    await response.text();
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    const body = JSON.parse(String(persistCall?.[1]?.body)) as {
+      parts: Array<Record<string, unknown>>;
+    };
+    expect(body.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: "Coach is unavailable right now. Please try again.",
+          type: "text",
         }),
       ]),
     );

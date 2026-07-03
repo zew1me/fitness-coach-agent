@@ -252,6 +252,89 @@ describe("SupabaseAgentSession", () => {
       },
     ]);
   });
+
+  it("keeps historical function calls in the Agents SDK callId shape for model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      arguments: "{}",
+      status: "completed",
+    } as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toMatchObject({
+      type: "function_call",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      arguments: "{}",
+      status: "completed",
+    });
+    expect(prepared).not.toHaveProperty("call_id");
+  });
+
+  it("keeps historical function call results in the Agents SDK callId shape for model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call_result",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      output: JSON.stringify({ status: "pending_implementation" }),
+      status: "completed",
+    } as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toMatchObject({
+      type: "function_call_result",
+      callId: "call-1",
+      name: "update_athlete_profile",
+      output: JSON.stringify({ status: "pending_implementation" }),
+      status: "completed",
+    });
+    expect(prepared).not.toHaveProperty("call_id");
+  });
+
+  it("rewrites raw Responses function_call_output items to assistant text before model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call_output",
+      call_id: "call-1",
+      output: JSON.stringify({
+        error: "Coach is unavailable right now. Please try again.",
+      }),
+      status: "completed",
+    } as unknown as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toEqual({
+      role: "assistant",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text:
+            "Historical tool output omitted from model replay. " +
+            "The visible chat transcript is preserved separately.",
+        },
+      ],
+    });
+  });
 });
 
 describe("DurableCompactionSession", () => {
@@ -303,6 +386,188 @@ describe("DurableCompactionSession", () => {
       }),
     );
     expect(result?.usage.totalTokens).toBe(12);
+  });
+
+  it("normalizes SDK function_call_result items to Responses API function_call_output for compact requests", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call_result",
+          callId: "call-1",
+          name: "update_athlete_profile",
+          output: JSON.stringify({ status: "pending" }),
+          status: "completed",
+        } as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [
+            {
+              type: "function_call_output",
+              call_id: "call-1",
+              output: JSON.stringify({ status: "pending" }),
+              status: "completed",
+            } as unknown as AgentInputItem,
+          ],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await session.runCompaction();
+
+    const request = client.responses.compact.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    const input = request["input"] as Record<string, unknown>[] | undefined;
+    expect(input).toHaveLength(1);
+    expect(input?.[0]).toEqual(
+      expect.objectContaining({
+        type: "function_call_output",
+        call_id: "call-1",
+        output: JSON.stringify({ status: "pending" }),
+        status: "completed",
+      }),
+    );
+    expect(input?.[0]?.["callId"]).toBeUndefined();
+  });
+
+  it("normalizes SDK callId to Responses API call_id for compact requests", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call",
+          callId: "call-1",
+          name: "update_athlete_profile",
+          arguments: "{}",
+          status: "completed",
+        } as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [
+            {
+              type: "function_call",
+              call_id: "call-1",
+              name: "update_athlete_profile",
+              arguments: "{}",
+              status: "completed",
+            } as unknown as AgentInputItem,
+          ],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await session.runCompaction();
+
+    const request = client.responses.compact.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    const input = request["input"] as Record<string, unknown>[] | undefined;
+    expect(input).toHaveLength(1);
+    expect(input?.[0]).toEqual(
+      expect.objectContaining({
+        type: "function_call",
+        call_id: "call-1",
+        name: "update_athlete_profile",
+        arguments: "{}",
+        status: "completed",
+      }),
+    );
+    expect(input?.[0]?.["callId"]).toBeUndefined();
+  });
+
+  it("normalizes paired SDK function calls and outputs for compact requests", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call",
+          callId: "call-1",
+          name: "update_athlete_profile",
+          arguments: "{}",
+          status: "completed",
+        } as AgentInputItem,
+        {
+          type: "function_call_output",
+          callId: "call-1",
+          output: JSON.stringify({ status: "updated" }),
+          status: "completed",
+        } as unknown as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [userItem("summary")],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await session.runCompaction();
+
+    const request = client.responses.compact.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    const input = request["input"] as Record<string, unknown>[] | undefined;
+    expect(input).toHaveLength(2);
+    expect(input?.[0]).toEqual(
+      expect.objectContaining({
+        type: "function_call",
+        call_id: "call-1",
+        name: "update_athlete_profile",
+      }),
+    );
+    expect(input?.[0]?.["callId"]).toBeUndefined();
+    expect(input?.[1]).toEqual(
+      expect.objectContaining({
+        type: "function_call_output",
+        call_id: "call-1",
+        output: JSON.stringify({ status: "updated" }),
+      }),
+    );
+    expect(input?.[1]?.["callId"]).toBeUndefined();
   });
 
   it("propagates a conflict while replacing compacted history", async () => {
@@ -416,7 +681,7 @@ describe("DurableCompactionSession", () => {
     );
   });
 
-  it("forwards compaction request options other than force to the API", async () => {
+  it("maps compaction request options to the OpenAI compact API shape", async () => {
     const output = [userItem("compacted")];
     const underlying = {
       addItems: vi.fn(),
@@ -456,11 +721,14 @@ describe("DurableCompactionSession", () => {
 
     expect(client.responses.compact).toHaveBeenCalledWith(
       expect.objectContaining({
-        compactionMode: "input",
-        responseId: "resp_123",
-        store: true,
+        previous_response_id: "resp_123",
       }),
     );
+    const request = client.responses.compact.mock.calls[0]?.[0];
+    expect(request).not.toHaveProperty("force");
+    expect(request).not.toHaveProperty("compactionMode");
+    expect(request).not.toHaveProperty("responseId");
+    expect(request).not.toHaveProperty("store");
   });
 
   it("throws when compaction returns an empty output array", async () => {

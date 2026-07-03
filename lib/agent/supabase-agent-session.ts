@@ -99,6 +99,110 @@ function unsupportedFileContentToText(part: { type: string }): {
   };
 }
 
+function withCallIdField(
+  record: Record<string, unknown>,
+  field: "callId" | "call_id",
+): AgentInputItem {
+  const callId = record["callId"] ?? record["call_id"];
+  if (typeof callId !== "string" || field in record) {
+    return record as unknown as AgentInputItem;
+  }
+  const rest = { ...record };
+  delete rest[field === "callId" ? "call_id" : "callId"];
+  return { ...rest, [field]: callId } as unknown as AgentInputItem;
+}
+
+function toResponsesCompactInputItem(
+  record: Record<string, unknown>,
+): AgentInputItem {
+  const type = record["type"];
+  if (type === "function_call_result") {
+    const callId = record["callId"] ?? record["call_id"];
+    if (typeof callId !== "string") {
+      return record as unknown as AgentInputItem;
+    }
+    const compacted: Record<string, unknown> = {
+      type: "function_call_output",
+      call_id: callId,
+      output: record["output"],
+    };
+    if (typeof record["status"] === "string") {
+      compacted["status"] = record["status"];
+    }
+    if (typeof record["id"] === "string") {
+      compacted["id"] = record["id"];
+    }
+    return compacted as unknown as AgentInputItem;
+  }
+  return withCallIdField(record, "call_id");
+}
+
+function omittedToolOutputMessage(): AgentInputItem {
+  return {
+    role: "assistant",
+    status: "completed",
+    content: [
+      {
+        type: "output_text",
+        text:
+          "Historical tool output omitted from model replay. " +
+          "The visible chat transcript is preserved separately.",
+      },
+    ],
+  } as AgentInputItem;
+}
+
+function prepareFunctionItemForModelInput(
+  item: AgentInputItem,
+): AgentInputItem {
+  if (!("type" in item)) return item;
+  const record = item as unknown as Record<string, unknown>;
+  const itemType = record["type"];
+  if (itemType === "function_call" || itemType === "function_call_result") {
+    return withCallIdField(record, "callId");
+  }
+  if (itemType === "function_call_output") {
+    return omittedToolOutputMessage();
+  }
+  return item;
+}
+
+type OpenAICompactOptions = Partial<
+  Pick<
+    OpenAI.Responses.ResponseCompactParams,
+    | "instructions"
+    | "previous_response_id"
+    | "prompt_cache_key"
+    | "prompt_cache_retention"
+    | "service_tier"
+  >
+>;
+
+type AgentsCompactionArgs = OpenAIResponsesCompactionArgs &
+  OpenAICompactOptions & {
+    responseId?: string | null;
+  };
+
+function toOpenAICompactOptions(
+  args: OpenAIResponsesCompactionArgs,
+): OpenAICompactOptions {
+  const source = args as AgentsCompactionArgs;
+  const options: OpenAICompactOptions = {};
+  const previousResponseId =
+    source.responseId ?? source.previous_response_id ?? undefined;
+  if (previousResponseId !== undefined)
+    options.previous_response_id = previousResponseId;
+  if (source.instructions !== undefined)
+    options.instructions = source.instructions;
+  if (source.prompt_cache_key !== undefined)
+    options.prompt_cache_key = source.prompt_cache_key;
+  if (source.prompt_cache_retention !== undefined)
+    options.prompt_cache_retention = source.prompt_cache_retention;
+  if (source.service_tier !== undefined)
+    options.service_tier = source.service_tier;
+  return options;
+}
+
 export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   private readonly options: SessionOptions;
   private state: ModelState | null = null;
@@ -206,6 +310,8 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   }
 
   prepareHistoryItemForModelInput(item: AgentInputItem): AgentInputItem {
+    const preparedFunctionItem = prepareFunctionItemForModelInput(item);
+    if (preparedFunctionItem !== item) return preparedFunctionItem;
     if (
       !("role" in item) ||
       item.role !== "user" ||
@@ -321,22 +427,27 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     const startedAt = performance.now();
     const items = await this.getItems();
     const before = estimateStoredContext(items);
-    const shouldCompact =
-      args.force === true ||
-      before.estimatedTokens >= (this.options.autoCompactTokens ?? 120_000) ||
-      before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40);
-    if (!shouldCompact || items.length === 0) return null;
 
-    const compactArgs: Partial<OpenAIResponsesCompactionArgs> = { ...args };
-    delete compactArgs.force;
+    const shouldCompact = (): boolean => {
+      return (
+        args.force === true ||
+        before.estimatedTokens >= (this.options.autoCompactTokens ?? 120000) ||
+        before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40)
+      );
+    };
+
+    if (!shouldCompact() || items.length === 0) return null;
+
+    const compactArgs = toOpenAICompactOptions(args);
     const compacted = await this.client.responses.compact({
       ...compactArgs,
       model: this.options.model ?? "gpt-5.4-mini",
       // Strip input_image parts (and any other model-incompatible content)
       // before compacting, matching the sanitization applied elsewhere via
-      // prepareHistoryItemForModelInput.
+      // prepareHistoryItemForModelInput. Convert SDK `callId` to the
+      // Responses API `call_id` field so compact accepts function calls.
       input: items.map((item) =>
-        this.prepareHistoryItemForModelInput(item),
+        toResponsesCompactInputItem(this.prepareHistoryItemForModelInput(item)),
       ) as OpenAI.Responses.ResponseInput,
     });
     const output = compacted.output as AgentInputItem[];

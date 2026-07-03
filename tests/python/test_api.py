@@ -2691,6 +2691,13 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
         ("GET", "/api/chat/messages", None, "list_messages", HTTPError("connection reset")),
         ("GET", "/api/chat/model-state", None, "get_model_state", HTTPError("timeout")),
         (
+            "POST",
+            "/api/chat/model-state/lease",
+            {"lease_id": "lease-1"},
+            "acquire_turn_lease",
+            RuntimeError("unexpected lease failure"),
+        ),
+        (
             "PUT",
             "/api/chat/model-state",
             {
