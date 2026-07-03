@@ -153,6 +153,10 @@ export const calendarActivitySchema = z.looseObject({
   planned_workout_id: z.string().nullable().optional(),
 });
 
+export const resolvePlanWorkoutResponseSchema = z.object({
+  workout: calendarPlannedWorkoutSchema,
+});
+
 export const calendarResponseSchema = z.object({
   start: isoDateSchema,
   end: isoDateSchema,

@@ -10,6 +10,7 @@
 - `20260625172251_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
 - `20260626000000_activity_summary.sql` — rich activity summary persistence
 - `20260702000000_agent_emails.sql` — inbound agent email storage for autonomous preview testing
+- `20260703000000_plan_workout_completion.sql` — `plan_workouts.completion_source` provenance plus a partial index for unconfirmed (past, still `scheduled`) workout lookups
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the

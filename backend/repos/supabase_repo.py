@@ -578,6 +578,12 @@ class SupabaseRepository:
             raise RuntimeError("Supabase did not return the inserted training plan row.")
         return TrainingPlan.model_validate(rows[0])
 
+    async def update_training_plan_status(self, user_id: str, plan_id: str, status: str) -> None:
+        client = self._require_client()
+        client.table("training_plans").update({"status": status}).eq("user_id", user_id).eq(
+            "id", plan_id
+        ).execute()
+
     async def get_active_plan(self, user_id: str) -> TrainingPlan | None:
         client = self._require_client()
         response = (
@@ -612,6 +618,48 @@ class SupabaseRepository:
             query = query.gte("workout_date", since.isoformat())
         response = query.order("workout_date").execute()
         return [PlanWorkout.model_validate(r) for r in (response.data or [])]
+
+    async def get_plan_workout(self, user_id: str, workout_id: str) -> PlanWorkout:
+        client = self._require_client()
+        response = (
+            client.table("plan_workouts")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("id", workout_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(f"No plan workout '{workout_id}' for user '{user_id}'.")
+        return PlanWorkout.model_validate(rows[0])
+
+    # Only resolution-related columns may be patched; identifiers and
+    # prescription fields are immutable through this path.
+    _PLAN_WORKOUT_PATCHABLE_FIELDS = frozenset(
+        {"status", "actual_activity_id", "completion_source"}
+    )
+
+    async def update_plan_workout_fields(
+        self, user_id: str, workout_id: str, fields: dict[str, Any]
+    ) -> PlanWorkout:
+        if not fields:
+            raise ValueError("At least one field is required to update a plan workout.")
+        disallowed = set(fields) - self._PLAN_WORKOUT_PATCHABLE_FIELDS
+        if disallowed:
+            raise ValueError(f"Fields not patchable on plan_workouts: {sorted(disallowed)}")
+        client = self._require_client()
+        response = (
+            client.table("plan_workouts")
+            .update(fields)
+            .eq("user_id", user_id)
+            .eq("id", workout_id)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(f"No plan workout '{workout_id}' for user '{user_id}'.")
+        return PlanWorkout.model_validate(rows[0])
 
     async def list_plan_workouts_between(
         self, user_id: str, *, start: date, end: date

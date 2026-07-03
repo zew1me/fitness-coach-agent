@@ -399,7 +399,8 @@ describe("proposedUpdateToolShapeHints", () => {
         "update_athlete_profile {fields: {biological_sex?, birth_date?, coaching_state?, constraints?: [...], dietary_restrictions?: [...], display_name?, height_cm?, hormone_status?, injuries_rehab?: [...], max_hr_bpm?, notes?, nutrition_notes?, onboarding_collected?: {nutrition?}, primary_sports?: [...], resting_hr_bpm?, specialization_pct?, weekly_available_hours?, weight_kg?}}; " +
         "generate_training_plan {goal_id?}; " +
         "adjust_plan {plan_id, reason}; " +
-        "recalibrate_thresholds {}",
+        "recalibrate_thresholds {}; " +
+        "resolve_plan_workout {activity_id, outcome, plan_workout_id}",
     );
   });
 
@@ -413,6 +414,7 @@ describe("proposedUpdateToolShapeHints", () => {
       "generate_training_plan",
       "adjust_plan",
       "recalibrate_thresholds",
+      "resolve_plan_workout",
     ];
 
     for (const toolName of toolNames) {

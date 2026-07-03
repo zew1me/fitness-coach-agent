@@ -70,6 +70,21 @@ export function monthLabel(iso: string): string {
   }).format(toUtc(iso));
 }
 
+/**
+ * "unconfirmed" is derived, never persisted: a past-dated workout still in
+ * `scheduled` has neither auto-matched an activity nor been resolved by the
+ * athlete or coach.
+ */
+export function derivedWorkoutStatus(
+  workout: CalendarPlannedWorkout,
+  todayIso: string,
+): string {
+  if (workout.status === "scheduled" && workout.workout_date < todayIso) {
+    return "unconfirmed";
+  }
+  return workout.status;
+}
+
 export function groupCalendarItemsByDay(
   response: CalendarResponse,
 ): Map<string, CalendarDayItems> {

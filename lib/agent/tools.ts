@@ -204,6 +204,12 @@ const adjustPlanInputSchema = z.object({
   reason: z.string().min(1),
 });
 
+const resolvePlanWorkoutInputSchema = z.object({
+  activity_id: z.string().min(1).nullable(),
+  outcome: z.enum(["completed", "skipped"]),
+  plan_workout_id: z.string().min(1),
+});
+
 type ToolDefinition<TSchema extends z.ZodTypeAny> = {
   description: string;
   inputSchema: TSchema;
@@ -230,8 +236,12 @@ export const coachToolDefinitions = {
     userInputSchema,
   ),
   get_compliance_summary: defineTool(
-    "Summarize planned versus actual completion over recent weeks.",
+    "Summarize planned versus actual workout completion since the plan started (up to 4 weeks). Auto-matches recorded activities to planned workouts, reports compliance percentage, and lists up to 3 recent unconfirmed sessions worth asking the athlete about.",
     userInputSchema,
+  ),
+  resolve_plan_workout: defineTool(
+    "Mark a planned workout completed or skipped after the athlete confirms what happened. Optionally link the recorded activity that fulfilled it.",
+    resolvePlanWorkoutInputSchema,
   ),
   save_activity_from_text: defineTool(
     "Persist an activity described in natural language after deterministic scoring.",

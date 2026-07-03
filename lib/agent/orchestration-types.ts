@@ -40,6 +40,7 @@ const proposedWriteToolNameSchema = z.enum([
   "generate_training_plan",
   "adjust_plan",
   "recalibrate_thresholds",
+  "resolve_plan_workout",
 ]);
 type ProposedWriteToolName = z.infer<typeof proposedWriteToolNameSchema>;
 
@@ -140,6 +141,9 @@ const proposedUpdateToolInputSchemas: Record<
   ),
   recalibrate_thresholds: relaxForProposedUpdate(
     coachToolDefinitions.recalibrate_thresholds.inputSchema,
+  ),
+  resolve_plan_workout: relaxForProposedUpdate(
+    coachToolDefinitions.resolve_plan_workout.inputSchema,
   ),
 };
 

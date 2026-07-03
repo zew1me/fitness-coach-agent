@@ -5,9 +5,10 @@ import logging
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Literal
 from urllib.parse import urlencode
 
 import httpx
@@ -53,7 +54,7 @@ from backend.models.chat import (
     ChatTurnLeaseRequest,
 )
 from backend.models.storage import PresignUploadRequest
-from backend.models.training import Activity
+from backend.models.training import Activity, PlanWorkout, TrainingPlan
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -1274,17 +1275,25 @@ async def save_activity_from_text(
             "raw_extraction": result.raw_extraction,
             "status": "needs_clarification",
         }
+    return await _persist_extracted_activity(user_context.user_id, result.activity)
+
+
+async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapping[str, object]:
     try:
         activity = await _activity_repo_call(
-            repo.create_activity(result.activity),
+            repo.create_activity(extracted),
             detail="Failed to save activity.",
-            log_message=f"create_activity failed for user_id={user_context.user_id}",
+            log_message=f"create_activity failed for user_id={user_id}",
         )
     except RuntimeError as exc:
-        logger.exception("create_activity failed for user_id=%s", user_context.user_id)
+        logger.exception("create_activity failed for user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
-    logger.info("save_activity_from_text user_id=%s status=saved", user_context.user_id)
-    return {"activity": activity.model_dump(mode="json"), "status": "saved"}
+    logger.info("save_activity_from_text user_id=%s status=saved", user_id)
+    matched = await _try_match_activity_to_plan(user_id, activity)
+    response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}
+    if matched is not None:
+        response["matched_plan_workout"] = matched
+    return response
 
 
 class GeneratePlanStructureRequest(BaseModel):
@@ -1332,14 +1341,67 @@ async def generate_plan_structure(
         recovery_week_frequency=recovery_freq,
     )
 
+    from backend.services.plan_composer import compose_plan_workouts
+
+    plan_sport = (
+        (target_goal.sport if target_goal else None)
+        or (profile.primary_sports[0] if profile.primary_sports else None)
+        or "cycling"
+    )
+    plan = TrainingPlan(
+        user_id=user_id,
+        title=(f"Plan: {target_goal.title}" if target_goal else "Rolling training plan"),
+        plan_type="full_cycle" if target_goal and target_goal.target_date else "weekly",
+        status="active",
+        start_date=skeleton.start_date,
+        end_date=skeleton.end_date,
+        target_goal_id=target_goal.id if target_goal else None,
+        phases=[p.to_dict() for p in skeleton.phases],
+        weekly_tss_target=round(skeleton.starting_weekly_tss, 1),
+        weekly_hours_target=available_hours,
+    )
+    persisted_plan = None
+    try:
+        schedule = await repo.get_schedule(user_id)
+        persisted_plan = await repo.create_training_plan(plan)
+        workouts = compose_plan_workouts(
+            skeleton,
+            user_id=user_id,
+            plan_id=persisted_plan.id or "",
+            sport=plan_sport,
+            weekly_pattern=schedule.weekly_pattern if schedule else None,
+        )
+        persisted_workouts = await repo.create_plan_workouts(workouts)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError) as exc:
+        logger.exception("generate_plan: persistence failed user_id=%s", user_id)
+        if persisted_plan is not None and persisted_plan.id:
+            # Don't leave a workout-less plan active (create_training_plan
+            # already superseded the previous one). Best-effort cleanup.
+            try:
+                await repo.update_training_plan_status(user_id, persisted_plan.id, "superseded")
+            except Exception:
+                logger.exception(
+                    "generate_plan: failed to supersede partial plan user_id=%s plan_id=%s",
+                    user_id,
+                    persisted_plan.id,
+                )
+        raise HTTPException(status_code=503, detail="Failed to persist training plan.") from exc
+
     logger.info(
-        "plan structure generated user_id=%s weeks=%d goal_type=%s recovery_freq=%d",
+        "plan generated user_id=%s plan_id=%s weeks=%d workouts=%d goal_type=%s recovery_freq=%d",
         user_id,
+        persisted_plan.id,
         skeleton.total_weeks,
+        len(persisted_workouts),
         target_goal.goal_type if target_goal else "maintenance",
         recovery_freq,
     )
     return {
+        "plan_id": persisted_plan.id,
+        "sport": plan_sport,
+        "workouts_created": len(persisted_workouts),
         "total_weeks": skeleton.total_weeks,
         "start_date": skeleton.start_date.isoformat(),
         "end_date": skeleton.end_date.isoformat(),
@@ -1351,6 +1413,202 @@ async def generate_plan_structure(
             "committed_amateur_ctl": ceiling.committed_amateur_ctl,
         },
     }
+
+
+async def _persist_workout_match(user_id: str, workout: PlanWorkout, activity: Activity) -> None:
+    """Link a confident plan↔activity match on both sides."""
+    await repo.update_plan_workout_fields(
+        user_id,
+        workout.id or "",
+        {
+            "status": "completed",
+            "actual_activity_id": activity.id,
+            "completion_source": "auto_matched",
+        },
+    )
+    await repo.update_activity(activity.model_copy(update={"planned_workout_id": workout.id}))
+
+
+async def _try_match_activity_to_plan(user_id: str, activity: Activity) -> dict[str, object] | None:
+    """Write-time glue: opportunistically match a just-saved activity.
+
+    Best-effort by design — a matching failure must never fail the save that
+    triggered it, so errors are logged and swallowed.
+    """
+    from backend.services.compliance import MATCH_MAX_DAY_OFFSET, match_activities_to_workouts
+
+    try:
+        window = timedelta(days=MATCH_MAX_DAY_OFFSET)
+        planned = await repo.list_plan_workouts_between(
+            user_id,
+            start=activity.activity_date - window,
+            end=activity.activity_date + window,
+        )
+        matches = match_activities_to_workouts(planned, [activity], today=datetime.now(UTC).date())
+        if not matches:
+            return None
+        match = matches[0]
+        await _persist_workout_match(user_id, match.workout, activity)
+        logger.info(
+            "activity auto-matched user_id=%s activity_id=%s plan_workout_id=%s",
+            user_id,
+            activity.id,
+            match.workout.id,
+        )
+        return {
+            "plan_workout_id": match.workout.id,
+            "workout_date": match.workout.workout_date.isoformat(),
+            "title": match.workout.title,
+        }
+    except Exception:
+        logger.exception("post-save plan matching failed user_id=%s", user_id)
+        return None
+
+
+@app.post("/api/engine/get-compliance-summary")
+async def get_compliance_summary(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Read-time reconciliation + planned-versus-done summary for the coach."""
+    from backend.services.compliance import (
+        MATCH_MAX_DAY_OFFSET,
+        build_compliance_summary,
+        compliance_window,
+        match_activities_to_workouts,
+    )
+
+    user_id = user_context.user_id
+    today = datetime.now(UTC).date()
+
+    try:
+        plan = await repo.get_active_plan(user_id)
+        if plan is None:
+            return {
+                "status": "no_active_plan",
+                "message": "No active training plan; generate one to track compliance.",
+            }
+
+        start, _ = compliance_window(plan.start_date, today)
+        match_margin = timedelta(days=MATCH_MAX_DAY_OFFSET)
+        planned, activities = await asyncio.gather(
+            repo.list_plan_workouts_between(user_id, start=start, end=today + match_margin),
+            repo.list_activities_between(
+                user_id, start=start - match_margin, end=today + match_margin
+            ),
+        )
+
+        matches = match_activities_to_workouts(planned, activities, today=today)
+        for match in matches:
+            await _persist_workout_match(user_id, match.workout, match.activity)
+
+        # Reflect the persisted matches in memory so the summary is built from
+        # post-reconciliation state without a second round-trip.
+        workout_to_activity = {m.workout.id: m.activity.id for m in matches}
+        activity_to_workout = {m.activity.id: m.workout.id for m in matches}
+        planned = [
+            w.model_copy(
+                update={
+                    "status": "completed",
+                    "actual_activity_id": workout_to_activity[w.id],
+                    "completion_source": "auto_matched",
+                }
+            )
+            if w.id in workout_to_activity
+            else w
+            for w in planned
+        ]
+        activities = [
+            a.model_copy(update={"planned_workout_id": activity_to_workout[a.id]})
+            if a.id in activity_to_workout
+            else a
+            for a in activities
+        ]
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("get_compliance_summary failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to load compliance data.") from exc
+
+    summary = build_compliance_summary(plan, planned, activities, today=today)
+    logger.info(
+        "compliance summary user_id=%s plan_id=%s matches=%d pct=%s unconfirmed=%d",
+        user_id,
+        plan.id,
+        len(matches),
+        summary["compliance_pct"],
+        summary["totals"]["unconfirmed"],
+    )
+    return summary
+
+
+class ResolvePlanWorkoutRequest(BaseModel):
+    """Explicit athlete/coach resolution of a planned workout."""
+
+    plan_workout_id: str = Field(min_length=1)
+    outcome: Literal["completed", "skipped"]
+    activity_id: str | None = None
+    source: Literal["athlete", "coach"] = "coach"
+
+
+async def _apply_workout_resolution(
+    user_id: str, workout: PlanWorkout, payload: ResolvePlanWorkoutRequest
+) -> PlanWorkout:
+    activity: Activity | None = None
+    if payload.outcome == "completed" and payload.activity_id:
+        activity = await repo.get_activity(user_id, payload.activity_id)
+
+    fields: dict[str, object] = {
+        "status": payload.outcome,
+        "completion_source": f"{payload.source}_confirmed",
+    }
+    if activity is not None:
+        fields["actual_activity_id"] = activity.id
+    if payload.outcome == "skipped":
+        # Correcting a previous match ("I didn't actually do that"):
+        # clear the link on both sides so the activity reads as unplanned.
+        fields["actual_activity_id"] = None
+    updated = await repo.update_plan_workout_fields(user_id, payload.plan_workout_id, fields)
+    if activity is not None:
+        await repo.update_activity(activity.model_copy(update={"planned_workout_id": workout.id}))
+    # Unlink the previously matched activity when skipping or when a different
+    # activity replaces it, so only the current link survives on both sides.
+    prior_activity_id = workout.actual_activity_id
+    replaced = activity is not None and prior_activity_id not in (None, activity.id)
+    if prior_activity_id is not None and (payload.outcome == "skipped" or replaced):
+        linked = await repo.get_activity(user_id, prior_activity_id)
+        await repo.update_activity(linked.model_copy(update={"planned_workout_id": None}))
+    return updated
+
+
+@app.post("/api/engine/resolve-plan-workout")
+async def resolve_plan_workout(
+    payload: ResolvePlanWorkoutRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    try:
+        workout = await repo.get_plan_workout(user_id, payload.plan_workout_id)
+        updated = await _apply_workout_resolution(user_id, workout, payload)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception(
+            "resolve_plan_workout failed user_id=%s workout_id=%s",
+            user_id,
+            payload.plan_workout_id,
+        )
+        raise HTTPException(status_code=503, detail="Failed to resolve plan workout.") from exc
+
+    logger.info(
+        "plan workout resolved user_id=%s workout_id=%s outcome=%s source=%s",
+        user_id,
+        payload.plan_workout_id,
+        payload.outcome,
+        payload.source,
+    )
+    return {"workout": updated.model_dump(mode="json")}
 
 
 class ConfirmThresholdRequest(BaseModel):

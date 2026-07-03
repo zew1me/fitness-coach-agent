@@ -25,7 +25,7 @@ from backend.models.auth import (
     UserContext,
 )
 from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest
-from backend.models.training import Activity, DailyLoadSnapshot, Goal
+from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
 from backend.services.auth import AuthService
@@ -148,6 +148,17 @@ class EngineRepository:
 
     async def create_activity(self, activity: Activity) -> Activity:
         return activity.model_copy(update={"id": "activity-1"})
+
+    async def list_plan_workouts_between(self, user_id: str, *, start, end) -> list[PlanWorkout]:
+        return []
+
+    async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+        return plan.model_copy(update={"id": "plan-1"})
+
+    async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+        return [
+            w.model_copy(update={"id": f"workout-{i}"}) for i, w in enumerate(workouts, start=1)
+        ]
 
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         return Activity(
@@ -2405,6 +2416,96 @@ async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
     assert body["target_goal"]["title"] == "Hill climb race"
     assert body["starting_weekly_tss"] == 294
     assert body["phases"]
+    assert body["plan_id"] == "plan-1"
+    assert body["sport"] == "running"
+    assert body["workouts_created"] == body["total_weeks"] * 7
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_persists_plan_and_workouts(monkeypatch) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            profile = await super().get_athlete_profile(user_id)
+            # Put a non-goal sport first so the assertion below proves the
+            # goal sport (running) wins over profile ordering.
+            return profile.model_copy(update={"primary_sports": ["cycling", "running"]})
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.status == "active"
+    assert recording_repo.created_plan.target_goal_id == "goal-1"
+    workouts = recording_repo.created_workouts
+    assert workouts
+    assert all(w.plan_id == "plan-1" for w in workouts)
+    assert all(w.user_id == "athlete-1" for w in workouts)
+    # Goal sport (running) wins over profile ordering.
+    assert {w.sport for w in workouts} == {"running"}
+    assert all(w.status == "scheduled" for w in workouts)
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_supersedes_partial_plan_on_workout_failure(
+    monkeypatch,
+) -> None:
+    class FailingWorkoutRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            raise RuntimeError("insert failed")
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    failing_repo = FailingWorkoutRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", failing_repo)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert failing_repo.status_updates == [("plan-1", "superseded")]
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,11 @@ declare const styles: {
   readonly moreCount: string;
   readonly navButton: string;
   readonly page: string;
+  readonly pillUnconfirmed: string;
   readonly primaryButton: string;
+  readonly resolveButton: string;
+  readonly resolveError: string;
+  readonly resolveRow: string;
   readonly shell: string;
   readonly statusBanner: string;
   readonly todayLabel: string;

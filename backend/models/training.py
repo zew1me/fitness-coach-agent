@@ -1,5 +1,5 @@
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -132,6 +132,7 @@ class PlanWorkout(BaseModel):
 
     status: str = "scheduled"
     actual_activity_id: str | None = None
+    completion_source: Literal["auto_matched", "athlete_confirmed", "coach_confirmed"] | None = None
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
