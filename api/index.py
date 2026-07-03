@@ -590,6 +590,44 @@ async def upload_chat_attachment(
     return upload_result.model_dump(mode="json")
 
 
+# Guards the calendar endpoint against unbounded scans; the UI window is
+# ~15 weeks (42 days back + 8 weeks ahead), so this leaves generous headroom.
+_CALENDAR_MAX_RANGE_DAYS = 200
+
+
+@app.get("/api/calendar")
+async def get_calendar(
+    start: date,
+    end: date,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Planned workouts and recorded activities for the agenda/calendar view."""
+    if start > end:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
+    if (end - start).days > _CALENDAR_MAX_RANGE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"date range too large; maximum is {_CALENDAR_MAX_RANGE_DAYS} days",
+        )
+
+    planned = await repo.list_plan_workouts_between(user_context.user_id, start=start, end=end)
+    activities = await repo.list_activities_between(user_context.user_id, start=start, end=end)
+    logger.debug(
+        "calendar user_id=%s start=%s end=%s planned=%d activities=%d",
+        user_context.user_id,
+        start,
+        end,
+        len(planned),
+        len(activities),
+    )
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "planned_workouts": [workout.model_dump(mode="json") for workout in planned],
+        "activities": [activity.model_dump(mode="json") for activity in activities],
+    }
+
+
 # ── Engine endpoints ──────────────────────────────────────────
 
 

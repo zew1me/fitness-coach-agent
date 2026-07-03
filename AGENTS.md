@@ -48,6 +48,7 @@ Next.js 15 App Router. Key pages:
 - `app/auth/callback/page.tsx` — Supabase auth callback
 - `app/consent/page.tsx` — OAuth consent UI (POSTs to `/api/oauth/authorize/decision`)
 - `app/profile/page.tsx` — athlete profile management
+- `app/calendar/page.tsx` — read-only training calendar (past 42 days + upcoming 8 weeks of planned workouts and recorded activities via `GET /api/calendar`; issue #212 MVP)
 
 `lib/` contains shared TS utilities: Supabase browser client (`supabase.ts`), Zod schemas (`schemas.ts`), TypeScript types (`types.ts`), and site config (`site.ts`).
 

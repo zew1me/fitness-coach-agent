@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 /**
  * UI tests — run explicitly with `bun run test:ui`.
- * They now run as a separate task in CI, see 
+ * They now run as a separate task in CI, see
  * .github/workflows/ci.yml.
  *
  * The dev server starts automatically unless BASE_URL is set.
@@ -20,11 +20,19 @@ export default defineConfig({
   // below) for the uploaded playwright-report artifact.
   retries: process.env["CI"] ? 1 : 0,
   workers: 1,
-  reporter: process.env["CI"] ? [["list"], ["html", { open: "never" }]] : "list",
+  reporter: process.env["CI"]
+    ? [["list"], ["html", { open: "never" }]]
+    : "list",
   use: {
     baseURL,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
+    // Sandboxed environments sometimes preinstall a Chromium whose build
+    // number differs from the one this @playwright/test version downloads.
+    // Point PW_CHROMIUM_PATH at that binary to use it instead.
+    ...(process.env["PW_CHROMIUM_PATH"]
+      ? { launchOptions: { executablePath: process.env["PW_CHROMIUM_PATH"] } }
+      : {}),
   },
   projects: [
     {

@@ -119,3 +119,49 @@ export const uploadRequestSchema = z.object({
   filename: z.string().trim().min(1),
   purpose: z.string().trim().min(1).default("check-in-image"),
 });
+
+const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+export const calendarPlannedWorkoutSchema = z.looseObject({
+  id: z.string().min(1),
+  plan_id: z.string().min(1),
+  workout_date: isoDateSchema,
+  sport: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().nullable().optional(),
+  workout_type: z.string().min(1),
+  phase_name: z.string().nullable().optional(),
+  target_duration_minutes: z.number().nullable().optional(),
+  target_distance_meters: z.number().nullable().optional(),
+  target_tss: z.number().nullable().optional(),
+  status: z.string().min(1).default("scheduled"),
+  actual_activity_id: z.string().nullable().optional(),
+});
+
+export const calendarActivitySchema = z.looseObject({
+  id: z.string().min(1),
+  sport: z.string().min(1),
+  activity_date: isoDateSchema,
+  started_at: z.string().nullable().optional(),
+  duration_seconds: z.number().nullable().optional(),
+  distance_meters: z.number().nullable().optional(),
+  elevation_gain_meters: z.number().nullable().optional(),
+  avg_hr_bpm: z.number().nullable().optional(),
+  tss: z.number().nullable().optional(),
+  rpe: z.number().nullable().optional(),
+  athlete_notes: z.string().nullable().optional(),
+  planned_workout_id: z.string().nullable().optional(),
+});
+
+export const calendarResponseSchema = z.object({
+  start: isoDateSchema,
+  end: isoDateSchema,
+  planned_workouts: z.array(calendarPlannedWorkoutSchema),
+  activities: z.array(calendarActivitySchema),
+});
+
+export type CalendarPlannedWorkout = z.infer<
+  typeof calendarPlannedWorkoutSchema
+>;
+export type CalendarActivity = z.infer<typeof calendarActivitySchema>;
+export type CalendarResponse = z.infer<typeof calendarResponseSchema>;
