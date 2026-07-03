@@ -24,7 +24,8 @@ dev = [
   "pytest>=8.3.5,<9.0.0",
   "pytest-asyncio>=0.25.3,<0.26.0",
   "ruff>=0.11.0,<0.12.0",
-  "ty>=0.0.1a4"
+  "ty>=0.0.1a4",
+  "vulture>=2.14,<3.0",
 ]
 
 [tool.ruff]
@@ -72,6 +73,11 @@ indent-style = "space"
 
 [tool.ty.src]
 include = ["api", "backend", "tests/python"]
+
+[tool.vulture]
+paths = ["api", "backend", "scripts"]
+min_confidence = 80
+ignore_names = ["cls"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

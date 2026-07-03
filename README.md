@@ -25,6 +25,7 @@ ChatGPT-first endurance coaching app scaffold with:
 - TypeScript linting: `eslint`
 - Python lint/format: `ruff`
 - Python type checking: `ty`
+- Python dead-code detection: `vulture`
 
 ## Commands
 
@@ -45,6 +46,7 @@ uv sync --all-groups
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check
+uv run vulture
 uv run pytest
 ```
 
