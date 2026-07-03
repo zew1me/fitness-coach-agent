@@ -14,7 +14,10 @@
 import { Agent, Runner, run } from "@openai/agents";
 import { describe, expect, it } from "vitest";
 
-import { specialistReportSchema } from "../../lib/agent/orchestration-types";
+import {
+  specialistReportSchema,
+  specialistReportWireSchema,
+} from "../../lib/agent/orchestration-types";
 
 const MODEL = "gpt-5-mini-2025-08-07";
 
@@ -34,7 +37,9 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       instructions:
         "You are an endurance coaching intake specialist. Analyse the athlete message and return a structured report. Keep summary under 50 words and proposedUpdates empty.",
       model: MODEL,
-      outputType: specialistReportSchema,
+      // Matches production (lib/agent/specialists.ts): the structural-only
+      // wire schema is what's actually sent to the Responses API.
+      outputType: specialistReportWireSchema,
     });
 
     const result = await run(agent, MINIMAL_USER_INPUT, { maxTurns: 1 }).catch(

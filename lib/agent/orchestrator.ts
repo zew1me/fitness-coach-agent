@@ -30,7 +30,6 @@ import {
 } from "./lease-client";
 import { selectMessagesForModel } from "./message-context";
 import {
-  specialistReportsSchema,
   type DelegationPlan,
   type SpecialistReport,
 } from "./orchestration-types";
@@ -434,21 +433,22 @@ export function streamCoachTurn({
                     "coach: delegation failed; continuing lead-only",
                   );
                 }
+                // runSpecialists() handles per-specialist failures (bad
+                // report, bad proposedUpdate, execution error) internally so
+                // one malformed specialist doesn't discard the others and
+                // always returns already-valid reports; this catch is a
+                // last-resort net for anything unexpected outside that.
                 let reports: SpecialistReport[] = [];
                 try {
-                  reports = specialistReportsSchema.parse(
-                    await runSpecialists({
-                      messages: selectedMessages,
-                      messagesAreModelSelected: true,
-                      model: MODEL,
-                      roles: delegationPlan.delegations.map(
-                        (item) => item.role,
-                      ),
-                      delegations: delegationPlan.delegations,
-                      coachingMemory,
-                      slices: buildContextSlices(context),
-                    }),
-                  ) as SpecialistReport[];
+                  reports = await runSpecialists({
+                    messages: selectedMessages,
+                    messagesAreModelSelected: true,
+                    model: MODEL,
+                    roles: delegationPlan.delegations.map((item) => item.role),
+                    delegations: delegationPlan.delegations,
+                    coachingMemory,
+                    slices: buildContextSlices(context),
+                  });
                 } catch (error) {
                   Sentry.captureException(error, {
                     tags: { subsystem: "specialists" },
