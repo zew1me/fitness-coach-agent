@@ -72,10 +72,10 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.ty.src]
-include = ["api", "backend", "tests/python"]
+include = ["api", "backend", "scripts", "tests/python"]
 
 [tool.vulture]
-paths = ["api", "backend", "scripts"]
+paths = ["api", "backend", "scripts", "tests/python"]
 min_confidence = 80
 ignore_names = ["cls"]
 
