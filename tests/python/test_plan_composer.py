@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 
 from backend.engine.periodization import build_plan_skeleton
-from backend.services.plan_composer import compose_plan_workouts
+from backend.services.plan_composer import PlanComposerPolicy, compose_plan_workouts
 
 START = date(2026, 7, 6)  # a Monday
 
@@ -89,6 +89,41 @@ def test_build_phase_allows_three_quality_sessions() -> None:
     build_week = [w for w in workouts if w.week_number == build_weeks[0]]
     quality = [w for w in build_week if w.workout_type == "threshold"]
     assert len(quality) == 3
+
+
+def test_longevity_policy_limits_quality_sessions() -> None:
+    skeleton = _skeleton(goal_type="improvement")
+    workouts = compose_plan_workouts(
+        skeleton,
+        user_id="athlete-1",
+        plan_id="plan-1",
+        sport="cycling",
+        policy=PlanComposerPolicy(training_model="longevity"),
+    )
+
+    build_week = [w for w in workouts if w.week_number == 1]
+    quality = [w for w in build_week if w.workout_type in {"tempo", "threshold", "vo2max"}]
+
+    assert len(quality) == 1
+    assert quality[0].workout_type == "tempo"
+
+
+def test_recovery_return_policy_avoids_quality_and_adds_rest() -> None:
+    skeleton = _skeleton(goal_type="improvement")
+    workouts = compose_plan_workouts(
+        skeleton,
+        user_id="athlete-1",
+        plan_id="plan-1",
+        sport="cycling",
+        policy=PlanComposerPolicy(training_model="recovery_return"),
+    )
+
+    week_one = [w for w in workouts if w.week_number == 1]
+    quality = [w for w in week_one if w.workout_type in {"tempo", "threshold", "vo2max"}]
+    rest_days = [w for w in week_one if w.workout_type == "rest"]
+
+    assert quality == []
+    assert len(rest_days) >= 2
 
 
 def test_unavailable_days_become_rest() -> None:

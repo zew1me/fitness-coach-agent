@@ -195,8 +195,16 @@ const profileInputSchema = z.object({
   fields: profileFieldsSchema,
 });
 
+const trainingModelSchema = z.enum([
+  "auto",
+  "longevity",
+  "performance",
+  "recovery_return",
+]);
+
 const planInputSchema = z.object({
   goal_id: z.string().min(1).optional(),
+  training_model: trainingModelSchema.optional(),
 });
 
 const adjustPlanInputSchema = z.object({
@@ -276,7 +284,7 @@ export const coachToolDefinitions = {
     thresholdInputSchema,
   ),
   generate_training_plan: defineTool(
-    "Generate and persist a training plan.",
+    "Generate and persist a training plan. Optional training_model: auto, longevity, performance, or recovery_return.",
     planInputSchema,
   ),
   adjust_plan: defineTool(

@@ -114,6 +114,59 @@ class ComplianceRepository:
         self.activity_updates.append(activity)
         return activity
 
+    async def match_plan_workout_to_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+        completion_source: str,
+    ) -> PlanWorkout:
+        workout = await self.update_plan_workout_fields(
+            user_id,
+            workout_id,
+            {
+                "status": "completed",
+                "actual_activity_id": activity_id,
+                "completion_source": completion_source,
+            },
+        )
+        activity = await self.get_activity(user_id, activity_id)
+        await self.update_activity(activity.model_copy(update={"planned_workout_id": workout_id}))
+        return workout
+
+    async def resolve_plan_workout_atomic(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        outcome: str,
+        activity_id: str | None,
+        source: str,
+    ) -> PlanWorkout:
+        workout = await self.get_plan_workout(user_id, workout_id)
+        activity: Activity | None = None
+        if activity_id is not None:
+            activity = await self.get_activity(user_id, activity_id)
+        fields: dict[str, Any] = {
+            "status": outcome,
+            "completion_source": f"{source}_confirmed",
+        }
+        if activity_id is not None:
+            fields["actual_activity_id"] = activity_id
+        if outcome == "skipped":
+            fields["actual_activity_id"] = None
+        updated = await self.update_plan_workout_fields(user_id, workout_id, fields)
+        if activity is not None:
+            await self.update_activity(
+                activity.model_copy(update={"planned_workout_id": workout_id})
+            )
+        replaced = activity_id is not None and workout.actual_activity_id not in (None, activity_id)
+        if workout.actual_activity_id is not None and (outcome == "skipped" or replaced):
+            prior = await self.get_activity(user_id, workout.actual_activity_id)
+            await self.update_activity(prior.model_copy(update={"planned_workout_id": None}))
+        return updated
+
 
 async def _post(path: str, body: dict[str, Any]) -> Any:
     transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)

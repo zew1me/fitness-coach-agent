@@ -208,7 +208,9 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("save_activity_from_text {");
     expect(prompt).toContain("update_schedule {");
     expect(prompt).toContain("update_goals {");
-    expect(prompt).toContain("generate_training_plan {goal_id?}");
+    expect(prompt).toContain(
+      "generate_training_plan {goal_id?, training_model?}",
+    );
     expect(prompt).toContain("adjust_plan {plan_id, reason}");
     expect(prompt).toContain("recalibrate_thresholds {}");
   });

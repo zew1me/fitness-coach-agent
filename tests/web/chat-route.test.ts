@@ -1014,6 +1014,7 @@ describe("app/api/chat route", () => {
     await expect(
       generateTrainingPlan.execute({
         goal_id: "goal-1",
+        training_model: "performance",
         user_id: "athlete-1",
       }),
     ).resolves.toEqual({ phases: [{ name: "Base" }], total_weeks: 8 });
@@ -1022,6 +1023,7 @@ describe("app/api/chat route", () => {
       expect.objectContaining({
         body: JSON.stringify({
           goal_id: "goal-1",
+          training_model: "performance",
         }),
         method: "POST",
       }),

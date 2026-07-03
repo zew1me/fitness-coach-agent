@@ -663,6 +663,59 @@ class SupabaseRepository:
             raise RecordNotFoundError(f"No plan workout '{workout_id}' for user '{user_id}'.")
         return PlanWorkout.model_validate(rows[0])
 
+    @staticmethod
+    def _plan_workout_from_rpc_response(response_data: object, workout_id: str) -> PlanWorkout:
+        if isinstance(response_data, list):
+            rows = response_data
+            if not rows:
+                raise RecordNotFoundError(f"No plan workout '{workout_id}' was updated.")
+            return PlanWorkout.model_validate(rows[0])
+        if isinstance(response_data, dict):
+            return PlanWorkout.model_validate(response_data)
+        raise RuntimeError("Supabase RPC did not return an updated plan workout row.")
+
+    async def match_plan_workout_to_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+        completion_source: str,
+    ) -> PlanWorkout:
+        client = self._require_client()
+        response = client.rpc(
+            "match_plan_workout_to_activity",
+            {
+                "p_user_id": user_id,
+                "p_plan_workout_id": workout_id,
+                "p_activity_id": activity_id,
+                "p_completion_source": completion_source,
+            },
+        ).execute()
+        return self._plan_workout_from_rpc_response(response.data, workout_id)
+
+    async def resolve_plan_workout_atomic(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        outcome: str,
+        activity_id: str | None,
+        source: str,
+    ) -> PlanWorkout:
+        client = self._require_client()
+        response = client.rpc(
+            "resolve_plan_workout",
+            {
+                "p_user_id": user_id,
+                "p_plan_workout_id": workout_id,
+                "p_outcome": outcome,
+                "p_activity_id": activity_id,
+                "p_source": source,
+            },
+        ).execute()
+        return self._plan_workout_from_rpc_response(response.data, workout_id)
+
     async def list_plan_workouts_between(
         self, user_id: str, *, start: date, end: date
     ) -> list[PlanWorkout]:

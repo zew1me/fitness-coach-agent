@@ -76,6 +76,19 @@ describe("coachToolDefinitions", () => {
     expect(parsed.goal?.course_elevation_gain_meters).toBe(700);
   });
 
+  it("accepts explicit training model policy for plan generation", () => {
+    const parsed =
+      coachToolDefinitions.generate_training_plan.inputSchema.parse({
+        goal_id: "goal-1",
+        training_model: "longevity",
+      });
+
+    expect(parsed).toEqual({
+      goal_id: "goal-1",
+      training_model: "longevity",
+    });
+  });
+
   it("accepts complete and abandon actions without a goal payload", () => {
     for (const action of ["complete", "abandon"] as const) {
       const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({

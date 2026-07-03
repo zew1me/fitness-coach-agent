@@ -55,7 +55,7 @@ from backend.models.chat import (
     ChatTurnLeaseRequest,
 )
 from backend.models.storage import PresignUploadRequest
-from backend.models.training import Activity, PlanWorkout, TrainingPlan
+from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -1299,8 +1299,22 @@ async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapp
     return response
 
 
+TrainingModelRequest = Literal["auto", "longevity", "performance", "recovery_return"]
+
+
 class GeneratePlanStructureRequest(BaseModel):
     goal_id: str | None = None
+    training_model: TrainingModelRequest = "auto"
+
+
+def _select_training_model(
+    requested: TrainingModelRequest, target_goal: Goal | None
+) -> tuple[Literal["longevity", "performance", "recovery_return"], str]:
+    if requested != "auto":
+        return requested, "explicit"
+    if target_goal is not None and target_goal.goal_type in {"event", "mountain", "improvement"}:
+        return "performance", "auto"
+    return "longevity", "auto"
 
 
 @app.post("/api/engine/generate-plan-structure")
@@ -1344,12 +1358,15 @@ async def generate_plan_structure(
         recovery_week_frequency=recovery_freq,
     )
 
-    from backend.services.plan_composer import compose_plan_workouts
+    from backend.services.plan_composer import PlanComposerPolicy, compose_plan_workouts
 
     plan_sport = (
         (target_goal.sport if target_goal else None)
         or (profile.primary_sports[0] if profile.primary_sports else None)
         or "cycling"
+    )
+    training_model, training_model_source = _select_training_model(
+        payload.training_model, target_goal
     )
     plan = TrainingPlan(
         user_id=user_id,
@@ -1360,6 +1377,10 @@ async def generate_plan_structure(
         end_date=skeleton.end_date,
         target_goal_id=target_goal.id if target_goal else None,
         phases=[p.to_dict() for p in skeleton.phases],
+        generation_context={
+            "training_model": training_model,
+            "training_model_source": training_model_source,
+        },
         weekly_tss_target=round(skeleton.starting_weekly_tss, 1),
         weekly_hours_target=available_hours,
     )
@@ -1373,6 +1394,7 @@ async def generate_plan_structure(
             plan_id=persisted_plan.id or "",
             sport=plan_sport,
             weekly_pattern=schedule.weekly_pattern if schedule else None,
+            policy=PlanComposerPolicy(training_model=training_model),
         )
         persisted_workouts = await repo.create_plan_workouts(workouts)
     except RepositoryNotConfiguredError as exc:
@@ -1404,6 +1426,7 @@ async def generate_plan_structure(
     return {
         "plan_id": persisted_plan.id,
         "sport": plan_sport,
+        "training_model": training_model,
         "workouts_created": len(persisted_workouts),
         "total_weeks": skeleton.total_weeks,
         "start_date": skeleton.start_date.isoformat(),
@@ -1420,16 +1443,12 @@ async def generate_plan_structure(
 
 async def _persist_workout_match(user_id: str, workout: PlanWorkout, activity: Activity) -> None:
     """Link a confident plan↔activity match on both sides."""
-    await repo.update_plan_workout_fields(
-        user_id,
-        workout.id or "",
-        {
-            "status": "completed",
-            "actual_activity_id": activity.id,
-            "completion_source": "auto_matched",
-        },
+    await repo.match_plan_workout_to_activity(
+        user_id=user_id,
+        workout_id=workout.id or "",
+        activity_id=activity.id or "",
+        completion_source="auto_matched",
     )
-    await repo.update_activity(activity.model_copy(update={"planned_workout_id": workout.id}))
 
 
 async def _try_match_activity_to_plan(user_id: str, activity: Activity) -> dict[str, object] | None:
@@ -1556,31 +1575,15 @@ class ResolvePlanWorkoutRequest(BaseModel):
 async def _apply_workout_resolution(
     user_id: str, workout: PlanWorkout, payload: ResolvePlanWorkoutRequest
 ) -> PlanWorkout:
-    activity: Activity | None = None
     if payload.outcome == "completed" and payload.activity_id:
-        activity = await repo.get_activity(user_id, payload.activity_id)
-
-    fields: dict[str, object] = {
-        "status": payload.outcome,
-        "completion_source": f"{payload.source}_confirmed",
-    }
-    if activity is not None:
-        fields["actual_activity_id"] = activity.id
-    if payload.outcome == "skipped":
-        # Correcting a previous match ("I didn't actually do that"):
-        # clear the link on both sides so the activity reads as unplanned.
-        fields["actual_activity_id"] = None
-    updated = await repo.update_plan_workout_fields(user_id, payload.plan_workout_id, fields)
-    if activity is not None:
-        await repo.update_activity(activity.model_copy(update={"planned_workout_id": workout.id}))
-    # Unlink the previously matched activity when skipping or when a different
-    # activity replaces it, so only the current link survives on both sides.
-    prior_activity_id = workout.actual_activity_id
-    replaced = activity is not None and prior_activity_id not in (None, activity.id)
-    if prior_activity_id is not None and (payload.outcome == "skipped" or replaced):
-        linked = await repo.get_activity(user_id, prior_activity_id)
-        await repo.update_activity(linked.model_copy(update={"planned_workout_id": None}))
-    return updated
+        await repo.get_activity(user_id, payload.activity_id)
+    return await repo.resolve_plan_workout_atomic(
+        user_id=user_id,
+        workout_id=workout.id or payload.plan_workout_id,
+        outcome=payload.outcome,
+        activity_id=payload.activity_id,
+        source=payload.source,
+    )
 
 
 @app.post("/api/engine/resolve-plan-workout")

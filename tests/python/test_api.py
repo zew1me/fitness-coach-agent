@@ -3,7 +3,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient, HTTPError
@@ -177,6 +177,55 @@ class EngineRepository:
 
     async def update_activity(self, activity: Activity) -> Activity:
         return activity
+
+    async def match_plan_workout_to_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+        completion_source: Literal["auto_matched", "athlete_confirmed", "coach_confirmed"],
+    ) -> PlanWorkout:
+        return PlanWorkout(
+            id=workout_id,
+            plan_id="plan-1",
+            user_id=user_id,
+            workout_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            day_of_week=5,
+            week_number=1,
+            sport="cycling",
+            title="Matched ride",
+            workout_type="endurance",
+            status="completed",
+            actual_activity_id=activity_id,
+            completion_source=completion_source,
+        )
+
+    async def resolve_plan_workout_atomic(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        outcome: str,
+        activity_id: str | None,
+        source: Literal["athlete", "coach"],
+    ) -> PlanWorkout:
+        return PlanWorkout(
+            id=workout_id,
+            plan_id="plan-1",
+            user_id=user_id,
+            workout_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            day_of_week=5,
+            week_number=1,
+            sport="cycling",
+            title="Resolved ride",
+            workout_type="endurance",
+            status=outcome,
+            actual_activity_id=activity_id,
+            completion_source=cast(
+                Literal["athlete_confirmed", "coach_confirmed"], f"{source}_confirmed"
+            ),
+        )
 
     async def upsert_load_snapshots(self, user_id: str, snapshots: list[dict], sport=None) -> None:
         self.snapshots = snapshots
@@ -2465,6 +2514,52 @@ async def test_generate_plan_structure_persists_plan_and_workouts(monkeypatch) -
     # Goal sport (running) wins over profile ordering.
     assert {w.sport for w in workouts} == {"running"}
     assert all(w.status == "scheduled" for w in workouts)
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_accepts_training_model_policy(monkeypatch) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={"training_model": "longevity"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["training_model"] == "longevity"
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.generation_context == {
+        "training_model": "longevity",
+        "training_model_source": "explicit",
+    }
+    first_week = [w for w in recording_repo.created_workouts if w.week_number == 1]
+    quality = [w for w in first_week if w.workout_type in {"tempo", "threshold", "vo2max"}]
+    assert len(quality) == 1
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.models.athlete import AthleteProfile, SportThreshold
 from backend.models.chat import ChatModelStateReplaceRequest
-from backend.models.training import Activity
+from backend.models.training import Activity, PlanWorkout
 from backend.repos import supabase_repo
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -191,6 +191,107 @@ class FakeSupabaseClient:
     def table(self, table_name: str) -> FakeTableQuery:
         # The real Supabase client returns a fresh query builder for each call.
         return FakeTableQuery(self._tables[table_name]._rows)
+
+
+class FakeRpcQuery:
+    def __init__(self, data: object) -> None:
+        self._data = data
+
+    def execute(self) -> FakeResponse:
+        return FakeResponse(self._data)  # type: ignore[arg-type]
+
+
+class FakeRpcClient:
+    def __init__(self, data: object) -> None:
+        self.data = data
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def rpc(self, function_name: str, params: dict[str, object]) -> FakeRpcQuery:
+        self.calls.append((function_name, params))
+        return FakeRpcQuery(self.data)
+
+
+def _plan_workout_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "00000000-0000-0000-0000-000000000011",
+        "plan_id": "00000000-0000-0000-0000-000000000010",
+        "user_id": "athlete-1",
+        "workout_date": "2026-07-03",
+        "day_of_week": 4,
+        "week_number": 1,
+        "sport": "cycling",
+        "title": "Endurance ride",
+        "workout_type": "endurance",
+        "status": "completed",
+        "actual_activity_id": "00000000-0000-0000-0000-000000000012",
+        "completion_source": "auto_matched",
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_match_plan_workout_to_activity_uses_atomic_rpc() -> None:
+    client = FakeRpcClient([_plan_workout_row()])
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.match_plan_workout_to_activity(
+        user_id="athlete-1",
+        workout_id="00000000-0000-0000-0000-000000000011",
+        activity_id="00000000-0000-0000-0000-000000000012",
+        completion_source="auto_matched",
+    )
+
+    assert isinstance(updated, PlanWorkout)
+    assert updated.actual_activity_id == "00000000-0000-0000-0000-000000000012"
+    assert client.calls == [
+        (
+            "match_plan_workout_to_activity",
+            {
+                "p_user_id": "athlete-1",
+                "p_plan_workout_id": "00000000-0000-0000-0000-000000000011",
+                "p_activity_id": "00000000-0000-0000-0000-000000000012",
+                "p_completion_source": "auto_matched",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_plan_workout_uses_atomic_rpc() -> None:
+    client = FakeRpcClient(
+        [
+            _plan_workout_row(
+                status="skipped",
+                actual_activity_id=None,
+                completion_source="athlete_confirmed",
+            )
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.resolve_plan_workout_atomic(
+        user_id="athlete-1",
+        workout_id="00000000-0000-0000-0000-000000000011",
+        outcome="skipped",
+        activity_id=None,
+        source="athlete",
+    )
+
+    assert updated.status == "skipped"
+    assert updated.actual_activity_id is None
+    assert client.calls == [
+        (
+            "resolve_plan_workout",
+            {
+                "p_user_id": "athlete-1",
+                "p_plan_workout_id": "00000000-0000-0000-0000-000000000011",
+                "p_outcome": "skipped",
+                "p_activity_id": None,
+                "p_source": "athlete",
+            },
+        )
+    ]
 
 
 def test_fake_table_upsert_replaces_existing_conflict_row() -> None:
