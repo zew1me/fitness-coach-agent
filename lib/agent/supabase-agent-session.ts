@@ -99,29 +99,20 @@ function unsupportedFileContentToText(part: { type: string }): {
   };
 }
 
-function withSdkCallId(record: Record<string, unknown>): AgentInputItem {
-  const callId = record["callId"] ?? record["call_id"];
-  if (typeof callId !== "string" || "callId" in record) {
-    return record as unknown as AgentInputItem;
-  }
-  const rest = { ...record };
-  delete rest["call_id"];
-  return { ...rest, callId } as unknown as AgentInputItem;
-}
-
-function withResponsesCompactCallId(
+function withCallIdField(
   record: Record<string, unknown>,
+  field: "callId" | "call_id",
 ): AgentInputItem {
   const callId = record["callId"] ?? record["call_id"];
-  if (typeof callId !== "string" || "call_id" in record) {
+  if (typeof callId !== "string" || field in record) {
     return record as unknown as AgentInputItem;
   }
   const rest = { ...record };
-  delete rest["callId"];
-  return { ...rest, call_id: callId } as unknown as AgentInputItem;
+  delete rest[field === "callId" ? "call_id" : "callId"];
+  return { ...rest, [field]: callId } as unknown as AgentInputItem;
 }
 
-function withResponsesCompactItem(
+function toResponsesCompactInputItem(
   record: Record<string, unknown>,
 ): AgentInputItem {
   const type = record["type"];
@@ -143,7 +134,7 @@ function withResponsesCompactItem(
     }
     return compacted as unknown as AgentInputItem;
   }
-  return withResponsesCompactCallId(record);
+  return withCallIdField(record, "call_id");
 }
 
 function omittedToolOutputMessage(): AgentInputItem {
@@ -167,11 +158,8 @@ function prepareFunctionItemForModelInput(
   if (!("type" in item)) return item;
   const record = item as unknown as Record<string, unknown>;
   const itemType = record["type"];
-  if (itemType === "function_call") {
-    return withSdkCallId(record);
-  }
-  if (itemType === "function_call_result") {
-    return withSdkCallId(record);
+  if (itemType === "function_call" || itemType === "function_call_result") {
+    return withCallIdField(record, "callId");
   }
   if (itemType === "function_call_output") {
     return omittedToolOutputMessage();
@@ -459,7 +447,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       // prepareHistoryItemForModelInput. Convert SDK `callId` to the
       // Responses API `call_id` field so compact accepts function calls.
       input: items.map((item) =>
-        withResponsesCompactItem(this.prepareHistoryItemForModelInput(item)),
+        toResponsesCompactInputItem(this.prepareHistoryItemForModelInput(item)),
       ) as OpenAI.Responses.ResponseInput,
     });
     const output = compacted.output as AgentInputItem[];
