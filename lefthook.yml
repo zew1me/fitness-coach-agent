@@ -40,6 +40,8 @@ pre-push:
       run: bun run typecheck
     ty:
       run: uv run ty check
+    vulture:
+      run: uv run vulture
     vitest:
       run: bun run test
     pytest:
