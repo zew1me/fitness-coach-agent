@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Mapping
@@ -610,8 +611,10 @@ async def get_calendar(
             detail=f"date range too large; maximum is {_CALENDAR_MAX_RANGE_DAYS} days",
         )
 
-    planned = await repo.list_plan_workouts_between(user_context.user_id, start=start, end=end)
-    activities = await repo.list_activities_between(user_context.user_id, start=start, end=end)
+    planned, activities = await asyncio.gather(
+        repo.list_plan_workouts_between(user_context.user_id, start=start, end=end),
+        repo.list_activities_between(user_context.user_id, start=start, end=end),
+    )
     logger.debug(
         "calendar user_id=%s start=%s end=%s planned=%d activities=%d",
         user_context.user_id,

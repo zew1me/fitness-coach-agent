@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX, RefObject } from "react";
 
 import {
@@ -45,8 +45,11 @@ function longDayLabel(iso: string): string {
 }
 
 function formatMinutes(totalMinutes: number): string {
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = Math.round(totalMinutes % 60);
+  // Round before splitting so fractional inputs (e.g. 119.5) can't produce
+  // "1h 60m" from an independent floor/round of hours and minutes.
+  const roundedMinutes = Math.round(totalMinutes);
+  const hours = Math.floor(roundedMinutes / 60);
+  const minutes = roundedMinutes % 60;
   if (hours === 0) return `${minutes}m`;
   return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
@@ -165,6 +168,9 @@ function SignedInCalendar({
       loadCalendar(range.start, range.end, fetch, signal),
   });
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  // Stable identity so the detail panel's focus/Escape effect doesn't re-run
+  // (and re-steal focus) whenever this component re-renders.
+  const closeDetail = useCallback(() => setSelectedDay(null), []);
 
   const weeks = useMemo(
     () => buildCalendarWeeks(range.start, range.end),
@@ -235,7 +241,7 @@ function SignedInCalendar({
         <DayDetailPanel
           dayIso={selectedDay}
           items={byDay.get(selectedDay) ?? EMPTY_DAY}
-          onClose={() => setSelectedDay(null)}
+          onClose={closeDetail}
         />
       ) : null}
     </main>
@@ -402,6 +408,26 @@ function DayDetailPanel({
   onClose: () => void;
 }>): JSX.Element {
   const isEmpty = items.planned.length === 0 && items.activities.length === 0;
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  // Modal behavior: move focus into the dialog on open, close on Escape, and
+  // hand focus back to the triggering day cell when the panel unmounts.
+  useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return (): void => {
+      document.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [onClose]);
+
   return (
     <div
       className={styles.drawerBackdrop}
@@ -410,9 +436,11 @@ function DayDetailPanel({
     >
       <aside
         aria-label={`Details for ${longDayLabel(dayIso)}`}
+        aria-modal="true"
         className={styles.drawer}
         data-testid="calendar-day-detail"
         onClick={(event) => event.stopPropagation()}
+        role="dialog"
       >
         <div className={styles.drawerHeader}>
           <div>
@@ -425,6 +453,7 @@ function DayDetailPanel({
             className={styles.drawerClose}
             data-testid="calendar-detail-close"
             onClick={onClose}
+            ref={closeButtonRef}
             type="button"
           >
             Close

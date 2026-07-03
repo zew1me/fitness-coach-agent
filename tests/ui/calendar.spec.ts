@@ -145,6 +145,8 @@ test("opens a read-only day detail panel with full session context", async ({
 
   const detail = page.getByTestId("calendar-day-detail");
   await expect(detail).toBeVisible();
+  await expect(detail).toHaveAttribute("role", "dialog");
+  await expect(page.getByTestId("calendar-detail-close")).toBeFocused();
   await expect(detail).toContainText("Saturday, June 20, 2026");
   await expect(detail).toContainText("Easy shakeout");
   await expect(detail).toContainText("completed");
@@ -162,6 +164,13 @@ test("opens a read-only day detail panel with full session context", async ({
   await expect(page.getByTestId("calendar-day-detail")).toContainText(
     "Nothing planned or recorded for this day.",
   );
+
+  // Escape also closes the dialog, returning focus to the day cell.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("calendar-day-detail")).not.toBeVisible();
+  await expect(
+    page.locator('[data-testid="calendar-day"][data-date="2026-08-30"]'),
+  ).toBeFocused();
 });
 
 test("navigates chat → calendar → chat via the topbar toggles", async ({
