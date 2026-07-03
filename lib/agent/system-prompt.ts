@@ -1,3 +1,4 @@
+import { proposedUpdateToolShapeHints } from "./orchestration-types";
 import type {
   InternalSpecialistRole,
   SpecialistReport,
@@ -221,6 +222,7 @@ export function buildSpecialistPrompt(
     "Do not call tools or persist data.",
     "Use empty arrays for proposedUpdates and risks when none apply.",
     'Write proposedUpdate.input as a JSON-serialized object string (e.g. "{}" for zero-param tools like recalibrate_thresholds). Never use natural language, null, or an array as the input value. Do not include user_id.',
+    `proposedUpdate.input must match the named tool's key shape exactly (a "?" marks an optional key): ${proposedUpdateToolShapeHints}.`,
     `Context slice: ${JSON.stringify(contextSlice)}`,
   ].join("\n\n");
 }
