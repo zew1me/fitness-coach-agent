@@ -109,6 +109,43 @@ function withSdkCallId(record: Record<string, unknown>): AgentInputItem {
   return { ...rest, callId } as unknown as AgentInputItem;
 }
 
+function withResponsesCompactCallId(
+  record: Record<string, unknown>,
+): AgentInputItem {
+  const callId = record["callId"] ?? record["call_id"];
+  if (typeof callId !== "string" || "call_id" in record) {
+    return record as unknown as AgentInputItem;
+  }
+  const rest = { ...record };
+  delete rest["callId"];
+  return { ...rest, call_id: callId } as unknown as AgentInputItem;
+}
+
+function withResponsesCompactItem(
+  record: Record<string, unknown>,
+): AgentInputItem {
+  const type = record["type"];
+  if (type === "function_call_result") {
+    const callId = record["callId"] ?? record["call_id"];
+    if (typeof callId !== "string") {
+      return record as unknown as AgentInputItem;
+    }
+    const compacted: Record<string, unknown> = {
+      type: "function_call_output",
+      call_id: callId,
+      output: record["output"],
+    };
+    if (typeof record["status"] === "string") {
+      compacted.status = record["status"];
+    }
+    if (typeof record["id"] === "string") {
+      compacted.id = record["id"];
+    }
+    return compacted as unknown as AgentInputItem;
+  }
+  return withResponsesCompactCallId(record);
+}
+
 function omittedToolOutputMessage(): AgentInputItem {
   return {
     role: "assistant",
@@ -402,11 +439,16 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     const startedAt = performance.now();
     const items = await this.getItems();
     const before = estimateStoredContext(items);
-    const shouldCompact =
-      args.force === true ||
-      before.estimatedTokens >= (this.options.autoCompactTokens ?? 120_000) ||
-      before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40);
-    if (!shouldCompact || items.length === 0) return null;
+
+    const shouldCompact = (): boolean => {
+      return (
+        args.force === true ||
+        before.estimatedTokens >= (this.options.autoCompactTokens ?? 120000) ||
+        before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40)
+      );
+    };
+
+    if (!shouldCompact() || items.length === 0) return null;
 
     const compactArgs = toOpenAICompactOptions(args);
     const compacted = await this.client.responses.compact({
@@ -414,9 +456,10 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       model: this.options.model ?? "gpt-5.4-mini",
       // Strip input_image parts (and any other model-incompatible content)
       // before compacting, matching the sanitization applied elsewhere via
-      // prepareHistoryItemForModelInput.
+      // prepareHistoryItemForModelInput. Convert SDK `callId` to the
+      // Responses API `call_id` field so compact accepts function calls.
       input: items.map((item) =>
-        this.prepareHistoryItemForModelInput(item),
+        withResponsesCompactItem(this.prepareHistoryItemForModelInput(item)),
       ) as OpenAI.Responses.ResponseInput,
     });
     const output = compacted.output as AgentInputItem[];

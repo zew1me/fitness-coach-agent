@@ -388,6 +388,126 @@ describe("DurableCompactionSession", () => {
     expect(result?.usage.totalTokens).toBe(12);
   });
 
+  it("normalizes SDK function_call_result items to Responses API function_call_output for compact requests", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call_result",
+          callId: "call-1",
+          name: "update_athlete_profile",
+          output: JSON.stringify({ status: "pending" }),
+          status: "completed",
+        } as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [
+            {
+              type: "function_call_output",
+              call_id: "call-1",
+              output: JSON.stringify({ status: "pending" }),
+              status: "completed",
+            } as unknown as AgentInputItem,
+          ],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await session.runCompaction();
+
+    const request = client.responses.compact.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(request.input).toHaveLength(1);
+    expect(request.input?.[0]).toEqual(
+      expect.objectContaining({
+        type: "function_call_output",
+        call_id: "call-1",
+        output: JSON.stringify({ status: "pending" }),
+        status: "completed",
+      }),
+    );
+    expect(
+      (request.input?.[0] as Record<string, unknown>).callId,
+    ).toBeUndefined();
+  });
+
+  it("normalizes SDK callId to Responses API call_id for compact requests", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call",
+          callId: "call-1",
+          name: "update_athlete_profile",
+          arguments: "{}",
+          status: "completed",
+        } as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [
+            {
+              type: "function_call",
+              call_id: "call-1",
+              name: "update_athlete_profile",
+              arguments: "{}",
+              status: "completed",
+            } as unknown as AgentInputItem,
+          ],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await session.runCompaction();
+
+    const request = client.responses.compact.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(request.input).toHaveLength(1);
+    expect(request.input?.[0]).toEqual(
+      expect.objectContaining({
+        type: "function_call",
+        call_id: "call-1",
+        name: "update_athlete_profile",
+        arguments: "{}",
+        status: "completed",
+      }),
+    );
+    expect(
+      (request.input?.[0] as Record<string, unknown>).callId,
+    ).toBeUndefined();
+  });
+
   it("propagates a conflict while replacing compacted history", async () => {
     const conflict = new Error("Unable to replace model state (409)");
     const underlying = {
