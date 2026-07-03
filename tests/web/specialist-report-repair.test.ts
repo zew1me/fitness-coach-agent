@@ -81,6 +81,87 @@ describe("repairSpecialistReport", () => {
     expect(result.report).toBeNull();
     expect(result.droppedProposedUpdateCount).toBe(0);
   });
+
+  it("keeps the report with an empty proposedUpdates array when every proposed update is invalid", () => {
+    const raw = {
+      confidence: "low",
+      proposedUpdates: [
+        {
+          input: "not json at all",
+          rationale: "First bad update.",
+          toolName: "recalibrate_thresholds",
+        },
+        {
+          input: JSON.stringify(["not", "an", "object"]),
+          rationale: "Second bad update.",
+          toolName: "adjust_plan",
+        },
+      ],
+      risks: [],
+      role: "workout",
+      summary: "Nothing usable was proposed.",
+    };
+
+    const result = repairSpecialistReport(raw);
+
+    expect(result.report).not.toBeNull();
+    expect(result.report?.proposedUpdates).toEqual([]);
+    expect(result.droppedProposedUpdateCount).toBe(2);
+  });
+
+  it("drops the whole report when proposedUpdates is missing entirely", () => {
+    const raw = {
+      confidence: "low",
+      risks: [],
+      role: "workout",
+      summary: "Missing the proposedUpdates key altogether.",
+    };
+
+    const result = repairSpecialistReport(raw);
+
+    expect(result.report).toBeNull();
+    expect(result.droppedProposedUpdateCount).toBe(0);
+  });
+
+  it("drops the whole report when proposedUpdates is present but not an array", () => {
+    const raw = {
+      confidence: "low",
+      proposedUpdates: "not an array",
+      risks: [],
+      role: "workout",
+      summary: "Wrong type for proposedUpdates.",
+    };
+
+    const result = repairSpecialistReport(raw);
+
+    expect(result.report).toBeNull();
+    expect(result.droppedProposedUpdateCount).toBe(0);
+  });
+
+  it("cannot repair when a non-proposedUpdates field is also invalid alongside a bad proposedUpdate", () => {
+    // Both the role and one proposedUpdate are invalid. Filtering out the
+    // bad proposedUpdate alone isn't enough to make the report valid — the
+    // role failure remains, so the whole report must stay unrecoverable
+    // rather than silently repairing part of the problem.
+    const raw = {
+      confidence: "low",
+      proposedUpdates: [
+        {
+          input: "not json at all",
+          rationale: "Bad update.",
+          toolName: "recalibrate_thresholds",
+        },
+      ],
+      risks: [],
+      role: "not-a-real-role",
+      summary: "Doubly broken report.",
+    };
+
+    const result = repairSpecialistReport(raw);
+
+    expect(result.report).toBeNull();
+    expect(result.droppedProposedUpdateCount).toBe(0);
+  });
 });
 
 describe("specialistReportWireSchema", () => {

@@ -770,4 +770,32 @@ describe("streamCoachTurn", () => {
       expect.objectContaining({ summary: "Recalibrate thresholds." }),
     ]);
   });
+
+  it("no longer validates runSpecialists' return value against a schema before use", async () => {
+    // Regression guard: the orchestrator used to run
+    // specialistReportsSchema.parse() over runSpecialists' return value and
+    // would throw (degrading to lead-only) on any malformed report. That
+    // validation moved inside runSpecialists itself (see specialists.ts),
+    // so the orchestrator must now trust and forward whatever array
+    // runSpecialists resolves with, even a structurally invalid one, rather
+    // than re-validating or discarding it.
+    const malformedReports = [{ notAValidSpecialistReportShape: true }];
+    vi.mocked(runSpecialists).mockResolvedValueOnce(
+      malformedReports as unknown as Awaited<ReturnType<typeof runSpecialists>>,
+    );
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    // The turn does not throw or degrade to an empty reports list — the
+    // malformed value is passed straight through.
+    await expect(response.text()).resolves.toContain("Keep tomorrow easy.");
+    const reportsPassedToLeadCoach =
+      vi.mocked(buildLeadCoachPrompt).mock.calls[0]?.[1];
+    expect(reportsPassedToLeadCoach).toEqual(malformedReports);
+  });
 });
