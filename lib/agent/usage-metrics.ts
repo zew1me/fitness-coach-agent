@@ -2,7 +2,7 @@ import type { Usage } from "@openai/agents";
 import * as Sentry from "@sentry/nextjs";
 
 export function recordStageUsage(
-  stage: "compaction" | "delegation" | "lead" | "specialist",
+  stage: "compaction" | "delegation" | "lead" | "lead-followup" | "specialist",
   usage?: Usage,
 ): void {
   if (!usage) return;

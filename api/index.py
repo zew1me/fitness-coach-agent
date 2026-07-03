@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -48,6 +48,7 @@ from backend.models.auth import (
     UserContext,
 )
 from backend.models.chat import (
+    ChatModelState,
     ChatModelStateReplaceRequest,
     ChatPersistRequest,
     ChatTurnLeaseReleaseRequest,
@@ -148,6 +149,26 @@ def require_user_context(authorization: str | None = Header(default=None)) -> Us
     except Exception as exc:
         logger.warning("bearer auth failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=401, detail="Invalid bearer token") from exc
+
+
+async def _run_chat_model_state_operation(
+    operation: Callable[[], Awaitable[ChatModelState]],
+    *,
+    failure_log_message: str,
+) -> Mapping[str, object]:
+    try:
+        state = await operation()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception(failure_log_message, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    except Exception as exc:
+        logger.exception(failure_log_message, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return state.model_dump(mode="json")
 
 
 # ── Health ────────────────────────────────────────────────────
@@ -449,16 +470,10 @@ async def replace_chat_model_state(
     payload: ChatModelStateReplaceRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    try:
-        state = await chat_service.replace_model_state(user_context.user_id, payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RepositoryNotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
-        logger.exception("chat model state replace failed error_type=%s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
-    return state.model_dump(mode="json")
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.replace_model_state(user_context.user_id, payload),
+        failure_log_message="chat model state replace failed error_type=%s",
+    )
 
 
 @app.post("/api/chat/model-state/lease")
@@ -466,18 +481,12 @@ async def acquire_chat_turn_lease(
     payload: ChatTurnLeaseRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    try:
-        state = await chat_service.acquire_turn_lease(
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.acquire_turn_lease(
             user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RepositoryNotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
-        logger.exception("chat lease acquire failed error_type=%s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
-    return state.model_dump(mode="json")
+        ),
+        failure_log_message="chat lease acquire failed error_type=%s",
+    )
 
 
 @app.delete("/api/chat/model-state/lease")
@@ -485,16 +494,10 @@ async def release_chat_turn_lease(
     payload: ChatTurnLeaseReleaseRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    try:
-        state = await chat_service.release_turn_lease(user_context.user_id, payload.lease_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RepositoryNotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
-        logger.exception("chat lease release failed error_type=%s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
-    return state.model_dump(mode="json")
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.release_turn_lease(user_context.user_id, payload.lease_id),
+        failure_log_message="chat lease release failed error_type=%s",
+    )
 
 
 _ALLOWED_UPLOAD_TYPES: frozenset[str] = frozenset(

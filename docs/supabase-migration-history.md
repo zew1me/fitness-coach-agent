@@ -11,6 +11,8 @@
 - `20260626000000_activity_summary.sql` — rich activity summary persistence
 - `20260702000000_agent_emails.sql` — inbound agent email storage for autonomous preview testing
 - `20260703000000_plan_workout_completion.sql` — `plan_workouts.completion_source` provenance plus a partial index for unconfirmed (past, still `scheduled`) workout lookups
+- `20260703090000_remove_pending_tool_outputs_from_model_state.sql` — one-time cleanup of alpha placeholder tool outputs from durable replay state
+- `20260703094500_remove_tool_calls_from_model_state.sql` — one-time cleanup of all alpha tool-call items from durable replay state
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -216,3 +218,68 @@ service role credentials.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally).
+
+## 20260703090000 — remove pending tool outputs from model state (2026-07-03)
+
+**File:** `supabase/migrations/20260703090000_remove_pending_tool_outputs_from_model_state.sql`
+
+**Change:** Removes stale `pending_implementation` tool-call outputs, plus their
+matching `function_call` items, from `chat_model_states.items`. The migration
+increments the model-state `version` and records
+`removed_pending_tool_outputs_at` in `compaction_metadata`.
+
+**Why:** Early alpha durable sessions could contain placeholder outputs from
+tools that were advertised before implementation. The Agents SDK rejected one
+such replay item on the `empty-bubble-fix` preview deployment with
+`Unsupported item {"type":"function_call_output", ... "status":"pending_implementation"}`,
+causing `/api/chat` to return the bounded `503` fallback. This is private model
+replay state, not the athlete-visible transcript, so the correct alpha repair is
+a data cleanup rather than retaining compatibility for obsolete placeholder
+history forever.
+
+**Preview before applying:**
+
+```sql
+select thread_id, user_id
+from public.chat_model_states
+where items::text like '%pending_implementation%';
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). This migration is a no-op where no stale placeholder tool outputs
+exist. Because it increments `chat_model_states.version` on rewritten rows,
+apply it during a maintenance or low-traffic window, or briefly pause durable
+chat writes so in-flight optimistic-concurrency writes do not retry against the
+rewrite.
+
+## 20260703094500 — remove tool calls from model state (2026-07-03)
+
+**File:** `supabase/migrations/20260703094500_remove_tool_calls_from_model_state.sql`
+
+**Change:** Removes all historical `function_call`, `function_call_result`, and
+`function_call_output` items from `chat_model_states.items`. The migration
+increments the model-state `version` and records
+`removed_tool_calls_from_model_state_at` in `compaction_metadata`.
+
+**Why:** A narrower cleanup removed `pending_implementation` outputs, but a
+subsequent preview turn still failed in the Agents SDK replay path on a stale
+tool result whose output was `{"error":"Coach is unavailable right now. Please
+try again."}`. Durable model state is private replay context; the visible chat
+transcript and tool pills remain in `chat_messages`. During alpha, dropping
+historical tool-call pairs from replay is safer than repeatedly chasing
+obsolete tool-output payload variants.
+
+**Preview before applying:**
+
+```sql
+select thread_id, user_id
+from public.chat_model_states
+where items::text like '%"function_call%';
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). This migration is a no-op where no historical function tool-call
+items exist in durable model state. Because it increments
+`chat_model_states.version` on rewritten rows, apply it during a maintenance or
+low-traffic window, or briefly pause durable chat writes so in-flight
+optimistic-concurrency writes do not retry against the rewrite.

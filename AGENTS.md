@@ -6,14 +6,9 @@ This file provides guidance to agents when working with code in this repository.
 
 A ChatGPT like experience for endurance coaching. Athletes log in via magic link, manage their fitness profiles, and submit check-ins, and get plans.
 
-Two runtimes:
-
-- **Next.js 15 frontend** (TypeScript, Supabase Auth, App Router)
-- **Python FastAPI backend** running on Vercel Functions (`api/index.py` entrypoint)
-
 ## Commands
 
-**Package manager: Bun**
+### Package manager: Bun
 
 ```bash
 # Local dev (local Supabase + Next.js in one command)
@@ -40,6 +35,11 @@ uv run vulture                       # dead-code detection
 ```
 
 ## Architecture
+
+### Runtimes
+
+- **Next.js 15 frontend** (TypeScript, Supabase Auth, App Router)
+- **Python FastAPI backend** running on Vercel Functions (`api/index.py` entrypoint)
 
 ### Frontend (`app/`, `components/`, `lib/`)
 
@@ -80,8 +80,7 @@ Migrations in `supabase/migrations/`:
 
 - `0001_schema.sql` — initial schema (athlete profiles, check-ins, OAuth tables, chat tables, etc.)
 - `0002_nutrition.sql` — nutrition tracking
-- `0003_fitness_thresholds.sql` — sport-specific threshold source metadata
-- `0004_chat_messages_parts.sql` — adopts AI SDK `UIMessage.parts` JSON shape on `chat_messages` (see "Chat persistence" below)
+- ... see dir for more.
 
 When introducing a new migration, update `docs/supabase-migration-history.md`
 in the same change so migration ordering and any environment-specific repair
@@ -95,11 +94,13 @@ Use separate Supabase projects per environment (development (local) / preview / 
 
 The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
 
-### Storage — current reality vs. intent
+#### Compaction
 
-**Intent.** Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
+See [COMPACTION_DESIGN.md](COMPACTION_DESIGN.md).
 
-**Current reality.** Chat image attachments are now persisted to `chat_messages.parts` as R2 `public_url` references (issue #163 fix). The client refuses to send a message whose attachment lacks a `public_url`, so any base64 `data:` URL in `parts[i].url` is a stale row from before the fix landed. Whether R2 is referenced by anything else in the running app is **issue #164**.
+### Storage
+
+Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
 
 ### Unsupported file attachments → text (do not send to the model as `input_file`)
 
