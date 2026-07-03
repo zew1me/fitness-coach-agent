@@ -99,27 +99,45 @@ function unsupportedFileContentToText(part: { type: string }): {
   };
 }
 
+function withSdkCallId(record: Record<string, unknown>): AgentInputItem {
+  const callId = record["callId"] ?? record["call_id"];
+  if (typeof callId !== "string" || "callId" in record) {
+    return record as unknown as AgentInputItem;
+  }
+  const rest = { ...record };
+  delete rest["call_id"];
+  return { ...rest, callId } as unknown as AgentInputItem;
+}
+
+function omittedToolOutputMessage(): AgentInputItem {
+  return {
+    role: "assistant",
+    status: "completed",
+    content: [
+      {
+        type: "output_text",
+        text:
+          "Historical tool output omitted from model replay. " +
+          "The visible chat transcript is preserved separately.",
+      },
+    ],
+  } as AgentInputItem;
+}
+
 function prepareFunctionItemForModelInput(
   item: AgentInputItem,
 ): AgentInputItem {
   if (!("type" in item)) return item;
   const record = item as unknown as Record<string, unknown>;
-  const callId = record["callId"] ?? record["call_id"];
-  if (typeof callId !== "string") return item;
-  if (item.type === "function_call") {
-    const rest = { ...record };
-    delete rest["callId"];
-    return { ...rest, call_id: callId } as unknown as AgentInputItem;
+  const itemType = record["type"];
+  if (itemType === "function_call") {
+    return withSdkCallId(record);
   }
-  if (item.type === "function_call_result") {
-    const rest = { ...record };
-    delete rest["callId"];
-    delete rest["name"];
-    return {
-      ...rest,
-      type: "function_call_output",
-      call_id: callId,
-    } as unknown as AgentInputItem;
+  if (itemType === "function_call_result") {
+    return withSdkCallId(record);
+  }
+  if (itemType === "function_call_output") {
+    return omittedToolOutputMessage();
   }
   return item;
 }

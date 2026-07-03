@@ -253,7 +253,7 @@ describe("SupabaseAgentSession", () => {
     ]);
   });
 
-  it("rewrites historical function calls to the Responses API call_id shape for model replay", () => {
+  it("keeps historical function calls in the Agents SDK callId shape for model replay", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
       baseUrl: "http://localhost",
@@ -271,15 +271,15 @@ describe("SupabaseAgentSession", () => {
 
     expect(prepared).toMatchObject({
       type: "function_call",
-      call_id: "call-1",
+      callId: "call-1",
       name: "update_athlete_profile",
       arguments: "{}",
       status: "completed",
     });
-    expect(prepared).not.toHaveProperty("callId");
+    expect(prepared).not.toHaveProperty("call_id");
   });
 
-  it("rewrites historical function call results to function_call_output for model replay", () => {
+  it("keeps historical function call results in the Agents SDK callId shape for model replay", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
       baseUrl: "http://localhost",
@@ -296,13 +296,44 @@ describe("SupabaseAgentSession", () => {
     } as AgentInputItem) as Record<string, unknown>;
 
     expect(prepared).toMatchObject({
-      type: "function_call_output",
-      call_id: "call-1",
+      type: "function_call_result",
+      callId: "call-1",
+      name: "update_athlete_profile",
       output: JSON.stringify({ status: "pending_implementation" }),
       status: "completed",
     });
-    expect(prepared).not.toHaveProperty("callId");
-    expect(prepared).not.toHaveProperty("name");
+    expect(prepared).not.toHaveProperty("call_id");
+  });
+
+  it("rewrites raw Responses function_call_output items to assistant text before model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call_output",
+      call_id: "call-1",
+      output: JSON.stringify({
+        error: "Coach is unavailable right now. Please try again.",
+      }),
+      status: "completed",
+    } as unknown as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toEqual({
+      role: "assistant",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text:
+            "Historical tool output omitted from model replay. " +
+            "The visible chat transcript is preserved separately.",
+        },
+      ],
+    });
   });
 });
 
