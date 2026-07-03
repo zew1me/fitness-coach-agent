@@ -2926,13 +2926,6 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
         ("GET", "/api/chat/messages", None, "list_messages", HTTPError("connection reset")),
         ("GET", "/api/chat/model-state", None, "get_model_state", HTTPError("timeout")),
         (
-            "POST",
-            "/api/chat/model-state/lease",
-            {"lease_id": "lease-1"},
-            "acquire_turn_lease",
-            RuntimeError("unexpected lease failure"),
-        ),
-        (
             "PUT",
             "/api/chat/model-state",
             {
@@ -2974,6 +2967,33 @@ async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Chat session service unavailable"
+
+
+@pytest.mark.asyncio
+async def test_private_chat_state_endpoints_do_not_mask_programming_errors(
+    model_state_chat_service_fixture,
+) -> None:
+    service = model_state_chat_service_fixture
+
+    async def broken_replace(*_args, **_kwargs):
+        raise TypeError("programming error")
+
+    service.replace_model_state = broken_replace
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.put(
+            "/api/chat/model-state",
+            json={
+                "chat_id": "thread-1",
+                "expected_version": 0,
+                "lease_id": "lease-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+        )
+
+    assert response.status_code == 500
 
 
 @pytest.mark.asyncio
