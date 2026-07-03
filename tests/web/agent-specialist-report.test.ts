@@ -1,7 +1,10 @@
 import { zodSchema } from "ai";
 import { describe, expect, it } from "vitest";
 
-import { specialistReportSchema } from "../../lib/agent/orchestration-types";
+import {
+  specialistReportSchema,
+  specialistReportWireSchema,
+} from "../../lib/agent/orchestration-types";
 
 describe("specialistReportSchema", () => {
   it("accepts a valid specialist report with approved proposed updates", () => {
@@ -35,8 +38,10 @@ describe("specialistReportSchema", () => {
       proposedUpdates: [
         {
           input: {
-            primary_sports: ["running", "cycling", "hiking"],
-            weekly_available_hours: 6,
+            fields: {
+              primary_sports: ["running", "cycling", "hiking"],
+              weekly_available_hours: 6,
+            },
           },
           rationale: "Multi-sport athlete with 6h/week availability.",
           toolName: "update_athlete_profile",
@@ -50,8 +55,11 @@ describe("specialistReportSchema", () => {
     expect(parsed.proposedUpdates[0]?.toolName).toBe("update_athlete_profile");
     // After coercion the stored value is the JSON string, not the raw object.
     expect(typeof parsed.proposedUpdates[0]?.input).toBe("string");
-    const parsedInput = JSON.parse(parsed.proposedUpdates[0]?.input ?? "{}") as Record<string, unknown>;
-    expect(parsedInput["primary_sports"]).toEqual(["running", "cycling", "hiking"]);
+    const parsedInput = JSON.parse(
+      parsed.proposedUpdates[0]?.input ?? "{}",
+    ) as Record<string, unknown>;
+    const fields = parsedInput["fields"] as Record<string, unknown>;
+    expect(fields["primary_sports"]).toEqual(["running", "cycling", "hiking"]);
   });
 
   it("rejects a raw object with nested user_id — tests preprocessing path", () => {
@@ -91,7 +99,7 @@ describe("specialistReportSchema", () => {
         role: "workout",
         risks: [],
         summary: "Needs context.",
-      })
+      }),
     ).toThrow();
   });
 
@@ -112,7 +120,7 @@ describe("specialistReportSchema", () => {
         role: "recovery",
         risks: [],
         summary: "Poor sleep.",
-      })
+      }),
     ).toThrow();
   });
 
@@ -130,21 +138,162 @@ describe("specialistReportSchema", () => {
         role: "recovery",
         risks: [],
         summary: "Invalid input shape.",
-      })
+      }),
     ).toThrow();
   });
 
+  it("rejects an empty entries array for save_recovery_data (array-level .min(1) survives relaxation)", () => {
+    // Regression guard: relaxing a tool's nested object fields to optional
+    // must not also drop the *array's own* length constraint. entries must
+    // still contain at least one item even though each item's fields are
+    // individually optional for a proposedUpdate.
+    expect(() =>
+      specialistReportSchema.parse({
+        confidence: "medium",
+        proposedUpdates: [
+          {
+            input: JSON.stringify({ entries: [] }),
+            rationale: "No actual data provided.",
+            toolName: "save_recovery_data",
+          },
+        ],
+        role: "recovery",
+        risks: [],
+        summary: "Empty recovery data.",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a proposed update missing a required top-level field", () => {
+    // Regression guard: only fields nested below the top level relax to
+    // optional; a tool's own top-level required fields (e.g. `text` for
+    // save_activity_from_text) must stay required.
+    expect(() =>
+      specialistReportSchema.parse({
+        confidence: "medium",
+        proposedUpdates: [
+          {
+            input: JSON.stringify({}),
+            rationale: "Missing the required text field.",
+            toolName: "save_activity_from_text",
+          },
+        ],
+        role: "workout",
+        risks: [],
+        summary: "Incomplete activity proposal.",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts a partial weekly_pattern entry for update_schedule (ZodRecord branch)", () => {
+    const parsed = specialistReportSchema.parse({
+      confidence: "medium",
+      proposedUpdates: [
+        {
+          input: JSON.stringify({
+            weekly_pattern: { monday: { available: true } },
+          }),
+          rationale: "Athlete confirmed Monday availability.",
+          toolName: "update_schedule",
+        },
+      ],
+      role: "intake",
+      risks: [],
+      summary: "Monday is available.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.toolName).toBe("update_schedule");
+  });
+
+  it("rejects a proposed update input that doesn't match the named tool's schema", () => {
+    expect(() =>
+      specialistReportSchema.parse({
+        confidence: "high",
+        proposedUpdates: [
+          {
+            // Shaped for save_recovery_data, not update_goals.
+            input: JSON.stringify({
+              entries: [{ log_date: "2026-06-15", sleep_score: 40 }],
+            }),
+            rationale: "Wrong payload shape for the named tool.",
+            toolName: "update_goals",
+          },
+        ],
+        role: "workout",
+        risks: [],
+        summary: "Mismatched tool input.",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts a partial patch that omits untouched fields on the named tool", () => {
+    const parsed = specialistReportSchema.parse({
+      confidence: "medium",
+      proposedUpdates: [
+        {
+          // Only sleep_score is set; other recoveryEntrySchema fields are
+          // omitted, mirroring what a specialist actually proposes.
+          input: JSON.stringify({
+            entries: [{ log_date: "2026-06-20", sleep_score: 55 }],
+          }),
+          rationale: "Athlete reported poor sleep last night.",
+          toolName: "save_recovery_data",
+        },
+      ],
+      role: "recovery",
+      risks: [],
+      summary: "Poor sleep.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.toolName).toBe("save_recovery_data");
+  });
+
+  it("accepts a partial goal on an update_goals create proposal", () => {
+    // The prompt hint advertises every goal subfield as optional (a
+    // proposal is a preview, not the literal tool call), so a create
+    // proposal with only a subset of goal fields must be accepted here —
+    // full-goal completeness is enforced later by the real tool call.
+    const parsed = specialistReportSchema.parse({
+      confidence: "medium",
+      proposedUpdates: [
+        {
+          input: JSON.stringify({
+            action: "create",
+            goal: { title: "Sub-3 marathon" },
+          }),
+          rationale: "Athlete stated a new race goal.",
+          toolName: "update_goals",
+        },
+      ],
+      role: "intake",
+      risks: [],
+      summary: "New goal.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.toolName).toBe("update_goals");
+  });
+
   it("emits an OpenAI-compatible schema for structured outputs", async () => {
-    const jsonSchema = (await zodSchema(specialistReportSchema).jsonSchema) as {
-      properties?: Record<string, { items?: { properties?: Record<string, { type?: unknown }> } }>;
+    // specialistReportWireSchema is what's actually passed as an Agent's
+    // outputType (see lib/agent/specialists.ts) — specialistReportSchema's
+    // extra superRefine checks aren't expressible as JSON Schema and would
+    // never be enforced by OpenAI's structured outputs anyway, so this must
+    // assert against the wire schema, not the full one.
+    const jsonSchema = (await zodSchema(specialistReportWireSchema)
+      .jsonSchema) as {
+      properties?: Record<
+        string,
+        { items?: { properties?: Record<string, { type?: unknown }> } }
+      >;
       required?: string[];
     };
 
     expect(
-      jsonSchema.properties?.["proposedUpdates"]?.items?.properties?.["input"]?.type
+      jsonSchema.properties?.["proposedUpdates"]?.items?.properties?.["input"]
+        ?.type,
     ).toBe("string");
     expect(jsonSchema.required?.sort()).toEqual(
-      Object.keys(jsonSchema.properties ?? {}).sort()
+      Object.keys(jsonSchema.properties ?? {}).sort(),
     );
   });
 });

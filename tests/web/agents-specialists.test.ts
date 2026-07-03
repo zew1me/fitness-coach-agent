@@ -2,9 +2,16 @@ import type { UIMessage } from "ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildContextSlices } from "../../lib/agent/context-slices";
+import { specialistReportWireSchema } from "../../lib/agent/orchestration-types";
 import { runSpecialists } from "../../lib/agent/specialists";
 
 import { athleteContextFixture } from "./agent-fixtures";
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: vi.fn(),
+  captureMessage: vi.fn(),
+  logger: { debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() },
+}));
 
 const agentsMocks = vi.hoisted(() => {
   const constructedAgents: Array<Record<string, unknown>> = [];
@@ -13,13 +20,15 @@ const agentsMocks = vi.hoisted(() => {
       state: { usage: undefined },
       finalOutput: {
         confidence: "high",
-        proposedUpdates: [],
-        risks: [],
+        proposedUpdates: [] as unknown[],
+        risks: [] as string[],
         role: agent.name.toLowerCase().replace(" specialist", ""),
         summary: `${agent.name} report`,
       },
     }),
   );
+  const roleName = (agent: { name: string }): string =>
+    agent.name.toLowerCase().replace(" specialist", "");
 
   class Agent {
     name: string;
@@ -30,7 +39,7 @@ const agentsMocks = vi.hoisted(() => {
     }
   }
 
-  return { Agent, constructedAgents, run };
+  return { Agent, constructedAgents, roleName, run };
 });
 
 vi.mock("@openai/agents", () => ({
@@ -156,6 +165,15 @@ describe("runSpecialists with the Agents SDK", () => {
     expect(agentsMocks.constructedAgents[0]?.["instructions"]).toContain(
       "Friday remains rest",
     );
+    // Regression guard: must use the structural-only wire schema as
+    // outputType, not the full refined schema — see the comment on
+    // proposedUpdateWireSchema in orchestration-types.ts for why using the
+    // full schema here would make repairSpecialistReport's per-item repair
+    // unreachable (the SDK throws on refinement failures when finalOutput
+    // is accessed, before repairSpecialistReport ever runs).
+    expect(agentsMocks.constructedAgents[0]?.["outputType"]).toBe(
+      specialistReportWireSchema,
+    );
   });
 
   it("wraps delegated context and memory as escaped data-only prompt sections", async () => {
@@ -190,5 +208,250 @@ describe("runSpecialists with the Agents SDK", () => {
     expect(instructions).toContain('<data-block name="relevantMemory">');
     expect(instructions).toContain("\\`\\`\\`");
     expect(instructions).not.toContain("Lead-generated brief:");
+  });
+
+  it("keeps other specialists' reports when one specialist's report fails schema validation", async () => {
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.resolve({
+          state: { usage: undefined },
+          finalOutput: {
+            confidence: "low",
+            proposedUpdates: [],
+            risks: [],
+            role: "not-a-real-role",
+            summary: "Malformed report.",
+          },
+        });
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "high",
+          proposedUpdates: [],
+          risks: [],
+          role: agentsMocks.roleName(agent),
+          summary: `${agent.name} report`,
+        },
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual(["workout"]);
+  });
+
+  it("keeps other specialists' reports when one specialist's execution throws", async () => {
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.reject(new Error("Model request timed out"));
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "high",
+          proposedUpdates: [],
+          risks: [],
+          role: agentsMocks.roleName(agent),
+          summary: `${agent.name} report`,
+        },
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual(["workout"]);
+  });
+
+  it("repairs one specialist's malformed proposedUpdate while a sibling specialist succeeds untouched", async () => {
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.resolve({
+          state: { usage: undefined },
+          finalOutput: {
+            confidence: "low",
+            proposedUpdates: [
+              {
+                // Natural language, not a JSON object string — fails the
+                // full schema's superRefine, so this one proposedUpdate
+                // should be dropped while the rest of the report survives.
+                input: "recalibrate the thresholds for me",
+                rationale: "Athlete asked to recalibrate.",
+                toolName: "recalibrate_thresholds",
+              },
+            ],
+            risks: [],
+            role: "recovery",
+            summary: "Recalibrate thresholds.",
+          },
+        });
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "high",
+          proposedUpdates: [],
+          risks: [],
+          role: agentsMocks.roleName(agent),
+          summary: `${agent.name} report`,
+        },
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual([
+      "recovery",
+      "workout",
+    ]);
+    const recoveryReport = reports.find((report) => report.role === "recovery");
+    expect(recoveryReport?.summary).toBe("Recalibrate thresholds.");
+    expect(recoveryReport?.proposedUpdates).toHaveLength(0);
+  });
+
+  it("corrects a valid-but-mismatched role to the specialist actually invoked", async () => {
+    const Sentry = await import("@sentry/nextjs");
+
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.resolve({
+          state: { usage: undefined },
+          finalOutput: {
+            confidence: "high",
+            proposedUpdates: [],
+            risks: [],
+            // Valid enum value, but wrong for the specialist that ran —
+            // schema validation alone can't catch this.
+            role: "workout",
+            summary: "Recovery advice mislabeled as workout.",
+          },
+        });
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "high",
+          proposedUpdates: [],
+          risks: [],
+          role: agentsMocks.roleName(agent),
+          summary: `${agent.name} report`,
+        },
+      });
+    });
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual([
+      "recovery",
+      "workout",
+    ]);
+    const recoveryReport = reports.find(
+      (report) => report.summary === "Recovery advice mislabeled as workout.",
+    );
+    expect(recoveryReport?.role).toBe("recovery");
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect.stringContaining('mismatched role "workout"'),
+      expect.objectContaining({ level: "warning" }),
+    );
+  });
+
+  it("reports dropped proposedUpdates and unrecoverable reports to Sentry", async () => {
+    const Sentry = await import("@sentry/nextjs");
+
+    agentsMocks.run.mockImplementation((agent: { name: string }) => {
+      if (agentsMocks.roleName(agent) === "recovery") {
+        return Promise.resolve({
+          state: { usage: undefined },
+          finalOutput: {
+            confidence: "low",
+            proposedUpdates: [
+              {
+                input: "recalibrate the thresholds for me",
+                rationale: "Athlete asked to recalibrate.",
+                toolName: "recalibrate_thresholds",
+              },
+            ],
+            risks: [],
+            role: "recovery",
+            summary: "Recalibrate thresholds.",
+          },
+        });
+      }
+      return Promise.resolve({
+        state: { usage: undefined },
+        finalOutput: {
+          confidence: "low",
+          proposedUpdates: [],
+          risks: [],
+          role: "not-a-real-role",
+          summary: "Malformed report.",
+        },
+      });
+    });
+
+    await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      model: "gpt-5.4-mini",
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(Sentry.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("dropped 1 invalid proposedUpdate(s)"),
+    );
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect.stringContaining("failed schema validation"),
+      expect.objectContaining({ level: "warning" }),
+    );
   });
 });

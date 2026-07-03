@@ -71,8 +71,51 @@ describe("coachToolDefinitions", () => {
       },
     });
 
-    expect(parsed.goal.title).toBe("Hill climb");
-    expect(parsed.goal.course_elevation_gain_meters).toBe(700);
+    expect(parsed.goal?.title).toBe("Hill climb");
+    expect(parsed.goal?.course_elevation_gain_meters).toBe(700);
+  });
+
+  it("accepts complete and abandon actions without a goal payload", () => {
+    for (const action of ["complete", "abandon"] as const) {
+      const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action,
+        goal_id: "goal-1",
+      });
+
+      expect(
+        parsed.success,
+        `${action} should be a valid update_goals call`,
+      ).toBe(true);
+    }
+  });
+
+  it("validates update_goals payloads by action", () => {
+    const partialUpdate =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "update",
+        goal_id: "goal-1",
+        goal: { title: "Sharpen for Leadville" },
+      });
+    const incompleteCreate =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "create",
+        goal: { title: "Sharpen for Leadville" },
+      });
+    const missingGoalId =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "complete",
+      });
+    const terminalGoalPayload =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "complete",
+        goal_id: "goal-1",
+        goal: { title: "Ignored title" },
+      });
+
+    expect(partialUpdate.success).toBe(true);
+    expect(incompleteCreate.success).toBe(false);
+    expect(missingGoalId.success).toBe(false);
+    expect(terminalGoalPayload.success).toBe(false);
   });
 
   it("emits OpenAI-compatible schemas for all coach tools", () => {
@@ -278,6 +321,133 @@ describe("coachToolDefinitions", () => {
           text: "Add RPE 9 and two gels.",
         },
         url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
+  it("routes save_recovery_data to the engine and strips any client-sent user_id", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ count: 1, saved: [{ id: "rec-1" }] }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["save_recovery_data"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      entries: [
+        {
+          hrv_ms: 48,
+          log_date: "2026-05-30",
+          sleep_duration_hours: 7.5,
+        },
+      ],
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ count: 1, saved: [{ id: "rec-1" }] });
+    expect(requests).toEqual([
+      {
+        body: {
+          entries: [
+            {
+              hrv_ms: 48,
+              log_date: "2026-05-30",
+              sleep_duration_hours: 7.5,
+            },
+          ],
+        },
+        url: "https://coach.test/api/engine/save-recovery-data",
+      },
+    ]);
+  });
+
+  it("routes goal updates to the engine and strips any client-sent user_id", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: "goal-new", status: "active" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["update_goals"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      action: "create",
+      goal: {
+        goal_type: "event",
+        title: "Leadville 100",
+        sport: "cycling",
+      },
+      user_id: "ignored-client-user",
+    });
+    const completeResult = await (
+      tools["update_goals"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      action: "complete",
+      goal_id: "goal-new",
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ id: "goal-new", status: "active" });
+    expect(completeResult).toEqual({ id: "goal-new", status: "active" });
+    expect(requests).toEqual([
+      {
+        body: {
+          action: "create",
+          goal: {
+            goal_type: "event",
+            title: "Leadville 100",
+            sport: "cycling",
+          },
+        },
+        url: "https://coach.test/api/engine/update-goals",
+      },
+      {
+        body: {
+          action: "complete",
+          goal_id: "goal-new",
+        },
+        url: "https://coach.test/api/engine/update-goals",
       },
     ]);
   });

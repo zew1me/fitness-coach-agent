@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { streamCoachTurn } from "../../lib/agent/orchestrator";
 import { runSpecialists } from "../../lib/agent/specialists";
+import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
 
 import { athleteContextFixture } from "./agent-fixtures";
 
@@ -712,28 +713,15 @@ describe("streamCoachTurn", () => {
     expect(historySignal?.aborted).toBe(true);
   });
 
-  it("degrades to lead-only when a specialist report fails schema validation", async () => {
-    // A specialist sometimes returns natural language for a zero-param tool's
-    // `input` (e.g. recalibrate_thresholds) — uncoercible by the preprocess
-    // layer, so specialistReportsSchema.parse throws.  The orchestrator's
-    // try/catch must swallow that and still run the lead coach, rather than
-    // killing the turn and surfacing an empty assistant bubble.
-    vi.mocked(runSpecialists).mockResolvedValueOnce([
-      {
-        confidence: "low",
-        proposedUpdates: [
-          {
-            // Natural language, not a JSON object string — fails superRefine.
-            input: "recalibrate the thresholds for me",
-            rationale: "Athlete asked to recalibrate.",
-            toolName: "recalibrate_thresholds",
-          },
-        ],
-        role: "workout",
-        risks: [],
-        summary: "Recalibrate thresholds.",
-      },
-    ] as unknown as Awaited<ReturnType<typeof runSpecialists>>);
+  it("degrades to lead-only when runSpecialists rejects", async () => {
+    // runSpecialists() itself handles per-specialist failures internally
+    // (see lib/agent/specialists.ts) and should never reject in practice,
+    // but if it somehow does, the turn must still survive and run the lead
+    // coach rather than killing the turn and surfacing an empty assistant
+    // bubble.
+    vi.mocked(runSpecialists).mockRejectedValueOnce(
+      new Error("Specialist run crashed unexpectedly"),
+    );
 
     const response = await streamCoachTurn({
       accessToken: "token-1",
@@ -750,5 +738,36 @@ describe("streamCoachTurn", () => {
         (config) => config["name"] === "Lead coach",
       ),
     ).toBeDefined();
+  });
+
+  it("passes the specialist reports runSpecialists returns through to the lead coach prompt", async () => {
+    // runSpecialists() is trusted to return already-valid reports (schema
+    // validation and per-specialist repair happen inside it), so the
+    // orchestrator should pass them through to buildLeadCoachPrompt as-is.
+    vi.mocked(runSpecialists).mockResolvedValueOnce([
+      {
+        confidence: "low",
+        proposedUpdates: [],
+        role: "workout",
+        risks: [],
+        summary: "Recalibrate thresholds.",
+      },
+    ] as unknown as Awaited<ReturnType<typeof runSpecialists>>);
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    await expect(response.text()).resolves.toContain("Keep tomorrow easy.");
+    // buildLeadCoachPrompt is mocked to a static string in this file, so
+    // assert on what it was called with rather than the rendered prompt.
+    const reportsPassedToLeadCoach =
+      vi.mocked(buildLeadCoachPrompt).mock.calls[0]?.[1];
+    expect(reportsPassedToLeadCoach).toEqual([
+      expect.objectContaining({ summary: "Recalibrate thresholds." }),
+    ]);
   });
 });

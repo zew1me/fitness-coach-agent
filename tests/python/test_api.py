@@ -1409,6 +1409,46 @@ async def test_update_goals_validation_errors_return_422(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_goals_contract_errors_return_400(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            missing_goal_id = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "complete"},
+            )
+            unknown_action = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "pause", "goal_id": "goal-1"},
+            )
+    finally:
+        restore_override()
+
+    assert missing_goal_id.status_code == 400
+    assert unknown_action.status_code == 400
+    assert repository.update_call is None
+
+
+@pytest.mark.asyncio
 async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized(
     monkeypatch,
 ) -> None:
@@ -1457,11 +1497,297 @@ async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized
         restore_override()
 
     assert response.status_code == 200
+    assert repository.update_call == ("goal-1", "athlete-1", {"status": "completed"})
+
+
+@pytest.mark.asyncio
+async def test_update_goals_complete_allows_omitted_goal(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Updated goal")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "complete", "goal_id": "goal-1"},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.update_call == ("goal-1", "athlete-1", {"status": "completed"})
+
+
+@pytest.mark.asyncio
+async def test_update_goals_create_rejects_malformed_target_date(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created: Goal | None = None
+
+        async def create_goal(self, goal: Goal) -> Goal:
+            self.created = goal
+            return goal
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "create",
+                    "goal": {
+                        "goal_type": "event",
+                        "title": "Race",
+                        "target_date": "summer 2026",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.created is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_rejects_malformed_target_date(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {"target_date": "2026-13-99"},
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.update_call is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_requires_non_empty_fields(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "update", "goal_id": "goal-1", "goal": {}},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.update_call is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_omits_null_fields(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {
+                        "sport": None,
+                        "target_date": None,
+                        "title": "Updated race",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.update_call == ("goal-1", "athlete-1", {"title": "Updated race"})
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_merges_course_profile_notes(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.get_call: tuple[str, str] | None = None
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def get_goal(self, goal_id: str, user_id: str) -> Goal:
+            self.get_call = (goal_id, user_id)
+            return Goal(
+                id=goal_id,
+                user_id=user_id,
+                goal_type="event",
+                title="Hill climb race",
+                course_profile={"terrain": "trail", "aid_stations": 3},
+            )
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(
+                id=goal_id,
+                user_id=user_id,
+                goal_type="event",
+                title="Hill climb race",
+            )
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {"course_profile_notes": "Steep final mile."},
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.get_call == ("goal-1", "athlete-1")
     assert repository.update_call == (
         "goal-1",
         "athlete-1",
-        {"title": "Updated goal", "status": "completed"},
+        {
+            "course_profile": {
+                "aid_stations": 3,
+                "notes": "Steep final mile.",
+                "terrain": "trail",
+            }
+        },
     )
+
+
+@pytest.mark.asyncio
+async def test_update_goals_returns_503_when_repository_unconfigured(monkeypatch) -> None:
+    class UnconfiguredRepository(EngineRepository):
+        async def create_goal(self, goal: Goal) -> Goal:
+            raise RepositoryNotConfiguredError("Supabase is not configured.")
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", UnconfiguredRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "create", "goal": {"goal_type": "event", "title": "Race"}},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Supabase is not configured."}
 
 
 @pytest.mark.asyncio
@@ -1492,6 +1818,146 @@ async def test_update_schedule_validation_errors_return_422(monkeypatch) -> None
             )
     finally:
         restore_override()
+
+    assert response.status_code == 422
+
+
+@pytest.fixture
+def recovery_user_context():
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    try:
+        yield
+    finally:
+        restore_override()
+
+
+class RecoveryRepository(EngineRepository):
+    def __init__(self) -> None:
+        self.saved: list[RecoveryLog] = []
+
+    async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+        self.saved.append(log)
+        return log.model_copy(update={"id": f"recovery-{len(self.saved)}"})
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_persists_entries(monkeypatch, recovery_user_context) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={
+                "entries": [
+                    {
+                        "log_date": "2026-05-30",
+                        "hrv_ms": 48,
+                        "sleep_duration_hours": 7.5,
+                        "subjective_energy": 4,
+                        "notes": None,
+                        "user_id": "ignored-client-user",
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 1
+    assert body["saved"][0]["id"] == "recovery-1"
+    assert len(repository.saved) == 1
+    saved = repository.saved[0]
+    # user_id is always derived from the bearer token, never the client payload.
+    assert saved.user_id == "athlete-1"
+    assert saved.log_date.isoformat() == "2026-05-30"
+    assert saved.hrv_ms == 48
+    assert saved.sleep_duration_hours == 7.5
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_defaults_missing_log_date_to_today(
+    monkeypatch, recovery_user_context
+) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"hrv_ms": 51}]},
+        )
+
+    assert response.status_code == 200
+    assert repository.saved[0].log_date == datetime.now(UTC).date()
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_repo_not_configured_returns_503(
+    monkeypatch, recovery_user_context
+) -> None:
+    class UnconfiguredRepository(EngineRepository):
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            raise RepositoryNotConfiguredError("Supabase is not configured.")
+
+    monkeypatch.setattr(api_index, "repo", UnconfiguredRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"hrv_ms": 51, "log_date": "2026-05-30"}]},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Supabase is not configured."}
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_rejects_malformed_entry_without_partial_write(
+    monkeypatch, recovery_user_context
+) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={
+                "entries": [
+                    {"log_date": "2026-05-30", "hrv_ms": 48},
+                    {"log_date": "not-a-date", "hrv_ms": 51},
+                ]
+            },
+        )
+
+    assert response.status_code == 422
+    # The valid first entry must not be persisted when a later entry is malformed.
+    assert repository.saved == []
+
+
+@pytest.mark.asyncio
+async def test_save_recovery_data_requires_at_least_one_entry(
+    monkeypatch, recovery_user_context
+) -> None:
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": []},
+        )
 
     assert response.status_code == 422
 

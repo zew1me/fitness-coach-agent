@@ -462,6 +462,16 @@ class SupabaseRepository:
         )
         return [Goal.model_validate(r) for r in (response.data or [])]
 
+    async def get_goal(self, goal_id: str, user_id: str) -> Goal:
+        client = self._require_client()
+        response = (
+            client.table("goals").select("*").eq("id", goal_id).eq("user_id", user_id).execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(f"Goal '{goal_id}' not found.")
+        return Goal.model_validate(rows[0])
+
     async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
         client = self._require_client()
         response = (

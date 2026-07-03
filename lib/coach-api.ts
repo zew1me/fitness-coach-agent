@@ -18,6 +18,80 @@ import type {
 
 type FetchLike = typeof fetch;
 
+// Backoff schedule for transient fetch drops. iOS WebKit aborts an in-flight
+// fetch (tab suspended, cell↔Wi-Fi handoff, low-memory kill) with a TypeError
+// whose message is "Load failed"; a single silent retry recovers the request
+// before the user ever sees the Coach Unavailable card.
+const TRANSIENT_FETCH_RETRY_DELAYS_MS = [300, 900];
+
+function isTransientFetchError(error: unknown): boolean {
+  // Heuristic: WebKit emits `TypeError: Load failed` and other engines emit
+  // `TypeError: Failed to fetch` for a network-level abort, so we retry on the
+  // TypeError *type* rather than brittle message matching. The tradeoff is that
+  // a genuine client-side TypeError (a programming bug) is also retried before
+  // surfacing — acceptable since it is still re-thrown after retries, just
+  // delayed. HTTP errors surface as plain Errors and are left alone so real
+  // outages still propagate immediately.
+  return error instanceof TypeError;
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  for (
+    let attempt = 0;
+    attempt <= TRANSIENT_FETCH_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    try {
+      return await operation();
+    } catch (error) {
+      const backoffMs = TRANSIENT_FETCH_RETRY_DELAYS_MS[attempt];
+      if (
+        backoffMs === undefined ||
+        signal?.aborted ||
+        !isTransientFetchError(error)
+      ) {
+        throw error;
+      }
+      // Recovery is silent for the user, so leave a breadcrumb — otherwise a
+      // rising retry rate (frequent WebKit drops or a flaky backend) stays
+      // invisible to monitoring while requests still appear healthy.
+      Sentry.logger.debug("transient fetch retry", {
+        attempt: attempt + 1,
+        backoff_ms: backoffMs,
+      });
+      await delay(backoffMs, signal);
+      // An abort that lands mid-backoff should stop here rather than burn
+      // another token + thread fetch.
+      if (signal?.aborted) {
+        throw error;
+      }
+    }
+  }
+  // Unreachable: the loop always returns or throws above.
+  throw new Error("withRetry exhausted without resolution");
+}
+
 function normalizeErrorText(detail: string): string {
   const trimmed = detail.trim();
   if (trimmed.length === 0) {
@@ -188,13 +262,16 @@ export async function loadChatThread(
   fetchImpl: FetchLike = fetch,
   signal?: AbortSignal,
 ): Promise<ParsedChatThreadResponse> {
-  const thread = chatThreadResponseSchema.parse(
-    await authorizedFetch<unknown>(
-      "/api/chat/thread",
-      { method: "GET", signal: signal ?? null },
-      fetchImpl,
-    ),
+  const raw = await withRetry(
+    () =>
+      authorizedFetch<unknown>(
+        "/api/chat/thread",
+        { method: "GET", signal: signal ?? null },
+        fetchImpl,
+      ),
+    signal,
   );
+  const thread = chatThreadResponseSchema.parse(raw);
   Sentry.logger.debug("chat thread loaded", {
     message_count: thread.thread.messages.length,
     thread_id: thread.thread.id,
