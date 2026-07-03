@@ -400,7 +400,7 @@ describe("proposedUpdateToolShapeHints", () => {
         "generate_training_plan {goal_id?}; " +
         "adjust_plan {plan_id, reason}; " +
         "recalibrate_thresholds {}; " +
-        "resolve_plan_workout {activity_id, outcome, plan_workout_id}",
+        "resolve_plan_workout {activity_id?, outcome, plan_workout_id}",
     );
   });
 

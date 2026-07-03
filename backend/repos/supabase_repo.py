@@ -564,11 +564,6 @@ class SupabaseRepository:
 
     async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
         client = self._require_client()
-        # Supersede existing active plan
-        client.table("training_plans").update({"status": "superseded"}).eq(
-            "user_id", plan.user_id
-        ).eq("status", "active").execute()
-
         payload = plan.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
@@ -576,7 +571,14 @@ class SupabaseRepository:
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted training plan row.")
-        return TrainingPlan.model_validate(rows[0])
+        created = TrainingPlan.model_validate(rows[0])
+
+        # Supersede prior active plans only after the insert succeeded, so an
+        # insert failure never leaves the athlete without an active plan.
+        client.table("training_plans").update({"status": "superseded"}).eq(
+            "user_id", plan.user_id
+        ).eq("status", "active").neq("id", created.id).execute()
+        return created
 
     async def update_training_plan_status(self, user_id: str, plan_id: str, status: str) -> None:
         client = self._require_client()

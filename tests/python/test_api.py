@@ -2506,6 +2506,45 @@ async def test_generate_plan_structure_supersedes_partial_plan_on_workout_failur
 
 
 @pytest.mark.asyncio
+async def test_generate_plan_structure_maps_composer_valueerror_to_503(monkeypatch) -> None:
+    from backend.services import plan_composer
+
+    class RecordingCleanupRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    def broken_compose(*args, **kwargs):
+        raise ValueError("Plan skeleton has no phase covering week 3")
+
+    cleanup_repo = RecordingCleanupRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", cleanup_repo)
+    monkeypatch.setattr(plan_composer, "compose_plan_workouts", broken_compose)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert cleanup_repo.status_updates == [("plan-1", "superseded")]
+
+
+@pytest.mark.asyncio
 async def test_get_athlete_summary_new_user_returns_onboarding_stub(monkeypatch) -> None:
     """New users without a profile row get a stub with coaching_state=onboarding."""
     from backend.repos.supabase_repo import RecordNotFoundError

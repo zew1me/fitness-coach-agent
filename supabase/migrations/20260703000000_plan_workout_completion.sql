@@ -7,6 +7,9 @@ alter table public.plan_workouts
 
 -- Fast lookup of past workouts still awaiting confirmation ("unconfirmed" is
 -- derived at read time: workout_date in the past and status still 'scheduled').
+-- Plain CREATE INDEX (not CONCURRENTLY): the stable Supabase CLI (≤2.101)
+-- wraps migrations in a transaction where CONCURRENTLY is rejected, and this
+-- table is small enough that the build lock is negligible.
 create index if not exists plan_workouts_user_scheduled_idx
   on public.plan_workouts (user_id, workout_date desc)
   where status = 'scheduled';

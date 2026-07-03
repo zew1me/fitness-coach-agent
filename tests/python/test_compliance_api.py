@@ -128,14 +128,15 @@ def as_athlete():
     api_index.app.dependency_overrides.clear()
 
 
+@pytest.mark.usefixtures("as_athlete")
 class TestGetComplianceSummary:
-    async def test_no_active_plan(self, as_athlete, monkeypatch) -> None:
+    async def test_no_active_plan(self, monkeypatch) -> None:
         monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=None))
         response = await _post("/api/engine/get-compliance-summary", {})
         assert response.status_code == 200
         assert response.json()["status"] == "no_active_plan"
 
-    async def test_reconciles_matches_and_summarizes(self, as_athlete, monkeypatch) -> None:
+    async def test_reconciles_matches_and_summarizes(self, monkeypatch) -> None:
         repo = ComplianceRepository(
             plan=_plan(),
             workouts=[
@@ -175,9 +176,7 @@ class TestGetComplianceSummary:
         # The unmatched running workout surfaces as a nudgeable session.
         assert [s["id"] for s in body["unconfirmed_sessions"]] == ["workout-2"]
 
-    async def test_summary_is_idempotent_when_already_matched(
-        self, as_athlete, monkeypatch
-    ) -> None:
+    async def test_summary_is_idempotent_when_already_matched(self, monkeypatch) -> None:
         repo = ComplianceRepository(
             plan=_plan(),
             workouts=[_workout(status="completed", actual_activity_id="activity-1")],
@@ -193,10 +192,9 @@ class TestGetComplianceSummary:
         assert response.json()["compliance_pct"] == 100.0
 
 
+@pytest.mark.usefixtures("as_athlete")
 class TestUnplannedActivities:
-    async def test_activity_without_plan_match_is_reported_unplanned(
-        self, as_athlete, monkeypatch
-    ) -> None:
+    async def test_activity_without_plan_match_is_reported_unplanned(self, monkeypatch) -> None:
         repo = ComplianceRepository(
             plan=_plan(),
             workouts=[],
@@ -213,8 +211,9 @@ class TestUnplannedActivities:
         assert repo.workout_updates == []
 
 
+@pytest.mark.usefixtures("as_athlete")
 class TestResolvePlanWorkout:
-    async def test_athlete_confirms_completed(self, as_athlete, monkeypatch) -> None:
+    async def test_athlete_confirms_completed(self, monkeypatch) -> None:
         repo = ComplianceRepository(plan=_plan(), workouts=[_workout()])
         monkeypatch.setattr(api_index, "repo", repo)
 
@@ -232,7 +231,7 @@ class TestResolvePlanWorkout:
             )
         ]
 
-    async def test_coach_marks_skipped(self, as_athlete, monkeypatch) -> None:
+    async def test_coach_marks_skipped(self, monkeypatch) -> None:
         repo = ComplianceRepository(plan=_plan(), workouts=[_workout()])
         monkeypatch.setattr(api_index, "repo", repo)
 
@@ -253,7 +252,7 @@ class TestResolvePlanWorkout:
             )
         ]
 
-    async def test_completed_with_activity_links_both_sides(self, as_athlete, monkeypatch) -> None:
+    async def test_completed_with_activity_links_both_sides(self, monkeypatch) -> None:
         repo = ComplianceRepository(plan=_plan(), workouts=[_workout()], activities=[_activity()])
         monkeypatch.setattr(api_index, "repo", repo)
 
@@ -281,9 +280,7 @@ class TestResolvePlanWorkout:
         assert len(repo.activity_updates) == 1
         assert repo.activity_updates[0].planned_workout_id == "workout-1"
 
-    async def test_skipping_a_matched_workout_unlinks_the_activity(
-        self, as_athlete, monkeypatch
-    ) -> None:
+    async def test_skipping_a_matched_workout_unlinks_the_activity(self, monkeypatch) -> None:
         repo = ComplianceRepository(
             plan=_plan(),
             workouts=[_workout(status="completed", actual_activity_id="activity-1")],
@@ -311,7 +308,7 @@ class TestResolvePlanWorkout:
         assert repo.activity_updates[0].planned_workout_id is None
 
     async def test_completing_with_a_different_activity_unlinks_the_prior_one(
-        self, as_athlete, monkeypatch
+        self, monkeypatch
     ) -> None:
         repo = ComplianceRepository(
             plan=_plan(),
@@ -338,7 +335,7 @@ class TestResolvePlanWorkout:
         assert ("activity-new", "workout-1") in linked_ids
         assert ("activity-old", None) in linked_ids
 
-    async def test_unknown_workout_returns_404(self, as_athlete, monkeypatch) -> None:
+    async def test_unknown_workout_returns_404(self, monkeypatch) -> None:
         monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
         response = await _post(
             "/api/engine/resolve-plan-workout",
@@ -346,7 +343,7 @@ class TestResolvePlanWorkout:
         )
         assert response.status_code == 404
 
-    async def test_unknown_activity_returns_404(self, as_athlete, monkeypatch) -> None:
+    async def test_unknown_activity_returns_404(self, monkeypatch) -> None:
         repo = ComplianceRepository(plan=_plan(), workouts=[_workout()])
         monkeypatch.setattr(api_index, "repo", repo)
         response = await _post(
@@ -361,7 +358,7 @@ class TestResolvePlanWorkout:
         assert response.status_code == 404
         assert repo.workout_updates == []
 
-    async def test_invalid_outcome_rejected(self, as_athlete, monkeypatch) -> None:
+    async def test_invalid_outcome_rejected(self, monkeypatch) -> None:
         monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
         response = await _post(
             "/api/engine/resolve-plan-workout",
@@ -370,8 +367,9 @@ class TestResolvePlanWorkout:
         assert response.status_code == 422
 
 
+@pytest.mark.usefixtures("as_athlete")
 class TestWriteTimeMatchHook:
-    async def test_saved_activity_auto_matches_plan_workout(self, as_athlete, monkeypatch) -> None:
+    async def test_saved_activity_auto_matches_plan_workout(self, monkeypatch) -> None:
         from types import SimpleNamespace
 
         from backend.services import activity_text
@@ -423,7 +421,7 @@ class TestWriteTimeMatchHook:
         ]
         assert repo.activity_updates[-1].planned_workout_id == "workout-1"
 
-    async def test_match_failure_does_not_fail_save(self, as_athlete, monkeypatch) -> None:
+    async def test_match_failure_does_not_fail_save(self, monkeypatch) -> None:
         from types import SimpleNamespace
 
         from backend.services import activity_text

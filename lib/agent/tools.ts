@@ -205,7 +205,7 @@ const adjustPlanInputSchema = z.object({
 });
 
 const resolvePlanWorkoutInputSchema = z.object({
-  activity_id: z.string().min(1).nullable(),
+  activity_id: z.string().min(1).nullish(),
   outcome: z.enum(["completed", "skipped"]),
   plan_workout_id: z.string().min(1),
 });

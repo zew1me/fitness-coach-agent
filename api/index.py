@@ -1374,7 +1374,7 @@ async def generate_plan_structure(
         persisted_workouts = await repo.create_plan_workouts(workouts)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError) as exc:
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
         logger.exception("generate_plan: persistence failed user_id=%s", user_id)
         if persisted_plan is not None and persisted_plan.id:
             # Don't leave a workout-less plan active (create_training_plan
