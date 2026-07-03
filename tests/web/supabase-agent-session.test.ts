@@ -433,8 +433,9 @@ describe("DurableCompactionSession", () => {
       string,
       unknown
     >;
-    expect(request.input).toHaveLength(1);
-    expect(request.input?.[0]).toEqual(
+    const input = request["input"] as Record<string, unknown>[] | undefined;
+    expect(input).toHaveLength(1);
+    expect(input?.[0]).toEqual(
       expect.objectContaining({
         type: "function_call_output",
         call_id: "call-1",
@@ -442,9 +443,7 @@ describe("DurableCompactionSession", () => {
         status: "completed",
       }),
     );
-    expect(
-      (request.input?.[0] as Record<string, unknown>).callId,
-    ).toBeUndefined();
+    expect(input?.[0]?.["callId"]).toBeUndefined();
   });
 
   it("normalizes SDK callId to Responses API call_id for compact requests", async () => {
@@ -493,8 +492,9 @@ describe("DurableCompactionSession", () => {
       string,
       unknown
     >;
-    expect(request.input).toHaveLength(1);
-    expect(request.input?.[0]).toEqual(
+    const input = request["input"] as Record<string, unknown>[] | undefined;
+    expect(input).toHaveLength(1);
+    expect(input?.[0]).toEqual(
       expect.objectContaining({
         type: "function_call",
         call_id: "call-1",
@@ -503,9 +503,7 @@ describe("DurableCompactionSession", () => {
         status: "completed",
       }),
     );
-    expect(
-      (request.input?.[0] as Record<string, unknown>).callId,
-    ).toBeUndefined();
+    expect(input?.[0]?.["callId"]).toBeUndefined();
   });
 
   it("propagates a conflict while replacing compacted history", async () => {

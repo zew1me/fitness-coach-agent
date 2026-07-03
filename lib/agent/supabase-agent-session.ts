@@ -136,10 +136,10 @@ function withResponsesCompactItem(
       output: record["output"],
     };
     if (typeof record["status"] === "string") {
-      compacted.status = record["status"];
+      compacted["status"] = record["status"];
     }
     if (typeof record["id"] === "string") {
-      compacted.id = record["id"];
+      compacted["id"] = record["id"];
     }
     return compacted as unknown as AgentInputItem;
   }
