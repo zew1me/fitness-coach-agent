@@ -405,6 +405,21 @@ class SupabaseRepository:
         response = query.order("activity_date", desc=True).limit(limit).execute()
         return [Activity.model_validate(r) for r in (response.data or [])]
 
+    async def list_activities_between(
+        self, user_id: str, *, start: date, end: date
+    ) -> list[Activity]:
+        client = self._require_client()
+        response = (
+            client.table("activities")
+            .select("*")
+            .eq("user_id", user_id)
+            .gte("activity_date", start.isoformat())
+            .lte("activity_date", end.isoformat())
+            .order("activity_date")
+            .execute()
+        )
+        return [Activity.model_validate(r) for r in (response.data or [])]
+
     # ── Daily Load Snapshots ──────────────────────────────────
 
     async def upsert_load_snapshots(
@@ -596,6 +611,21 @@ class SupabaseRepository:
         if since:
             query = query.gte("workout_date", since.isoformat())
         response = query.order("workout_date").execute()
+        return [PlanWorkout.model_validate(r) for r in (response.data or [])]
+
+    async def list_plan_workouts_between(
+        self, user_id: str, *, start: date, end: date
+    ) -> list[PlanWorkout]:
+        client = self._require_client()
+        response = (
+            client.table("plan_workouts")
+            .select("*")
+            .eq("user_id", user_id)
+            .gte("workout_date", start.isoformat())
+            .lte("workout_date", end.isoformat())
+            .order("workout_date")
+            .execute()
+        )
         return [PlanWorkout.model_validate(r) for r in (response.data or [])]
 
     # ── Chat (unchanged from original) ────────────────────────
