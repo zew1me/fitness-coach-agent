@@ -202,6 +202,15 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("proposedUpdate.input must match");
     expect(prompt).toContain("update_athlete_profile {fields:");
     expect(prompt).toContain("save_recovery_data {entries:");
+    // The shape hint is a single fixed constant appended to every
+    // specialist's prompt (independent of role), so it must cover every
+    // proposable write tool, not just the two above.
+    expect(prompt).toContain("save_activity_from_text {");
+    expect(prompt).toContain("update_schedule {");
+    expect(prompt).toContain("update_goals {");
+    expect(prompt).toContain("generate_training_plan {goal_id?}");
+    expect(prompt).toContain("adjust_plan {plan_id, reason}");
+    expect(prompt).toContain("recalibrate_thresholds {}");
   });
 
   it("builds a lead coach prompt that includes specialist reports and final-response guidance", () => {

@@ -2,6 +2,7 @@ import { zodSchema } from "ai";
 import { describe, expect, it } from "vitest";
 
 import {
+  proposedUpdateToolShapeHints,
   specialistReportSchema,
   specialistReportWireSchema,
 } from "../../lib/agent/orchestration-types";
@@ -273,6 +274,89 @@ describe("specialistReportSchema", () => {
     expect(parsed.proposedUpdates[0]?.toolName).toBe("update_goals");
   });
 
+  it("accepts a zero-param recalibrate_thresholds proposal with an empty object", () => {
+    const parsed = specialistReportSchema.parse({
+      confidence: "high",
+      proposedUpdates: [
+        {
+          input: "{}",
+          rationale: "Recent races suggest thresholds have shifted.",
+          toolName: "recalibrate_thresholds",
+        },
+      ],
+      role: "workout",
+      risks: [],
+      summary: "Recalibrate thresholds.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.toolName).toBe("recalibrate_thresholds");
+  });
+
+  it("accepts a generate_training_plan proposal that omits the optional goal_id", () => {
+    const parsed = specialistReportSchema.parse({
+      confidence: "medium",
+      proposedUpdates: [
+        {
+          input: "{}",
+          rationale: "Athlete is ready for a structured plan.",
+          toolName: "generate_training_plan",
+        },
+      ],
+      role: "workout",
+      risks: [],
+      summary: "Generate a plan.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.toolName).toBe("generate_training_plan");
+  });
+
+  it("rejects an adjust_plan proposal missing the required top-level reason field", () => {
+    // adjust_plan has no nested objects to relax — both plan_id and reason
+    // are its own top-level fields and must stay required exactly as the
+    // real tool defines them.
+    expect(() =>
+      specialistReportSchema.parse({
+        confidence: "medium",
+        proposedUpdates: [
+          {
+            input: JSON.stringify({ plan_id: "plan-1" }),
+            rationale: "Athlete asked to adjust the plan.",
+            toolName: "adjust_plan",
+          },
+        ],
+        role: "workout",
+        risks: [],
+        summary: "Incomplete adjust_plan proposal.",
+      }),
+    ).toThrow();
+  });
+
+  it("does not reject a proposed update whose input has an unrecognized key alongside valid fields", () => {
+    // The relaxed per-tool schemas are plain z.object() (not .strict()), so
+    // safeParse() against them ignores an extra key rather than failing —
+    // this only affects whether validation blocks the proposal; the report's
+    // `input` string is never rewritten from the stripped result, so the
+    // extra key is still present verbatim on the returned report.
+    const parsed = specialistReportSchema.parse({
+      confidence: "medium",
+      proposedUpdates: [
+        {
+          input: JSON.stringify({
+            fields: { weekly_available_hours: 5 },
+            unexpected_key: "not part of the tool schema",
+          }),
+          rationale: "Athlete confirmed reduced availability.",
+          toolName: "update_athlete_profile",
+        },
+      ],
+      role: "intake",
+      risks: [],
+      summary: "Reduced availability.",
+    });
+
+    expect(parsed.proposedUpdates[0]?.input).toContain("unexpected_key");
+  });
+
   it("emits an OpenAI-compatible schema for structured outputs", async () => {
     // specialistReportWireSchema is what's actually passed as an Agent's
     // outputType (see lib/agent/specialists.ts) — specialistReportSchema's
@@ -294,6 +378,59 @@ describe("specialistReportSchema", () => {
     ).toBe("string");
     expect(jsonSchema.required?.sort()).toEqual(
       Object.keys(jsonSchema.properties ?? {}).sort(),
+    );
+  });
+});
+
+describe("proposedUpdateToolShapeHints", () => {
+  it("describes every write tool's exact key shape, marking optional keys with '?'", () => {
+    // Full-string regression guard: this constant is computed once at module
+    // load from the same relaxed per-tool schemas proposedUpdateSchema
+    // validates against (see orchestration-types.ts), so any drift here
+    // means either a tool schema changed (expected — update this string) or
+    // the shape-description logic itself broke (a real bug). Top-level
+    // required fields (e.g. `text`, `plan_id`, `reason`) carry no `?`;
+    // nested fields are all optional per relaxForProposedUpdate.
+    expect(proposedUpdateToolShapeHints).toBe(
+      "save_activity_from_text {activity_id?, text}; " +
+        "save_recovery_data {entries: [{body_battery?, hrv_ms?, log_date?, notes?, resting_hr_bpm?, sleep_consistency_pct?, sleep_duration_hours?, sleep_score?, stress_score?, subjective_energy?}]}; " +
+        "update_schedule {overrides?: [{available?, max_hours?, override_date?, reason?}], weekly_pattern?: {<key>: {available?, max_hours?, notes?}}}; " +
+        "update_goals {action, goal?: {course_distance_meters?, course_elevation_gain_meters?, course_profile_notes?, goal_type?, improvement_baseline_value?, improvement_metric?, improvement_target_value?, sport?, target_date?, title?}, goal_id?}; " +
+        "update_athlete_profile {fields: {biological_sex?, birth_date?, coaching_state?, constraints?: [...], dietary_restrictions?: [...], display_name?, height_cm?, hormone_status?, injuries_rehab?: [...], max_hr_bpm?, notes?, nutrition_notes?, onboarding_collected?: {nutrition?}, primary_sports?: [...], resting_hr_bpm?, specialization_pct?, weekly_available_hours?, weight_kg?}}; " +
+        "generate_training_plan {goal_id?}; " +
+        "adjust_plan {plan_id, reason}; " +
+        "recalibrate_thresholds {}",
+    );
+  });
+
+  it("lists a hint for every proposable write tool, in a semicolon-separated list", () => {
+    const toolNames = [
+      "save_activity_from_text",
+      "save_recovery_data",
+      "update_schedule",
+      "update_goals",
+      "update_athlete_profile",
+      "generate_training_plan",
+      "adjust_plan",
+      "recalibrate_thresholds",
+    ];
+
+    for (const toolName of toolNames) {
+      expect(proposedUpdateToolShapeHints).toContain(toolName);
+    }
+    expect(proposedUpdateToolShapeHints.split("; ")).toHaveLength(
+      toolNames.length,
+    );
+  });
+
+  it("truncates recursion into deeply nested arrays of scalars with '...'", () => {
+    // constraints/dietary_restrictions/etc. on update_athlete_profile are
+    // arrays of plain strings four levels deep (fields -> array element);
+    // describeShape's depth limit renders these as `[...]` rather than
+    // recursing into the string primitive.
+    expect(proposedUpdateToolShapeHints).toContain("constraints?: [...]");
+    expect(proposedUpdateToolShapeHints).toContain(
+      "dietary_restrictions?: [...]",
     );
   });
 });
