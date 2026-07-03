@@ -506,6 +506,70 @@ describe("DurableCompactionSession", () => {
     expect(input?.[0]?.["callId"]).toBeUndefined();
   });
 
+  it("normalizes paired SDK function calls and outputs for compact requests", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call",
+          callId: "call-1",
+          name: "update_athlete_profile",
+          arguments: "{}",
+          status: "completed",
+        } as AgentInputItem,
+        {
+          type: "function_call_output",
+          callId: "call-1",
+          output: JSON.stringify({ status: "updated" }),
+          status: "completed",
+        } as unknown as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [userItem("summary")],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await session.runCompaction();
+
+    const request = client.responses.compact.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    const input = request["input"] as Record<string, unknown>[] | undefined;
+    expect(input).toHaveLength(2);
+    expect(input?.[0]).toEqual(
+      expect.objectContaining({
+        type: "function_call",
+        call_id: "call-1",
+        name: "update_athlete_profile",
+      }),
+    );
+    expect(input?.[0]?.["callId"]).toBeUndefined();
+    expect(input?.[1]).toEqual(
+      expect.objectContaining({
+        type: "function_call_output",
+        call_id: "call-1",
+        output: JSON.stringify({ status: "updated" }),
+      }),
+    );
+    expect(input?.[1]?.["callId"]).toBeUndefined();
+  });
+
   it("propagates a conflict while replacing compacted history", async () => {
     const conflict = new Error("Unable to replace model state (409)");
     const underlying = {

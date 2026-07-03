@@ -164,6 +164,9 @@ async def _run_chat_model_state_operation(
     except (PostgRESTAPIError, httpx.HTTPError) as exc:
         logger.exception(failure_log_message, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    except Exception as exc:
+        logger.exception(failure_log_message, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
 
 

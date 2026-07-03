@@ -9,6 +9,11 @@
 -- select thread_id, user_id
 -- from public.chat_model_states
 -- where items::text like '%"function_call%';
+--
+-- Rollout note: this migration increments chat_model_states.version for rows it
+-- rewrites. Apply during a maintenance or low-traffic window, or briefly pause
+-- durable chat writes, so in-flight optimistic-concurrency writes do not retry
+-- against the rewrite.
 with rewritten as (
   select
     state.thread_id,

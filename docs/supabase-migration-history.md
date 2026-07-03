@@ -246,7 +246,10 @@ where items::text like '%pending_implementation%';
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). This migration is a no-op where no stale placeholder tool outputs
-exist.
+exist. Because it increments `chat_model_states.version` on rewritten rows,
+apply it during a maintenance or low-traffic window, or briefly pause durable
+chat writes so in-flight optimistic-concurrency writes do not retry against the
+rewrite.
 
 ## 20260703094500 — remove tool calls from model state (2026-07-03)
 
@@ -275,4 +278,7 @@ where items::text like '%"function_call%';
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). This migration is a no-op where no historical function tool-call
-items exist in durable model state.
+items exist in durable model state. Because it increments
+`chat_model_states.version` on rewritten rows, apply it during a maintenance or
+low-traffic window, or briefly pause durable chat writes so in-flight
+optimistic-concurrency writes do not retry against the rewrite.

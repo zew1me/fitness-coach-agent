@@ -8,6 +8,11 @@
 -- These entries were created when unimplemented tools were advertised to the
 -- coach and persisted as completed function-call outputs. They are not
 -- user-visible transcript data; chat_messages remains untouched.
+--
+-- Rollout note: this migration increments chat_model_states.version for rows it
+-- rewrites. Apply during a maintenance or low-traffic window, or briefly pause
+-- durable chat writes, so in-flight optimistic-concurrency writes do not retry
+-- against the rewrite.
 with stale_calls as (
   select
     state.thread_id,
@@ -15,7 +20,7 @@ with stale_calls as (
   from public.chat_model_states as state
   cross join lateral jsonb_array_elements(state.items) as item(value)
   where item.value ->> 'type' in ('function_call_output', 'function_call_result')
-    and item.value ->> 'output' like '%pending_implementation%'
+    and item.value ->> 'status' = 'pending_implementation'
     and coalesce(item.value ->> 'call_id', item.value ->> 'callId') is not null
 ),
 rewritten as (
@@ -26,7 +31,7 @@ rewritten as (
         where not (
           (
             item.value ->> 'type' in ('function_call_output', 'function_call_result')
-            and item.value ->> 'output' like '%pending_implementation%'
+            and item.value ->> 'status' = 'pending_implementation'
           )
           or (
             item.value ->> 'type' = 'function_call'

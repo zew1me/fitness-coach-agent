@@ -185,9 +185,23 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       input: "Reply with exactly READY.",
       store: true,
     });
-    const store = new InMemoryCompactionSession(
-      MINIMAL_USER_INPUT as AgentInputItem[],
-    );
+    const toolCallId = "call_compaction_pair";
+    const store = new InMemoryCompactionSession([
+      ...(MINIMAL_USER_INPUT as AgentInputItem[]),
+      {
+        type: "function_call",
+        callId: toolCallId,
+        name: "update_athlete_profile",
+        arguments: "{}",
+        status: "completed",
+      } as AgentInputItem,
+      {
+        type: "function_call_output",
+        callId: toolCallId,
+        output: JSON.stringify({ status: "updated" }),
+        status: "completed",
+      } as unknown as AgentInputItem,
+    ]);
     const session = new DurableCompactionSession({
       underlyingSession: store,
       client,
@@ -205,6 +219,22 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     const compacted = await store.getItems();
     expect(
       compacted.some((item) => "type" in item && item.type === "compaction"),
+    ).toBe(true);
+    const compactedRecords = compacted as Record<string, unknown>[];
+    const remainingCallIds = new Set(
+      compactedRecords
+        .filter((item) => item["type"] === "function_call")
+        .map((item) => item["call_id"])
+        .filter((callId): callId is string => typeof callId === "string"),
+    );
+    const remainingOutputIds = new Set(
+      compactedRecords
+        .filter((item) => item["type"] === "function_call_output")
+        .map((item) => item["call_id"])
+        .filter((callId): callId is string => typeof callId === "string"),
+    );
+    expect(
+      [...remainingCallIds].every((callId) => remainingOutputIds.has(callId)),
     ).toBe(true);
   }, 60_000);
 });
