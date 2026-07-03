@@ -10,6 +10,7 @@
 - `20260625172251_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
 - `20260626000000_activity_summary.sql` — rich activity summary persistence
 - `20260702000000_agent_emails.sql` — inbound agent email storage for autonomous preview testing
+- `20260703090000_remove_pending_tool_outputs_from_model_state.sql` — one-time cleanup of alpha placeholder tool outputs from durable replay state
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -215,3 +216,33 @@ service role credentials.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally).
+
+## 20260703090000 — remove pending tool outputs from model state (2026-07-03)
+
+**File:** `supabase/migrations/20260703090000_remove_pending_tool_outputs_from_model_state.sql`
+
+**Change:** Removes stale `pending_implementation` tool-call outputs, plus their
+matching `function_call` items, from `chat_model_states.items`. The migration
+increments the model-state `version` and records
+`removed_pending_tool_outputs_at` in `compaction_metadata`.
+
+**Why:** Early alpha durable sessions could contain placeholder outputs from
+tools that were advertised before implementation. The Agents SDK rejected one
+such replay item on the `empty-bubble-fix` preview deployment with
+`Unsupported item {"type":"function_call_output", ... "status":"pending_implementation"}`,
+causing `/api/chat` to return the bounded `503` fallback. This is private model
+replay state, not the athlete-visible transcript, so the correct alpha repair is
+a data cleanup rather than retaining compatibility for obsolete placeholder
+history forever.
+
+**Preview before applying:**
+
+```sql
+select thread_id, user_id
+from public.chat_model_states
+where items::text like '%pending_implementation%';
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). This migration is a no-op where no stale placeholder tool outputs
+exist.
