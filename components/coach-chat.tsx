@@ -755,6 +755,40 @@ function ChatTopbar({
         <span className={styles.meta}>{coachingStatus}</span>
       </div>
       <div className={styles.topbarActions}>
+        <Link
+          aria-label="Training calendar"
+          className={styles.accountButton}
+          data-testid="chat-open-calendar"
+          href="/calendar"
+          title="Training calendar"
+        >
+          <svg
+            aria-hidden="true"
+            className={styles.accountIcon}
+            viewBox="0 0 24 24"
+          >
+            <rect
+              fill="none"
+              height="15"
+              rx="2.5"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              width="17"
+              x="3.5"
+              y="5"
+            />
+            <path
+              d="M3.5 9.5H20.5M8 3V6.5M16 3V6.5"
+              fill="none"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeWidth="1.8"
+            />
+            <circle cx="8.5" cy="13.5" fill="currentColor" r="1.2" />
+            <circle cx="12" cy="13.5" fill="currentColor" r="1.2" />
+            <circle cx="15.5" cy="13.5" fill="currentColor" r="1.2" />
+          </svg>
+        </Link>
         <div className={styles.accountMenuWrap}>
           <button
             aria-expanded={open}

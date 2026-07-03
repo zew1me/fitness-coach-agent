@@ -2,6 +2,8 @@ import * as Sentry from "@sentry/nextjs";
 
 import {
   athleteProfileSchema,
+  type CalendarResponse,
+  calendarResponseSchema,
   chatMessagePageSchema,
   chatThreadResponseSchema,
   type ParsedChatMessagePage,
@@ -291,6 +293,21 @@ export async function loadChatMessages(
     fetchImpl,
   );
   return chatMessagePageSchema.parse(page);
+}
+
+export async function loadCalendar(
+  start: string,
+  end: string,
+  fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
+): Promise<CalendarResponse> {
+  const params = new URLSearchParams({ start, end });
+  const raw = await authorizedFetch<unknown>(
+    `/api/calendar?${params.toString()}`,
+    { method: "GET", signal: signal ?? null },
+    fetchImpl,
+  );
+  return calendarResponseSchema.parse(raw);
 }
 
 export async function createChatUploadIntent(
