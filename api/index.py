@@ -36,6 +36,7 @@ from backend.models.athlete import (
 from backend.models.athlete import (
     RecoveryLog,
     ScheduleAvailability,
+    ScheduleDayAvailability,
     ScheduleOverride,
     SportThreshold,
 )
@@ -1079,7 +1080,11 @@ async def update_goals_endpoint(
 
 
 class UpdateScheduleRequest(BaseModel):
-    weekly_pattern: dict[str, object] | None = None
+    # Merge semantics (issue #232):
+    #   weekly_pattern — full replacement of the recurring weekday template.
+    #   overrides      — per-date upsert (on_conflict=user_id,override_date).
+    # Typed per-day validation (max_hours in [0, 24]) rejects bad input as 422.
+    weekly_pattern: dict[str, ScheduleDayAvailability] | None = None
     overrides: list[dict[str, object]] | None = None
 
 
@@ -1092,10 +1097,15 @@ async def update_schedule_endpoint(
     updated: list[str] = []
     try:
         if payload.weekly_pattern is not None:
-            schedule = ScheduleAvailability(user_id=user_id, weekly_pattern=payload.weekly_pattern)
+            # weekly_pattern is a full replacement of the recurring weekday template.
+            weekly_pattern = {
+                day: entry.model_dump(mode="json") for day, entry in payload.weekly_pattern.items()
+            }
+            schedule = ScheduleAvailability(user_id=user_id, weekly_pattern=weekly_pattern)
             await repo.upsert_schedule(schedule)
             updated.append("weekly_pattern")
         if payload.overrides:
+            # Each override upserts on (user_id, override_date).
             for ov in payload.overrides:
                 override = ScheduleOverride.model_validate({"user_id": user_id, **ov})
                 await repo.upsert_schedule_override(override)
@@ -1315,7 +1325,7 @@ def _select_training_model(
 
 
 @app.post("/api/engine/generate-plan-structure")
-async def generate_plan_structure(
+async def generate_plan_structure(  # noqa: C901
     payload: GeneratePlanStructureRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
@@ -1384,13 +1394,22 @@ async def generate_plan_structure(
     persisted_plan = None
     try:
         schedule = await repo.get_schedule(user_id)
+        overrides = await repo.list_schedule_overrides_between(
+            user_id, start=skeleton.start_date, end=skeleton.end_date
+        )
+        # Capture the plan being superseded *before* the insert so we can clean up
+        # its future scheduled workouts and leave one coherent calendar timeline.
+        prior_plan = await repo.get_active_plan(user_id)
         persisted_plan = await repo.create_training_plan(plan)
+        if prior_plan is not None and prior_plan.id:
+            await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, skeleton.start_date)
         workouts = compose_plan_workouts(
             skeleton,
             user_id=user_id,
             plan_id=persisted_plan.id or "",
             sport=plan_sport,
             weekly_pattern=schedule.weekly_pattern if schedule else None,
+            overrides=overrides,
             policy=PlanComposerPolicy(training_model=training_model),
         )
         persisted_workouts = await repo.create_plan_workouts(workouts)
@@ -1435,6 +1454,142 @@ async def generate_plan_structure(
             "age_bracket": ceiling.age_bracket,
             "committed_amateur_ctl": ceiling.committed_amateur_ctl,
         },
+    }
+
+
+class AdjustPlanRequest(BaseModel):
+    plan_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+def _rebuild_skeleton(plan: TrainingPlan):
+    """Reconstruct a PlanSkeleton from a persisted plan's stored ``phases``.
+
+    Recomposing from the plan's *own* skeleton (rather than a fresh one) keeps the
+    periodization ramp continuous across an adjust, so future weeks stay faithful
+    to the original build.
+    """
+    from backend.engine.periodization import PhasePlan, PlanSkeleton
+
+    phases = [
+        PhasePlan(
+            name=str(p["name"]),
+            start_week=int(p["start_week"]),
+            end_week=int(p["end_week"]),
+            focus=str(p["focus"]),
+            target_weekly_tss=float(p["target_weekly_tss"]),
+            z1_z2_pct=int(p["z1_z2_pct"]),
+            max_hiit_per_week=int(p["max_hiit_per_week"]),
+            description=str(p.get("description", "")),
+        )
+        for p in plan.phases
+    ]
+    total_weeks = max((phase.end_week for phase in phases), default=0)
+    return PlanSkeleton(
+        phases=phases,
+        total_weeks=total_weeks,
+        start_date=plan.start_date,
+        end_date=plan.end_date,
+        starting_weekly_tss=plan.weekly_tss_target or 0.0,
+    )
+
+
+@app.post("/api/engine/adjust-plan")
+async def adjust_plan(
+    payload: AdjustPlanRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Edit the active plan's *future scheduled* workouts in place (feedback loop).
+
+    Unlike full generation, adjust never spawns a new plan: it recomposes only the
+    remaining weeks on the same ``plan_id``, preserving completed/matched history
+    (and therefore compliance %) untouched.
+    """
+    from typing import cast
+
+    from backend.services.plan_composer import (
+        PlanComposerPolicy,
+        TrainingModel,
+        compose_plan_workouts,
+    )
+
+    user_id = user_context.user_id
+    today = datetime.now(UTC).date()
+    from_date = today + timedelta(days=1)
+
+    plan = await repo.get_active_plan(user_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No active training plan to adjust.")
+    if plan.id != payload.plan_id:
+        raise HTTPException(
+            status_code=409,
+            detail="plan_id does not match the athlete's active plan.",
+        )
+    # plan.id == payload.plan_id (a validated non-empty str); use it downstream.
+    plan_id = payload.plan_id
+
+    try:
+        # Sport lives on the workouts, not the plan; read it from surviving history.
+        existing = await repo.list_plan_workouts(plan_id)
+        plan_sport = existing[0].sport if existing else "cycling"
+
+        skeleton = _rebuild_skeleton(plan)
+        schedule = await repo.get_schedule(user_id)
+        overrides = await repo.list_schedule_overrides_between(
+            user_id, start=from_date, end=plan.end_date
+        )
+        raw_model = str((plan.generation_context or {}).get("training_model", "performance"))
+        training_model: TrainingModel = (
+            cast(TrainingModel, raw_model)
+            if raw_model in ("performance", "longevity", "recovery_return")
+            else "performance"
+        )
+
+        deleted = await repo.delete_future_scheduled_workouts(user_id, plan_id, from_date)
+        # Any future workout that survived the delete is completed/matched — never
+        # double-book a recomposed session onto its date.
+        surviving_dates = {
+            w.workout_date for w in await repo.list_plan_workouts(plan_id, since=from_date)
+        }
+        recomposed = compose_plan_workouts(
+            skeleton,
+            user_id=user_id,
+            plan_id=plan_id,
+            sport=plan_sport,
+            weekly_pattern=schedule.weekly_pattern if schedule else None,
+            overrides=overrides,
+            policy=PlanComposerPolicy(training_model=training_model),
+            from_date=from_date,
+        )
+        to_insert = [w for w in recomposed if w.workout_date not in surviving_dates]
+        inserted = await repo.create_plan_workouts(to_insert)
+
+        # Append an audit entry to generation_context so adjusts are traceable.
+        context = dict(plan.generation_context or {})
+        adjustments = list(context.get("adjustments", []))
+        adjustments.append({"reason": payload.reason, "at": datetime.now(UTC).isoformat()})
+        context["adjustments"] = adjustments
+        await repo.update_training_plan_generation_context(user_id, plan_id, context)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.exception("adjust_plan: persistence failed user_id=%s plan_id=%s", user_id, plan_id)
+        raise HTTPException(status_code=503, detail="Failed to adjust training plan.") from exc
+
+    logger.info(
+        "plan adjusted user_id=%s plan_id=%s deleted=%d inserted=%d reason=%r",
+        user_id,
+        plan_id,
+        deleted,
+        len(inserted),
+        payload.reason,
+    )
+    return {
+        "plan_id": plan_id,
+        "status": "adjusted",
+        "workouts_removed": deleted,
+        "workouts_created": len(inserted),
+        "from_date": from_date.isoformat(),
     }
 
 
