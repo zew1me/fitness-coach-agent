@@ -24,6 +24,7 @@ class FakeTableQuery:
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self._rows = rows
         self._filters: dict[str, object] = {}
+        self._neq_filters: dict[str, object] = {}
         self._is_null: set[str] = set()
         self._inserted_payload: dict[str, object] | None = None
         self._inserted_payloads: list[dict[str, object]] | None = None
@@ -31,9 +32,12 @@ class FakeTableQuery:
         self._upsert_conflict: str | None = None
         self._ignore_duplicates = False
         self._update_payload: dict[str, object] | None = None
+        self._delete = False
         self._limit: int | None = None
         self._in_filters: dict[str, set[object]] = {}
         self._gt_filters: dict[str, object] = {}
+        self._gte_filters: dict[str, object] = {}
+        self._lte_filters: dict[str, object] = {}
         self._cursor_before: tuple[str, str] | None = None
         self._orders: list[tuple[str, bool]] = []
 
@@ -44,12 +48,28 @@ class FakeTableQuery:
         self._filters[column] = value
         return self
 
+    def neq(self, column: str, value: object) -> "FakeTableQuery":
+        self._neq_filters[column] = value
+        return self
+
     def in_(self, column: str, values: list[object]) -> "FakeTableQuery":
         self._in_filters[column] = set(values)
         return self
 
     def gt(self, column: str, value: object) -> "FakeTableQuery":
         self._gt_filters[column] = value
+        return self
+
+    def gte(self, column: str, value: object) -> "FakeTableQuery":
+        self._gte_filters[column] = value
+        return self
+
+    def lte(self, column: str, value: object) -> "FakeTableQuery":
+        self._lte_filters[column] = value
+        return self
+
+    def delete(self) -> "FakeTableQuery":
+        self._delete = True
         return self
 
     def is_(self, column: str, value: object) -> "FakeTableQuery":
@@ -97,7 +117,7 @@ class FakeTableQuery:
         self._update_payload = payload
         return self
 
-    def execute(self) -> FakeResponse:  # noqa: C901
+    def execute(self) -> FakeResponse:  # noqa: C901, PLR0912
         if self._inserted_payload is not None:
             self._rows.append(self._inserted_payload)
             return FakeResponse([self._inserted_payload])
@@ -132,6 +152,11 @@ class FakeTableQuery:
                 row.update(self._update_payload)
                 updated.append(row)
             return FakeResponse(updated)
+        if self._delete:
+            removed = self._matching_rows()
+            for row in removed:
+                self._rows.remove(row)
+            return FakeResponse(removed)
 
         rows = self._matching_rows()
         for column, desc in reversed(self._orders):
@@ -145,11 +170,20 @@ class FakeTableQuery:
             row
             for row in self._rows
             if all(row.get(column) == value for column, value in self._filters.items())
+            and all(row.get(column) != value for column, value in self._neq_filters.items())
             and all(row.get(column) in values for column, values in self._in_filters.items())
             and all(row.get(column) is None for column in self._is_null)
             and all(
                 row.get(column) is not None and str(row[column]) > str(value)
                 for column, value in self._gt_filters.items()
+            )
+            and all(
+                row.get(column) is not None and str(row[column]) >= str(value)
+                for column, value in self._gte_filters.items()
+            )
+            and all(
+                row.get(column) is not None and str(row[column]) <= str(value)
+                for column, value in self._lte_filters.items()
             )
             and (
                 self._cursor_before is None
@@ -175,6 +209,9 @@ class FakeSupabaseClient:
         chat_model_state_rows: list[dict[str, object]] | None = None,
         daily_load_snapshot_rows: list[dict[str, object]] | None = None,
         goal_rows: list[dict[str, object]] | None = None,
+        plan_workout_rows: list[dict[str, object]] | None = None,
+        training_plan_rows: list[dict[str, object]] | None = None,
+        schedule_override_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._tables = {
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
@@ -186,6 +223,10 @@ class FakeSupabaseClient:
             "chat_attachments": FakeTableQuery(chat_attachment_rows or []),
             "chat_model_states": FakeTableQuery(chat_model_state_rows or []),
             "goals": FakeTableQuery(goal_rows or []),
+            "plan_workouts": FakeTableQuery(plan_workout_rows or []),
+            "training_plans": FakeTableQuery(training_plan_rows or []),
+            "schedule_overrides": FakeTableQuery(schedule_override_rows or []),
+            "schedule_availability": FakeTableQuery([]),
         }
 
     def table(self, table_name: str) -> FakeTableQuery:
@@ -1186,6 +1227,89 @@ async def test_acquire_chat_turn_lease_does_not_retry_unrelated_api_errors(
 
     assert excinfo.value.code == "42501"
     assert client.calls == 1, "non-transient errors must not be retried"
+
+
+@pytest.mark.asyncio
+async def test_schedule_workouts_delete_removes_only_future_scheduled_unmatched() -> None:
+    """The cleanup primitive must never touch history: completed/matched rows and
+    past-dated rows survive; only future scheduled + unmatched rows are deleted."""
+    plan_id = "00000000-0000-0000-0000-000000000010"
+    rows: list[dict[str, object]] = [
+        # Past scheduled — kept (before from_date).
+        _plan_workout_row(
+            id="past-scheduled",
+            workout_date="2026-07-01",
+            status="scheduled",
+            actual_activity_id=None,
+        ),
+        # Future completed/matched — kept (history).
+        _plan_workout_row(
+            id="future-completed",
+            workout_date="2026-07-10",
+            status="completed",
+            actual_activity_id="act-1",
+        ),
+        # Future scheduled but matched (defensive) — kept.
+        _plan_workout_row(
+            id="future-scheduled-matched",
+            workout_date="2026-07-11",
+            status="scheduled",
+            actual_activity_id="act-2",
+        ),
+        # Future scheduled + unmatched — the only row that should go.
+        _plan_workout_row(
+            id="future-scheduled",
+            workout_date="2026-07-12",
+            status="scheduled",
+            actual_activity_id=None,
+        ),
+        # Another athlete's future scheduled row — never touched.
+        _plan_workout_row(
+            id="other-user",
+            user_id="athlete-2",
+            workout_date="2026-07-12",
+            status="scheduled",
+            actual_activity_id=None,
+        ),
+    ]
+    client = FakeSupabaseClient(plan_workout_rows=rows)
+    repo = SupabaseRepository(client=client)
+
+    removed = await repo.delete_future_scheduled_workouts("athlete-1", plan_id, date(2026, 7, 5))
+
+    assert removed == 1
+    remaining_ids = {row["id"] for row in client._tables["plan_workouts"]._rows}
+    assert remaining_ids == {
+        "past-scheduled",
+        "future-completed",
+        "future-scheduled-matched",
+        "other-user",
+    }
+
+
+@pytest.mark.asyncio
+async def test_schedule_overrides_read_between_filters_date_range() -> None:
+    """list_schedule_overrides_between returns only this athlete's rows in range."""
+    rows: list[dict[str, object]] = [
+        {"user_id": "athlete-1", "override_date": "2026-07-04", "available": False},
+        {"user_id": "athlete-1", "override_date": "2026-12-20", "available": False},
+        {
+            "user_id": "athlete-1",
+            "override_date": "2026-12-27",
+            "available": True,
+            "max_hours": 1.0,
+        },
+        {"user_id": "athlete-2", "override_date": "2026-12-21", "available": False},
+    ]
+    client = FakeSupabaseClient(schedule_override_rows=rows)
+    repo = SupabaseRepository(client=client)
+
+    overrides = await repo.list_schedule_overrides_between(
+        "athlete-1", start=date(2026, 12, 1), end=date(2026, 12, 31)
+    )
+
+    assert [ov.override_date for ov in overrides] == [date(2026, 12, 20), date(2026, 12, 27)]
+    assert all(ov.user_id == "athlete-1" for ov in overrides)
 
 
 def test_athlete_profile_specialization_pct_defaults_to_none() -> None:

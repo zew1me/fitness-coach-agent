@@ -188,9 +188,27 @@ class RecoveryLog(BaseModel):
     source: str = "manual"
 
 
+_MAX_HOURS_PER_DAY = 24.0
+
+
+class ScheduleDayAvailability(BaseModel):
+    """One weekday's availability entry inside ``weekly_pattern``.
+
+    ``available`` is nullable to mirror the coach tool schema (the model treats a
+    missing/None value as available); ``max_hours`` is validated to a sane
+    ``[0, 24]`` window so a bad value is rejected at the request boundary (422).
+    """
+
+    available: bool | None = True
+    max_hours: float | None = Field(default=None, ge=0, le=_MAX_HOURS_PER_DAY)
+    notes: str | None = None
+
+
 class ScheduleAvailability(BaseModel):
     id: str | None = None
     user_id: str
+    # Persisted as an opaque jsonb map of weekday -> ScheduleDayAvailability shape;
+    # validation of individual entries happens at the request boundary.
     weekly_pattern: dict = Field(default_factory=dict)
 
 
@@ -199,5 +217,5 @@ class ScheduleOverride(BaseModel):
     user_id: str
     override_date: date
     available: bool = False
-    max_hours: float | None = None
+    max_hours: float | None = Field(default=None, ge=0, le=_MAX_HOURS_PER_DAY)
     reason: str | None = None

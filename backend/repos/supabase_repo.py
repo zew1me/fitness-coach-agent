@@ -560,6 +560,22 @@ class SupabaseRepository:
             raise RuntimeError("Supabase did not return the upserted schedule override row.")
         return ScheduleOverride.model_validate(rows[0])
 
+    async def list_schedule_overrides_between(
+        self, user_id: str, *, start: date, end: date
+    ) -> list[ScheduleOverride]:
+        """Dated availability overrides in ``[start, end]`` (issue #232)."""
+        client = self._require_client()
+        response = (
+            client.table("schedule_overrides")
+            .select("*")
+            .eq("user_id", user_id)
+            .gte("override_date", start.isoformat())
+            .lte("override_date", end.isoformat())
+            .order("override_date")
+            .execute()
+        )
+        return [ScheduleOverride.model_validate(r) for r in (response.data or [])]
+
     # ── Training Plans ────────────────────────────────────────
 
     async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
@@ -586,6 +602,15 @@ class SupabaseRepository:
             "id", plan_id
         ).execute()
 
+    async def update_training_plan_generation_context(
+        self, user_id: str, plan_id: str, generation_context: dict[str, Any]
+    ) -> None:
+        """Persist a fresh ``generation_context`` (e.g. append an adjust audit entry)."""
+        client = self._require_client()
+        client.table("training_plans").update({"generation_context": generation_context}).eq(
+            "user_id", user_id
+        ).eq("id", plan_id).execute()
+
     async def get_active_plan(self, user_id: str) -> TrainingPlan | None:
         client = self._require_client()
         response = (
@@ -610,6 +635,30 @@ class SupabaseRepository:
             payloads.append(p)
         response = client.table("plan_workouts").insert(payloads).execute()
         return [PlanWorkout.model_validate(r) for r in (response.data or [])]
+
+    async def delete_future_scheduled_workouts(
+        self, user_id: str, plan_id: str, from_date: date
+    ) -> int:
+        """Delete only *future, scheduled, unmatched* workouts for a plan.
+
+        The single cleanup primitive shared by regeneration and adjust. Rows that
+        are completed/matched (``status != 'scheduled'`` or a non-null
+        ``actual_activity_id``) are history — they carry ``completion_source`` and
+        the matched activity — and are never touched. Past-dated rows are likewise
+        left alone. Returns the number of rows removed.
+        """
+        client = self._require_client()
+        response = (
+            client.table("plan_workouts")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("plan_id", plan_id)
+            .eq("status", "scheduled")
+            .is_("actual_activity_id", "null")
+            .gte("workout_date", from_date.isoformat())
+            .execute()
+        )
+        return len(response.data or [])
 
     async def list_plan_workouts(
         self, plan_id: str, *, since: date | None = None
