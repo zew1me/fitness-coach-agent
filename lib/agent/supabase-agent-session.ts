@@ -137,6 +137,33 @@ function toResponsesCompactInputItem(
   return withCallIdField(record, "call_id");
 }
 
+const RESPONSES_COMPACT_INPUT_FIELDS = new Set([
+  "arguments",
+  "call_id",
+  "content",
+  "encrypted_content",
+  "id",
+  "name",
+  "output",
+  "role",
+  "status",
+  "summary",
+  "type",
+]);
+
+function sanitizeResponsesCompactInputItem(
+  item: AgentInputItem,
+): AgentInputItem {
+  const record = item as unknown as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (RESPONSES_COMPACT_INPUT_FIELDS.has(key)) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized as unknown as AgentInputItem;
+}
+
 function omittedToolOutputMessage(): AgentInputItem {
   return {
     role: "assistant",
@@ -446,9 +473,11 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       // before compacting, matching the sanitization applied elsewhere via
       // prepareHistoryItemForModelInput. Convert SDK `callId` to the
       // Responses API `call_id` field so compact accepts function calls.
-      input: items.map((item) =>
-        toResponsesCompactInputItem(this.prepareHistoryItemForModelInput(item)),
-      ) as OpenAI.Responses.ResponseInput,
+      input: items.map((item) => {
+        const prepared = this.prepareHistoryItemForModelInput(item);
+        const compactInput = toResponsesCompactInputItem(prepared);
+        return sanitizeResponsesCompactInputItem(compactInput);
+      }) as OpenAI.Responses.ResponseInput,
     });
     const output = compacted.output as AgentInputItem[];
     if (!Array.isArray(output) || output.length === 0) {
