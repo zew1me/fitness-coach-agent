@@ -1674,8 +1674,19 @@ describe("CoachChat", () => {
     await waitFor(() => {
       expect((input as HTMLTextAreaElement).value).toBe("I ran easy today.");
     });
-    // ...drops the optimistic bubble the SDK added...
-    expect(chatMocks.setMessages).toHaveBeenCalled();
+    // ...drops exactly the failed optimistic bubble (and nothing else) via the
+    // setMessages updater...
+    const sendArgs = chatMocks.sendMessage.mock.calls[0] as unknown as [
+      { id: string },
+    ];
+    const sentId = sendArgs[0].id;
+    const setMessagesArgs = chatMocks.setMessages.mock.calls.at(
+      -1,
+    ) as unknown as [(prev: { id: string }[]) => { id: string }[]];
+    const removeUpdater = setMessagesArgs[0];
+    expect(removeUpdater([{ id: sentId }, { id: "keep-me" }])).toEqual([
+      { id: "keep-me" },
+    ]);
     // ...and surfaces the failure inline.
     await screen.findByText(/network down/i);
   });

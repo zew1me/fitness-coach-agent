@@ -1336,6 +1336,16 @@ function CoachChatBody({
   // Synchronous guard against double-click: state reads aren't atomic across
   // rapid events, so this ref is the authoritative in-flight check.
   const sendInFlightRef = useRef(false);
+  // When we clear attachments optimistically on send, the [attachments] cleanup
+  // effect below would otherwise revoke the preview URLs we still need for the
+  // failure-restore path. This flag tells that cleanup to skip one revocation.
+  const skipNextAttachmentPreviewCleanupRef = useRef(false);
+  // Mirror the latest draft so the failed-send restore path can tell whether the
+  // user has started a new draft since we cleared it (see handleSend's catch).
+  const latestComposerRef = useRef(composer);
+  latestComposerRef.current = composer;
+  const latestAttachmentsRef = useRef(attachments);
+  latestAttachmentsRef.current = attachments;
 
   const chatMessages = useMemo<UIMessage[]>(
     () => persistedMessages.map(toUiMessage),
@@ -1428,6 +1438,10 @@ function CoachChatBody({
 
   useEffect((): (() => void) => {
     return (): void => {
+      if (skipNextAttachmentPreviewCleanupRef.current) {
+        skipNextAttachmentPreviewCleanupRef.current = false;
+        return;
+      }
       removePreviewUrls(attachments);
     };
   }, [attachments]);
@@ -1577,9 +1591,12 @@ function CoachChatBody({
       // empties the instant the user hits Send. `sendMessage` only resolves once
       // the entire assistant response has streamed back, so clearing after it
       // would leave the message sitting in the composer for the whole reply. If
-      // the send fails we restore the snapshot below. Don't revoke the attachment
-      // preview URLs yet — they must survive in case we need to restore them.
+      // the send fails we restore the snapshot below, so keep the attachment
+      // preview URLs alive — suppress the [attachments] cleanup's revocation for
+      // this one clear.
       setComposer("");
+      skipNextAttachmentPreviewCleanupRef.current =
+        pendingAttachments.length > 0;
       setAttachments([]);
       await sendMessage({
         id: messageId,
@@ -1608,16 +1625,24 @@ function CoachChatBody({
       setSyncingThread(false);
       // The send failed, so drop the optimistic user bubble the SDK added and
       // restore the draft into the composer — but only if the user hasn't
-      // started typing something new while the send was in flight, so we never
-      // clobber fresh input. The preview URLs were never revoked, so the
-      // restored attachments still render.
+      // started a new draft (text or attachments) while the send was in flight,
+      // so we never clobber fresh input. Text and attachments are restored
+      // together under one check so we never pair a new draft with the failed
+      // send's attachments. The preview URLs were kept alive on the optimistic
+      // clear (see skipNextAttachmentPreviewCleanupRef), so restored attachments
+      // still render; if we don't restore, we revoke them here to avoid a leak.
       setMessages((current) =>
         current.filter((message) => message.id !== messageId),
       );
-      setComposer((current) => (current === "" ? pendingComposer : current));
-      setAttachments((current) =>
-        current.length === 0 ? pendingAttachments : current,
-      );
+      const draftUntouched =
+        latestComposerRef.current === "" &&
+        latestAttachmentsRef.current.length === 0;
+      if (draftUntouched) {
+        setComposer(pendingComposer);
+        setAttachments(pendingAttachments);
+      } else {
+        removePreviewUrls(pendingAttachments);
+      }
       setThreadError(errorMessage(error, "Unable to send your message."));
     } finally {
       sendInFlightRef.current = false;
