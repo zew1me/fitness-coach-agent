@@ -1401,8 +1401,6 @@ async def generate_plan_structure(  # noqa: C901
         # its future scheduled workouts and leave one coherent calendar timeline.
         prior_plan = await repo.get_active_plan(user_id)
         persisted_plan = await repo.create_training_plan(plan)
-        if prior_plan is not None and prior_plan.id:
-            await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, skeleton.start_date)
         workouts = compose_plan_workouts(
             skeleton,
             user_id=user_id,
@@ -1413,6 +1411,11 @@ async def generate_plan_structure(  # noqa: C901
             policy=PlanComposerPolicy(training_model=training_model),
         )
         persisted_workouts = await repo.create_plan_workouts(workouts)
+        # Clean up the superseded plan's future scheduled workouts only *after* the
+        # new plan's workouts are safely persisted — a failed insert must never leave
+        # the athlete with the prior plan's future deleted and no replacement.
+        if prior_plan is not None and prior_plan.id:
+            await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, skeleton.start_date)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
@@ -1532,6 +1535,15 @@ async def adjust_plan(
         # Sport lives on the workouts, not the plan; read it from surviving history.
         existing = await repo.list_plan_workouts(plan_id)
         plan_sport = existing[0].sport if existing else "cycling"
+        # Future completed/matched workouts are history — never double-book a
+        # recomposed session onto their dates. Derive this from the rows we already
+        # fetched (no second query), so it is known *before* the destructive delete.
+        surviving_dates = {
+            w.workout_date
+            for w in existing
+            if w.workout_date >= from_date
+            and (w.actual_activity_id is not None or w.status != "scheduled")
+        }
 
         skeleton = _rebuild_skeleton(plan)
         schedule = await repo.get_schedule(user_id)
@@ -1545,12 +1557,10 @@ async def adjust_plan(
             else "performance"
         )
 
-        deleted = await repo.delete_future_scheduled_workouts(user_id, plan_id, from_date)
-        # Any future workout that survived the delete is completed/matched — never
-        # double-book a recomposed session onto its date.
-        surviving_dates = {
-            w.workout_date for w in await repo.list_plan_workouts(plan_id, since=from_date)
-        }
+        # Compose the replacement rows (pure computation) *before* deleting anything,
+        # so a recomposition failure can never leave the plan with its future wiped.
+        # delete and re-insert both target this plan_id, so insert-before-delete would
+        # clobber the new rows; keep them adjacent to minimise the non-atomic window.
         recomposed = compose_plan_workouts(
             skeleton,
             user_id=user_id,
@@ -1562,6 +1572,7 @@ async def adjust_plan(
             from_date=from_date,
         )
         to_insert = [w for w in recomposed if w.workout_date not in surviving_dates]
+        deleted = await repo.delete_future_scheduled_workouts(user_id, plan_id, from_date)
         inserted = await repo.create_plan_workouts(to_insert)
 
         # Append an audit entry to generation_context so adjusts are traceable.

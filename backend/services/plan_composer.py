@@ -115,6 +115,10 @@ def _apply_override(session: dict, override: ScheduleOverride) -> dict:
     """
     if not override.available:
         return _rest_session()
+    # Zero available hours is a rest day even when the athlete is nominally
+    # "available" — otherwise the templated session survives at 0 min/0 TSS.
+    if override.max_hours is not None and override.max_hours <= 0:
+        return _rest_session()
     target_tss = session["target_tss"]
     if override.max_hours is not None and target_tss is not None:
         cap_tss = override.max_hours * _TSS_PER_HOUR_EASY

@@ -197,6 +197,29 @@ def test_override_forces_rest_on_unavailable_dates() -> None:
     assert week_one_types - {"rest"}, "week 1 should still contain training days"
 
 
+def test_override_zero_max_hours_forces_rest_even_when_available() -> None:
+    skeleton = _skeleton(weeks=2)
+    baseline = compose_plan_workouts(
+        skeleton, user_id="athlete-1", plan_id="plan-1", sport="cycling"
+    )
+    # Pick a training day (has a TSS target) in week 1.
+    training_day = next(w for w in baseline if w.week_number == 1 and w.target_tss)
+    override = ScheduleOverride(
+        user_id="athlete-1", override_date=training_day.workout_date, available=True, max_hours=0
+    )
+    workouts = compose_plan_workouts(
+        skeleton,
+        user_id="athlete-1",
+        plan_id="plan-1",
+        sport="cycling",
+        overrides=[override],
+    )
+    day = next(w for w in workouts if w.workout_date == training_day.workout_date)
+    assert day.workout_type == "rest"
+    assert day.target_tss is None
+    assert day.target_duration_minutes is None
+
+
 def test_override_max_hours_caps_target_tss() -> None:
     skeleton = _skeleton(weeks=2)
     # Find the long day (highest TSS) in week 1 and cap it hard at 1 hour.
