@@ -54,11 +54,14 @@ class DailyLoadSnapshot(BaseModel):
     tsb: float = 0
 
 
+GoalType = Literal["event", "mountain", "improvement", "maintenance", "secondary"]
+
+
 class Goal(BaseModel):
     id: str | None = None
     user_id: str
 
-    goal_type: str  # event | mountain | improvement | maintenance | secondary
+    goal_type: GoalType
     sport: str | None = None
     title: str
     description: str | None = None
