@@ -414,6 +414,44 @@
   line-height: 1.5;
 }
 
+.pillUnconfirmed {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px dashed var(--accent);
+}
+
+.resolveRow {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.resolveButton {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 5px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.resolveButton:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.resolveButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.resolveError {
+  margin: 0;
+  color: var(--danger, #c0392b);
+  font-size: 0.82rem;
+}
+
 .emptyDetail {
   margin: 0;
   color: var(--text-muted);

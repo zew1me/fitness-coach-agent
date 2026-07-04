@@ -2,12 +2,14 @@ import * as Sentry from "@sentry/nextjs";
 
 import {
   athleteProfileSchema,
+  type CalendarPlannedWorkout,
   type CalendarResponse,
   calendarResponseSchema,
   chatMessagePageSchema,
   chatThreadResponseSchema,
   type ParsedChatMessagePage,
   type ParsedChatThreadResponse,
+  resolvePlanWorkoutResponseSchema,
   uploadRequestSchema,
 } from "./schemas";
 import type {
@@ -308,6 +310,26 @@ export async function loadCalendar(
     fetchImpl,
   );
   return calendarResponseSchema.parse(raw);
+}
+
+export async function resolvePlannedWorkout(
+  planWorkoutId: string,
+  outcome: "completed" | "skipped",
+  fetchImpl: FetchLike = fetch,
+): Promise<CalendarPlannedWorkout> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/engine/resolve-plan-workout",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        outcome,
+        plan_workout_id: planWorkoutId,
+        source: "athlete",
+      }),
+    },
+    fetchImpl,
+  );
+  return resolvePlanWorkoutResponseSchema.parse(raw).workout;
 }
 
 export async function createChatUploadIntent(

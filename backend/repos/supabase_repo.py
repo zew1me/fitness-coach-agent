@@ -564,11 +564,6 @@ class SupabaseRepository:
 
     async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
         client = self._require_client()
-        # Supersede existing active plan
-        client.table("training_plans").update({"status": "superseded"}).eq(
-            "user_id", plan.user_id
-        ).eq("status", "active").execute()
-
         payload = plan.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
@@ -576,7 +571,20 @@ class SupabaseRepository:
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted training plan row.")
-        return TrainingPlan.model_validate(rows[0])
+        created = TrainingPlan.model_validate(rows[0])
+
+        # Supersede prior active plans only after the insert succeeded, so an
+        # insert failure never leaves the athlete without an active plan.
+        client.table("training_plans").update({"status": "superseded"}).eq(
+            "user_id", plan.user_id
+        ).eq("status", "active").neq("id", created.id).execute()
+        return created
+
+    async def update_training_plan_status(self, user_id: str, plan_id: str, status: str) -> None:
+        client = self._require_client()
+        client.table("training_plans").update({"status": status}).eq("user_id", user_id).eq(
+            "id", plan_id
+        ).execute()
 
     async def get_active_plan(self, user_id: str) -> TrainingPlan | None:
         client = self._require_client()
@@ -612,6 +620,101 @@ class SupabaseRepository:
             query = query.gte("workout_date", since.isoformat())
         response = query.order("workout_date").execute()
         return [PlanWorkout.model_validate(r) for r in (response.data or [])]
+
+    async def get_plan_workout(self, user_id: str, workout_id: str) -> PlanWorkout:
+        client = self._require_client()
+        response = (
+            client.table("plan_workouts")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("id", workout_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(f"No plan workout '{workout_id}' for user '{user_id}'.")
+        return PlanWorkout.model_validate(rows[0])
+
+    # Only resolution-related columns may be patched; identifiers and
+    # prescription fields are immutable through this path.
+    _PLAN_WORKOUT_PATCHABLE_FIELDS = frozenset(
+        {"status", "actual_activity_id", "completion_source"}
+    )
+
+    async def update_plan_workout_fields(
+        self, user_id: str, workout_id: str, fields: dict[str, Any]
+    ) -> PlanWorkout:
+        if not fields:
+            raise ValueError("At least one field is required to update a plan workout.")
+        disallowed = set(fields) - self._PLAN_WORKOUT_PATCHABLE_FIELDS
+        if disallowed:
+            raise ValueError(f"Fields not patchable on plan_workouts: {sorted(disallowed)}")
+        client = self._require_client()
+        response = (
+            client.table("plan_workouts")
+            .update(fields)
+            .eq("user_id", user_id)
+            .eq("id", workout_id)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError(f"No plan workout '{workout_id}' for user '{user_id}'.")
+        return PlanWorkout.model_validate(rows[0])
+
+    @staticmethod
+    def _plan_workout_from_rpc_response(response_data: object, workout_id: str) -> PlanWorkout:
+        if isinstance(response_data, list):
+            rows = response_data
+            if not rows:
+                raise RecordNotFoundError(f"No plan workout '{workout_id}' was updated.")
+            return PlanWorkout.model_validate(rows[0])
+        if isinstance(response_data, dict):
+            return PlanWorkout.model_validate(response_data)
+        raise RuntimeError("Supabase RPC did not return an updated plan workout row.")
+
+    async def match_plan_workout_to_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+        completion_source: str,
+    ) -> PlanWorkout:
+        client = self._require_client()
+        response = client.rpc(
+            "match_plan_workout_to_activity",
+            {
+                "p_user_id": user_id,
+                "p_plan_workout_id": workout_id,
+                "p_activity_id": activity_id,
+                "p_completion_source": completion_source,
+            },
+        ).execute()
+        return self._plan_workout_from_rpc_response(response.data, workout_id)
+
+    async def resolve_plan_workout_atomic(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        outcome: str,
+        activity_id: str | None,
+        source: str,
+    ) -> PlanWorkout:
+        client = self._require_client()
+        response = client.rpc(
+            "resolve_plan_workout",
+            {
+                "p_user_id": user_id,
+                "p_plan_workout_id": workout_id,
+                "p_outcome": outcome,
+                "p_activity_id": activity_id,
+                "p_source": source,
+            },
+        ).execute()
+        return self._plan_workout_from_rpc_response(response.data, workout_id)
 
     async def list_plan_workouts_between(
         self, user_id: str, *, start: date, end: date

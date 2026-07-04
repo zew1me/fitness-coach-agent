@@ -10,8 +10,10 @@
 - `20260625172251_chat_model_state.sql` — private, versioned Agents SDK replay state and turn leases
 - `20260626000000_activity_summary.sql` — rich activity summary persistence
 - `20260702000000_agent_emails.sql` — inbound agent email storage for autonomous preview testing
+- `20260703000000_plan_workout_completion.sql` — `plan_workouts.completion_source` provenance plus a partial index for unconfirmed (past, still `scheduled`) workout lookups
 - `20260703090000_remove_pending_tool_outputs_from_model_state.sql` — one-time cleanup of alpha placeholder tool outputs from durable replay state
 - `20260703094500_remove_tool_calls_from_model_state.sql` — one-time cleanup of all alpha tool-call items from durable replay state
+- `20260703110000_plan_workout_atomic_rpc.sql` — service-role RPCs that atomically maintain plan workout/activity links
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the

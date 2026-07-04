@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX, RefObject } from "react";
@@ -9,10 +9,11 @@ import {
   buildCalendarWeeks,
   type CalendarDayItems,
   calendarDateRange,
+  derivedWorkoutStatus,
   groupCalendarItemsByDay,
   monthLabel,
 } from "../lib/calendar-view";
-import { loadCalendar } from "../lib/coach-api";
+import { loadCalendar, resolvePlannedWorkout } from "../lib/coach-api";
 import type {
   CalendarActivity,
   CalendarPlannedWorkout,
@@ -66,12 +67,11 @@ function definedNumber(value: number | null | undefined): value is number {
   return value !== null && value !== undefined;
 }
 
-function plannedWorkoutPills(workout: CalendarPlannedWorkout): string[] {
-  const pills = [
-    workout.sport,
-    workoutTypeLabel(workout.workout_type),
-    workout.status,
-  ];
+function plannedWorkoutPills(
+  workout: CalendarPlannedWorkout,
+  status: string,
+): string[] {
+  const pills = [workout.sport, workoutTypeLabel(workout.workout_type), status];
   if (definedNumber(workout.target_duration_minutes)) {
     pills.push(formatMinutes(workout.target_duration_minutes));
   }
@@ -242,6 +242,7 @@ function SignedInCalendar({
           dayIso={selectedDay}
           items={byDay.get(selectedDay) ?? EMPTY_DAY}
           onClose={closeDetail}
+          todayIso={todayIso}
         />
       ) : null}
     </main>
@@ -402,10 +403,12 @@ function DayDetailPanel({
   dayIso,
   items,
   onClose,
+  todayIso,
 }: Readonly<{
   dayIso: string;
   items: CalendarDayItems;
   onClose: () => void;
+  todayIso: string;
 }>): JSX.Element {
   const isEmpty = items.planned.length === 0 && items.activities.length === 0;
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -470,7 +473,11 @@ function DayDetailPanel({
           <section className={styles.detailSection}>
             <h3 className={styles.detailHeading}>Planned</h3>
             {items.planned.map((workout) => (
-              <PlannedWorkoutDetail key={workout.id} workout={workout} />
+              <PlannedWorkoutDetail
+                key={workout.id}
+                todayIso={todayIso}
+                workout={workout}
+              />
             ))}
           </section>
         ) : null}
@@ -490,13 +497,35 @@ function DayDetailPanel({
 
 function PlannedWorkoutDetail({
   workout,
-}: Readonly<{ workout: CalendarPlannedWorkout }>): JSX.Element {
+  todayIso,
+}: Readonly<{
+  workout: CalendarPlannedWorkout;
+  todayIso: string;
+}>): JSX.Element {
+  const queryClient = useQueryClient();
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const resolveMutation = useMutation({
+    mutationFn: (outcome: "completed" | "skipped") =>
+      resolvePlannedWorkout(workout.id, outcome),
+    onMutate: () => setResolveError(null),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["calendar"] }),
+    onError: (error: Error) => setResolveError(error.message),
+  });
+  const status = derivedWorkoutStatus(workout, todayIso);
+
   return (
     <article className={`${styles.detailItem} ${styles.detailItemPlanned}`}>
       <h4 className={styles.detailItemTitle}>{workout.title}</h4>
       <div className={styles.detailMetaRow}>
-        {plannedWorkoutPills(workout).map((pill) => (
-          <span className={styles.detailPill} key={pill}>
+        {plannedWorkoutPills(workout, status).map((pill) => (
+          <span
+            className={
+              pill === "unconfirmed"
+                ? `${styles.detailPill} ${styles.pillUnconfirmed}`
+                : styles.detailPill
+            }
+            key={pill}
+          >
             {pill}
           </span>
         ))}
@@ -504,6 +533,33 @@ function PlannedWorkoutDetail({
       {typeof workout.description === "string" &&
       workout.description.length > 0 ? (
         <p className={styles.detailNotes}>{workout.description}</p>
+      ) : null}
+      {status === "unconfirmed" ? (
+        <div className={styles.resolveRow}>
+          <button
+            className={styles.resolveButton}
+            data-testid="calendar-resolve-completed"
+            disabled={resolveMutation.isPending}
+            onClick={() => resolveMutation.mutate("completed")}
+            type="button"
+          >
+            ✓ I did it
+          </button>
+          <button
+            className={styles.resolveButton}
+            data-testid="calendar-resolve-skipped"
+            disabled={resolveMutation.isPending}
+            onClick={() => resolveMutation.mutate("skipped")}
+            type="button"
+          >
+            ✗ Skipped it
+          </button>
+        </div>
+      ) : null}
+      {resolveError !== null ? (
+        <p className={styles.resolveError} role="alert">
+          {resolveError}
+        </p>
       ) : null}
     </article>
   );

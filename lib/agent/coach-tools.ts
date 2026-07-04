@@ -225,13 +225,21 @@ function executeDeterministicEngineTool(
     calculate_zones: "/api/engine/calculate-zones",
     estimate_thresholds: "/api/engine/estimate-thresholds",
     generate_training_plan: "/api/engine/generate-plan-structure",
+    get_compliance_summary: "/api/engine/get-compliance-summary",
+    resolve_plan_workout: "/api/engine/resolve-plan-workout",
     save_recovery_data: "/api/engine/save-recovery-data",
     update_goals: "/api/engine/update-goals",
     update_schedule: "/api/engine/update-schedule",
   };
   const path = paths[name];
   if (path) {
-    return postEngine(context, path, engineInput(input));
+    // The coach agent is the caller: the engine maps source "coach" to the
+    // persisted completion_source "coach_confirmed".
+    const payload =
+      name === "resolve_plan_workout"
+        ? { ...engineInput(input), source: "coach" }
+        : engineInput(input);
+    return postEngine(context, path, payload);
   }
 
   return null;

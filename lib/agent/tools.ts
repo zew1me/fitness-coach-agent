@@ -195,13 +195,27 @@ const profileInputSchema = z.object({
   fields: profileFieldsSchema,
 });
 
+const trainingModelSchema = z.enum([
+  "auto",
+  "longevity",
+  "performance",
+  "recovery_return",
+]);
+
 const planInputSchema = z.object({
   goal_id: z.string().min(1).optional(),
+  training_model: trainingModelSchema.optional(),
 });
 
 const adjustPlanInputSchema = z.object({
   plan_id: z.string().min(1),
   reason: z.string().min(1),
+});
+
+const resolvePlanWorkoutInputSchema = z.object({
+  activity_id: z.string().min(1).nullish(),
+  outcome: z.enum(["completed", "skipped"]),
+  plan_workout_id: z.string().min(1),
 });
 
 type ToolDefinition<TSchema extends z.ZodTypeAny> = {
@@ -230,8 +244,12 @@ export const coachToolDefinitions = {
     userInputSchema,
   ),
   get_compliance_summary: defineTool(
-    "Summarize planned versus actual completion over recent weeks.",
+    "Summarize planned versus actual workout completion since the plan started (up to 4 weeks). Auto-matches recorded activities to planned workouts, reports compliance percentage, and lists up to 3 recent unconfirmed sessions worth asking the athlete about.",
     userInputSchema,
+  ),
+  resolve_plan_workout: defineTool(
+    "Mark a planned workout completed or skipped after the athlete confirms what happened. Optionally link the recorded activity that fulfilled it.",
+    resolvePlanWorkoutInputSchema,
   ),
   save_activity_from_text: defineTool(
     "Persist an activity described in natural language after deterministic scoring.",
@@ -266,7 +284,7 @@ export const coachToolDefinitions = {
     thresholdInputSchema,
   ),
   generate_training_plan: defineTool(
-    "Generate and persist a training plan.",
+    "Generate and persist a training plan. Optional training_model: auto, longevity, performance, or recovery_return.",
     planInputSchema,
   ),
   adjust_plan: defineTool(

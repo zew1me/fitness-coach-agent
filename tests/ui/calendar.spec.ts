@@ -34,6 +34,21 @@ const CALENDAR_FIXTURE = {
       actual_activity_id: null,
     },
     {
+      id: "workout-unconfirmed",
+      plan_id: "plan-1",
+      user_id: TEST_USER_ID,
+      workout_date: "2026-07-01",
+      day_of_week: 2,
+      week_number: 2,
+      phase_name: "Build",
+      sport: "cycling",
+      title: "Endurance spin",
+      workout_type: "endurance",
+      target_duration_minutes: 60,
+      status: "scheduled",
+      actual_activity_id: null,
+    },
+    {
       id: "workout-done",
       plan_id: "plan-1",
       user_id: TEST_USER_ID,
@@ -171,6 +186,95 @@ test("opens a read-only day detail panel with full session context", async ({
   await expect(
     page.locator('[data-testid="calendar-day"][data-date="2026-08-30"]'),
   ).toBeFocused();
+});
+
+test("confirms an unconfirmed past workout from the day detail panel", async ({
+  page,
+}) => {
+  // After a successful resolve, the refetched calendar returns the workout
+  // as completed so the UI can be asserted to reflect the new state.
+  let resolved = false;
+  await page.clock.setFixedTime(new Date(`${FIXED_TODAY}T10:00:00`));
+  await mockAuthenticatedSession(page);
+  await page.route("**/api/calendar**", (route) => {
+    const url = new URL(route.request().url());
+    const fixture = resolved
+      ? {
+          ...CALENDAR_FIXTURE,
+          planned_workouts: CALENDAR_FIXTURE.planned_workouts.map((workout) =>
+            workout.id === "workout-unconfirmed"
+              ? { ...workout, status: "completed" }
+              : workout,
+          ),
+        }
+      : CALENDAR_FIXTURE;
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        start: url.searchParams.get("start"),
+        end: url.searchParams.get("end"),
+        ...fixture,
+      }),
+    });
+  });
+  const resolveRequests: Array<Record<string, unknown>> = [];
+  await page.route("**/api/engine/resolve-plan-workout", (route) => {
+    resolveRequests.push(
+      route.request().postDataJSON() as Record<string, unknown>,
+    );
+    resolved = true;
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        workout: {
+          id: "workout-unconfirmed",
+          plan_id: "plan-1",
+          workout_date: "2026-07-01",
+          sport: "cycling",
+          title: "Endurance spin",
+          workout_type: "endurance",
+          status: "completed",
+        },
+      }),
+    });
+  });
+  await page.goto("/calendar");
+
+  // A past, still-scheduled workout reads as unconfirmed and offers actions.
+  await page
+    .locator('[data-testid="calendar-day"][data-date="2026-07-01"]')
+    .click();
+  const detail = page.getByTestId("calendar-day-detail");
+  await expect(detail).toContainText("Endurance spin");
+  await expect(detail).toContainText("unconfirmed");
+
+  await page.getByTestId("calendar-resolve-completed").click();
+  await expect.poll(() => resolveRequests.length, { timeout: 5000 }).toBe(1);
+  expect(resolveRequests[0]).toEqual({
+    outcome: "completed",
+    plan_workout_id: "workout-unconfirmed",
+    source: "athlete",
+  });
+
+  // The refetched calendar shows the workout as completed with no actions.
+  await expect(detail).toContainText("completed");
+  await expect(
+    page.getByTestId("calendar-resolve-completed"),
+  ).not.toBeVisible();
+
+  // The upcoming workout stays a plain scheduled session with no actions.
+  await page.getByTestId("calendar-detail-close").click();
+  await page
+    .locator('[data-testid="calendar-day"][data-date="2026-07-04"]')
+    .click();
+  await expect(page.getByTestId("calendar-day-detail")).toContainText(
+    "scheduled",
+  );
+  await expect(
+    page.getByTestId("calendar-resolve-completed"),
+  ).not.toBeVisible();
 });
 
 test("navigates chat → calendar → chat via the topbar toggles", async ({

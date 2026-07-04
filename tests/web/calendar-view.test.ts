@@ -6,10 +6,15 @@ import {
   CALENDAR_FUTURE_DAYS,
   CALENDAR_PAST_DAYS,
   calendarDateRange,
+  derivedWorkoutStatus,
   groupCalendarItemsByDay,
   monthLabel,
 } from "../../lib/calendar-view";
-import { calendarResponseSchema } from "../../lib/schemas";
+import {
+  calendarPlannedWorkoutSchema,
+  calendarResponseSchema,
+} from "../../lib/schemas";
+import type { CalendarPlannedWorkout } from "../../lib/schemas";
 
 describe("calendar window", () => {
   it("spans the past 42 days and upcoming 8 weeks, aligned to Monday weeks", () => {
@@ -119,5 +124,44 @@ describe("calendar response parsing and grouping", () => {
     expect(twentieth?.activities[0]?.id).toBe("activity-1");
 
     expect(byDay.has("2026-07-05")).toBe(false);
+  });
+});
+
+describe("derivedWorkoutStatus", () => {
+  const workout = (
+    status: string,
+    workoutDate: string,
+  ): CalendarPlannedWorkout =>
+    calendarPlannedWorkoutSchema.parse({
+      id: "workout-1",
+      plan_id: "plan-1",
+      workout_date: workoutDate,
+      sport: "cycling",
+      title: "Endurance ride",
+      workout_type: "endurance",
+      status,
+    });
+
+  it("derives unconfirmed for a past workout still scheduled", () => {
+    expect(
+      derivedWorkoutStatus(workout("scheduled", "2026-07-01"), "2026-07-03"),
+    ).toBe("unconfirmed");
+  });
+
+  it("keeps scheduled for today and future dates", () => {
+    expect(
+      derivedWorkoutStatus(workout("scheduled", "2026-07-03"), "2026-07-03"),
+    ).toBe("scheduled");
+    expect(
+      derivedWorkoutStatus(workout("scheduled", "2026-07-04"), "2026-07-03"),
+    ).toBe("scheduled");
+  });
+
+  it("passes through resolved statuses untouched", () => {
+    for (const status of ["completed", "skipped", "modified"]) {
+      expect(
+        derivedWorkoutStatus(workout(status, "2026-07-01"), "2026-07-03"),
+      ).toBe(status);
+    }
   });
 });

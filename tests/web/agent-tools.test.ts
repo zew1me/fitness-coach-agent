@@ -40,6 +40,7 @@ describe("coachToolDefinitions", () => {
       "get_recent_activities",
       "get_active_plan",
       "get_compliance_summary",
+      "resolve_plan_workout",
       "save_activity_from_text",
       "process_uploaded_file",
       "save_recovery_data",
@@ -73,6 +74,19 @@ describe("coachToolDefinitions", () => {
 
     expect(parsed.goal?.title).toBe("Hill climb");
     expect(parsed.goal?.course_elevation_gain_meters).toBe(700);
+  });
+
+  it("accepts explicit training model policy for plan generation", () => {
+    const parsed =
+      coachToolDefinitions.generate_training_plan.inputSchema.parse({
+        goal_id: "goal-1",
+        training_model: "longevity",
+      });
+
+    expect(parsed).toEqual({
+      goal_id: "goal-1",
+      training_model: "longevity",
+    });
   });
 
   it("accepts complete and abandon actions without a goal payload", () => {
@@ -321,6 +335,94 @@ describe("coachToolDefinitions", () => {
           text: "Add RPE 9 and two gels.",
         },
         url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
+  it("routes get_compliance_summary to the engine compliance endpoint", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ compliance_pct: 66.7, status: "ok" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["get_compliance_summary"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ user_id: "ignored-client-user" });
+
+    expect(result).toEqual({ compliance_pct: 66.7, status: "ok" });
+    expect(requests).toEqual([
+      {
+        body: {},
+        url: "https://coach.test/api/engine/get-compliance-summary",
+      },
+    ]);
+  });
+
+  it("routes resolve_plan_workout to the engine with coach provenance", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ workout: { status: "skipped" } }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["resolve_plan_workout"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      activity_id: null,
+      outcome: "skipped",
+      plan_workout_id: "workout-1",
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ workout: { status: "skipped" } });
+    expect(requests).toEqual([
+      {
+        body: {
+          activity_id: null,
+          outcome: "skipped",
+          plan_workout_id: "workout-1",
+          source: "coach",
+        },
+        url: "https://coach.test/api/engine/resolve-plan-workout",
       },
     ]);
   });

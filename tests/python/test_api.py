@@ -3,7 +3,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient, HTTPError
@@ -25,7 +25,7 @@ from backend.models.auth import (
     UserContext,
 )
 from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest
-from backend.models.training import Activity, DailyLoadSnapshot, Goal
+from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
 from backend.services.auth import AuthService
@@ -147,6 +147,17 @@ class EngineRepository:
     async def create_activity(self, activity: Activity) -> Activity:
         return activity.model_copy(update={"id": "activity-1"})
 
+    async def list_plan_workouts_between(self, user_id: str, *, start, end) -> list[PlanWorkout]:
+        return []
+
+    async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+        return plan.model_copy(update={"id": "plan-1"})
+
+    async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+        return [
+            w.model_copy(update={"id": f"workout-{i}"}) for i, w in enumerate(workouts, start=1)
+        ]
+
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         return Activity(
             id=activity_id,
@@ -166,6 +177,55 @@ class EngineRepository:
 
     async def update_activity(self, activity: Activity) -> Activity:
         return activity
+
+    async def match_plan_workout_to_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+        completion_source: Literal["auto_matched", "athlete_confirmed", "coach_confirmed"],
+    ) -> PlanWorkout:
+        return PlanWorkout(
+            id=workout_id,
+            plan_id="plan-1",
+            user_id=user_id,
+            workout_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            day_of_week=5,
+            week_number=1,
+            sport="cycling",
+            title="Matched ride",
+            workout_type="endurance",
+            status="completed",
+            actual_activity_id=activity_id,
+            completion_source=completion_source,
+        )
+
+    async def resolve_plan_workout_atomic(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        outcome: str,
+        activity_id: str | None,
+        source: Literal["athlete", "coach"],
+    ) -> PlanWorkout:
+        return PlanWorkout(
+            id=workout_id,
+            plan_id="plan-1",
+            user_id=user_id,
+            workout_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            day_of_week=5,
+            week_number=1,
+            sport="cycling",
+            title="Resolved ride",
+            workout_type="endurance",
+            status=outcome,
+            actual_activity_id=activity_id,
+            completion_source=cast(
+                Literal["athlete_confirmed", "coach_confirmed"], f"{source}_confirmed"
+            ),
+        )
 
     async def upsert_load_snapshots(self, user_id: str, snapshots: list[dict], sport=None) -> None:
         self.snapshots = snapshots
@@ -2402,6 +2462,181 @@ async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
     assert body["target_goal"]["title"] == "Hill climb race"
     assert body["starting_weekly_tss"] == 294
     assert body["phases"]
+    assert body["plan_id"] == "plan-1"
+    assert body["sport"] == "running"
+    assert body["workouts_created"] == body["total_weeks"] * 7
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_persists_plan_and_workouts(monkeypatch) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            profile = await super().get_athlete_profile(user_id)
+            # Put a non-goal sport first so the assertion below proves the
+            # goal sport (running) wins over profile ordering.
+            return profile.model_copy(update={"primary_sports": ["cycling", "running"]})
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.status == "active"
+    assert recording_repo.created_plan.target_goal_id == "goal-1"
+    workouts = recording_repo.created_workouts
+    assert workouts
+    assert all(w.plan_id == "plan-1" for w in workouts)
+    assert all(w.user_id == "athlete-1" for w in workouts)
+    # Goal sport (running) wins over profile ordering.
+    assert {w.sport for w in workouts} == {"running"}
+    assert all(w.status == "scheduled" for w in workouts)
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_accepts_training_model_policy(monkeypatch) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={"training_model": "longevity"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["training_model"] == "longevity"
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.generation_context == {
+        "training_model": "longevity",
+        "training_model_source": "explicit",
+    }
+    first_week = [w for w in recording_repo.created_workouts if w.week_number == 1]
+    quality = [w for w in first_week if w.workout_type in {"tempo", "threshold", "vo2max"}]
+    assert len(quality) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_supersedes_partial_plan_on_workout_failure(
+    monkeypatch,
+) -> None:
+    class FailingWorkoutRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            raise RuntimeError("insert failed")
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    failing_repo = FailingWorkoutRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", failing_repo)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert failing_repo.status_updates == [("plan-1", "superseded")]
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_maps_composer_valueerror_to_503(monkeypatch) -> None:
+    from backend.services import plan_composer
+
+    class RecordingCleanupRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    def broken_compose(*args, **kwargs):
+        raise ValueError("Plan skeleton has no phase covering week 3")
+
+    cleanup_repo = RecordingCleanupRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", cleanup_repo)
+    monkeypatch.setattr(plan_composer, "compose_plan_workouts", broken_compose)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert cleanup_repo.status_updates == [("plan-1", "superseded")]
 
 
 @pytest.mark.asyncio
@@ -2691,13 +2926,6 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
         ("GET", "/api/chat/messages", None, "list_messages", HTTPError("connection reset")),
         ("GET", "/api/chat/model-state", None, "get_model_state", HTTPError("timeout")),
         (
-            "POST",
-            "/api/chat/model-state/lease",
-            {"lease_id": "lease-1"},
-            "acquire_turn_lease",
-            RuntimeError("unexpected lease failure"),
-        ),
-        (
             "PUT",
             "/api/chat/model-state",
             {
@@ -2739,6 +2967,33 @@ async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Chat session service unavailable"
+
+
+@pytest.mark.asyncio
+async def test_private_chat_state_endpoints_do_not_mask_programming_errors(
+    model_state_chat_service_fixture,
+) -> None:
+    service = model_state_chat_service_fixture
+
+    async def broken_replace(*_args, **_kwargs):
+        raise TypeError("programming error")
+
+    service.replace_model_state = broken_replace
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.put(
+            "/api/chat/model-state",
+            json={
+                "chat_id": "thread-1",
+                "expected_version": 0,
+                "lease_id": "lease-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+        )
+
+    assert response.status_code == 500
 
 
 @pytest.mark.asyncio
