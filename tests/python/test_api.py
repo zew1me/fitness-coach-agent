@@ -150,6 +150,12 @@ class EngineRepository:
     async def list_plan_workouts_between(self, user_id: str, *, start, end) -> list[PlanWorkout]:
         return []
 
+    async def list_schedule_overrides_between(self, user_id: str, *, start, end):
+        return []
+
+    async def delete_future_scheduled_workouts(self, user_id: str, plan_id: str, from_date) -> int:
+        return 0
+
     async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
         return plan.model_copy(update={"id": "plan-1"})
 

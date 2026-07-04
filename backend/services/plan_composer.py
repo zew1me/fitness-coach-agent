@@ -15,10 +15,11 @@ The output is intentionally boring and reproducible: same inputs, same plan.
 """
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Literal
 
 from backend.engine.periodization import PhasePlan, PlanSkeleton
+from backend.models.athlete import ScheduleOverride
 from backend.models.training import PlanWorkout
 
 TrainingModel = Literal["performance", "longevity", "recovery_return"]
@@ -94,6 +95,42 @@ def _available_days(weekly_pattern: dict | None) -> set[int]:
         if isinstance(entry, dict) and entry.get("available") is False:
             days.discard(index)
     return days
+
+
+def _rest_session() -> dict:
+    return {
+        "workout_type": "rest",
+        "title": "Rest day",
+        "target_tss": None,
+        "target_duration_minutes": None,
+    }
+
+
+def _apply_override(session: dict, override: ScheduleOverride) -> dict:
+    """Layer a dated schedule override onto a weekly-template session (issue #232).
+
+    ``available=False`` forces a rest day on that exact date; a ``max_hours`` cap
+    scales the day's target TSS/duration down proportionally when the templated
+    session would exceed the athlete's stated availability for that date.
+    """
+    if not override.available:
+        return _rest_session()
+    # Zero available hours is a rest day even when the athlete is nominally
+    # "available" — otherwise the templated session survives at 0 min/0 TSS.
+    if override.max_hours is not None and override.max_hours <= 0:
+        return _rest_session()
+    target_tss = session["target_tss"]
+    if override.max_hours is not None and target_tss is not None:
+        cap_tss = override.max_hours * _TSS_PER_HOUR_EASY
+        if target_tss > cap_tss:
+            scale = cap_tss / target_tss if target_tss else 0.0
+            duration = session["target_duration_minutes"] or 0
+            return {
+                **session,
+                "target_tss": round(cap_tss, 1),
+                "target_duration_minutes": round(duration * scale),
+            }
+    return session
 
 
 def _pick(preference: tuple[int, ...], pool: set[int]) -> int | None:
@@ -226,11 +263,20 @@ def compose_plan_workouts(  # noqa: PLR0913
     plan_id: str,
     sport: str,
     weekly_pattern: dict | None = None,
+    overrides: list[ScheduleOverride] | None = None,
     policy: PlanComposerPolicy | None = None,
+    from_date: date | None = None,
 ) -> list[PlanWorkout]:
-    """Compose one PlanWorkout per calendar day of the skeleton."""
+    """Compose one PlanWorkout per calendar day of the skeleton.
+
+    ``weekly_pattern`` shapes the recurring weekday template; ``overrides`` layer
+    dated availability on top (issue #232). ``from_date`` restricts the emitted
+    workouts to that date onward while still ramping TSS from the skeleton's true
+    week 1, so adjusting future weeks stays continuous with periodization.
+    """
     policy = policy or PlanComposerPolicy()
     available = _available_days(weekly_pattern)
+    override_by_date = {ov.override_date: ov for ov in (overrides or [])}
     phase_by_week = {
         week: phase
         for phase in skeleton.phases
@@ -249,9 +295,14 @@ def compose_plan_workouts(  # noqa: PLR0913
         sessions = _plan_week(phase, sport, available, policy)
         for day_index in range(_DAYS_PER_WEEK):
             workout_date = week_start + timedelta(days=day_index)
+            if from_date is not None and workout_date < from_date:
+                continue
             # Sessions are keyed by real weekday (Monday=0) so schedule
             # availability and slot preferences hold for any plan start day.
             session = sessions[workout_date.weekday()]
+            override = override_by_date.get(workout_date)
+            if override is not None:
+                session = _apply_override(session, override)
             workouts.append(
                 PlanWorkout(
                     plan_id=plan_id,
