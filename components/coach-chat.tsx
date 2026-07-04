@@ -1356,7 +1356,11 @@ function CoachChatBody({
       knownPersistedMessageIdsRef.current.add(message.id);
     }
   }, [persistedMessages]);
-  const { messages: liveMessages, sendMessage } = useChat({
+  const {
+    messages: liveMessages,
+    sendMessage,
+    setMessages,
+  } = useChat({
     id: threadId,
     messages: chatMessages,
     transport: new DefaultChatTransport({
@@ -1555,10 +1559,11 @@ function CoachChatBody({
     sendInFlightRef.current = true;
     setSending(true);
     setThreadError(null);
+    // Snapshot the draft before we clear it so the catch block can restore it.
+    const pendingComposer = composer;
+    const pendingAttachments = attachments;
+    const messageId = crypto.randomUUID();
     try {
-      const pendingComposer = composer;
-      const pendingAttachments = attachments;
-      const messageId = crypto.randomUUID();
       Sentry.logger.info("user turn submitted", {
         has_text: pendingComposer.trim().length > 0,
         attachment_count: pendingAttachments.length,
@@ -1568,17 +1573,20 @@ function CoachChatBody({
         pendingComposer.trim().length > 0
           ? [{ type: "text" as const, text: pendingComposer }]
           : [];
+      // Clear the draft optimistically, before awaiting the send, so the input
+      // empties the instant the user hits Send. `sendMessage` only resolves once
+      // the entire assistant response has streamed back, so clearing after it
+      // would leave the message sitting in the composer for the whole reply. If
+      // the send fails we restore the snapshot below. Don't revoke the attachment
+      // preview URLs yet — they must survive in case we need to restore them.
+      setComposer("");
+      setAttachments([]);
       await sendMessage({
         id: messageId,
         parts: [...messageParts, ...uploadedFileParts(pendingAttachments)],
       });
-      // Clear the draft only after the send succeeds so a failed send leaves the
-      // composer text and attachments intact for the user to retry. The textarea
-      // stays editable while the request is in flight, so only clear the text if
-      // it still matches what we sent — otherwise we'd wipe newly typed input.
+      // Send succeeded: free the preview URLs now that we won't restore them.
       removePreviewUrls(pendingAttachments);
-      setAttachments([]);
-      setComposer((current) => (current === pendingComposer ? "" : current));
       setSending(false);
       setSyncingThread(true);
       try {
@@ -1598,6 +1606,18 @@ function CoachChatBody({
       Sentry.logger.error("message send failed");
       console.error("Sending coach message failed", error);
       setSyncingThread(false);
+      // The send failed, so drop the optimistic user bubble the SDK added and
+      // restore the draft into the composer — but only if the user hasn't
+      // started typing something new while the send was in flight, so we never
+      // clobber fresh input. The preview URLs were never revoked, so the
+      // restored attachments still render.
+      setMessages((current) =>
+        current.filter((message) => message.id !== messageId),
+      );
+      setComposer((current) => (current === "" ? pendingComposer : current));
+      setAttachments((current) =>
+        current.length === 0 ? pendingAttachments : current,
+      );
       setThreadError(errorMessage(error, "Unable to send your message."));
     } finally {
       sendInFlightRef.current = false;
