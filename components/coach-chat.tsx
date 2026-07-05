@@ -1336,6 +1336,16 @@ function CoachChatBody({
   // Synchronous guard against double-click: state reads aren't atomic across
   // rapid events, so this ref is the authoritative in-flight check.
   const sendInFlightRef = useRef(false);
+  // When we clear attachments optimistically on send, the [attachments] cleanup
+  // effect below would otherwise revoke the preview URLs we still need for the
+  // failure-restore path. This flag tells that cleanup to skip one revocation.
+  const skipNextAttachmentPreviewCleanupRef = useRef(false);
+  // Mirror the latest draft so the failed-send restore path can tell whether the
+  // user has started a new draft since we cleared it (see handleSend's catch).
+  const latestComposerRef = useRef(composer);
+  latestComposerRef.current = composer;
+  const latestAttachmentsRef = useRef(attachments);
+  latestAttachmentsRef.current = attachments;
 
   const chatMessages = useMemo<UIMessage[]>(
     () => persistedMessages.map(toUiMessage),
@@ -1356,7 +1366,11 @@ function CoachChatBody({
       knownPersistedMessageIdsRef.current.add(message.id);
     }
   }, [persistedMessages]);
-  const { messages: liveMessages, sendMessage } = useChat({
+  const {
+    messages: liveMessages,
+    sendMessage,
+    setMessages,
+  } = useChat({
     id: threadId,
     messages: chatMessages,
     transport: new DefaultChatTransport({
@@ -1424,6 +1438,10 @@ function CoachChatBody({
 
   useEffect((): (() => void) => {
     return (): void => {
+      if (skipNextAttachmentPreviewCleanupRef.current) {
+        skipNextAttachmentPreviewCleanupRef.current = false;
+        return;
+      }
       removePreviewUrls(attachments);
     };
   }, [attachments]);
@@ -1555,10 +1573,11 @@ function CoachChatBody({
     sendInFlightRef.current = true;
     setSending(true);
     setThreadError(null);
+    // Snapshot the draft before we clear it so the catch block can restore it.
+    const pendingComposer = composer;
+    const pendingAttachments = attachments;
+    const messageId = crypto.randomUUID();
     try {
-      const pendingComposer = composer;
-      const pendingAttachments = attachments;
-      const messageId = crypto.randomUUID();
       Sentry.logger.info("user turn submitted", {
         has_text: pendingComposer.trim().length > 0,
         attachment_count: pendingAttachments.length,
@@ -1568,17 +1587,23 @@ function CoachChatBody({
         pendingComposer.trim().length > 0
           ? [{ type: "text" as const, text: pendingComposer }]
           : [];
+      // Clear the draft optimistically, before awaiting the send, so the input
+      // empties the instant the user hits Send. `sendMessage` only resolves once
+      // the entire assistant response has streamed back, so clearing after it
+      // would leave the message sitting in the composer for the whole reply. If
+      // the send fails we restore the snapshot below, so keep the attachment
+      // preview URLs alive — suppress the [attachments] cleanup's revocation for
+      // this one clear.
+      setComposer("");
+      skipNextAttachmentPreviewCleanupRef.current =
+        pendingAttachments.length > 0;
+      setAttachments([]);
       await sendMessage({
         id: messageId,
         parts: [...messageParts, ...uploadedFileParts(pendingAttachments)],
       });
-      // Clear the draft only after the send succeeds so a failed send leaves the
-      // composer text and attachments intact for the user to retry. The textarea
-      // stays editable while the request is in flight, so only clear the text if
-      // it still matches what we sent — otherwise we'd wipe newly typed input.
+      // Send succeeded: free the preview URLs now that we won't restore them.
       removePreviewUrls(pendingAttachments);
-      setAttachments([]);
-      setComposer((current) => (current === pendingComposer ? "" : current));
       setSending(false);
       setSyncingThread(true);
       try {
@@ -1598,6 +1623,26 @@ function CoachChatBody({
       Sentry.logger.error("message send failed");
       console.error("Sending coach message failed", error);
       setSyncingThread(false);
+      // The send failed, so drop the optimistic user bubble the SDK added and
+      // restore the draft into the composer — but only if the user hasn't
+      // started a new draft (text or attachments) while the send was in flight,
+      // so we never clobber fresh input. Text and attachments are restored
+      // together under one check so we never pair a new draft with the failed
+      // send's attachments. The preview URLs were kept alive on the optimistic
+      // clear (see skipNextAttachmentPreviewCleanupRef), so restored attachments
+      // still render; if we don't restore, we revoke them here to avoid a leak.
+      setMessages((current) =>
+        current.filter((message) => message.id !== messageId),
+      );
+      const draftUntouched =
+        latestComposerRef.current === "" &&
+        latestAttachmentsRef.current.length === 0;
+      if (draftUntouched) {
+        setComposer(pendingComposer);
+        setAttachments(pendingAttachments);
+      } else {
+        removePreviewUrls(pendingAttachments);
+      }
       setThreadError(errorMessage(error, "Unable to send your message."));
     } finally {
       sendInFlightRef.current = false;
