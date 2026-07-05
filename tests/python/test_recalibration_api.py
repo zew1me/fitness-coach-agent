@@ -141,6 +141,35 @@ class TestRecalibrateThresholdsEndpoint:
         assert running_result["status"] == "already_user_confirmed"
         assert repo.upserted == []
 
+    async def test_duplicate_active_thresholds_keep_first_current_threshold(
+        self, monkeypatch
+    ) -> None:
+        user_confirmed = _threshold(
+            id="newer-threshold",
+            source="user",
+            lt2_pace_sec_per_km=300,
+            lt1_pace_sec_per_km=330,
+        )
+        older_estimated = _threshold(
+            id="older-threshold",
+            source="estimated",
+            lt2_pace_sec_per_km=360,
+            lt1_pace_sec_per_km=390,
+        )
+        repo = RecalibrationRepository(
+            thresholds=[user_confirmed, older_estimated],
+            activities_by_sport={"running": [_activity()], "cycling": []},
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post({})
+
+        assert response.status_code == 200
+        body = response.json()
+        running_result = next(r for r in body["results"] if r["sport"] == "running")
+        assert running_result["status"] == "already_user_confirmed"
+        assert repo.upserted == []
+
     async def test_never_returns_pending_implementation(self, monkeypatch) -> None:
         repo = RecalibrationRepository()
         monkeypatch.setattr(api_index, "repo", repo)

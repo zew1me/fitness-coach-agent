@@ -793,7 +793,9 @@ async def recalibrate_thresholds_endpoint(
         detail="Failed to load thresholds.",
         log_message=f"get_active_thresholds failed for user_id={user_id}",
     )
-    current_by_sport = {t.sport: t for t in current_thresholds}
+    current_by_sport = {}
+    for threshold in current_thresholds:
+        current_by_sport.setdefault(threshold.sport, threshold)
 
     activities_by_sport = {}
     for sport in ESTIMABLE_SPORTS:
