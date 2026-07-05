@@ -137,31 +137,33 @@ function toResponsesCompactInputItem(
   return withCallIdField(record, "call_id");
 }
 
-const RESPONSES_COMPACT_INPUT_FIELDS = new Set([
-  "arguments",
-  "call_id",
-  "content",
-  "encrypted_content",
-  "id",
-  "name",
-  "output",
-  "role",
-  "status",
-  "summary",
-  "type",
-]);
+const PROVIDER_METADATA_KEYS = new Set(["providerData", "providerMetadata"]);
+
+// Every Agents SDK item (and every nested content part) may carry a
+// `providerData`/`providerMetadata` bag for SDK-internal bookkeeping, which
+// the raw Responses API `compact` endpoint doesn't recognize and rejects.
+// Strip those keys recursively rather than allowlisting known-good fields,
+// so item types the SDK hasn't been taught about yet (e.g. `namespace` on
+// function calls, `rawContent` on reasoning items) survive untouched.
+function stripProviderMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripProviderMetadata);
+  }
+  if (value !== null && typeof value === "object") {
+    const sanitized: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (PROVIDER_METADATA_KEYS.has(key)) continue;
+      sanitized[key] = stripProviderMetadata(entry);
+    }
+    return sanitized;
+  }
+  return value;
+}
 
 function sanitizeResponsesCompactInputItem(
   item: AgentInputItem,
 ): AgentInputItem {
-  const record = item as unknown as Record<string, unknown>;
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (RESPONSES_COMPACT_INPUT_FIELDS.has(key)) {
-      sanitized[key] = value;
-    }
-  }
-  return sanitized as unknown as AgentInputItem;
+  return stripProviderMetadata(item) as AgentInputItem;
 }
 
 function omittedToolOutputMessage(): AgentInputItem {

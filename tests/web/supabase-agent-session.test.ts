@@ -774,6 +774,108 @@ describe("DurableCompactionSession", () => {
     expect(request?.input?.[0]).toEqual(userItem("x"));
   });
 
+  it("strips provider metadata nested inside content parts", async () => {
+    const output = [userItem("compacted")];
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "x",
+              providerData: { provider: "openai" },
+            },
+          ],
+        } as unknown as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 999_999,
+    });
+
+    await session.runCompaction({ force: true });
+
+    const request = client.responses.compact.mock.calls[0]?.[0];
+    expect(request?.input?.[0]).toEqual(userItem("x"));
+  });
+
+  it("preserves fields outside the historical whitelist, like function_call namespace", async () => {
+    const output = [userItem("compacted")];
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call",
+          callId: "call-1",
+          name: "update_athlete_profile",
+          namespace: "mcp:athlete",
+          arguments: "{}",
+          status: "completed",
+          providerData: { provider: "openai" },
+        } as unknown as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 999_999,
+    });
+
+    await session.runCompaction({ force: true });
+
+    const request = client.responses.compact.mock.calls[0]?.[0];
+    expect(request?.input?.[0]).toEqual({
+      type: "function_call",
+      call_id: "call-1",
+      name: "update_athlete_profile",
+      namespace: "mcp:athlete",
+      arguments: "{}",
+      status: "completed",
+    });
+  });
+
   it("throws when compaction returns an empty output array", async () => {
     const underlying = {
       addItems: vi.fn(),
