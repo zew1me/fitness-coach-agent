@@ -1,6 +1,6 @@
 """Tests for POST /api/engine/recalibrate-thresholds."""
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -58,13 +58,19 @@ class RecalibrationRepository:
         self.thresholds = thresholds or []
         self.activities_by_sport = activities_by_sport or {}
         self.upserted: list[SportThreshold] = []
+        self.active_threshold_user_ids: list[str] = []
+        self.activity_calls: list[dict[str, Any]] = []
 
     async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+        self.active_threshold_user_ids.append(user_id)
         return self.thresholds
 
     async def list_activities(
         self, user_id: str, *, sport: str | None = None, since=None, limit: int = 50
     ) -> list[Activity]:
+        self.activity_calls.append(
+            {"limit": limit, "since": since, "sport": sport, "user_id": user_id}
+        )
         return self.activities_by_sport.get(sport or "", [])
 
     async def upsert_sport_threshold(self, threshold: SportThreshold) -> SportThreshold:
@@ -104,6 +110,22 @@ class TestRecalibrateThresholdsEndpoint:
         assert len(repo.upserted) == 1
         assert repo.upserted[0].sport == "running"
         assert repo.upserted[0].source == "file"
+        assert repo.upserted[0].user_id == "athlete-1"
+        assert repo.active_threshold_user_ids == ["athlete-1"]
+        assert sorted(repo.activity_calls, key=lambda call: call["sport"] or "") == [
+            {
+                "limit": 200,
+                "since": TODAY - timedelta(days=90),
+                "sport": "cycling",
+                "user_id": "athlete-1",
+            },
+            {
+                "limit": 200,
+                "since": TODAY - timedelta(days=90),
+                "sport": "running",
+                "user_id": "athlete-1",
+            },
+        ]
 
     async def test_insufficient_evidence_does_not_persist(self, monkeypatch) -> None:
         easy_run = _activity(rpe=None, duration_seconds=1800)  # slow, no rpe, no current to compare
