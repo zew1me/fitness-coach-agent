@@ -474,6 +474,62 @@ describe("coachToolDefinitions", () => {
     ]);
   });
 
+  it("routes recalibrate_thresholds to the engine recalibrate endpoint", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                confidence: "high",
+                explanation: "…",
+                sport: "running",
+                status: "recalibrated",
+              },
+            ],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        ),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["recalibrate_thresholds"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({});
+
+    // The mapping must resolve — no pending_implementation fallthrough.
+    expect(result).not.toEqual({
+      input: {},
+      status: "pending_implementation",
+      tool: "recalibrate_thresholds",
+    });
+    expect(requests).toEqual([
+      {
+        body: {},
+        url: "https://coach.test/api/engine/recalibrate-thresholds",
+      },
+    ]);
+  });
+
   it("routes save_recovery_data to the engine and strips any client-sent user_id", async () => {
     const requests: Array<{ body: unknown; url: string }> = [];
     const fetchImpl = (
