@@ -1764,13 +1764,28 @@ async def get_compliance_summary(
         )
 
         matches = match_activities_to_workouts(planned, activities, today=today)
+        persisted_matches = []
         for match in matches:
-            await _persist_workout_match(user_id, match.workout, match.activity)
+            try:
+                await _persist_workout_match(user_id, match.workout, match.activity)
+            except (RecordNotFoundError, RuntimeError):
+                # A stale match (e.g. the workout or activity was deleted/reassigned
+                # since the match was computed) must not abort the whole summary —
+                # skip it and reconcile it again on the next read.
+                logger.exception(
+                    "get_compliance_summary: skipping stale match user_id=%s "
+                    "plan_workout_id=%s activity_id=%s",
+                    user_id,
+                    match.workout.id,
+                    match.activity.id,
+                )
+                continue
+            persisted_matches.append(match)
 
         # Reflect the persisted matches in memory so the summary is built from
         # post-reconciliation state without a second round-trip.
-        workout_to_activity = {m.workout.id: m.activity.id for m in matches}
-        activity_to_workout = {m.activity.id: m.workout.id for m in matches}
+        workout_to_activity = {m.workout.id: m.activity.id for m in persisted_matches}
+        activity_to_workout = {m.activity.id: m.workout.id for m in persisted_matches}
         planned = [
             w.model_copy(
                 update={
@@ -1800,7 +1815,7 @@ async def get_compliance_summary(
         "compliance summary user_id=%s plan_id=%s matches=%d pct=%s unconfirmed=%d",
         user_id,
         plan.id,
-        len(matches),
+        len(persisted_matches),
         summary["compliance_pct"],
         summary["totals"]["unconfirmed"],
     )
