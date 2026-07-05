@@ -14,6 +14,7 @@ using a simple weekly template:
 The output is intentionally boring and reproducible: same inputs, same plan.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Literal
@@ -21,6 +22,8 @@ from typing import Literal
 from backend.engine.periodization import PhasePlan, PlanSkeleton
 from backend.models.athlete import ScheduleOverride
 from backend.models.training import PlanWorkout
+
+logger = logging.getLogger(__name__)
 
 TrainingModel = Literal["performance", "longevity", "recovery_return"]
 
@@ -185,6 +188,14 @@ def _assign_quality_days(
         max_quality = min(max_quality, policy.max_quality_sessions)
     if max_quality <= 0:
         return 0.0
+    if max_quality > len(_QUALITY_DAY_PREFERENCE):
+        logger.warning(
+            "Phase %r requested %d quality sessions, but only %d preferred quality "
+            "day slots exist; the request will be truncated.",
+            phase.name,
+            max_quality,
+            len(_QUALITY_DAY_PREFERENCE),
+        )
     quality_type = (
         "tempo"
         if policy.training_model == "longevity"

@@ -131,6 +131,7 @@ describe("derivedWorkoutStatus", () => {
   const workout = (
     status: string,
     workoutDate: string,
+    workoutType = "endurance",
   ): CalendarPlannedWorkout =>
     calendarPlannedWorkoutSchema.parse({
       id: "workout-1",
@@ -138,7 +139,7 @@ describe("derivedWorkoutStatus", () => {
       workout_date: workoutDate,
       sport: "cycling",
       title: "Endurance ride",
-      workout_type: "endurance",
+      workout_type: workoutType,
       status,
     });
 
@@ -146,6 +147,15 @@ describe("derivedWorkoutStatus", () => {
     expect(
       derivedWorkoutStatus(workout("scheduled", "2026-07-01"), "2026-07-03"),
     ).toBe("unconfirmed");
+  });
+
+  it("keeps a past-due rest workout scheduled rather than unconfirmed", () => {
+    expect(
+      derivedWorkoutStatus(
+        workout("scheduled", "2026-07-01", "rest"),
+        "2026-07-03",
+      ),
+    ).toBe("scheduled");
   });
 
   it("keeps scheduled for today and future dates", () => {
