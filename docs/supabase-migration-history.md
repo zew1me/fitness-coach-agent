@@ -284,3 +284,31 @@ items exist in durable model state. Because it increments
 `chat_model_states.version` on rewritten rows, apply it during a maintenance or
 low-traffic window, or briefly pause durable chat writes so in-flight
 optimistic-concurrency writes do not retry against the rewrite.
+
+## 20260703110000 — plan workout atomic RPCs (2026-07-03)
+
+**File:** `supabase/migrations/20260703110000_plan_workout_atomic_rpc.sql`
+
+**Change:** Adds two `security definer` RPCs, `match_plan_workout_to_activity`
+and `resolve_plan_workout`, that update `plan_workouts` and the reciprocal
+`activities.planned_workout_id` link inside one Postgres transaction, taking
+row locks (`for update`) on both sides before writing.
+
+**Why:** Compliance and calendar features (`backend/services/compliance.py`,
+`backend/services/plan_composer.py`, `backend/services/goal_service.py`) all
+read the bidirectional plan↔activity link, so it must never be observed
+half-written. Before this migration, the FastAPI backend maintained the link
+with separate read-then-write calls to `plan_workouts` and `activities`, which
+left a race window: a concurrent request (e.g. re-matching the same activity,
+or an adjust-plan run) could read a stale `actual_activity_id`/
+`planned_workout_id` pair between the two writes and produce a dangling or
+duplicate link. Moving the read-modify-write into a single locked transaction
+on the database closes that window; the backend now calls these RPCs via
+PostgREST instead of issuing the two writes itself.
+
+**Security note:** Both functions are revoked from `public`, `anon`, and
+`authenticated`, and granted only to `service_role` — they are the FastAPI
+backend's write path, never called directly from the browser.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Additive migration; no backfill or data rewrite required.

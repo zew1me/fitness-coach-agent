@@ -244,6 +244,30 @@ class TestGetComplianceSummary:
         assert repo.activity_updates == []
         assert response.json()["compliance_pct"] == 100.0
 
+    async def test_stale_match_is_skipped_without_failing_the_summary(self, monkeypatch) -> None:
+        class StaleMatchRepository(ComplianceRepository):
+            async def match_plan_workout_to_activity(self, **kwargs: Any) -> PlanWorkout:
+                raise RecordNotFoundError("Plan workout was deleted since matching.")
+
+        repo = StaleMatchRepository(
+            plan=_plan(),
+            workouts=[_workout()],
+            activities=[_activity()],
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post("/api/engine/get-compliance-summary", {})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "ok"
+        # The stale match must not be reflected as completed in the summary,
+        # and must not have persisted any workout/activity update.
+        assert repo.workout_updates == []
+        assert repo.activity_updates == []
+        assert body["totals"]["unconfirmed"] == 1
+        assert body["totals"]["completed"] == 0
+
 
 @pytest.mark.usefixtures("as_athlete")
 class TestUnplannedActivities:

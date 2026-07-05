@@ -142,6 +142,11 @@ class TestMatching:
         activity = _activity(activity_date=date(2026, 7, 1), duration_seconds=30 * 60)
         assert match_activities_to_workouts([workout], [activity], today=TODAY) == []
 
+    def test_zero_duration_activity_disqualifies_rather_than_bypassing_check(self) -> None:
+        workout = _workout(workout_date=date(2026, 7, 1), target_duration_minutes=180)
+        activity = _activity(activity_date=date(2026, 7, 1), duration_seconds=0)
+        assert match_activities_to_workouts([workout], [activity], today=TODAY) == []
+
     def test_missing_duration_still_matches_on_date_and_sport(self) -> None:
         workout = _workout(workout_date=date(2026, 7, 1), target_duration_minutes=None)
         activity = _activity(activity_date=date(2026, 7, 1), duration_seconds=None)
