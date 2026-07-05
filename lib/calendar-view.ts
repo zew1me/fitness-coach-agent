@@ -70,6 +70,10 @@ export function monthLabel(iso: string): string {
   }).format(toUtc(iso));
 }
 
+/** Mirrors backend `_NON_TRAINING_TYPES` (backend/services/compliance.py) — these
+ * workout types are excluded from matching and never counted as unconfirmed. */
+const NON_TRAINING_TYPES = new Set(["rest"]);
+
 /**
  * "unconfirmed" is derived, never persisted: a past-dated workout still in
  * `scheduled` has neither auto-matched an activity nor been resolved by the
@@ -79,7 +83,11 @@ export function derivedWorkoutStatus(
   workout: CalendarPlannedWorkout,
   todayIso: string,
 ): string {
-  if (workout.status === "scheduled" && workout.workout_date < todayIso) {
+  if (
+    workout.status === "scheduled" &&
+    workout.workout_date < todayIso &&
+    !NON_TRAINING_TYPES.has(workout.workout_type)
+  ) {
     return "unconfirmed";
   }
   return workout.status;

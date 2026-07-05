@@ -17,13 +17,15 @@ set search_path = public
 as $$
 declare
   updated_workout public.plan_workouts%rowtype;
+  prior_activity_id uuid;
 begin
   if p_completion_source not in ('auto_matched', 'athlete_confirmed', 'coach_confirmed') then
     raise exception 'Invalid completion_source: %', p_completion_source
       using errcode = '22023';
   end if;
 
-  perform 1
+  select actual_activity_id
+  into prior_activity_id
   from public.plan_workouts
   where id = p_plan_workout_id
     and user_id = p_user_id
@@ -56,6 +58,16 @@ begin
   set planned_workout_id = p_plan_workout_id
   where id = p_activity_id
     and user_id = p_user_id;
+
+  -- Reassigning this workout to a different activity: clear the old
+  -- activity's reverse link so it no longer points at a workout it is
+  -- not actually linked from.
+  if prior_activity_id is not null and prior_activity_id <> p_activity_id then
+    update public.activities
+    set planned_workout_id = null
+    where id = prior_activity_id
+      and user_id = p_user_id;
+  end if;
 
   return updated_workout;
 end;
