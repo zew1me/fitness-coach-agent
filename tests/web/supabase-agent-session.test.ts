@@ -446,6 +446,50 @@ describe("DurableCompactionSession", () => {
     expect(input?.[0]?.["callId"]).toBeUndefined();
   });
 
+  it("wraps a single content-part function_call_result output object in an array and remaps its type for compact requests", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "function_call_result",
+          callId: "call-1",
+          name: "get_weather",
+          output: { type: "text", text: "18C, clear skies." },
+          status: "completed",
+        } as unknown as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [userItem("compacted")],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 1,
+    });
+
+    await session.runCompaction();
+
+    const request = client.responses.compact.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    const input = request["input"] as Record<string, unknown>[] | undefined;
+    expect(input?.[0]?.["output"]).toEqual([
+      { type: "input_text", text: "18C, clear skies." },
+    ]);
+  });
+
   it("normalizes SDK callId to Responses API call_id for compact requests", async () => {
     const underlying = {
       addItems: vi.fn(),
@@ -872,6 +916,59 @@ describe("DurableCompactionSession", () => {
       name: "update_athlete_profile",
       namespace: "mcp:athlete",
       arguments: "{}",
+      status: "completed",
+    });
+  });
+
+  it("converts a reasoning item to the raw API's summary shape, dropping rawContent, for compact requests", async () => {
+    const output = [userItem("compacted")];
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([
+        {
+          type: "reasoning",
+          id: "rs_1",
+          content: [{ type: "input_text", text: "Weighing options." }],
+          rawContent: [
+            { type: "reasoning_text", text: "Full chain of thought." },
+          ],
+          status: "completed",
+          providerData: { provider: "openai" },
+        } as unknown as AgentInputItem,
+      ]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      autoCompactTokens: 999_999,
+    });
+
+    await session.runCompaction({ force: true });
+
+    const request = client.responses.compact.mock.calls[0]?.[0];
+    expect(request?.input?.[0]).toEqual({
+      type: "reasoning",
+      id: "rs_1",
+      summary: [{ type: "summary_text", text: "Weighing options." }],
       status: "completed",
     });
   });

@@ -15,12 +15,14 @@ import {
   Agent,
   Runner,
   run,
+  tool,
   type AgentInputItem,
   type SessionHistoryRewriteArgs,
   type SessionHistoryRewriteAwareSession,
 } from "@openai/agents";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   specialistReportSchema,
@@ -235,6 +237,153 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     );
     expect(
       [...remainingCallIds].every((callId) => remainingOutputIds.has(callId)),
+    ).toBe(true);
+  }, 60_000);
+
+  it("compacts a real reasoning-model run's history, including provider-attached metadata, without a 400", async () => {
+    // gpt-5.4-mini (the production compaction model) is a reasoning model, so
+    // a real tool-using turn against it produces reasoning items and
+    // function_call/function_call_output items that the SDK stamps with its
+    // own providerData — this is the actual shape stored in
+    // chat_model_states.items, not a hand-built approximation of it.
+    const getWeather = tool({
+      name: "get_weather",
+      description: "Look up the current weather for a city.",
+      parameters: z.object({ city: z.string() }),
+      execute: ({ city }) =>
+        Promise.resolve(`${city}: 18C, light wind, clear skies.`),
+    });
+    const agent = new Agent({
+      name: "Lead coach",
+      instructions:
+        "You are an endurance coach. Use the get_weather tool once, then reply in one short sentence.",
+      model: MODEL,
+      tools: [getWeather],
+    });
+
+    const result = await run(
+      agent,
+      [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "Should I run outside in Boulder, CO today?",
+            },
+          ],
+        },
+      ],
+      { maxTurns: 3 },
+    );
+
+    const store = new InMemoryCompactionSession(result.history);
+    const session = new DurableCompactionSession({
+      underlyingSession: store,
+      client: new OpenAI(),
+      model: MODEL,
+    });
+
+    const compactionResult = await session
+      .runCompaction({ force: true, compactionMode: "input" })
+      .catch((error: unknown) => {
+        throw new Error(
+          `Compaction of a real run's history threw — full error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+
+    expect(compactionResult).not.toBeNull();
+    const compacted = await store.getItems();
+    expect(
+      compacted.some((item) => "type" in item && item.type === "compaction"),
+    ).toBe(true);
+    // The real history must have contained a function call/output pair for
+    // this to be a meaningful test of the sanitization path.
+    expect(
+      result.history.some(
+        (item) => "type" in item && item.type === "function_call",
+      ),
+    ).toBe(true);
+  }, 60_000);
+
+  it("accepts a function_call namespace alongside a real reasoning item from a genuine prior response", async () => {
+    // A synthetic reasoning item with a made-up id 404s ("Item ... not found
+    // — items are not persisted when store is set to false"): reasoning item
+    // ids are server-tracked, not client-inventable. So to test `namespace`
+    // (a valid FunctionCallItem field the app doesn't send today, since it
+    // has no MCP tools wired up) against real reasoning history, trigger a
+    // real reasoning-model turn first and append the namespaced item to its
+    // actual history, rather than hand-building the reasoning item too.
+    const echo = tool({
+      name: "echo_note",
+      description: "Record a short note.",
+      parameters: z.object({ note: z.string() }),
+      execute: ({ note }) => Promise.resolve(`recorded: ${note}`),
+    });
+    const agent = new Agent({
+      name: "Lead coach",
+      instructions:
+        "You are an endurance coach. Use the echo_note tool once to record a one-word note, then reply in one short sentence.",
+      model: MODEL,
+      tools: [echo],
+    });
+    const result = await run(
+      agent,
+      [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "Logging today's easy 5km run." },
+          ],
+        },
+      ],
+      { maxTurns: 3 },
+    );
+    expect(
+      result.history.some(
+        (item) => "type" in item && item.type === "reasoning",
+      ),
+      "Expected the real run to produce a reasoning item to test namespace against",
+    ).toBe(true);
+
+    const toolCallId = "call_namespaced_tool";
+    const store = new InMemoryCompactionSession([
+      ...result.history,
+      {
+        type: "function_call",
+        callId: toolCallId,
+        name: "update_athlete_profile",
+        namespace: "mcp_athlete",
+        arguments: "{}",
+        status: "completed",
+        providerData: { itemId: "fc_test_1" },
+      } as unknown as AgentInputItem,
+      {
+        type: "function_call_output",
+        callId: toolCallId,
+        output: JSON.stringify({ status: "updated" }),
+        status: "completed",
+        providerData: { itemId: "fc_test_1" },
+      } as unknown as AgentInputItem,
+    ]);
+    const session = new DurableCompactionSession({
+      underlyingSession: store,
+      client: new OpenAI(),
+      model: MODEL,
+    });
+
+    const compactionResult = await session
+      .runCompaction({ force: true, compactionMode: "input" })
+      .catch((error: unknown) => {
+        throw new Error(
+          `Compaction of a namespaced function_call alongside real reasoning history threw — full error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+
+    expect(compactionResult).not.toBeNull();
+    const compacted = await store.getItems();
+    expect(
+      compacted.some((item) => "type" in item && item.type === "compaction"),
     ).toBe(true);
   }, 60_000);
 });
