@@ -25,9 +25,11 @@ def _normalize_goal_fields(
     existing_course_profile: dict[str, object] | None = None,
 ) -> dict[str, object]:
     result = dict(d)
-    if result.get("goal_type") == "race":
+    goal_type = result.get("goal_type")
+    if goal_type == "race":
         result["goal_type"] = "event"
-    if "goal_type" in result and result["goal_type"] not in ALLOWED_GOAL_TYPES:
+        goal_type = "event"
+    if goal_type is not None and goal_type not in ALLOWED_GOAL_TYPES:
         raise InvalidGoalPayloadError(
             [
                 {

@@ -1829,6 +1829,7 @@ async def test_update_goals_update_omits_null_fields(monkeypatch) -> None:
                     "action": "update",
                     "goal_id": "goal-1",
                     "goal": {
+                        "goal_type": None,
                         "sport": None,
                         "target_date": None,
                         "title": "Updated race",
