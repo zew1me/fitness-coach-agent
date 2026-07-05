@@ -72,7 +72,10 @@ which read the single canonical `plan_workouts` table.
   new `training_plans` row, supersedes the prior active plan (status flip), and then
   **cleans up** the superseded plan's future scheduled workouts via
   `delete_future_scheduled_workouts` so the calendar shows a single coherent timeline.
-  A genuinely new goal is allowed to start compliance fresh.
+  A genuinely new goal is allowed to start compliance fresh; completed/matched workouts
+  stay on the superseded plan and are no longer counted because compliance reads only
+  the active plan, so the percentage resets. Prefer adjust over regenerate when you
+  want to preserve history.
 - **Adjust** (`POST /api/engine/adjust-plan {plan_id, reason}`) = _edit future in place_.
   It never spawns a new plan; it recomposes only the remaining weeks (`from today+1`) on
   the **same** `plan_id` from the plan's stored `phases` skeleton, preserving the TSS ramp.

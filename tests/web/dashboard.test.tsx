@@ -1565,6 +1565,132 @@ describe("CoachChat", () => {
     await act(() => Promise.resolve(resolveSend?.()));
   });
 
+  it("clears the composer immediately on send, before the send resolves", async () => {
+    // The send never resolves, so the only way the textarea can empty is the
+    // optimistic clear that runs before awaiting sendMessage. Pre-change code
+    // (clear-after-await) would leave the text in place here.
+    chatMocks.sendMessage.mockImplementationOnce(
+      () => new Promise<void>(() => {}),
+    );
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read"],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [],
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect((input as HTMLTextAreaElement).value).toBe("");
+    });
+    expect(chatMocks.sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it("restores the composer draft when the send fails", async () => {
+    chatMocks.sendMessage.mockRejectedValueOnce(new Error("network down"));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: ["profile:read"],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [],
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "I ran easy today." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    // The failed send puts the exact draft back in the composer...
+    await waitFor(() => {
+      expect((input as HTMLTextAreaElement).value).toBe("I ran easy today.");
+    });
+    // ...drops exactly the failed optimistic bubble (and nothing else) via the
+    // setMessages updater...
+    const sendArgs = chatMocks.sendMessage.mock.calls[0] as unknown as [
+      { id: string },
+    ];
+    const sentId = sendArgs[0].id;
+    const setMessagesArgs = chatMocks.setMessages.mock.calls.at(
+      -1,
+    ) as unknown as [(prev: { id: string }[]) => { id: string }[]];
+    const removeUpdater = setMessagesArgs[0];
+    expect(removeUpdater([{ id: sentId }, { id: "keep-me" }])).toEqual([
+      { id: "keep-me" },
+    ]);
+    // ...and surfaces the failure inline.
+    await screen.findByText(/network down/i);
+  });
+
   it("shows a thread sync status while reloading after a sent message", async () => {
     let resolveThreadReload: (() => void) | null = null;
     let threadRequestCount = 0;
