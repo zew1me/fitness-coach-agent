@@ -76,6 +76,26 @@ describe("coachToolDefinitions", () => {
     expect(parsed.goal?.course_elevation_gain_meters).toBe(700);
   });
 
+  it("rejects unsupported goal_type values before tool execution", () => {
+    const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
+      action: "create",
+      goal: {
+        title: "Half marathon",
+        goal_type: "race",
+        sport: "running",
+        target_date: "2026-08-29",
+        course_distance_meters: 21097,
+        course_elevation_gain_meters: null,
+        course_profile_notes: null,
+        improvement_baseline_value: null,
+        improvement_metric: null,
+        improvement_target_value: null,
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
   it("accepts explicit training model policy for plan generation", () => {
     const parsed =
       coachToolDefinitions.generate_training_plan.inputSchema.parse({

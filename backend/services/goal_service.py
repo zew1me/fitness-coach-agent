@@ -1,9 +1,12 @@
 from datetime import date
+from typing import get_args
 
 from pydantic import ValidationError
 
-from backend.models.training import Goal
+from backend.models.training import Goal, GoalType
 from backend.repos.supabase_repo import SupabaseRepository
+
+ALLOWED_GOAL_TYPES = frozenset(get_args(GoalType))
 
 
 class InvalidGoalPayloadError(ValueError):
@@ -22,6 +25,20 @@ def _normalize_goal_fields(
     existing_course_profile: dict[str, object] | None = None,
 ) -> dict[str, object]:
     result = dict(d)
+    goal_type = result.get("goal_type")
+    if goal_type == "race":
+        result["goal_type"] = "event"
+        goal_type = "event"
+    if goal_type is not None and goal_type not in ALLOWED_GOAL_TYPES:
+        raise InvalidGoalPayloadError(
+            [
+                {
+                    "loc": ("goal", "goal_type"),
+                    "msg": (f"goal_type must be one of: {', '.join(sorted(ALLOWED_GOAL_TYPES))}."),
+                    "type": "literal_error",
+                }
+            ]
+        )
     if "course_profile_notes" in result and "course_profile" not in result:
         notes = result.pop("course_profile_notes")
         if notes is not None:
