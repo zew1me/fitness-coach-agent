@@ -59,7 +59,7 @@ def _pair_score(workout: PlanWorkout, activity: Activity) -> float | None:
 
     score = 1.0 - 0.25 * day_offset
 
-    if workout.target_duration_minutes and activity.duration_seconds:
+    if workout.target_duration_minutes is not None and activity.duration_seconds is not None:
         duration_ratio = _ratio(
             float(workout.target_duration_minutes * 60), float(activity.duration_seconds)
         )
@@ -67,7 +67,7 @@ def _pair_score(workout: PlanWorkout, activity: Activity) -> float | None:
             return None
         score -= (1.0 - duration_ratio) * 0.5
 
-    if workout.target_tss and activity.tss:
+    if workout.target_tss is not None and activity.tss is not None:
         score -= (1.0 - _ratio(float(workout.target_tss), float(activity.tss))) * 0.25
 
     return score if score >= _MIN_MATCH_SCORE else None
