@@ -78,7 +78,7 @@ class TestRunningEligibility:
         assert result.confidence == "high"
         assert result.candidate is not None
         assert result.candidate.estimation_method == "race_time"
-        assert result.candidate.source == "estimated"
+        assert result.candidate.source == "file"
         assert result.candidate.lt2_pace_sec_per_km is not None
         assert result.evidence_activity_id == "a1"
 

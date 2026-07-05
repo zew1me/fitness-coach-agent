@@ -200,7 +200,7 @@ def _build_candidate(  # noqa: PLR0913
     updates["estimation_method"] = method
     updates["estimation_source"] = f"activity:{activity.id}:{activity.activity_date.isoformat()}"
     updates["confidence"] = confidence
-    updates["source"] = "estimated"
+    updates["source"] = "file"
     updates["effective_from"] = today
     candidate = base.model_copy(update=updates)
     candidate.zones = [

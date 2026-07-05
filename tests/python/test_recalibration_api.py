@@ -103,7 +103,7 @@ class TestRecalibrateThresholdsEndpoint:
         assert running_result["explanation"]
         assert len(repo.upserted) == 1
         assert repo.upserted[0].sport == "running"
-        assert repo.upserted[0].source == "estimated"
+        assert repo.upserted[0].source == "file"
 
     async def test_insufficient_evidence_does_not_persist(self, monkeypatch) -> None:
         easy_run = _activity(rpe=None, duration_seconds=1800)  # slow, no rpe, no current to compare
