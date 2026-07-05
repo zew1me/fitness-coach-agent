@@ -1,6 +1,7 @@
 export const siteConfig = {
   appName: "Exercise Training Plan GPT",
-  description: "Cyclocross-aware coaching app with durable athlete profiles and adaptive 14-day plans."
+  description:
+    "Endurance sport coaching app with durable athlete profiles and adaptive plans.",
 } as const;
 
 const TAVILY_MCP_BASE_URL = "https://mcp.tavily.com/mcp/";

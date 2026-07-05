@@ -222,6 +222,7 @@ function executeDeterministicEngineTool(
   context: CoachToolContext,
 ): unknown {
   const paths: Record<string, string> = {
+    adjust_plan: "/api/engine/adjust-plan",
     calculate_zones: "/api/engine/calculate-zones",
     estimate_thresholds: "/api/engine/estimate-thresholds",
     generate_training_plan: "/api/engine/generate-plan-structure",

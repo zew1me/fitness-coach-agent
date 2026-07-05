@@ -62,6 +62,36 @@ Next.js 15 App Router. Key pages:
 - `backend/repos/` — Supabase persistence: `oauth_repo.py` (grants/codes/refresh tokens), `supabase_repo.py` (athlete profiles + check-ins)
 - `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `planner.py` (14-day plan composition), `r2.py` (Cloudflare R2 presigned URLs)
 
+### Plan lifecycle & adjust semantics
+
+There is **one active plan** per athlete, and it is the source of truth for the
+calendar (`GET /api/calendar`) and compliance (`get-compliance-summary`), both of
+which read the single canonical `plan_workouts` table.
+
+- **Generate** (`POST /api/engine/generate-plan-structure`) = _new plan_. It inserts a
+  new `training_plans` row, supersedes the prior active plan (status flip), and then
+  **cleans up** the superseded plan's future scheduled workouts via
+  `delete_future_scheduled_workouts` so the calendar shows a single coherent timeline.
+  A genuinely new goal is allowed to start compliance fresh; completed/matched workouts
+  stay on the superseded plan and are no longer counted because compliance reads only
+  the active plan, so the percentage resets. Prefer adjust over regenerate when you
+  want to preserve history.
+- **Adjust** (`POST /api/engine/adjust-plan {plan_id, reason}`) = _edit future in place_.
+  It never spawns a new plan; it recomposes only the remaining weeks (`from today+1`) on
+  the **same** `plan_id` from the plan's stored `phases` skeleton, preserving the TSS ramp.
+  Completed/matched workouts are never touched, so compliance history (and %) is intact.
+  Each adjust appends an audit entry to `training_plans.generation_context.adjustments`.
+- **Cleanup primitive:** `delete_future_scheduled_workouts` only removes _future,
+  `status='scheduled'`, unmatched_ rows — completed/matched rows carry
+  `actual_activity_id`/`completion_source` and are history. Both generate-cleanup and
+  adjust reuse it.
+- **Schedule feeds composition (#232):** `compose_plan_workouts` honors the weekly pattern
+  _and_ dated `schedule_overrides` (unavailable date ⇒ forced rest; `max_hours` caps that
+  day's TSS). `update-schedule` merge semantics: `weekly_pattern` = full replacement;
+  `overrides` = per-date upsert on `(user_id, override_date)`.
+
+No new tables were introduced for this lifecycle work (all app-level).
+
 ### OAuth Flow
 
 The app implements OAuth 2.0 PKCE as a provider (not consumer). ChatGPT is the OAuth client. Key endpoints:
