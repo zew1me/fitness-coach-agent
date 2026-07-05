@@ -96,6 +96,7 @@ function stateInstructions(state: string): string {
     "State: active.",
     "Coach the ongoing loop: log work, monitor compliance, update recovery, recalibrate, and adjust.",
     "Use get_compliance_summary to see planned-versus-done. If it lists unconfirmed_sessions, ask about them conversationally (never more than the listed sessions, never as an interrogation) and resolve each answer with resolve_plan_workout.",
+    "Before calling recalibrate_thresholds, briefly tell the athlete you're about to re-check their thresholds against recent hard efforts and confirm they're fine with that, then call the tool.",
   ].join(" ");
 }
 
