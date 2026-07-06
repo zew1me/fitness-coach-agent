@@ -23,6 +23,10 @@ import {
 import { oldestDueFollowUp } from "./coaching-memory";
 import { buildContextSlices } from "./context-slices";
 import { planSpecialistDelegation } from "./delegation-planner";
+import {
+  DurableCompactionSession,
+  estimateStoredContext,
+} from "./durable-compaction-session";
 import { fetchSignalWithTimeout } from "./fetch-signal";
 import {
   LeaseAcquisitionError,
@@ -35,11 +39,7 @@ import {
   type SpecialistReport,
 } from "./orchestration-types";
 import { runSpecialists } from "./specialists";
-import {
-  DurableCompactionSession,
-  SupabaseAgentSession,
-  estimateStoredContext,
-} from "./supabase-agent-session";
+import { SupabaseAgentSession } from "./supabase-agent-session";
 import { buildLeadCoachPrompt } from "./system-prompt";
 import type { AthleteContextBundle } from "./types";
 import { recordStageUsage } from "./usage-metrics";

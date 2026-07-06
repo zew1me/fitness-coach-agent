@@ -24,11 +24,11 @@ import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { DurableCompactionSession } from "../../lib/agent/durable-compaction-session";
 import {
   specialistReportSchema,
   specialistReportWireSchema,
 } from "../../lib/agent/orchestration-types";
-import { DurableCompactionSession } from "../../lib/agent/supabase-agent-session";
 
 const MODEL = "gpt-5-mini-2025-08-07";
 
