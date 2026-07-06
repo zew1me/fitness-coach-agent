@@ -764,6 +764,87 @@ async def estimate_thresholds_endpoint(
     raise HTTPException(status_code=400, detail="Insufficient data for threshold estimation.")
 
 
+class RecalibrateThresholdsRequest(BaseModel):
+    pass
+
+
+@app.post("/api/engine/recalibrate-thresholds")
+async def recalibrate_thresholds_endpoint(
+    payload: RecalibrateThresholdsRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Re-estimate thresholds from recent athlete-owned performance evidence.
+
+    Persists a candidate only when the evaluation returns status
+    "recalibrated"; every other status (insufficient_evidence,
+    already_user_confirmed, no_change) is a non-mutating response.
+    """
+    from backend.services.recalibration import (
+        ESTIMABLE_SPORTS,
+        RECALIBRATION_LOOKBACK_DAYS,
+        evaluate_all,
+    )
+
+    user_id = user_context.user_id
+    since = date.today() - timedelta(days=RECALIBRATION_LOOKBACK_DAYS)
+
+    current_thresholds = await _activity_repo_call(
+        repo.get_active_thresholds(user_id),
+        detail="Failed to load thresholds.",
+        log_message=f"get_active_thresholds failed for user_id={user_id}",
+    )
+    current_by_sport = {}
+    for threshold in current_thresholds:
+        current_by_sport.setdefault(threshold.sport, threshold)
+
+    activities_by_sport = {}
+    for sport in ESTIMABLE_SPORTS:
+        activities_by_sport[sport] = await _activity_repo_call(
+            repo.list_activities(user_id, sport=sport, since=since, limit=200),
+            detail="Failed to load activities.",
+            log_message=f"list_activities failed for user_id={user_id} sport={sport}",
+        )
+
+    results = evaluate_all(activities_by_sport, current_by_sport, user_id)
+
+    for result in results:
+        if result.status == "recalibrated" and result.candidate is not None:
+            saved = await _activity_repo_call(
+                repo.upsert_sport_threshold(result.candidate),
+                detail="Failed to save recalibrated threshold.",
+                log_message=(
+                    f"upsert_sport_threshold failed for user_id={user_id} sport={result.sport}"
+                ),
+            )
+            logger.info(
+                "threshold recalibrated user_id=%s sport=%s confidence=%s method=%s",
+                user_id,
+                result.sport,
+                result.confidence,
+                saved.estimation_method,
+            )
+        else:
+            logger.info(
+                "threshold recalibration skipped user_id=%s sport=%s status=%s",
+                user_id,
+                result.sport,
+                result.status,
+            )
+
+    return {
+        "results": [
+            {
+                "sport": r.sport,
+                "status": r.status,
+                "confidence": r.confidence,
+                "explanation": r.explanation,
+                "evidence_activity_id": r.evidence_activity_id,
+            }
+            for r in results
+        ]
+    }
+
+
 class RecomputeLoadRequest(BaseModel):
     since: date | None = None
     sport: str | None = None

@@ -227,6 +227,7 @@ function executeDeterministicEngineTool(
     estimate_thresholds: "/api/engine/estimate-thresholds",
     generate_training_plan: "/api/engine/generate-plan-structure",
     get_compliance_summary: "/api/engine/get-compliance-summary",
+    recalibrate_thresholds: "/api/engine/recalibrate-thresholds",
     resolve_plan_workout: "/api/engine/resolve-plan-workout",
     save_recovery_data: "/api/engine/save-recovery-data",
     update_goals: "/api/engine/update-goals",
