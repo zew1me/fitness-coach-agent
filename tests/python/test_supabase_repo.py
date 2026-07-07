@@ -690,6 +690,35 @@ async def test_decide_recalibration_candidate_records_manual_threshold() -> None
 
 
 @pytest.mark.asyncio
+async def test_decide_recalibration_candidate_rejects_already_decided_candidate() -> None:
+    row = {
+        "id": "candidate-1",
+        "user_id": "athlete-1",
+        "sport": "running",
+        "status": "kept_current",
+        "confidence": "high",
+        "evidence_activity_id": "activity-1",
+        "explanation": "Proposal",
+        "candidate_threshold": SportThreshold(user_id="athlete-1", sport="running").model_dump(
+            mode="json"
+        ),
+        "generated_at": "2026-07-07T00:00:00+00:00",
+        "decided_at": "2026-07-07T00:05:00+00:00",
+    }
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(threshold_recalibration_candidate_rows=[row])
+    )
+
+    with pytest.raises(RecordNotFoundError):
+        await repo.decide_recalibration_candidate(
+            user_id="athlete-1",
+            candidate_id="candidate-1",
+            status="manual_entered",
+            manual_threshold=None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_create_activity_persists_structured_activity() -> None:
     repo = SupabaseRepository(client=FakeSupabaseClient())
 

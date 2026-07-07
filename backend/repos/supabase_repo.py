@@ -412,6 +412,7 @@ class SupabaseRepository:
             .update(payload)
             .eq("id", candidate_id)
             .eq("user_id", user_id)
+            .eq("status", "pending")
             .execute()
         )
         rows = response.data or []

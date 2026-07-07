@@ -10,6 +10,7 @@ import api.index as api_index
 from backend.models.athlete import SportThreshold, ThresholdRecalibrationCandidate
 from backend.models.auth import UserContext
 from backend.models.training import Activity
+from backend.repos.supabase_repo import RecordNotFoundError
 
 TODAY = date.today()
 NOW = datetime.now(UTC)
@@ -65,6 +66,7 @@ class RecalibrationRepository:
         self.decisions: list[dict[str, Any]] = []
         self.active_threshold_user_ids: list[str] = []
         self.activity_calls: list[dict[str, Any]] = []
+        self.raise_not_found_on_decide = False
 
     async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
         self.active_threshold_user_ids.append(user_id)
@@ -111,6 +113,8 @@ class RecalibrationRepository:
         status: str,
         manual_threshold: SportThreshold | None = None,
     ) -> ThresholdRecalibrationCandidate:
+        if self.raise_not_found_on_decide:
+            raise RecordNotFoundError("Recalibration candidate not found.")
         candidate = self.candidates_by_id[candidate_id]
         decided = candidate.model_copy(
             update={
@@ -396,3 +400,30 @@ class TestRecalibrationCandidateDecisionEndpoint:
         assert repo.upserted[0].estimation_method == "manual"
         assert repo.upserted[0].lt2_pace_sec_per_km == 260
         assert repo.decisions[0]["status"] == "manual_entered"
+
+    async def test_concurrent_decision_returns_conflict(self, monkeypatch) -> None:
+        """A second request racing the first to decide the same candidate gets a 409.
+
+        The endpoint's own pending check (`candidate.status != "pending"`) can't catch
+        this: both requests read the row while it's still pending. The repo's atomic
+        `.eq("status", "pending")` update guard is what actually loses the race, raising
+        RecordNotFoundError for the loser.
+        """
+        candidate = ThresholdRecalibrationCandidate(
+            id="candidate-1",
+            user_id="athlete-1",
+            sport="running",
+            status="pending",
+            confidence="high",
+            evidence_activity_id="activity-1",
+            explanation="Faster 5K.",
+            candidate_threshold=_threshold(source="file"),
+        )
+        repo = RecalibrationRepository()
+        repo.candidates_by_id["candidate-1"] = candidate
+        repo.raise_not_found_on_decide = True
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post_decision({"candidate_id": "candidate-1", "decision": "keep_current"})
+
+        assert response.status_code == 409

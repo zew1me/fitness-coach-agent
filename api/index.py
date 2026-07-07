@@ -1014,19 +1014,26 @@ async def decide_recalibration_candidate(
         )
         status = "manual_entered"
 
-    decided = await _activity_repo_call(
-        repo.decide_recalibration_candidate(
-            user_id=user_id,
-            candidate_id=payload.candidate_id,
-            status=status,
-            manual_threshold=saved_threshold if status == "manual_entered" else None,
-        ),
-        detail="Failed to record recalibration candidate decision.",
-        log_message=(
-            f"decide_recalibration_candidate failed for user_id={user_id} "
-            f"candidate_id={payload.candidate_id}"
-        ),
-    )
+    try:
+        decided = await _activity_repo_call(
+            repo.decide_recalibration_candidate(
+                user_id=user_id,
+                candidate_id=payload.candidate_id,
+                status=status,
+                manual_threshold=saved_threshold if status == "manual_entered" else None,
+            ),
+            detail="Failed to record recalibration candidate decision.",
+            log_message=(
+                f"decide_recalibration_candidate failed for user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+    except RecordNotFoundError as exc:
+        # We just confirmed status == "pending" above, so a missing row here means
+        # a concurrent request already decided this candidate first.
+        raise HTTPException(
+            status_code=409, detail="Recalibration candidate is already decided."
+        ) from exc
     logger.info(
         "threshold recalibration candidate decided user_id=%s candidate_id=%s status=%s",
         user_id,
