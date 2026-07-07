@@ -48,7 +48,7 @@ function withCallIdField(
   field: "callId" | "call_id",
 ): AgentInputItem {
   const callId = record["callId"] ?? record["call_id"];
-  if (typeof callId !== "string" || field in record) {
+  if (typeof callId !== "string") {
     return record as unknown as AgentInputItem;
   }
   const rest = { ...record };
