@@ -8,7 +8,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { planSpecialistDelegation } from "../../lib/agent/delegation-planner";
-import { DurableCompactionSession } from "../../lib/agent/supabase-agent-session";
+import { DurableCompactionSession } from "../../lib/agent/durable-compaction-session";
 
 import { athleteContextFixture } from "./agent-fixtures";
 

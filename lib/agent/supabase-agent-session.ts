@@ -1,14 +1,11 @@
-import {
-  RequestUsage,
-  type AgentInputItem,
-  type OpenAIResponsesCompactionArgs,
-  type OpenAIResponsesCompactionAwareSession,
-  type OpenAIResponsesCompactionResult,
-  type SessionHistoryRewriteArgs,
-  type SessionHistoryRewriteAwareSession,
+// CRUD session against /api/chat/model-state — no knowledge of
+// OpenAI.responses.compact. Compaction lives in durable-compaction-session.ts;
+// see docs/COMPACTION_DESIGN.md.
+import type {
+  AgentInputItem,
+  SessionHistoryRewriteArgs,
+  SessionHistoryRewriteAwareSession,
 } from "@openai/agents";
-import * as Sentry from "@sentry/nextjs";
-import OpenAI from "openai";
 
 import { modelStateSchema, type ModelState } from "../schemas";
 
@@ -19,6 +16,11 @@ import {
   type CoachingMemoryRecord,
 } from "./coaching-memory";
 import { fetchSignalWithTimeout } from "./fetch-signal";
+import {
+  dedupeItemsById,
+  prepareFunctionItemForModelInput,
+  unsupportedFileContentToText,
+} from "./responses-item-shapes";
 
 const MODEL_STATE_FETCH_TIMEOUT_MS = 10_000;
 
@@ -31,177 +33,6 @@ type SessionOptions = {
   maxCasRetries?: number;
   signal?: AbortSignal;
 };
-
-export type StoredContextEstimate = {
-  bytes: number;
-  estimatedTokens: number;
-  itemCount: number;
-  nonUserItemCount: number;
-};
-
-export function estimateStoredContext(
-  items: AgentInputItem[],
-): StoredContextEstimate {
-  const bytes = new TextEncoder().encode(JSON.stringify(items)).byteLength;
-  return {
-    bytes,
-    estimatedTokens: Math.ceil(bytes / 4),
-    itemCount: items.length,
-    nonUserItemCount: items.filter(
-      (item) => !("role" in item) || item.role !== "user",
-    ).length,
-  };
-}
-
-function usageDetail(value: unknown, key: string): number {
-  if (value === null || typeof value !== "object") return 0;
-  const detail = (value as Record<string, unknown>)[key];
-  return typeof detail === "number" ? detail : 0;
-}
-
-function extractFileRef(record: Record<string, unknown>): {
-  publicUrl?: string;
-  fileId?: string;
-} {
-  const file = record["file"];
-  if (typeof file === "string") return { publicUrl: file };
-  if (file !== null && typeof file === "object") {
-    const f = file as Record<string, unknown>;
-    const out: { publicUrl?: string; fileId?: string } = {};
-    if (typeof f["url"] === "string") out.publicUrl = f["url"];
-    if (typeof f["id"] === "string") out.fileId = f["id"];
-    return out;
-  }
-  return {};
-}
-
-// Rewrite an `input_file` content part into a text description.  OpenAI cannot
-// ingest the activity files athletes attach (.fit/.gpx), and `filename`
-// alongside a `file_url`/`file_id` reference is rejected outright.  New history
-// is sanitized upstream in `toAgentInputItems`; this defends the model-input and
-// compaction paths against any `input_file` already persisted before that fix.
-function unsupportedFileContentToText(part: { type: string }): {
-  type: "input_text";
-  text: string;
-} {
-  const record = part as unknown as Record<string, unknown>;
-  const { publicUrl, fileId } = extractFileRef(record);
-  const filename =
-    typeof record["filename"] === "string" && record["filename"].length > 0
-      ? (record["filename"] as string)
-      : "uploaded file";
-  return {
-    type: "input_text",
-    text:
-      `Uploaded file: ${filename}` +
-      (publicUrl ? `\npublic_url=${publicUrl}` : "") +
-      (fileId ? `\nfile_id=${fileId}` : ""),
-  };
-}
-
-function withCallIdField(
-  record: Record<string, unknown>,
-  field: "callId" | "call_id",
-): AgentInputItem {
-  const callId = record["callId"] ?? record["call_id"];
-  if (typeof callId !== "string" || field in record) {
-    return record as unknown as AgentInputItem;
-  }
-  const rest = { ...record };
-  delete rest[field === "callId" ? "call_id" : "callId"];
-  return { ...rest, [field]: callId } as unknown as AgentInputItem;
-}
-
-function toResponsesCompactInputItem(
-  record: Record<string, unknown>,
-): AgentInputItem {
-  const type = record["type"];
-  if (type === "function_call_result") {
-    const callId = record["callId"] ?? record["call_id"];
-    if (typeof callId !== "string") {
-      return record as unknown as AgentInputItem;
-    }
-    const compacted: Record<string, unknown> = {
-      type: "function_call_output",
-      call_id: callId,
-      output: record["output"],
-    };
-    if (typeof record["status"] === "string") {
-      compacted["status"] = record["status"];
-    }
-    if (typeof record["id"] === "string") {
-      compacted["id"] = record["id"];
-    }
-    return compacted as unknown as AgentInputItem;
-  }
-  return withCallIdField(record, "call_id");
-}
-
-function omittedToolOutputMessage(): AgentInputItem {
-  return {
-    role: "assistant",
-    status: "completed",
-    content: [
-      {
-        type: "output_text",
-        text:
-          "Historical tool output omitted from model replay. " +
-          "The visible chat transcript is preserved separately.",
-      },
-    ],
-  } as AgentInputItem;
-}
-
-function prepareFunctionItemForModelInput(
-  item: AgentInputItem,
-): AgentInputItem {
-  if (!("type" in item)) return item;
-  const record = item as unknown as Record<string, unknown>;
-  const itemType = record["type"];
-  if (itemType === "function_call" || itemType === "function_call_result") {
-    return withCallIdField(record, "callId");
-  }
-  if (itemType === "function_call_output") {
-    return omittedToolOutputMessage();
-  }
-  return item;
-}
-
-type OpenAICompactOptions = Partial<
-  Pick<
-    OpenAI.Responses.ResponseCompactParams,
-    | "instructions"
-    | "previous_response_id"
-    | "prompt_cache_key"
-    | "prompt_cache_retention"
-    | "service_tier"
-  >
->;
-
-type AgentsCompactionArgs = OpenAIResponsesCompactionArgs &
-  OpenAICompactOptions & {
-    responseId?: string | null;
-  };
-
-function toOpenAICompactOptions(
-  args: OpenAIResponsesCompactionArgs,
-): OpenAICompactOptions {
-  const source = args as AgentsCompactionArgs;
-  const options: OpenAICompactOptions = {};
-  const previousResponseId =
-    source.responseId ?? source.previous_response_id ?? undefined;
-  if (previousResponseId !== undefined)
-    options.previous_response_id = previousResponseId;
-  if (source.instructions !== undefined)
-    options.instructions = source.instructions;
-  if (source.prompt_cache_key !== undefined)
-    options.prompt_cache_key = source.prompt_cache_key;
-  if (source.prompt_cache_retention !== undefined)
-    options.prompt_cache_retention = source.prompt_cache_retention;
-  if (source.service_tier !== undefined)
-    options.service_tier = source.service_tier;
-  return options;
-}
 
 export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   private readonly options: SessionOptions;
@@ -283,9 +114,9 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   }
 
   async getItems(limit?: number): Promise<AgentInputItem[]> {
-    const items = (await this.load()).items;
+    const items = dedupeItemsById((await this.load()).items);
     if (limit !== undefined && limit <= 0) return [];
-    return limit === undefined ? [...items] : items.slice(-limit);
+    return limit === undefined ? items : items.slice(-limit);
   }
 
   async getCoachingMemory(): Promise<CoachingMemoryRecord[]> {
@@ -379,123 +210,5 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
       coaching_memory: state.coaching_memory,
       compaction_metadata: state.compaction_metadata,
     }));
-  }
-}
-
-type CompactionSessionOptions = {
-  underlyingSession: SessionHistoryRewriteAwareSession & {
-    replaceAll(
-      items: AgentInputItem[],
-      metadata: Record<string, unknown>,
-    ): Promise<void>;
-    getLastCasRetries?: () => number;
-  };
-  client?: OpenAI;
-  model?: string;
-  autoCompactTokens?: number;
-  autoCompactNonUserItems?: number;
-};
-
-export class DurableCompactionSession implements OpenAIResponsesCompactionAwareSession {
-  private readonly client: OpenAI;
-  private readonly options: CompactionSessionOptions;
-
-  constructor(options: CompactionSessionOptions) {
-    this.options = options;
-    this.client = options.client ?? new OpenAI();
-  }
-
-  getSessionId = (): Promise<string> =>
-    this.options.underlyingSession.getSessionId();
-  getItems = (limit?: number): Promise<AgentInputItem[]> =>
-    this.options.underlyingSession.getItems(limit);
-  addItems = (items: AgentInputItem[]): Promise<void> =>
-    this.options.underlyingSession.addItems(items);
-  popItem = (): Promise<AgentInputItem | undefined> =>
-    this.options.underlyingSession.popItem();
-  clearSession = (): Promise<void> =>
-    this.options.underlyingSession.clearSession();
-  prepareHistoryItemForModelInput = (item: AgentInputItem): AgentInputItem =>
-    this.options.underlyingSession.prepareHistoryItemForModelInput?.(item) ??
-    item;
-
-  // Trigger selection, remote compaction, atomic replacement, and metrics are one operation.
-  // eslint-disable-next-line complexity
-  async runCompaction(
-    args: OpenAIResponsesCompactionArgs = {},
-  ): Promise<OpenAIResponsesCompactionResult | null> {
-    const startedAt = performance.now();
-    const items = await this.getItems();
-    const before = estimateStoredContext(items);
-
-    const shouldCompact = (): boolean => {
-      return (
-        args.force === true ||
-        before.estimatedTokens >= (this.options.autoCompactTokens ?? 120000) ||
-        before.nonUserItemCount >= (this.options.autoCompactNonUserItems ?? 40)
-      );
-    };
-
-    if (!shouldCompact() || items.length === 0) return null;
-
-    const compactArgs = toOpenAICompactOptions(args);
-    const compacted = await this.client.responses.compact({
-      ...compactArgs,
-      model: this.options.model ?? "gpt-5.4-mini",
-      // Strip input_image parts (and any other model-incompatible content)
-      // before compacting, matching the sanitization applied elsewhere via
-      // prepareHistoryItemForModelInput. Convert SDK `callId` to the
-      // Responses API `call_id` field so compact accepts function calls.
-      input: items.map((item) =>
-        toResponsesCompactInputItem(this.prepareHistoryItemForModelInput(item)),
-      ) as OpenAI.Responses.ResponseInput,
-    });
-    const output = compacted.output as AgentInputItem[];
-    if (!Array.isArray(output) || output.length === 0) {
-      throw new Error(
-        `Compaction returned ${Array.isArray(output) ? 0 : typeof output} items; refusing to wipe durable context`,
-      );
-    }
-    const after = estimateStoredContext(output);
-    await this.options.underlyingSession.replaceAll(output, {
-      trigger: args.force === true ? "forced" : "auto",
-      compacted_at: new Date().toISOString(),
-      before_bytes: before.bytes,
-      before_tokens: before.estimatedTokens,
-      before_items: before.itemCount,
-      after_bytes: after.bytes,
-      after_tokens: after.estimatedTokens,
-      after_items: after.itemCount,
-    });
-    Sentry.logger.info("coach compaction complete", {
-      trigger: args.force === true ? "forced" : "auto",
-      before_bytes: before.bytes,
-      before_tokens: before.estimatedTokens,
-      before_items: before.itemCount,
-      after_bytes: after.bytes,
-      after_tokens: after.estimatedTokens,
-      after_items: after.itemCount,
-      latency_ms: Math.round(performance.now() - startedAt),
-      cas_retries: this.options.underlyingSession.getLastCasRetries?.() ?? 0,
-      request_count: 1,
-      input_tokens: compacted.usage.input_tokens,
-      cached_tokens: usageDetail(
-        compacted.usage.input_tokens_details,
-        "cached_tokens",
-      ),
-      output_tokens: compacted.usage.output_tokens,
-      reasoning_tokens: usageDetail(
-        compacted.usage.output_tokens_details,
-        "reasoning_tokens",
-      ),
-      total_tokens: compacted.usage.total_tokens,
-      max_request_input: compacted.usage.input_tokens,
-    });
-    return {
-      usage: new RequestUsage({
-        ...compacted.usage,
-        endpoint: "responses.compact",
-      }),
-    };
   }
 }

@@ -155,6 +155,14 @@ See `.env.example`. Required:
 - `OPENAI_API_KEY` — plan generation
 - `R2_*` — file uploads
 
+## Documentation
+
+`docs/` holds living design docs alongside point-in-time artifacts — know which is which before editing:
+
+- Changing the compaction/durable-session subsystem (`lib/agent/responses-item-shapes.ts`, `lib/agent/supabase-agent-session.ts`, `lib/agent/durable-compaction-session.ts`, `lib/agent/orchestrator.ts`) → update `docs/COMPACTION_DESIGN.md` in the same change.
+- Adding/changing a Supabase migration → update `docs/supabase-migration-history.md` (see the Database section above).
+- `docs/github-issues/` is an archive of point-in-time issue proposals, not a living doc — don't update it as code changes.
+
 ## Tests
 
 - Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
