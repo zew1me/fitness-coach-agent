@@ -298,7 +298,7 @@ export const coachToolDefinitions = {
     adjustPlanInputSchema,
   ),
   recalibrate_thresholds: defineTool(
-    "Re-estimate thresholds from recent performance evidence.",
+    "Evaluate recent hard efforts and queue athlete-reviewable threshold candidates without overwriting active thresholds.",
     userInputSchema,
   ),
 } as const;

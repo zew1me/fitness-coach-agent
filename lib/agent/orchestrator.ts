@@ -102,7 +102,8 @@ function buildToolAcknowledgement(toolName: string | undefined): string {
       "Thanks, I've factored the data you've shared into my notes.",
     generate_training_plan: "I've got a fresh training for you.",
     process_uploaded_file: "I've processed that file.",
-    recalibrate_thresholds: "I made some adjustments to my notes.",
+    recalibrate_thresholds:
+      "I checked your recent efforts and will walk through any threshold candidates with you.",
     save_activity_from_text: "I took note of that activity.",
     update_athlete_profile:
       "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",

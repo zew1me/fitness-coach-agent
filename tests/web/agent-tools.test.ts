@@ -510,10 +510,11 @@ describe("coachToolDefinitions", () => {
           JSON.stringify({
             results: [
               {
+                candidate_id: "candidate-1",
                 confidence: "high",
                 explanation: "…",
                 sport: "running",
-                status: "recalibrated",
+                status: "candidate_queued",
               },
             ],
           }),
