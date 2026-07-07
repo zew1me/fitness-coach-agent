@@ -127,6 +127,24 @@ function messages(): UIMessage[] {
   ];
 }
 
+function messagesWithFitAttachment(): UIMessage[] {
+  return [
+    {
+      id: "d0e12f7d-6d2c-4c1b-8e8d-9c9a2c3d9c9a",
+      parts: [
+        { text: "Here's my ride from today.", type: "text" },
+        {
+          filename: "ride.fit",
+          mediaType: "application/vnd.garmin.fit",
+          type: "file",
+          url: "https://cdn.example.com/ride.fit",
+        },
+      ],
+      role: "user",
+    },
+  ];
+}
+
 beforeEach(() => {
   orchestratorMocks.agentConfigs.length = 0;
   orchestratorMocks.events.length = 0;
@@ -177,6 +195,86 @@ describe("streamCoachTurn", () => {
       expect.any(Function),
       expect.objectContaining({ groupId: "athlete-1" }),
     );
+  });
+
+  it("disables save_activity_from_text when the turn carries a fit/gpx/tcx attachment", async () => {
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messagesWithFitAttachment(),
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({
+        context: expect.objectContaining({ hasActivityFileAttachment: true }),
+      }),
+    );
+
+    const leadCoachConfig = orchestratorMocks.agentConfigs.find(
+      (config) => config["name"] === "Lead coach",
+    );
+    const tools = leadCoachConfig?.["tools"] as Array<{
+      isEnabled: (args: {
+        runContext: { context: Record<string, unknown> };
+      }) => boolean;
+      name: string;
+    }>;
+    const saveActivityFromText = tools.find(
+      (candidate) => candidate.name === "save_activity_from_text",
+    );
+
+    expect(
+      saveActivityFromText?.isEnabled({
+        runContext: {
+          context: { hasActivityFileAttachment: true, toolCalled: false },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps save_activity_from_text enabled when the turn has no file attachment", async () => {
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({
+        context: expect.objectContaining({
+          hasActivityFileAttachment: false,
+        }),
+      }),
+    );
+
+    const leadCoachConfig = orchestratorMocks.agentConfigs.find(
+      (config) => config["name"] === "Lead coach",
+    );
+    const tools = leadCoachConfig?.["tools"] as Array<{
+      isEnabled: (args: {
+        runContext: { context: Record<string, unknown> };
+      }) => boolean;
+      name: string;
+    }>;
+    const saveActivityFromText = tools.find(
+      (candidate) => candidate.name === "save_activity_from_text",
+    );
+
+    expect(
+      saveActivityFromText?.isEnabled({
+        runContext: {
+          context: { hasActivityFileAttachment: false, toolCalled: false },
+        },
+      }),
+    ).toBe(true);
   });
 
   it("streams text using the existing UI-message protocol", async () => {

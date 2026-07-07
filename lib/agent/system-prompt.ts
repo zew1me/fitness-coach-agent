@@ -261,6 +261,7 @@ export function buildLeadCoachPrompt(
     "After any tool call, continue with a concise user-facing response that explains what changed, what was saved, or what you need next.",
     "Never end a turn with only tool calls or tool output. End with one context-aware prompt to continue the conversation, based on the athlete's latest ask and the current coaching state.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",
+    'When the user message is an "Uploaded file:" stub with content_type gpx/fit/tcx (or a filename ending in .gpx/.fit/.tcx), always call process_uploaded_file with that stub\'s filename, content_type, object_key, and public_url. Never call save_activity_from_text for a file upload — it cannot read file contents and must not guess numeric fields like duration.',
   ].join("\n\n");
 }
 

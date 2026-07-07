@@ -18,6 +18,7 @@ import { toAgentInputItems } from "./agent-input";
 import { finishAgentText, writeAgentStreamEvent } from "./agent-stream";
 import {
   createAgentCoachTools,
+  isActivityFile,
   type CoachAgentRunContext,
 } from "./coach-tools";
 import { oldestDueFollowUp } from "./coaching-memory";
@@ -33,7 +34,7 @@ import {
   acquireChatTurnLease,
   releaseChatTurnLease,
 } from "./lease-client";
-import { selectMessagesForModel } from "./message-context";
+import { nonImageFilePart, selectMessagesForModel } from "./message-context";
 import {
   type DelegationPlan,
   type SpecialistReport,
@@ -363,6 +364,15 @@ async function prepareDurableSession(
   return { durableSession, traceGroupId, underlyingSession };
 }
 
+function hasActivityFileAttachment(messages: UIMessage[]): boolean {
+  return messages.some((message) =>
+    message.parts.some((part) => {
+      const file = nonImageFilePart(part);
+      return file !== null && isActivityFile(file.mediaType, file.filename);
+    }),
+  );
+}
+
 function createTavilyServer(url: string | undefined): MCPServer | null {
   if (url === undefined) return null;
   return new MCPServerStreamableHttp({
@@ -387,7 +397,10 @@ export function streamCoachTurn({
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
-  const runContext: CoachAgentRunContext = { toolCalled: false };
+  const runContext: CoachAgentRunContext = {
+    hasActivityFileAttachment: hasActivityFileAttachment(selectedMessages),
+    toolCalled: false,
+  };
 
   const stream = createUIMessageStream<UIMessage>({
     generateId: generateUuid,

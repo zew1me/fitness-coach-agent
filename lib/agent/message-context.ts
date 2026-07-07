@@ -135,13 +135,13 @@ export async function appendImageExtractionsToMessages(
   );
 }
 
-type NonImageFilePart = {
+export type NonImageFilePart = {
   filename: string;
   url: string;
   mediaType: string;
 };
 
-function nonImageFilePart(
+export function nonImageFilePart(
   part: UIMessage["parts"][number],
 ): NonImageFilePart | null {
   const record = partRecord(part);
