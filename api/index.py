@@ -79,6 +79,8 @@ from backend.services.goal_service import (
 )
 from backend.services.r2 import R2Service
 
+ActivityPersistenceEndpoint = Literal["process_uploaded_file", "save_activity_from_text"]
+
 configure_logging(debug=settings.app_env == "development")
 
 _sentry_dsn = os.environ.get("SENTRY_DSN")
@@ -1006,7 +1008,7 @@ async def process_uploaded_file_endpoint(
         parsed.distance_meters or 0,
     )
     return await _persist_extracted_activity(
-        user_context.user_id, activity, source="process_uploaded_file"
+        user_context.user_id, activity, calling_endpoint="process_uploaded_file"
     )
 
 
@@ -1369,12 +1371,15 @@ async def save_activity_from_text(
             "status": "needs_clarification",
         }
     return await _persist_extracted_activity(
-        user_context.user_id, result.activity, source="save_activity_from_text"
+        user_context.user_id, result.activity, calling_endpoint="save_activity_from_text"
     )
 
 
 async def _persist_extracted_activity(
-    user_id: str, extracted: Activity, *, source: str
+    user_id: str,
+    extracted: Activity,
+    *,
+    calling_endpoint: ActivityPersistenceEndpoint,
 ) -> Mapping[str, object]:
     try:
         activity = await _activity_repo_call(
@@ -1385,7 +1390,7 @@ async def _persist_extracted_activity(
     except RuntimeError as exc:
         logger.exception("create_activity failed for user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
-    logger.info("%s user_id=%s status=saved", source, user_id)
+    logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}
     if matched is not None:

@@ -757,6 +757,7 @@ async def test_process_uploaded_file_persists_activity(auth_service_fixture, mon
     assert body["status"] == "saved"
     assert body["activity"]["id"] == "activity-1"
     assert activity_repo.created_activity is not None
+    assert activity_repo.created_activity.user_id == "athlete-1"
     assert activity_repo.created_activity.source_file_key == object_key
 
 
