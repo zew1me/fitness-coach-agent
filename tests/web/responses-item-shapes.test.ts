@@ -28,4 +28,17 @@ describe("toResponsesCompactInputItem", () => {
     expect("content" in result).toBe(false);
     expect("id" in result).toBe(false);
   });
+
+  it("preserves an already-compacted reasoning item's summary when content is absent", () => {
+    const result = toResponsesCompactInputItem({
+      type: "reasoning",
+      id: "rs_1",
+      summary: [{ type: "summary_text", text: "Weighing options." }],
+      status: "completed",
+    }) as unknown as Record<string, unknown>;
+
+    expect(result["summary"]).toEqual([
+      { type: "summary_text", text: "Weighing options." },
+    ]);
+  });
 });

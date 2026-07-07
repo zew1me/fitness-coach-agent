@@ -68,10 +68,14 @@ function withCallIdField(
 function toResponsesCompactReasoningItem(
   record: Record<string, unknown>,
 ): AgentInputItem {
-  const content = Array.isArray(record["content"]) ? record["content"] : [];
-  const summary = (content as Array<Record<string, unknown>>)
-    .filter((part) => typeof part["text"] === "string")
-    .map((part) => ({ type: "summary_text", text: part["text"] }));
+  // An already-compacted item (round-tripped through a prior responses.compact
+  // call) carries `summary` directly and has no `content` to rebuild from —
+  // fall back to the existing summary instead of collapsing it to [].
+  const summary = Array.isArray(record["content"])
+    ? (record["content"] as Array<Record<string, unknown>>)
+        .filter((part) => typeof part["text"] === "string")
+        .map((part) => ({ type: "summary_text", text: part["text"] }))
+    : (record["summary"] ?? record["summary_text"] ?? []);
   const compacted: Record<string, unknown> = {
     type: "reasoning",
     summary,
