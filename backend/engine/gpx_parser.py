@@ -24,6 +24,8 @@ class ParsedActivity:
     activity_date: date
     started_at: datetime | None = None
     duration_seconds: int | None = None
+    elapsed_duration_seconds: int | None = None
+    moving_duration_seconds: int | None = None
     distance_meters: float | None = None
     elevation_gain_meters: float | None = None
     avg_hr_bpm: int | None = None
@@ -98,6 +100,10 @@ def parse_gpx(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
         activity_date=activity_date,
         started_at=start_time,
         duration_seconds=duration,
+        # GPX's only duration signal is the timestamp span between first/last
+        # point, i.e. wall-clock time including any gaps — treat it as elapsed,
+        # not moving time.
+        elapsed_duration_seconds=duration,
         distance_meters=round(total_distance, 1) if total_distance > 0 else None,
         elevation_gain_meters=round(total_elevation_gain, 1) if total_elevation_gain > 0 else None,
         avg_hr_bpm=round(sum(hr_values) / len(hr_values)) if hr_values else None,
@@ -143,7 +149,7 @@ def _extract_gpx_extension(  # noqa: C901
             _extract_gpx_extension(child, hr_values, power_values, cadence_values, rr_intervals)
 
 
-def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
+def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912, PLR0915
     """Parse a Garmin .FIT file into structured activity data."""
     from fitparse import FitFile
 
@@ -151,7 +157,10 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
 
     sport = "general"
     start_time: datetime | None = None
-    duration: int | None = None
+    elapsed_total = 0.0
+    timer_total = 0.0
+    have_elapsed = False
+    have_timer = False
     distance: float | None = None
     elevation_gain: float | None = None
     avg_hr: int | None = None
@@ -161,6 +170,9 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
     power_stream: list[int] = []
     rr_intervals: list[int] = []
 
+    # A FIT file can contain multiple `session` messages (multi-sport/"brick"
+    # workouts). Sum durations across all of them rather than overwriting, so
+    # a trailing short session doesn't silently replace the real total.
     for record in fit.get_messages("session"):
         for field in record.fields:
             name = field.name
@@ -172,7 +184,11 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
             elif name == "start_time":
                 start_time = val
             elif name == "total_elapsed_time":
-                duration = int(val)
+                elapsed_total += float(val)
+                have_elapsed = True
+            elif name == "total_timer_time":
+                timer_total += float(val)
+                have_timer = True
             elif name == "total_distance":
                 distance = float(val)
             elif name == "total_ascent":
@@ -185,6 +201,10 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
                 avg_power = int(val)
             elif name == "avg_cadence":
                 avg_cadence = int(val)
+
+    elapsed_duration_seconds = int(elapsed_total) if have_elapsed else None
+    moving_duration_seconds = int(timer_total) if have_timer else None
+    duration = moving_duration_seconds or elapsed_duration_seconds
 
     # Collect power stream from records for NP calculation
     for record in fit.get_messages("record"):
@@ -209,6 +229,8 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:  # noqa: C901, PLR0912
         activity_date=activity_date,
         started_at=start_time,
         duration_seconds=duration,
+        elapsed_duration_seconds=elapsed_duration_seconds,
+        moving_duration_seconds=moving_duration_seconds,
         distance_meters=distance,
         elevation_gain_meters=elevation_gain,
         avg_hr_bpm=avg_hr,
@@ -266,6 +288,10 @@ def parse_tcx(file_path: str | Path) -> ParsedActivity:  # noqa: C901
         activity_date=activity_date,
         started_at=start_time,
         duration_seconds=duration,
+        # TCX's duration is the sum of each Lap's TotalTimeSeconds, which is
+        # Garmin's per-lap timer time (excludes auto-pause) — treat it as
+        # moving time, not elapsed.
+        moving_duration_seconds=duration,
         distance_meters=distance,
         avg_hr_bpm=round(sum(hr_values) / len(hr_values)) if hr_values else None,
         max_hr_bpm=max(hr_values) if hr_values else None,
