@@ -74,9 +74,11 @@ function toResponsesCompactReasoningItem(
     .map((part) => ({ type: "summary_text", text: part["text"] }));
   const compacted: Record<string, unknown> = {
     type: "reasoning",
-    id: record["id"],
     summary,
   };
+  if (typeof record["id"] === "string") {
+    compacted["id"] = record["id"];
+  }
   if (typeof record["status"] === "string") {
     compacted["status"] = record["status"];
   }
@@ -142,7 +144,7 @@ export function toResponsesCompactInputItem(
   if (type === "function_call_result") {
     return toResponsesCompactFunctionCallResultItem(record);
   }
-  if (type === "reasoning" && typeof record["id"] === "string") {
+  if (type === "reasoning") {
     return toResponsesCompactReasoningItem(record);
   }
   return withCallIdField(record, "call_id");

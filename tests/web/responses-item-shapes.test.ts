@@ -15,4 +15,17 @@ describe("toResponsesCompactInputItem", () => {
     expect(result["call_id"]).toBe("call-1");
     expect("callId" in result).toBe(false);
   });
+
+  it("converts a reasoning item lacking an id into the compact summary shape", () => {
+    const result = toResponsesCompactInputItem({
+      type: "reasoning",
+      content: [{ type: "input_text", text: "thinking about it" }],
+    }) as unknown as Record<string, unknown>;
+
+    expect(result["summary"]).toEqual([
+      { type: "summary_text", text: "thinking about it" },
+    ]);
+    expect("content" in result).toBe(false);
+    expect("id" in result).toBe(false);
+  });
 });
