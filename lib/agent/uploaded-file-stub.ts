@@ -46,7 +46,7 @@ function valueAfterPrefix(line: string, prefix: string): string | null {
 }
 
 export function parseUploadedFileText(text: string): UploadedFileStub | null {
-  const lines = text.trim().split("\n");
+  const lines = text.trim().split(/\r?\n/);
   if (lines.length !== STUB_PREFIXES.length) {
     return null;
   }

@@ -4,6 +4,33 @@ import { z } from "zod";
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import { coachToolDefinitions } from "../../lib/agent/tools";
 
+type RecordedRequest = { body: unknown; url: string };
+
+function createRecordingFetch(responseBody: unknown): {
+  fetchImpl: typeof fetch;
+  requests: RecordedRequest[];
+} {
+  const requests: RecordedRequest[] = [];
+  const fetchImpl = (
+    url: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    requests.push({
+      body: JSON.parse(String(init?.body)),
+      url: String(url),
+    });
+
+    return Promise.resolve(
+      new Response(JSON.stringify(responseBody), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+  };
+
+  return { fetchImpl, requests };
+}
+
 function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
   if (schema === null || typeof schema !== "object") {
     return;
@@ -366,29 +393,10 @@ describe("coachToolDefinitions", () => {
   ])(
     "redirects a %s upload stub passed to save_activity_from_text to process_uploaded_file",
     async (contentType, filename) => {
-      const requests: Array<{ body: unknown; url: string }> = [];
-      const fetchImpl = (
-        url: RequestInfo | URL,
-        init?: RequestInit,
-      ): Promise<Response> => {
-        requests.push({
-          body: JSON.parse(String(init?.body)),
-          url: String(url),
-        });
-
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              activity: { duration_seconds: 5880, sport: "cycling" },
-              status: "saved",
-            }),
-            {
-              headers: { "Content-Type": "application/json" },
-              status: 200,
-            },
-          ),
-        );
-      };
+      const { fetchImpl, requests } = createRecordingFetch({
+        activity: { duration_seconds: 5880, sport: "cycling" },
+        status: "saved",
+      });
       const tools = createCoachTools({
         accessToken: "token",
         baseUrl: "https://coach.test",
@@ -398,9 +406,9 @@ describe("coachToolDefinitions", () => {
       const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
       const publicUrl = `https://cdn.example.com/${filename}`;
       const stub =
-        `Uploaded file: ${filename}\n` +
-        `content_type=${contentType}\n` +
-        `public_url=${publicUrl}\n` +
+        `Uploaded file: ${filename}\r\n` +
+        `content_type=${contentType}\r\n` +
+        `public_url=${publicUrl}\r\n` +
         `object_key=${objectKey}`;
 
       const result = await (
@@ -428,23 +436,7 @@ describe("coachToolDefinitions", () => {
   );
 
   it("does not redirect ordinary free-text activity descriptions", async () => {
-    const requests: Array<{ body: unknown; url: string }> = [];
-    const fetchImpl = (
-      url: RequestInfo | URL,
-      init?: RequestInit,
-    ): Promise<Response> => {
-      requests.push({
-        body: JSON.parse(String(init?.body)),
-        url: String(url),
-      });
-
-      return Promise.resolve(
-        new Response(JSON.stringify({ status: "saved" }), {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        }),
-      );
-    };
+    const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
     const tools = createCoachTools({
       accessToken: "token",
       baseUrl: "https://coach.test",
@@ -466,23 +458,7 @@ describe("coachToolDefinitions", () => {
   });
 
   it("does not redirect a stub-shaped text for a non-activity content_type", async () => {
-    const requests: Array<{ body: unknown; url: string }> = [];
-    const fetchImpl = (
-      url: RequestInfo | URL,
-      init?: RequestInit,
-    ): Promise<Response> => {
-      requests.push({
-        body: JSON.parse(String(init?.body)),
-        url: String(url),
-      });
-
-      return Promise.resolve(
-        new Response(JSON.stringify({ status: "saved" }), {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        }),
-      );
-    };
+    const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
     const tools = createCoachTools({
       accessToken: "token",
       baseUrl: "https://coach.test",
