@@ -1005,7 +1005,9 @@ async def process_uploaded_file_endpoint(
         parsed.activity_date,
         parsed.distance_meters or 0,
     )
-    return {"activity": activity.model_dump(mode="json")}
+    return await _persist_extracted_activity(
+        user_context.user_id, activity, source="process_uploaded_file"
+    )
 
 
 def _build_fitness_metrics(
@@ -1366,10 +1368,14 @@ async def save_activity_from_text(
             "raw_extraction": result.raw_extraction,
             "status": "needs_clarification",
         }
-    return await _persist_extracted_activity(user_context.user_id, result.activity)
+    return await _persist_extracted_activity(
+        user_context.user_id, result.activity, source="save_activity_from_text"
+    )
 
 
-async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapping[str, object]:
+async def _persist_extracted_activity(
+    user_id: str, extracted: Activity, *, source: str
+) -> Mapping[str, object]:
     try:
         activity = await _activity_repo_call(
             repo.create_activity(extracted),
@@ -1379,7 +1385,7 @@ async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapp
     except RuntimeError as exc:
         logger.exception("create_activity failed for user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
-    logger.info("save_activity_from_text user_id=%s status=saved", user_id)
+    logger.info("%s user_id=%s status=saved", source, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}
     if matched is not None:
