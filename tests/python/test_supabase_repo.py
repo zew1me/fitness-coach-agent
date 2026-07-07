@@ -245,6 +245,8 @@ class FakeSupabaseClient:
     def rpc(self, function_name: str, params: dict[str, object]) -> "FakeRpcQuery":
         if function_name == "create_training_plan_atomic":
             return FakeRpcQuery([self._create_training_plan_atomic(params)])
+        if function_name == "create_recalibration_candidate_atomic":
+            return FakeRpcQuery([self._create_recalibration_candidate_atomic(params)])
         raise AssertionError(f"Unexpected RPC call: {function_name}")
 
     def _create_training_plan_atomic(self, params: dict[str, object]) -> dict[str, object]:
@@ -260,6 +262,27 @@ class FakeSupabaseClient:
             if existing.get("user_id") == user_id and existing.get("status") == "active":
                 existing["status"] = "superseded"
         self._tables["training_plans"]._rows.append(row)
+        return row
+
+    def _create_recalibration_candidate_atomic(
+        self, params: dict[str, object]
+    ) -> dict[str, object]:
+        payload = params["p_candidate"]
+        assert isinstance(payload, dict)
+        row = dict(payload)
+        if not row.get("id"):
+            row["id"] = str(uuid4())
+        row["status"] = "pending"
+
+        user_id, sport = row["user_id"], row["sport"]
+        for existing in self._tables["threshold_recalibration_candidates"]._rows:
+            if (
+                existing.get("user_id") == user_id
+                and existing.get("sport") == sport
+                and existing.get("status") == "pending"
+            ):
+                existing["status"] = "superseded"
+        self._tables["threshold_recalibration_candidates"]._rows.append(row)
         return row
 
 

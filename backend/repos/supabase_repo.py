@@ -363,16 +363,12 @@ class SupabaseRepository:
         self, candidate: ThresholdRecalibrationCandidate
     ) -> ThresholdRecalibrationCandidate:
         client = self._require_client()
-        client.table("threshold_recalibration_candidates").update(
-            {"status": "superseded", "decided_at": datetime.now(UTC).isoformat()}
-        ).eq("user_id", candidate.user_id).eq("sport", candidate.sport).eq(
-            "status", "pending"
-        ).execute()
-
         payload = candidate.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = client.table("threshold_recalibration_candidates").insert(payload).execute()
+        response = client.rpc(
+            "create_recalibration_candidate_atomic", {"p_candidate": payload}
+        ).execute()
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted recalibration candidate row.")
