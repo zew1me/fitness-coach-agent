@@ -159,7 +159,7 @@ See `.env.example`. Required:
 
 `docs/` holds living design docs alongside point-in-time artifacts — know which is which before editing:
 
-- Changing the compaction/durable-session subsystem (`lib/agent/responses-item-shapes.ts`, `lib/agent/supabase-agent-session.ts`, `lib/agent/durable-compaction-session.ts`) → update `docs/COMPACTION_DESIGN.md` in the same change.
+- Changing the compaction/durable-session subsystem (`lib/agent/responses-item-shapes.ts`, `lib/agent/supabase-agent-session.ts`, `lib/agent/durable-compaction-session.ts`, `lib/agent/orchestrator.ts`) → update `docs/COMPACTION_DESIGN.md` in the same change.
 - Adding/changing a Supabase migration → update `docs/supabase-migration-history.md` (see the Database section above).
 - `docs/github-issues/` is an archive of point-in-time issue proposals, not a living doc — don't update it as code changes.
 
