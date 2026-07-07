@@ -373,6 +373,16 @@ function hasActivityFileAttachment(messages: UIMessage[]): boolean {
   );
 }
 
+function latestUserTurnMessages(messages: UIMessage[]): UIMessage[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "user") {
+      return [message];
+    }
+  }
+  return [];
+}
+
 function createTavilyServer(url: string | undefined): MCPServer | null {
   if (url === undefined) return null;
   return new MCPServerStreamableHttp({
@@ -397,8 +407,9 @@ export function streamCoachTurn({
   const selectedMessages = messagesAreModelSelected
     ? messages
     : selectMessagesForModel(messages);
+  const latestUserTurn = latestUserTurnMessages(selectedMessages);
   const runContext: CoachAgentRunContext = {
-    hasActivityFileAttachment: hasActivityFileAttachment(selectedMessages),
+    hasActivityFileAttachment: hasActivityFileAttachment(latestUserTurn),
     toolCalled: false,
   };
 
