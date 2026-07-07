@@ -313,6 +313,21 @@ backend's write path, never called directly from the browser.
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Additive migration; no backfill or data rewrite required.
 
+## 20260707000000 — threshold recalibration candidates (2026-07-07)
+
+**File:** `supabase/migrations/20260707000000_threshold_recalibration_candidates.sql`
+
+**Change:** Creates `public.threshold_recalibration_candidates` for proposed
+sport-threshold updates. Rows store the candidate threshold JSON, evidence
+metadata, confidence, status, and optional manual-threshold decision payload.
+
+**Why:** Recalibration should queue athlete-reviewable threshold candidates
+rather than silently overwriting athlete-confirmed or active thresholds from
+daily automation/tool runs.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally).
+
 ## 20260706000000 — atomic active training plan creation (2026-07-06)
 
 **File:** `supabase/migrations/20260706000000_create_training_plan_atomic.sql`

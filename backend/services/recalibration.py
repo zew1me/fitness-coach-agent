@@ -38,6 +38,8 @@ from backend.models.athlete import SportThreshold
 from backend.models.training import Activity
 
 RECALIBRATION_LOOKBACK_DAYS = 90
+LOW_CONFIDENCE_REASK_DAYS = 7
+MEDIUM_HIGH_CONFIDENCE_REASK_DAYS = 28
 
 _MIN_HARD_EFFORT_RPE = 8
 _HIGH_CONFIDENCE_RPE = 9
@@ -72,6 +74,29 @@ class RecalibrationResult:
     candidate: SportThreshold | None  # unsaved; caller persists via the repo
     confidence: str | None
     explanation: str
+
+
+def recalibration_cadence_days(confidence: str) -> int:
+    """Minimum days before proposing another candidate at this confidence tier."""
+    return LOW_CONFIDENCE_REASK_DAYS if confidence == "low" else MEDIUM_HIGH_CONFIDENCE_REASK_DAYS
+
+
+def next_recalibration_eligible_date(confidence: str, generated_at: date) -> date:
+    return generated_at + timedelta(days=recalibration_cadence_days(confidence))
+
+
+def recalibration_cadence_gate(
+    confidence: str,
+    last_generated_at: date | None,
+    *,
+    today: date | None = None,
+) -> date | None:
+    """Return next eligible date when cadence blocks a proposal; otherwise None."""
+    if last_generated_at is None:
+        return None
+    today = today or date.today()
+    next_eligible = next_recalibration_eligible_date(confidence, last_generated_at)
+    return next_eligible if today < next_eligible else None
 
 
 def _classify_effort(rpe: int | None, meets_or_beats_current: bool) -> str | None:

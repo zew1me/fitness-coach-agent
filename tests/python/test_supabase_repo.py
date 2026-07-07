@@ -5,7 +5,11 @@ from uuid import uuid4
 import pytest
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
-from backend.models.athlete import AthleteProfile, SportThreshold
+from backend.models.athlete import (
+    AthleteProfile,
+    SportThreshold,
+    ThresholdRecalibrationCandidate,
+)
 from backend.models.chat import ChatModelStateReplaceRequest
 from backend.models.training import Activity, PlanWorkout, TrainingPlan
 from backend.repos import supabase_repo
@@ -213,6 +217,7 @@ class FakeSupabaseClient:
         plan_workout_rows: list[dict[str, object]] | None = None,
         training_plan_rows: list[dict[str, object]] | None = None,
         schedule_override_rows: list[dict[str, object]] | None = None,
+        threshold_recalibration_candidate_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self._tables = {
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
@@ -228,6 +233,9 @@ class FakeSupabaseClient:
             "training_plans": FakeTableQuery(training_plan_rows or []),
             "schedule_overrides": FakeTableQuery(schedule_override_rows or []),
             "schedule_availability": FakeTableQuery([]),
+            "threshold_recalibration_candidates": FakeTableQuery(
+                threshold_recalibration_candidate_rows or []
+            ),
         }
 
     def table(self, table_name: str) -> FakeTableQuery:
@@ -563,6 +571,122 @@ async def test_upsert_sport_threshold_supersedes_active_threshold() -> None:
     assert threshold.user_id == "athlete-1"
     assert threshold.lt2_power_watts == 260
     assert threshold.id is not None
+
+
+@pytest.mark.asyncio
+async def test_create_recalibration_candidate_supersedes_existing_pending_candidate() -> None:
+    existing = {
+        "id": "candidate-old",
+        "user_id": "athlete-1",
+        "sport": "running",
+        "status": "pending",
+        "confidence": "high",
+        "evidence_activity_id": "activity-old",
+        "explanation": "Older proposal",
+        "candidate_threshold": SportThreshold(
+            user_id="athlete-1",
+            sport="running",
+            lt2_pace_sec_per_km=270,
+            source="file",
+        ).model_dump(mode="json"),
+        "generated_at": "2026-07-01T00:00:00+00:00",
+    }
+    client = FakeSupabaseClient(threshold_recalibration_candidate_rows=[existing])
+    repo = SupabaseRepository(client=client)
+
+    saved = await repo.create_recalibration_candidate(
+        ThresholdRecalibrationCandidate(
+            user_id="athlete-1",
+            sport="running",
+            confidence="high",
+            evidence_activity_id="activity-new",
+            explanation="New proposal",
+            candidate_threshold=SportThreshold(
+                user_id="athlete-1",
+                sport="running",
+                lt2_pace_sec_per_km=250,
+                source="file",
+            ),
+            generated_at=datetime(2026, 7, 7, tzinfo=UTC),
+        )
+    )
+
+    rows = client._tables["threshold_recalibration_candidates"]._rows
+    assert existing["status"] == "superseded"
+    assert saved.id is not None
+    assert saved.candidate_threshold.lt2_pace_sec_per_km == 250
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_latest_recalibration_candidate_returns_newest_for_sport() -> None:
+    older = {
+        "id": "candidate-old",
+        "user_id": "athlete-1",
+        "sport": "running",
+        "status": "kept_current",
+        "confidence": "medium",
+        "evidence_activity_id": "activity-old",
+        "explanation": "Older proposal",
+        "candidate_threshold": SportThreshold(user_id="athlete-1", sport="running").model_dump(
+            mode="json"
+        ),
+        "generated_at": "2026-07-01T00:00:00+00:00",
+    }
+    newer = {
+        **older,
+        "id": "candidate-new",
+        "status": "pending",
+        "generated_at": "2026-07-07T00:00:00+00:00",
+    }
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(threshold_recalibration_candidate_rows=[older, newer])
+    )
+
+    latest = await repo.get_latest_recalibration_candidate("athlete-1", "running")
+
+    assert latest is not None
+    assert latest.id == "candidate-new"
+
+
+@pytest.mark.asyncio
+async def test_decide_recalibration_candidate_records_manual_threshold() -> None:
+    row = {
+        "id": "candidate-1",
+        "user_id": "athlete-1",
+        "sport": "running",
+        "status": "pending",
+        "confidence": "high",
+        "evidence_activity_id": "activity-1",
+        "explanation": "Proposal",
+        "candidate_threshold": SportThreshold(user_id="athlete-1", sport="running").model_dump(
+            mode="json"
+        ),
+        "generated_at": "2026-07-07T00:00:00+00:00",
+    }
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(threshold_recalibration_candidate_rows=[row])
+    )
+    manual = SportThreshold(
+        user_id="athlete-1",
+        sport="running",
+        lt2_pace_sec_per_km=260,
+        source="user",
+        confidence="high",
+        estimation_method="manual",
+    )
+
+    decided = await repo.decide_recalibration_candidate(
+        user_id="athlete-1",
+        candidate_id="candidate-1",
+        status="manual_entered",
+        manual_threshold=manual,
+    )
+
+    assert decided.status == "manual_entered"
+    assert decided.manual_threshold is not None
+    assert decided.manual_threshold.lt2_pace_sec_per_km == 260
+    assert decided.decided_at is not None
 
 
 @pytest.mark.asyncio
