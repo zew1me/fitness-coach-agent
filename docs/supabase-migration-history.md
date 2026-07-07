@@ -312,3 +312,24 @@ backend's write path, never called directly from the browser.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Additive migration; no backfill or data rewrite required.
+
+## 20260706000000 — atomic active training plan creation (2026-07-06)
+
+**File:** `supabase/migrations/20260706000000_create_training_plan_atomic.sql`
+
+**Change:** Adds `create_training_plan_atomic(p_plan jsonb)`, a
+`security definer` RPC that locks the athlete profile row, supersedes all prior
+active `training_plans` for that athlete, and inserts the replacement active
+plan in one database transaction.
+
+**Why:** Plan generation used to insert a new active plan and then supersede
+prior active plans in separate PostgREST calls. Concurrent chat-triggered
+generation or unattended daily lifecycle work could interleave those writes and
+leave multiple active plans. The per-athlete row lock serializes creation for
+one athlete while allowing different athletes to generate plans independently.
+
+**Security note:** The function is revoked from `public`, `anon`, and
+`authenticated`, and granted only to `service_role` for the FastAPI backend.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Additive migration; no backfill or data rewrite required.

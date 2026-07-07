@@ -1,12 +1,13 @@
 import re
 from datetime import UTC, date, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.models.athlete import AthleteProfile, SportThreshold
 from backend.models.chat import ChatModelStateReplaceRequest
-from backend.models.training import Activity, PlanWorkout
+from backend.models.training import Activity, PlanWorkout, TrainingPlan
 from backend.repos import supabase_repo
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -232,6 +233,26 @@ class FakeSupabaseClient:
     def table(self, table_name: str) -> FakeTableQuery:
         # The real Supabase client returns a fresh query builder for each call.
         return FakeTableQuery(self._tables[table_name]._rows)
+
+    def rpc(self, function_name: str, params: dict[str, object]) -> "FakeRpcQuery":
+        if function_name == "create_training_plan_atomic":
+            return FakeRpcQuery([self._create_training_plan_atomic(params)])
+        raise AssertionError(f"Unexpected RPC call: {function_name}")
+
+    def _create_training_plan_atomic(self, params: dict[str, object]) -> dict[str, object]:
+        payload = params["p_plan"]
+        assert isinstance(payload, dict)
+        row = dict(payload)
+        if not row.get("id"):
+            row["id"] = str(uuid4())
+        row["status"] = "active"
+
+        user_id = row["user_id"]
+        for existing in self._tables["training_plans"]._rows:
+            if existing.get("user_id") == user_id and existing.get("status") == "active":
+                existing["status"] = "superseded"
+        self._tables["training_plans"]._rows.append(row)
+        return row
 
 
 class FakeRpcQuery:
@@ -697,6 +718,64 @@ async def test_create_goal_persists_row_with_generated_id() -> None:
     assert created.id is not None
     assert created.user_id == "athlete-1"
     assert created.title == "A race"
+
+
+@pytest.mark.asyncio
+async def test_create_training_plan_uses_atomic_rpc() -> None:
+    returned_row = {
+        "id": "00000000-0000-0000-0000-000000000101",
+        "user_id": "athlete-1",
+        "title": "Race build",
+        "plan_type": "full_cycle",
+        "status": "active",
+        "start_date": "2026-07-06",
+        "end_date": "2026-08-03",
+        "target_goal_id": "00000000-0000-0000-0000-000000000201",
+        "phases": [{"name": "base"}],
+        "generation_context": {"source": "test"},
+        "weekly_tss_target": 420.0,
+        "weekly_hours_target": 7.5,
+    }
+    client = FakeRpcClient([returned_row])
+    repo = SupabaseRepository(client=client)
+    plan = TrainingPlan(
+        id=returned_row["id"],
+        user_id="athlete-1",
+        title="Race build",
+        plan_type="full_cycle",
+        start_date=date(2026, 7, 6),
+        end_date=date(2026, 8, 3),
+        target_goal_id="00000000-0000-0000-0000-000000000201",
+        phases=[{"name": "base"}],
+        generation_context={"source": "test"},
+        weekly_tss_target=420.0,
+        weekly_hours_target=7.5,
+    )
+
+    created = await repo.create_training_plan(plan)
+
+    assert created == TrainingPlan.model_validate(returned_row)
+    assert client.calls == [
+        (
+            "create_training_plan_atomic",
+            {
+                "p_plan": {
+                    "id": returned_row["id"],
+                    "user_id": "athlete-1",
+                    "title": "Race build",
+                    "plan_type": "full_cycle",
+                    "status": "active",
+                    "start_date": "2026-07-06",
+                    "end_date": "2026-08-03",
+                    "target_goal_id": "00000000-0000-0000-0000-000000000201",
+                    "phases": [{"name": "base"}],
+                    "generation_context": {"source": "test"},
+                    "weekly_tss_target": 420.0,
+                    "weekly_hours_target": 7.5,
+                }
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
