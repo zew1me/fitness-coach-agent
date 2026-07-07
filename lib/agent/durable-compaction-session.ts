@@ -1,3 +1,6 @@
+// Wraps a SupabaseAgentSession-shaped session to add OpenAI
+// responses.compact-based compaction. See docs/COMPACTION_DESIGN.md for the
+// full design.
 import {
   RequestUsage,
   type AgentInputItem,

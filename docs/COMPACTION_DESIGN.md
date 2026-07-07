@@ -83,6 +83,23 @@ preempted once `lease_expires_at` passes and another turn acquires a new lease.
 
 ## TypeScript layer
 
+This subsystem is split across three files with a one-directional dependency
+graph: `responses-item-shapes.ts` has no dependents within this trio and is
+imported by both of the other two — there is no reverse edge, so there's no
+circular-import risk between the CRUD session and its compaction wrapper.
+
+### `responses-item-shapes.ts` (`lib/agent/responses-item-shapes.ts`)
+
+Pure leaf module — only depends on `@openai/agents` types. Converts between
+Agents SDK item shapes and raw OpenAI Responses API shapes:
+
+- `unsupportedFileContentToText`, `prepareFunctionItemForModelInput` — run on
+  **every model turn** (not just compaction) via
+  `prepareHistoryItemForModelInput()`, which is why this file isn't named
+  compaction-specific.
+- `toResponsesCompactInputItem`, `sanitizeResponsesCompactInputItem` — used
+  only by `DurableCompactionSession` to build the `responses.compact` request.
+
 ### `SupabaseAgentSession` (`lib/agent/supabase-agent-session.ts`)
 
 Implements `SessionHistoryRewriteAwareSession` (the Agents SDK interface):
@@ -93,13 +110,20 @@ Implements `SessionHistoryRewriteAwareSession` (the Agents SDK interface):
   merge metadata into `compaction_metadata`. Preserves `coaching_memory`.
 - `applyHistoryMutations()` — rewrites specific `function_call` items in-place
   (used by the SDK for tool-result redaction).
-- `prepareHistoryItemForModelInput()` — strips `input_image` parts from user
-  messages before passing to the model (images are stored in R2, not replayed).
+- `prepareHistoryItemForModelInput()` — strips `input_image` parts and
+  delegates unsupported-file/function-item shape fixing to
+  `responses-item-shapes.ts` before passing history to the model (images are
+  stored in R2, not replayed).
 
-### `DurableCompactionSession` (`lib/agent/supabase-agent-session.ts`)
+This file is CRUD-only; it has no knowledge of `OpenAI.responses.compact`.
 
-Wraps `SupabaseAgentSession` and implements
-`OpenAIResponsesCompactionAwareSession`. The key method:
+### `DurableCompactionSession` (`lib/agent/durable-compaction-session.ts`)
+
+Wraps a `SupabaseAgentSession`-shaped session (typed structurally, not as the
+concrete class, precisely to keep this a one-directional dependency) and
+implements `OpenAIResponsesCompactionAwareSession`. Also home to
+`estimateStoredContext`/`StoredContextEstimate`, since token/byte estimation
+only matters for compaction's trigger conditions. The key method:
 
 ```text
 runCompaction(args?) → OpenAIResponsesCompactionResult | null
@@ -151,13 +175,14 @@ Operations on `coaching_memory` go through
 
 ## Tests
 
-| File                                       | What it covers                                                                     |
-| ------------------------------------------ | ---------------------------------------------------------------------------------- |
-| `tests/web/supabase-agent-session.test.ts` | Unit: CAS retries, replaceAll, coaching memory isolation                           |
-| `tests/web/real-durable-session.test.ts`   | Integration: full turn round-trip with fake repo                                   |
-| `tests/web/coaching-memory.test.ts`        | Memory operation types and merge logic                                             |
-| `tests/python/test_supabase_repo.py`       | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation |
-| `tests/python/test_chat_service.py`        | Service layer: model state CRUD, lease service methods                             |
+| File                                           | What it covers                                                                                                                      |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, replaceAll, coaching memory isolation                                                                            |
+| `tests/web/durable-compaction-session.test.ts` | Unit: DurableCompactionSession trigger thresholds, provider-metadata stripping, compact API shape conversion, estimateStoredContext |
+| `tests/web/real-durable-session.test.ts`       | Integration: full turn round-trip with fake repo                                                                                    |
+| `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                              |
+| `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                  |
+| `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                              |
 
 The `@pytest.mark.db` tests (live DB) are excluded from the default `pytest`
 run (`addopts = "-m 'not db'"` in `pyproject.toml`). Run them explicitly with

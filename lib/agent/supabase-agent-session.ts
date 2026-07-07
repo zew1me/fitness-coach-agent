@@ -1,3 +1,6 @@
+// CRUD session against /api/chat/model-state — no knowledge of
+// OpenAI.responses.compact. Compaction lives in durable-compaction-session.ts;
+// see docs/COMPACTION_DESIGN.md.
 import type {
   AgentInputItem,
   SessionHistoryRewriteArgs,

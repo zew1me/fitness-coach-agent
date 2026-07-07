@@ -1,3 +1,6 @@
+// Pure leaf module converting between Agents SDK item shapes and raw OpenAI
+// Responses API shapes. Used both on every model turn (model-input replay)
+// and during compaction — see docs/COMPACTION_DESIGN.md.
 import type { AgentInputItem } from "@openai/agents";
 
 function extractFileRef(record: Record<string, unknown>): {
