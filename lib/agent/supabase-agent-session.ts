@@ -17,6 +17,7 @@ import {
 } from "./coaching-memory";
 import { fetchSignalWithTimeout } from "./fetch-signal";
 import {
+  dedupeItemsById,
   prepareFunctionItemForModelInput,
   unsupportedFileContentToText,
 } from "./responses-item-shapes";
@@ -113,9 +114,9 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   }
 
   async getItems(limit?: number): Promise<AgentInputItem[]> {
-    const items = (await this.load()).items;
+    const items = dedupeItemsById((await this.load()).items);
     if (limit !== undefined && limit <= 0) return [];
-    return limit === undefined ? [...items] : items.slice(-limit);
+    return limit === undefined ? items : items.slice(-limit);
   }
 
   async getCoachingMemory(): Promise<CoachingMemoryRecord[]> {

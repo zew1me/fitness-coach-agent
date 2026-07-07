@@ -208,3 +208,22 @@ export function prepareFunctionItemForModelInput(
   }
   return item;
 }
+
+// Self-heals rows poisoned by a prior compaction bug that sent both `input`
+// and `previous_response_id` to `responses.compact`, causing the server to
+// splice a second, re-minted copy of the conversation onto the stored
+// history (see durable-compaction-session.ts). Both copies can share the same
+// provider-assigned `id` on items the server passed through unchanged, which
+// the Responses API rejects outright ("Duplicate item found with id ...") the
+// next time that history is replayed. Keeps the first occurrence of each id;
+// id-less items (never round-tripped through the model) always pass through.
+export function dedupeItemsById(items: AgentInputItem[]): AgentInputItem[] {
+  const seenIds = new Set<string>();
+  return items.filter((item) => {
+    const id = (item as unknown as Record<string, unknown>)["id"];
+    if (typeof id !== "string") return true;
+    if (seenIds.has(id)) return false;
+    seenIds.add(id);
+    return true;
+  });
+}

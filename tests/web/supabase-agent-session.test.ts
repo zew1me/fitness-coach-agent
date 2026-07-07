@@ -126,6 +126,28 @@ describe("SupabaseAgentSession", () => {
     await expect(session.getItems(-1)).resolves.toEqual([]);
   });
 
+  it("self-heals a row poisoned with duplicate item ids by keeping the first occurrence", async () => {
+    const first = { ...userItem("a"), id: "msg_dup" };
+    const second = { ...userItem("b"), id: "msg_dup" };
+    const fetchMock = vi.fn().mockResolvedValue(
+      response({
+        thread_id: "thread-1",
+        version: 1,
+        items: [first, second, userItem("c")],
+        coaching_memory: [],
+        compaction_metadata: {},
+      }),
+    );
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: fetchMock,
+    });
+
+    await expect(session.getItems()).resolves.toEqual([first, userItem("c")]);
+  });
+
   it("validates loaded model state before returning it", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       response({

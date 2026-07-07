@@ -48,7 +48,6 @@ type OpenAICompactOptions = Partial<
   Pick<
     OpenAI.Responses.ResponseCompactParams,
     | "instructions"
-    | "previous_response_id"
     | "prompt_cache_key"
     | "prompt_cache_retention"
     | "service_tier"
@@ -56,19 +55,23 @@ type OpenAICompactOptions = Partial<
 >;
 
 type AgentsCompactionArgs = OpenAIResponsesCompactionArgs &
-  OpenAICompactOptions & {
-    responseId?: string | null;
-  };
+  OpenAICompactOptions;
 
+// Deliberately never forwards responseId/previous_response_id: this session's
+// `input` (built from buildCompactionInput) is always the complete, Supabase-backed
+// authoritative history. `previous_response_id` tells responses.compact to layer
+// `input` on top of the server-remembered conversation for that response id —
+// since that conversation is the same one already present in `input`, the two
+// combine into a duplicated (and duplicate-item-id) history. The SDK's
+// post-turn auto-compaction call always supplies a responseId
+// (`runCompactionOnSession` in @openai/agents-core), so this only matters
+// because auto-compaction runs on every turn once thresholds are hit — see
+// docs/COMPACTION_DESIGN.md.
 function toOpenAICompactOptions(
   args: OpenAIResponsesCompactionArgs,
 ): OpenAICompactOptions {
   const source = args as AgentsCompactionArgs;
   const options: OpenAICompactOptions = {};
-  const previousResponseId =
-    source.responseId ?? source.previous_response_id ?? undefined;
-  if (previousResponseId !== undefined)
-    options.previous_response_id = previousResponseId;
   if (source.instructions !== undefined)
     options.instructions = source.instructions;
   if (source.prompt_cache_key !== undefined)

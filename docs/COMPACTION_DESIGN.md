@@ -139,6 +139,27 @@ Safety guard: if `responses.compact` returns an empty array the method **throws*
 rather than replacing durable context with nothing. This prevents a model error
 or API glitch from silently erasing the conversation.
 
+**`previous_response_id` is never sent to `responses.compact`.** This session's
+`input` (built by `buildCompactionInput` from the Supabase-stored `items`) is
+always the complete, authoritative history — this app doesn't rely on
+OpenAI's server-side conversation retention. `responses.compact` treats
+`previous_response_id` as "layer `input` on top of the server-remembered
+conversation for that response id," so passing both sends the same
+conversation twice; the server can then hand back a compacted history with
+the _same_ provider-assigned `id` on items from each copy, which the Responses
+API rejects on the next replay with `400 Duplicate item found with id ...`.
+The SDK's post-turn auto-compaction (`runCompactionOnSession` in
+`@openai/agents-core`) always supplies a `responseId`, so `toOpenAICompactOptions`
+deliberately drops it (and the `previous_response_id`/`store` fields) rather
+than forwarding them.
+
+**Self-heal for already-poisoned rows.** `SupabaseAgentSession.getItems()`
+runs `dedupeItemsById` (`responses-item-shapes.ts`) on every read, keeping the
+first occurrence of any item `id` and dropping later duplicates. This mirrors
+the existing `input_file`-to-text self-heal: rows corrupted by the bug above
+before this fix landed recover automatically on next read rather than needing
+a per-environment data migration.
+
 ---
 
 ## Compaction flow (one turn)

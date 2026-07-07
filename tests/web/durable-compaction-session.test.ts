@@ -437,12 +437,14 @@ describe("DurableCompactionSession", () => {
       store: true,
     });
 
-    expect(client.responses.compact).toHaveBeenCalledWith(
-      expect.objectContaining({
-        previous_response_id: "resp_123",
-      }),
-    );
+    // previous_response_id/responseId/store must never reach the request:
+    // `input` is already the complete Supabase-backed history, so also
+    // referencing the server-remembered conversation for `responseId` would
+    // splice a second copy of it onto `input` — that's the exact bug behind
+    // the "Duplicate item found with id ..." 400 (see
+    // docs/COMPACTION_DESIGN.md and durable-compaction-session.ts).
     const request = client.responses.compact.mock.calls[0]?.[0];
+    expect(request).not.toHaveProperty("previous_response_id");
     expect(request).not.toHaveProperty("force");
     expect(request).not.toHaveProperty("compactionMode");
     expect(request).not.toHaveProperty("responseId");
