@@ -4,6 +4,7 @@ import { type ToolSet } from "ai";
 import { coachingMemoryToolSchema } from "./coaching-memory";
 import type { SupabaseAgentSession } from "./supabase-agent-session";
 import { coachToolDefinitions } from "./tools";
+import { parseUploadedFileText } from "./uploaded-file-stub";
 
 export type CoachToolContext = {
   accessToken: string;
@@ -166,47 +167,13 @@ function isValidActivityUpload(
   );
 }
 
-// Matches the stub format produced by uploadedFileText() in
-// message-context.ts. The two are the only producer/consumer of this format
-// and must stay in lockstep.
-const UPLOADED_FILE_STUB_PATTERN =
-  /^Uploaded file: (?<filename>.+)\ncontent_type=(?<contentType>.+)\npublic_url=(?<publicUrl>.*)\nobject_key=(?<objectKey>.+)$/;
-
-type UploadedFileStub = {
-  contentType: string;
-  filename: string;
-  objectKey: string;
-  publicUrl: string | null;
-};
-
-function parseUploadedFileStub(text: string): UploadedFileStub | null {
-  const match = UPLOADED_FILE_STUB_PATTERN.exec(text.trim());
-  const groups = match?.groups;
-  if (
-    groups === undefined ||
-    typeof groups["filename"] !== "string" ||
-    typeof groups["contentType"] !== "string" ||
-    typeof groups["publicUrl"] !== "string" ||
-    typeof groups["objectKey"] !== "string"
-  ) {
-    return null;
-  }
-
-  return {
-    contentType: groups["contentType"],
-    filename: groups["filename"],
-    objectKey: groups["objectKey"],
-    publicUrl: groups["publicUrl"].length > 0 ? groups["publicUrl"] : null,
-  };
-}
-
-function saveActivityFromText(
+function routeSaveActivityFromText(
   input: unknown,
   context: CoachToolContext,
 ): unknown {
   const payload = engineInput(input);
   const text = stringField(payload, "text");
-  const stub = text !== null ? parseUploadedFileStub(text) : null;
+  const stub = text !== null ? parseUploadedFileText(text) : null;
   if (stub !== null && isActivityFile(stub.contentType, stub.filename)) {
     // The model attached a GPX/FIT/TCX upload stub as free text instead of
     // calling process_uploaded_file. Redirect to the deterministic parser so
@@ -329,7 +296,7 @@ export function executeCoachTool(
   }
 
   if (name === "save_activity_from_text") {
-    return saveActivityFromText(input, context);
+    return routeSaveActivityFromText(input, context);
   }
 
   if (name === "update_athlete_profile") {
@@ -360,7 +327,7 @@ export type CoachAgentRunContext = {
   // True when this turn's messages include a gpx/fit/tcx attachment. Gates
   // save_activity_from_text so the model can't route a file upload to the
   // LLM-guessing text-extraction path even if it doesn't pass the stub text
-  // through verbatim (see parseUploadedFileStub for the verbatim case).
+  // through verbatim (see parseUploadedFileText for the verbatim case).
   hasActivityFileAttachment: boolean;
 };
 

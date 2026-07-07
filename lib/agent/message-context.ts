@@ -1,5 +1,7 @@
 import type { UIMessage } from "ai";
 
+import { uploadedFileText } from "./uploaded-file-stub";
+
 const MODEL_RECENT_MESSAGE_LIMIT = 24;
 const EXTRACTED_IMAGE_PREFIX = "Extracted image content from ";
 
@@ -167,22 +169,6 @@ export function nonImageFilePart(
       : "uploaded file";
 
   return { filename, url, mediaType };
-}
-
-function uploadedFileText(file: NonImageFilePart): string {
-  let objectKey: string;
-  try {
-    objectKey = new URL(file.url).pathname.replace(/^\//, "");
-  } catch {
-    objectKey = file.url;
-  }
-
-  return (
-    `Uploaded file: ${file.filename}\n` +
-    `content_type=${file.mediaType}\n` +
-    `public_url=${file.url}\n` +
-    `object_key=${objectKey}`
-  );
 }
 
 export function convertUnsupportedFilePartsToText(
