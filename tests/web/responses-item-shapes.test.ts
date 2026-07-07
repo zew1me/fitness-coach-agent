@@ -6,13 +6,13 @@ describe("toResponsesCompactInputItem", () => {
   it("normalizes to a single call_id key when both callId and call_id are present", () => {
     const result = toResponsesCompactInputItem({
       type: "function_call",
-      callId: "call-1",
-      call_id: "call-1",
+      callId: "call-callId",
+      call_id: "call-call_id",
       name: "some_tool",
       arguments: "{}",
     }) as unknown as Record<string, unknown>;
 
-    expect(result["call_id"]).toBe("call-1");
+    expect(result["call_id"]).toBe("call-callId");
     expect("callId" in result).toBe(false);
   });
 
