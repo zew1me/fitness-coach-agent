@@ -76,17 +76,19 @@ class RecalibrationResult:
     explanation: str
 
 
-def recalibration_cadence_days(confidence: str) -> int:
+def recalibration_cadence_days(confidence: Literal["low", "medium", "high"]) -> int:
     """Minimum days before proposing another candidate at this confidence tier."""
     return LOW_CONFIDENCE_REASK_DAYS if confidence == "low" else MEDIUM_HIGH_CONFIDENCE_REASK_DAYS
 
 
-def next_recalibration_eligible_date(confidence: str, generated_at: date) -> date:
+def next_recalibration_eligible_date(
+    confidence: Literal["low", "medium", "high"], generated_at: date
+) -> date:
     return generated_at + timedelta(days=recalibration_cadence_days(confidence))
 
 
 def recalibration_cadence_gate(
-    confidence: str,
+    confidence: Literal["low", "medium", "high"],
     last_generated_at: date | None,
     *,
     today: date | None = None,

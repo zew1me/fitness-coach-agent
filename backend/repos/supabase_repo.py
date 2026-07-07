@@ -9,6 +9,7 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 from backend.config import settings
 from backend.models.athlete import (
     AthleteProfile,
+    RecalibrationCandidateStatus,
     RecoveryLog,
     ScheduleAvailability,
     ScheduleOverride,
@@ -396,7 +397,7 @@ class SupabaseRepository:
         *,
         user_id: str,
         candidate_id: str,
-        status: str,
+        status: RecalibrationCandidateStatus,
         manual_threshold: SportThreshold | None = None,
     ) -> ThresholdRecalibrationCandidate:
         client = self._require_client()
