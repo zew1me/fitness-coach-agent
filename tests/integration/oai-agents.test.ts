@@ -19,6 +19,7 @@ import {
   type AgentInputItem,
   type SessionHistoryRewriteArgs,
   type SessionHistoryRewriteAwareSession,
+  type Tool,
 } from "@openai/agents";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
@@ -26,9 +27,13 @@ import { z } from "zod";
 
 import { DurableCompactionSession } from "../../lib/agent/durable-compaction-session";
 import {
+  type SpecialistReport,
   specialistReportSchema,
   specialistReportWireSchema,
 } from "../../lib/agent/orchestration-types";
+import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
+import { coachToolDefinitions } from "../../lib/agent/tools";
+import { athleteContextFixture } from "../web/agent-fixtures";
 
 const MODEL = "gpt-5-mini-2025-08-07";
 
@@ -40,6 +45,131 @@ const MINIMAL_USER_INPUT = [
     ],
   },
 ];
+
+const RECALIBRATION_CASES = [
+  {
+    name: "sunny day candidate",
+    athleteMessage:
+      "Yes, I am fine with you re-checking my thresholds against recent hard efforts. Please recalibrate my thresholds from my latest hard 5K effort.",
+    toolResult: {
+      results: [
+        {
+          sport: "running",
+          status: "candidate_queued",
+          confidence: "high",
+          explanation:
+            "LT2 pace 260s/km -> 244s/km from an activity on 2026-07-04 (rpe 9)",
+          evidence_activity_id: "run-hard-5k",
+          candidate_id: "candidate-running-1",
+        },
+      ],
+    },
+  },
+  {
+    name: "insufficient evidence",
+    athleteMessage:
+      "Yes, I am fine with you re-checking my thresholds against recent hard efforts. Recheck my thresholds, but I only have easy aerobic runs recently.",
+    toolResult: {
+      results: [
+        {
+          sport: "running",
+          status: "insufficient_evidence",
+          confidence: null,
+          explanation:
+            "No recent running activity in the last 90 days looks like a hard enough effort to recalibrate from.",
+          evidence_activity_id: null,
+        },
+      ],
+    },
+  },
+  {
+    name: "multi-sport candidates",
+    athleteMessage:
+      "Yes, I am fine with you re-checking my thresholds against recent hard efforts. Recalibrate both my run threshold and bike FTP from recent hard tests.",
+    toolResult: {
+      results: [
+        {
+          sport: "cycling",
+          status: "candidate_queued",
+          confidence: "medium",
+          explanation:
+            "FTP 250W -> 266W from an activity on 2026-07-03 (rpe 8)",
+          evidence_activity_id: "bike-20m-test",
+          candidate_id: "candidate-cycling-1",
+        },
+        {
+          sport: "running",
+          status: "candidate_queued",
+          confidence: "high",
+          explanation:
+            "LT2 pace 260s/km -> 244s/km from an activity on 2026-07-04 (rpe 9)",
+          evidence_activity_id: "run-hard-5k",
+          candidate_id: "candidate-running-1",
+        },
+      ],
+    },
+  },
+  {
+    name: "protective edge statuses",
+    athleteMessage:
+      "Yes, I am fine with you re-checking my thresholds against recent hard efforts. Recalibrate my thresholds even though I manually confirmed one recently.",
+    toolResult: {
+      results: [
+        {
+          sport: "running",
+          status: "already_user_confirmed",
+          confidence: null,
+          explanation:
+            "Current threshold was manually confirmed by the athlete; recalibration will not override it.",
+          evidence_activity_id: null,
+        },
+        {
+          sport: "cycling",
+          status: "cadence_gated",
+          confidence: "high",
+          explanation:
+            "FTP 250W -> 266W from an activity on 2026-07-03 (rpe 9)",
+          evidence_activity_id: "bike-20m-test",
+          next_eligible_date: "2026-07-31",
+        },
+      ],
+    },
+  },
+] as const;
+
+const RECALIBRATION_CONTEXT = {
+  ...athleteContextFixture,
+  profile: {
+    ...athleteContextFixture.profile,
+    coaching_state: "active",
+  },
+} as const;
+
+const RECALIBRATION_SPECIALIST_REPORTS: SpecialistReport[] = [
+  {
+    confidence: "high",
+    proposedUpdates: [
+      {
+        input: "{}",
+        rationale: "Athlete asked to re-check thresholds from recent efforts.",
+        toolName: "recalibrate_thresholds",
+      },
+    ],
+    risks: [],
+    role: "workout",
+    summary: "Athlete asked to recalibrate thresholds.",
+  },
+];
+
+function recalibrationToolWithResult(result: unknown): Tool {
+  const definition = coachToolDefinitions.recalibrate_thresholds;
+  return tool({
+    name: "recalibrate_thresholds",
+    description: definition.description,
+    parameters: definition.inputSchema,
+    execute: () => Promise.resolve(JSON.stringify(result)),
+  });
+}
 
 class InMemoryCompactionSession implements SessionHistoryRewriteAwareSession {
   constructor(private items: AgentInputItem[]) {}
@@ -105,6 +235,52 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       `Schema parse failed: ${JSON.stringify(parsed)}`,
     ).toBe(true);
   }, 60_000);
+
+  it.each(RECALIBRATION_CASES)(
+    "handles recalibrate_thresholds tool result: $name",
+    async ({ athleteMessage, toolResult }) => {
+      const agent = new Agent({
+        name: "Lead coach",
+        instructions: buildLeadCoachPrompt(
+          RECALIBRATION_CONTEXT,
+          RECALIBRATION_SPECIALIST_REPORTS,
+        ),
+        model: MODEL,
+        tools: [recalibrationToolWithResult(toolResult)],
+      });
+
+      const result = await run(
+        agent,
+        [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: athleteMessage }],
+          },
+        ],
+        { maxTurns: 3 },
+      ).catch((error: unknown) => {
+        throw new Error(
+          `Recalibration tool run threw — full error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+
+      expect(
+        result.history.some(
+          (item) =>
+            "type" in item &&
+            item.type === "function_call" &&
+            item.name === "recalibrate_thresholds",
+        ),
+        "Expected the model to call recalibrate_thresholds",
+      ).toBe(true);
+      expect(result.finalOutput).toEqual(expect.any(String));
+      const finalOutput = result.finalOutput;
+      expect(typeof finalOutput).toBe("string");
+      expect(finalOutput?.length).toBeGreaterThan(0);
+      expect(finalOutput).not.toMatch(/auto-apply|automatically apply/i);
+    },
+    60_000,
+  );
 
   it("streams text from the lead coach without a 400", async () => {
     const agent = new Agent({
