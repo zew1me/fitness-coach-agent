@@ -154,12 +154,12 @@ def _extract_gpx_extension(
 
     if tag == "TrackPointExtension":
         _extract_gpx_trackpoint_extension(ext, hr_values, cadence_values, rr_intervals)
-    else:
-        _extract_gpx_simple_extension(tag, ext.text, hr_values, power_values, rr_intervals)
+        return
+
+    _extract_gpx_simple_extension(tag, ext.text, hr_values, power_values, rr_intervals)
 
     for child in ext:
-        if _local_name(child.tag) != "TrackPointExtension":
-            _extract_gpx_extension(child, hr_values, power_values, cadence_values, rr_intervals)
+        _extract_gpx_extension(child, hr_values, power_values, cadence_values, rr_intervals)
 
 
 def _extract_gpx_trackpoint_extension(
@@ -212,7 +212,7 @@ class _FitSessionSummary:
         self.sport = str(value).lower()
 
     def set_start_time(self, value: Any) -> None:
-        if isinstance(value, datetime):
+        if isinstance(value, datetime) and (self.start_time is None or value < self.start_time):
             self.start_time = value
 
     def add_elapsed_time(self, value: Any) -> None:
@@ -223,11 +223,11 @@ class _FitSessionSummary:
         self.timer_total += float(value)
         self.have_timer = True
 
-    def set_distance(self, value: Any) -> None:
-        self.distance = float(value)
+    def add_distance(self, value: Any) -> None:
+        self.distance = (self.distance or 0.0) + float(value)
 
-    def set_elevation_gain(self, value: Any) -> None:
-        self.elevation_gain = float(value)
+    def add_elevation_gain(self, value: Any) -> None:
+        self.elevation_gain = (self.elevation_gain or 0.0) + float(value)
 
     def set_avg_hr(self, value: Any) -> None:
         self.avg_hr = int(value)
@@ -249,8 +249,8 @@ _FIT_SESSION_FIELD_APPLIERS: dict[str, _FitFieldApplier] = {
     "start_time": _FitSessionSummary.set_start_time,
     "total_elapsed_time": _FitSessionSummary.add_elapsed_time,
     "total_timer_time": _FitSessionSummary.add_timer_time,
-    "total_distance": _FitSessionSummary.set_distance,
-    "total_ascent": _FitSessionSummary.set_elevation_gain,
+    "total_distance": _FitSessionSummary.add_distance,
+    "total_ascent": _FitSessionSummary.add_elevation_gain,
     "avg_heart_rate": _FitSessionSummary.set_avg_hr,
     "max_heart_rate": _FitSessionSummary.set_max_hr,
     "avg_power": _FitSessionSummary.set_avg_power,
@@ -291,7 +291,9 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:
     moving_duration_seconds = (
         int(session_summary.timer_total) if session_summary.have_timer else None
     )
-    duration = moving_duration_seconds or elapsed_duration_seconds
+    duration = (
+        moving_duration_seconds if moving_duration_seconds is not None else elapsed_duration_seconds
+    )
 
     # Collect power stream from records for NP calculation
     for record in fit.get_messages("record"):

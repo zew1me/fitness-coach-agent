@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,34 @@ def test_parse_fit_sums_durations_across_multiple_sessions(
     assert activity.moving_duration_seconds == 5400
 
 
+def test_parse_fit_sums_distance_and_ascent_across_multiple_sessions(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    first_start = datetime(2026, 7, 7, 6, 30, tzinfo=UTC)
+    second_start = datetime(2026, 7, 7, 7, 10, tzinfo=UTC)
+    _patch_fitparse["session"] = [
+        _session_message(
+            sport="running",
+            start_time=second_start,
+            total_distance=10000,
+            total_ascent=150,
+        ),
+        _session_message(
+            sport="cycling",
+            start_time=first_start,
+            total_distance=40000,
+            total_ascent=350,
+        ),
+    ]
+
+    activity = parse_fit(tmp_path / "brick.fit")
+
+    assert activity.started_at == first_start
+    assert activity.distance_meters == 50000
+    assert activity.elevation_gain_meters == 500
+
+
 def test_parse_fit_handles_missing_timer_time_falls_back_to_elapsed(
     _patch_fitparse: dict[str, list[_FakeMessage]],
     tmp_path: Path,
@@ -124,3 +153,22 @@ def test_parse_fit_handles_missing_timer_time_falls_back_to_elapsed(
     assert activity.duration_seconds == 1200
     assert activity.elapsed_duration_seconds == 1200
     assert activity.moving_duration_seconds is None
+
+
+def test_parse_fit_preserves_zero_moving_duration(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    _patch_fitparse["session"] = [
+        _session_message(
+            sport="cycling",
+            total_elapsed_time=1200,
+            total_timer_time=0,
+        ),
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert activity.duration_seconds == 0
+    assert activity.elapsed_duration_seconds == 1200
+    assert activity.moving_duration_seconds == 0
