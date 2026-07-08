@@ -15,6 +15,14 @@ class IntervalsAthlete(BaseModel):
     id: str
     name: str | None = None
 
+    @field_validator("id")
+    @classmethod
+    def non_empty_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Intervals athlete id must not be empty")
+        return stripped
+
 
 class IntervalsTokenResponse(BaseModel):
     access_token: str

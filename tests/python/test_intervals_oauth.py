@@ -11,6 +11,7 @@ import api.index as api_index
 from backend.models.auth import UserContext
 from backend.models.intervals import IntervalsConnectionCreate, IntervalsConnectionRecord
 from backend.services.intervals import (
+    IntervalsOAuthExchangeError,
     IntervalsOAuthService,
     IntervalsStateError,
     TokenCipher,
@@ -188,6 +189,32 @@ async def test_exchange_code_stores_encrypted_token_and_returns_connection_statu
     assert status.intervals_athlete_name == "Nigel"
     assert repo.rows[0].access_token_ciphertext != "intervals-access-token"
     assert "intervals-access-token" not in repo.rows[0].model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_exchange_code_rejects_missing_athlete_id() -> None:
+    repo = InMemoryIntervalsRepository()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "token_type": "Bearer",
+                "access_token": "intervals-access-token",
+                "scope": "ACTIVITY:READ",
+                "athlete": {"id": "", "name": "Nigel"},
+            },
+        )
+
+    service = _service(repo, transport=httpx.MockTransport(handler))
+    state = service.create_state(user_id="coach-user-1")
+
+    with pytest.raises(
+        IntervalsOAuthExchangeError,
+        match="Intervals.icu authorization could not be completed",
+    ):
+        await service.exchange_code_for_connection(code="intervals-code", state=state)
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio
