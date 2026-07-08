@@ -298,7 +298,7 @@ export const coachToolDefinitions = {
     adjustPlanInputSchema,
   ),
   recalibrate_thresholds: defineTool(
-    "Re-estimate thresholds from recent performance evidence.",
+    "Re-estimate thresholds from recent activities, non-overwriting.",
     userInputSchema,
   ),
 } as const;

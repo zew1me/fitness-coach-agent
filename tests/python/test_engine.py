@@ -120,6 +120,37 @@ def test_parse_gpx_extracts_rr_interval_extensions(tmp_path: Path) -> None:
     assert activity.hrv_summary["quality"] == "insufficient_rr_intervals"
 
 
+def test_parse_gpx_trackpoint_extension_values_are_not_duplicated(tmp_path: Path) -> None:
+    gpx_file = tmp_path / "run.gpx"
+    gpx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test"
+     xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0">
+      <ele>10</ele><time>2026-04-19T10:00:00Z</time>
+      <extensions>
+        <gpxtpx:TrackPointExtension>
+          <gpxtpx:hr>140</gpxtpx:hr>
+          <gpxtpx:cad>85</gpxtpx:cad>
+          <gpxtpx:rr>820</gpxtpx:rr>
+        </gpxtpx:TrackPointExtension>
+      </extensions>
+    </trkpt>
+  </trkseg></trk>
+</gpx>""",
+        encoding="utf-8",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert activity.avg_hr_bpm == 140
+    assert activity.max_hr_bpm == 140
+    assert activity.avg_cadence_rpm == 85
+    assert activity.rr_intervals_ms == [820]
+
+
 def test_parse_tcx_extracts_activity_and_rr_intervals(tmp_path: Path) -> None:
     tcx_file = tmp_path / "run.tcx"
     tcx_file.write_text(
