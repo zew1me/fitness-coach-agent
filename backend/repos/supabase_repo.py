@@ -9,6 +9,7 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 from backend.config import settings
 from backend.models.athlete import (
     AthleteProfile,
+    RecalibrationCandidateStatus,
     RecoveryLog,
     ScheduleAvailability,
     ScheduleOverride,
@@ -362,16 +363,12 @@ class SupabaseRepository:
         self, candidate: ThresholdRecalibrationCandidate
     ) -> ThresholdRecalibrationCandidate:
         client = self._require_client()
-        client.table("threshold_recalibration_candidates").update(
-            {"status": "superseded", "decided_at": datetime.now(UTC).isoformat()}
-        ).eq("user_id", candidate.user_id).eq("sport", candidate.sport).eq(
-            "status", "pending"
-        ).execute()
-
         payload = candidate.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = client.table("threshold_recalibration_candidates").insert(payload).execute()
+        response = client.rpc(
+            "create_recalibration_candidate_atomic", {"p_candidate": payload}
+        ).execute()
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted recalibration candidate row.")
@@ -396,7 +393,7 @@ class SupabaseRepository:
         *,
         user_id: str,
         candidate_id: str,
-        status: str,
+        status: RecalibrationCandidateStatus,
         manual_threshold: SportThreshold | None = None,
     ) -> ThresholdRecalibrationCandidate:
         client = self._require_client()
@@ -411,6 +408,7 @@ class SupabaseRepository:
             .update(payload)
             .eq("id", candidate_id)
             .eq("user_id", user_id)
+            .eq("status", "pending")
             .execute()
         )
         rows = response.data or []

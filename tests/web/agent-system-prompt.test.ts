@@ -246,6 +246,15 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("Workout specialist suggests moving intervals");
     expect(prompt).toContain("Keep intensity conservative");
     expect(prompt).toContain("user-facing response");
+    expect(prompt).toContain(
+      "candidate_queued means a threshold proposal is awaiting athlete review",
+    );
+    expect(prompt).toContain(
+      "insufficient_evidence, no_change, already_user_confirmed, and cadence_gated mean no threshold was applied",
+    );
+    expect(prompt).toContain(
+      "Do not offer to auto-apply or schedule future threshold changes",
+    );
   });
 
   it("marks coaching-memory follow-ups as untrusted data", () => {
