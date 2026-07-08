@@ -642,6 +642,8 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     sensitive_filename = "Secret Race Notes\nInjected.gpx"
     captured: dict[str, str] = {}
 
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
         captured["user_id"] = user_id
         captured["object_key"] = object_key
@@ -700,10 +702,132 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_file_recovers_key_from_public_url(
+    auth_service_fixture, monkeypatch
+) -> None:
+    # Regression for issue #325: the coach reliably transcribes the distinctive
+    # public_url but corrupts the long opaque object_key (splicing the user-UUID
+    # head onto the file-UUID tail). The endpoint must derive the authoritative
+    # key from public_url so both the R2 download and stored source_file_key are
+    # correct — otherwise every future re-read of the activity 403s.
+    correct_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
+    mangled_key = "users/athlete-1/6679c232edad.gpx"
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+    monkeypatch.setattr("backend.services.r2.settings.r2_public_base_url", "https://pub-abc.r2.dev")
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        captured["object_key"] = object_key
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/gpx+xml",
+                "filename": "run.gpx",
+                "object_key": mangled_key,
+                "public_url": f"https://pub-abc.r2.dev/{correct_key}",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    # The download used the recovered key, not the mangled one the model sent.
+    assert captured["object_key"] == correct_key
+    assert body["activity"]["source_file_key"] == correct_key
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_file_persists_activity(auth_service_fixture, monkeypatch) -> None:
+    object_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_activity: Activity | None = None
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.created_activity = activity
+            return activity.model_copy(update={"id": "activity-1"})
+
+    activity_repo = ActivityRepository()
+    monkeypatch.setattr(api_index, "repo", activity_repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/gpx+xml",
+                "filename": "run.gpx",
+                "object_key": object_key,
+                "public_url": "https://cdn.example.com/run.gpx",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "saved"
+    assert body["activity"]["id"] == "activity-1"
+    assert activity_repo.created_activity is not None
+    assert activity_repo.created_activity.user_id == "athlete-1"
+    assert activity_repo.created_activity.source_file_key == object_key
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_file_parses_tcx_with_hrv_metadata(
     auth_service_fixture, monkeypatch
 ) -> None:
     object_key = "users/athlete-1/chat-attachment/2024/01/01/run.tcx"
+
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
         return b"""<?xml version="1.0" encoding="UTF-8"?>
