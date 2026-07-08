@@ -276,6 +276,30 @@ async def test_callback_denial_redirects_to_profile_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_callback_redirects_normalize_base_url_trailing_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "api.index.settings.app_base_url",
+        "https://coach.nigels.dev/",
+    )
+    original_service = api_index.intervals_service
+    api_index.intervals_service = _service()
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/api/intervals/callback?error=access_denied",
+                follow_redirects=False,
+            )
+    finally:
+        api_index.intervals_service = original_service
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://coach.nigels.dev/profile?intervals=error"
+
+
+@pytest.mark.asyncio
 async def test_status_and_disconnect_are_user_scoped() -> None:
     repo = InMemoryIntervalsRepository()
     repo.replace_connection(

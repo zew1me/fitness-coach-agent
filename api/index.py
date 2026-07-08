@@ -359,7 +359,8 @@ async def intervals_callback(
     error: str | None = None,
     state: str | None = None,
 ) -> RedirectResponse:
-    profile_error_url = f"{settings.base_url}/profile?intervals=error"
+    profile_base_url = f"{settings.base_url.rstrip('/')}/profile"
+    profile_error_url = f"{profile_base_url}?intervals=error"
     if error is not None:
         logger.info("intervals callback denied error=%s", error)
         return RedirectResponse(profile_error_url, status_code=302)
@@ -379,7 +380,7 @@ async def intervals_callback(
         return RedirectResponse(profile_error_url, status_code=302)
 
     logger.info("intervals callback completed")
-    return RedirectResponse(f"{settings.base_url}/profile?intervals=connected", status_code=302)
+    return RedirectResponse(f"{profile_base_url}?intervals=connected", status_code=302)
 
 
 @app.get("/api/intervals/status")
