@@ -1171,9 +1171,13 @@ async def process_uploaded_file_endpoint(
         Path(payload.filename).suffix.lower()[:16] or "none",
         payload.content_type,
     )
+    object_key = r2_service.resolve_object_key(
+        object_key=payload.object_key,
+        public_url=payload.public_url,
+    )
     file_bytes = await r2_service.download_file_bytes(
         user_id=user_context.user_id,
-        object_key=payload.object_key,
+        object_key=object_key,
     )
     parsed = _parse_uploaded_activity_file(payload.filename, payload.content_type, file_bytes)
     activity = Activity(
@@ -1189,7 +1193,7 @@ async def process_uploaded_file_endpoint(
         avg_power_watts=parsed.avg_power_watts,
         avg_cadence_rpm=parsed.avg_cadence_rpm,
         source=_activity_source_for_filename(payload.filename),
-        source_file_key=payload.object_key,
+        source_file_key=object_key,
         raw_extraction={
             "content_type": payload.content_type,
             "filename": payload.filename,
