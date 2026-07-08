@@ -80,6 +80,8 @@ from backend.services.goal_service import (
 )
 from backend.services.r2 import R2Service
 
+ActivityPersistenceEndpoint = Literal["process_uploaded_file", "save_activity_from_text"]
+
 configure_logging(debug=settings.app_env == "development")
 
 _sentry_dsn = os.environ.get("SENTRY_DSN")
@@ -1169,9 +1171,13 @@ async def process_uploaded_file_endpoint(
         Path(payload.filename).suffix.lower()[:16] or "none",
         payload.content_type,
     )
+    object_key = r2_service.resolve_object_key(
+        object_key=payload.object_key,
+        public_url=payload.public_url,
+    )
     file_bytes = await r2_service.download_file_bytes(
         user_id=user_context.user_id,
-        object_key=payload.object_key,
+        object_key=object_key,
     )
     parsed = _parse_uploaded_activity_file(payload.filename, payload.content_type, file_bytes)
     activity = Activity(
@@ -1187,7 +1193,7 @@ async def process_uploaded_file_endpoint(
         avg_power_watts=parsed.avg_power_watts,
         avg_cadence_rpm=parsed.avg_cadence_rpm,
         source=_activity_source_for_filename(payload.filename),
-        source_file_key=payload.object_key,
+        source_file_key=object_key,
         raw_extraction={
             "content_type": payload.content_type,
             "filename": payload.filename,
@@ -1206,7 +1212,9 @@ async def process_uploaded_file_endpoint(
         parsed.activity_date,
         parsed.distance_meters or 0,
     )
-    return {"activity": activity.model_dump(mode="json")}
+    return await _persist_extracted_activity(
+        user_context.user_id, activity, calling_endpoint="process_uploaded_file"
+    )
 
 
 def _build_fitness_metrics(
@@ -1567,10 +1575,17 @@ async def save_activity_from_text(
             "raw_extraction": result.raw_extraction,
             "status": "needs_clarification",
         }
-    return await _persist_extracted_activity(user_context.user_id, result.activity)
+    return await _persist_extracted_activity(
+        user_context.user_id, result.activity, calling_endpoint="save_activity_from_text"
+    )
 
 
-async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapping[str, object]:
+async def _persist_extracted_activity(
+    user_id: str,
+    extracted: Activity,
+    *,
+    calling_endpoint: ActivityPersistenceEndpoint,
+) -> Mapping[str, object]:
     try:
         activity = await _activity_repo_call(
             repo.create_activity(extracted),
@@ -1580,7 +1595,7 @@ async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapp
     except RuntimeError as exc:
         logger.exception("create_activity failed for user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
-    logger.info("save_activity_from_text user_id=%s status=saved", user_id)
+    logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}
     if matched is not None:

@@ -123,6 +123,37 @@ class R2Service:
             return None
         return f"{base.rstrip('/')}/{object_key}"
 
+    def resolve_object_key(self, *, object_key: str, public_url: str | None) -> str:
+        """Return the authoritative object key for a referenced upload.
+
+        The coach passes both an ``object_key`` and a ``public_url`` back into the
+        upload-processing tool. The model reliably transcribes the distinctive
+        ``public_url`` but corrupts the long opaque ``object_key`` (splicing the
+        user-UUID head onto the file-UUID tail), which then fails the per-user
+        scope check with a 403. When we can derive the key from ``public_url``
+        deterministically, that value wins; otherwise we fall back to the
+        model-supplied ``object_key``.
+        """
+        derived = self._object_key_from_public_url(public_url)
+        return derived or object_key
+
+    def _object_key_from_public_url(self, public_url: str | None) -> str | None:
+        """Invert ``_build_public_url``: recover the object key from a public URL.
+
+        Only URLs under the configured R2 base are trusted — that distinctive
+        prefix is what makes the derivation safe. Anything else (base unset, an
+        unrelated host, a model-hallucinated URL) returns ``None`` so the caller
+        falls back to the supplied ``object_key``.
+        """
+        url = self._configured_value(public_url)
+        base = self._configured_value(settings.r2_public_base_url)
+        if url is None or base is None:
+            return None
+        prefix = f"{base.rstrip('/')}/"
+        if not url.startswith(prefix):
+            return None
+        return url[len(prefix) :].lstrip("/") or None
+
     def _object_key_log_ref(self, object_key: str) -> str:
         return sha256(object_key.encode("utf-8")).hexdigest()[:12]
 

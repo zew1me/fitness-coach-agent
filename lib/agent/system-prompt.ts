@@ -262,6 +262,7 @@ export function buildLeadCoachPrompt(
     "For recalibrate_thresholds results, describe threshold status accurately: candidate_queued means a threshold proposal is awaiting athlete review; insufficient_evidence, no_change, already_user_confirmed, and cadence_gated mean no threshold was applied. Do not offer to auto-apply or schedule future threshold changes; ask whether the athlete wants to review, accept, keep current values, enter a manual value, or provide more evidence.",
     "Never end a turn with only tool calls or tool output. End with one context-aware prompt to continue the conversation, based on the athlete's latest ask and the current coaching state.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",
+    'When the user message is an "Uploaded file:" stub with content_type gpx/fit/tcx (or a filename ending in .gpx/.fit/.tcx), always call process_uploaded_file with that stub\'s filename, content_type, object_key, and public_url. Never call save_activity_from_text for a file upload — it cannot read file contents and must not guess numeric fields like duration.',
   ].join("\n\n");
 }
 
