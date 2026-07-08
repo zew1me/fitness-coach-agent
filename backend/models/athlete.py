@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field, field_validator
 # "user" = athlete typed it; "file" = extracted from GPX/FIT/screenshot;
 # "estimated" = derived by the system from workout patterns.
 ThresholdSource = Literal["user", "file", "estimated"]
+RecalibrationCandidateStatus = Literal[
+    "pending", "accepted", "kept_current", "manual_entered", "superseded"
+]
 
 _FALSY_STRINGS = frozenset({"false", "0", "no", "off", ""})
 _TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
@@ -168,6 +171,23 @@ class SportThreshold(BaseModel):
             measured_at=self.effective_from,
             notes=self.estimation_source,
         )
+
+
+class ThresholdRecalibrationCandidate(BaseModel):
+    id: str | None = None
+    user_id: str
+    sport: str
+    status: RecalibrationCandidateStatus = "pending"
+    confidence: Literal["low", "medium", "high"]
+    evidence_activity_id: str | None = None
+    evidence_reason: str | None = None
+    explanation: str
+    candidate_threshold: SportThreshold
+    manual_threshold: SportThreshold | None = None
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    decided_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class RecoveryLog(BaseModel):

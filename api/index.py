@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -39,6 +39,7 @@ from backend.models.athlete import (
     ScheduleDayAvailability,
     ScheduleOverride,
     SportThreshold,
+    ThresholdRecalibrationCandidate,
 )
 from backend.models.auth import (
     BrowserSessionRequest,
@@ -770,6 +771,22 @@ class RecalibrateThresholdsRequest(BaseModel):
     pass
 
 
+class ManualThresholdInput(BaseModel):
+    lt1_power_watts: int | None = None
+    lt1_pace_sec_per_km: int | None = None
+    lt1_hr_bpm: int | None = None
+    lt2_power_watts: int | None = None
+    lt2_pace_sec_per_km: int | None = None
+    lt2_hr_bpm: int | None = None
+    css_sec_per_100: int | None = None
+
+
+class RecalibrationCandidateDecisionRequest(BaseModel):
+    candidate_id: str
+    decision: Literal["accept_candidate", "keep_current", "manual_threshold"]
+    manual_threshold: ManualThresholdInput | None = None
+
+
 @app.post("/api/engine/recalibrate-thresholds")
 async def recalibrate_thresholds_endpoint(
     payload: RecalibrateThresholdsRequest,
@@ -785,6 +802,7 @@ async def recalibrate_thresholds_endpoint(
         ESTIMABLE_SPORTS,
         RECALIBRATION_LOOKBACK_DAYS,
         evaluate_all,
+        recalibration_cadence_gate,
     )
 
     user_id = user_context.user_id
@@ -808,22 +826,80 @@ async def recalibrate_thresholds_endpoint(
         )
 
     results = evaluate_all(activities_by_sport, current_by_sport, user_id)
-
+    response_results: list[dict[str, object]] = []
     for result in results:
         if result.status == "recalibrated" and result.candidate is not None:
-            saved = await _activity_repo_call(
-                repo.upsert_sport_threshold(result.candidate),
-                detail="Failed to save recalibrated threshold.",
+            candidate_confidence = cast(
+                Literal["low", "medium", "high"], result.confidence or "low"
+            )
+            latest_candidate = await _activity_repo_call(
+                repo.get_latest_recalibration_candidate(user_id, result.sport),
+                detail="Failed to load recalibration candidate history.",
                 log_message=(
-                    f"upsert_sport_threshold failed for user_id={user_id} sport={result.sport}"
+                    "get_latest_recalibration_candidate failed for "
+                    f"user_id={user_id} sport={result.sport}"
+                ),
+            )
+            next_eligible_date = recalibration_cadence_gate(
+                candidate_confidence,
+                latest_candidate.generated_at.date() if latest_candidate else None,
+            )
+            if next_eligible_date is not None:
+                logger.info(
+                    "threshold recalibration cadence gated user_id=%s sport=%s confidence=%s "
+                    "next_eligible_date=%s",
+                    user_id,
+                    result.sport,
+                    result.confidence,
+                    next_eligible_date,
+                )
+                response_results.append(
+                    {
+                        "sport": result.sport,
+                        "status": "cadence_gated",
+                        "confidence": result.confidence,
+                        "explanation": result.explanation,
+                        "evidence_activity_id": result.evidence_activity_id,
+                        "next_eligible_date": next_eligible_date.isoformat(),
+                    }
+                )
+                continue
+
+            candidate = await _activity_repo_call(
+                repo.create_recalibration_candidate(
+                    ThresholdRecalibrationCandidate(
+                        user_id=user_id,
+                        sport=result.sport,
+                        confidence=candidate_confidence,
+                        evidence_activity_id=result.evidence_activity_id,
+                        evidence_reason=result.evidence_reason,
+                        explanation=result.explanation,
+                        candidate_threshold=result.candidate,
+                    )
+                ),
+                detail="Failed to queue recalibration candidate.",
+                log_message=(
+                    f"create_recalibration_candidate failed for user_id={user_id} "
+                    f"sport={result.sport}"
                 ),
             )
             logger.info(
-                "threshold recalibrated user_id=%s sport=%s confidence=%s method=%s",
+                "threshold recalibration candidate queued user_id=%s sport=%s confidence=%s "
+                "candidate_id=%s",
                 user_id,
                 result.sport,
                 result.confidence,
-                saved.estimation_method,
+                candidate.id,
+            )
+            response_results.append(
+                {
+                    "sport": result.sport,
+                    "status": "candidate_queued",
+                    "confidence": result.confidence,
+                    "explanation": result.explanation,
+                    "evidence_activity_id": result.evidence_activity_id,
+                    "candidate_id": candidate.id,
+                }
             )
         else:
             logger.info(
@@ -832,18 +908,143 @@ async def recalibrate_thresholds_endpoint(
                 result.sport,
                 result.status,
             )
+            response_results.append(
+                {
+                    "sport": result.sport,
+                    "status": result.status,
+                    "confidence": result.confidence,
+                    "explanation": result.explanation,
+                    "evidence_activity_id": result.evidence_activity_id,
+                }
+            )
 
+    return {"results": response_results}
+
+
+def _manual_threshold_from_candidate(
+    candidate: ThresholdRecalibrationCandidate,
+    manual_threshold: ManualThresholdInput,
+    *,
+    today: date,
+) -> SportThreshold:
+    from backend.engine.zones import compute_zones
+
+    updates = manual_threshold.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="manual_threshold must include a value.")
+
+    threshold = candidate.candidate_threshold.model_copy(
+        update={
+            **updates,
+            "confidence": "high",
+            "effective_from": today,
+            "estimation_method": "manual",
+            "estimation_source": f"manual_threshold_decision:{candidate.id}",
+            "id": None,
+            "source": "user",
+            "superseded_at": None,
+            "user_id": candidate.user_id,
+            "sport": candidate.sport,
+        }
+    )
+    threshold.zones = [
+        z.to_dict()
+        for z in compute_zones(
+            threshold.sport,
+            ftp_watts=threshold.lt2_power_watts,
+            lt1_power_watts=threshold.lt1_power_watts,
+            lt2_pace_sec_km=threshold.lt2_pace_sec_per_km,
+            lt1_pace_sec_km=threshold.lt1_pace_sec_per_km,
+            max_hr=None,
+            lt2_hr=threshold.lt2_hr_bpm,
+            lt1_hr=threshold.lt1_hr_bpm,
+        )
+    ]
+    return threshold
+
+
+@app.post("/api/engine/recalibration-candidate-decision")
+async def decide_recalibration_candidate(
+    payload: RecalibrationCandidateDecisionRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    candidate = await _activity_repo_call(
+        repo.get_recalibration_candidate(user_id, payload.candidate_id),
+        detail="Failed to load recalibration candidate.",
+        log_message=(
+            f"get_recalibration_candidate failed for user_id={user_id} "
+            f"candidate_id={payload.candidate_id}"
+        ),
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Recalibration candidate not found.")
+    if candidate.status != "pending":
+        raise HTTPException(status_code=409, detail="Recalibration candidate is already decided.")
+
+    saved_threshold: SportThreshold | None = None
+    if payload.decision == "accept_candidate":
+        threshold = candidate.candidate_threshold.model_copy(
+            update={"id": None, "superseded_at": None, "user_id": user_id}
+        )
+        saved_threshold = await _activity_repo_call(
+            repo.upsert_sport_threshold(threshold),
+            detail="Failed to save accepted recalibration candidate.",
+            log_message=(
+                f"upsert_sport_threshold failed for accepted candidate user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+        status = "accepted"
+    elif payload.decision == "keep_current":
+        status = "kept_current"
+    else:
+        if payload.manual_threshold is None:
+            raise HTTPException(status_code=400, detail="manual_threshold is required.")
+        manual = _manual_threshold_from_candidate(
+            candidate,
+            payload.manual_threshold,
+            today=date.today(),
+        )
+        saved_threshold = await _activity_repo_call(
+            repo.upsert_sport_threshold(manual),
+            detail="Failed to save manual threshold.",
+            log_message=(
+                f"upsert_sport_threshold failed for manual threshold user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+        status = "manual_entered"
+
+    try:
+        decided = await _activity_repo_call(
+            repo.decide_recalibration_candidate(
+                user_id=user_id,
+                candidate_id=payload.candidate_id,
+                status=status,
+                manual_threshold=saved_threshold if status == "manual_entered" else None,
+            ),
+            detail="Failed to record recalibration candidate decision.",
+            log_message=(
+                f"decide_recalibration_candidate failed for user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+    except RecordNotFoundError as exc:
+        # We just confirmed status == "pending" above, so a missing row here means
+        # a concurrent request already decided this candidate first.
+        raise HTTPException(
+            status_code=409, detail="Recalibration candidate is already decided."
+        ) from exc
+    logger.info(
+        "threshold recalibration candidate decided user_id=%s candidate_id=%s status=%s",
+        user_id,
+        payload.candidate_id,
+        status,
+    )
     return {
-        "results": [
-            {
-                "sport": r.sport,
-                "status": r.status,
-                "confidence": r.confidence,
-                "explanation": r.explanation,
-                "evidence_activity_id": r.evidence_activity_id,
-            }
-            for r in results
-        ]
+        "candidate": decided.model_dump(mode="json"),
+        "threshold": saved_threshold.model_dump(mode="json") if saved_threshold else None,
     }
 
 
