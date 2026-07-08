@@ -57,6 +57,7 @@ from backend.models.chat import (
 )
 from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
+from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -76,6 +77,12 @@ from backend.services.goal_service import (
     GoalService,
     InvalidGoalPayloadError,
     UnknownGoalActionError,
+)
+from backend.services.intervals import (
+    IntervalsConfigurationError,
+    IntervalsOAuthExchangeError,
+    IntervalsOAuthService,
+    IntervalsStateError,
 )
 from backend.services.r2 import R2Service
 
@@ -128,6 +135,7 @@ app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
 auth_service = AuthService()
 chat_service = ChatService()
 goal_service = GoalService()
+intervals_service = IntervalsOAuthService()
 repo = SupabaseRepository()
 r2_service = R2Service()
 
@@ -326,6 +334,71 @@ async def oauth_browser_token(
     else:
         logger.debug("browser token issued user_id=%s", browser_session.user_id)
         return token
+
+
+# ── Intervals.icu OAuth ───────────────────────────────────────
+
+
+@app.post("/api/intervals/authorize")
+async def intervals_authorize(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        response = intervals_service.build_authorization_url(user_context.user_id)
+    except IntervalsConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response.model_dump(mode="json")
+
+
+@app.get("/api/intervals/callback")
+async def intervals_callback(
+    code: str | None = None,
+    error: str | None = None,
+    state: str | None = None,
+) -> RedirectResponse:
+    profile_error_url = f"{settings.base_url}/profile?intervals=error"
+    if error is not None:
+        logger.info("intervals callback denied error=%s", error)
+        return RedirectResponse(profile_error_url, status_code=302)
+    if not code or not state:
+        logger.warning("intervals callback missing required parameters")
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    try:
+        await intervals_service.exchange_code_for_connection(code=code, state=state)
+    except (
+        IntervalsConfigurationError,
+        IntervalsOAuthExchangeError,
+        IntervalsRepositoryNotConfiguredError,
+        IntervalsStateError,
+    ) as exc:
+        logger.warning("intervals callback failed error_type=%s", type(exc).__name__)
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    logger.info("intervals callback completed")
+    return RedirectResponse(f"{settings.base_url}/profile?intervals=connected", status_code=302)
+
+
+@app.get("/api/intervals/status")
+async def intervals_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = intervals_service.get_status(user_context.user_id)
+    except IntervalsRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
+
+
+@app.delete("/api/intervals/connection")
+async def intervals_disconnect(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = intervals_service.disconnect(user_context.user_id)
+    except IntervalsRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
 
 
 @app.post("/api/oauth/authorize/decision")

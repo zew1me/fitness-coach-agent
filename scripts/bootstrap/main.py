@@ -348,6 +348,17 @@ def _build_env_vars(  # noqa: PLR0913
         vars["R2_PUBLIC_BASE_URL"] = r2["public_base_url"]
     if app_base_url:
         vars["APP_BASE_URL"] = app_base_url
+    vars.update(
+        {
+            key: value
+            for key, value in {
+                "INTERVALS_CLIENT_ID": settings.intervals_client_id,
+                "INTERVALS_CLIENT_SECRET": settings.intervals_client_secret,
+                "INTERVALS_TOKEN_ENCRYPTION_SECRET": settings.intervals_token_encryption_secret,
+            }.items()
+            if value
+        }
+    )
     # These should be two distinct Client Keys — a secret server-side DSN and a public
     # browser one — so the public browser DSN can't expose the server's. Bootstrap does
     # not verify they differ; that separation is the operator's responsibility.
@@ -387,6 +398,9 @@ def _print_summary(  # noqa: PLR0913
     print(f"  R2 access key ID     : {_mask(r2['access_key_id'])}")
     print(f"  R2 public base URL   : {r2['public_base_url'] or '(not configured)'}")
     print(f"  APP_BASE_URL         : {app_base_url or '(unset — falls back to VERCEL_URL)'}")
+    print(f"  Intervals client ID  : {_present('INTERVALS_CLIENT_ID')}")
+    print(f"  Intervals secret     : {_present('INTERVALS_CLIENT_SECRET')}")
+    print(f"  Intervals token key  : {_present('INTERVALS_TOKEN_ENCRYPTION_SECRET')}")
     print(f"  Sentry server DSN    : {_present('SENTRY_DSN')}")
     print(f"  Sentry browser DSN   : {_present('NEXT_PUBLIC_SENTRY_DSN')}")
     print(f"  Sentry source maps   : {_present('SENTRY_AUTH_TOKEN')}")

@@ -14,6 +14,8 @@
 - `20260703090000_remove_pending_tool_outputs_from_model_state.sql` — one-time cleanup of alpha placeholder tool outputs from durable replay state
 - `20260703094500_remove_tool_calls_from_model_state.sql` — one-time cleanup of all alpha tool-call items from durable replay state
 - `20260703110000_plan_workout_atomic_rpc.sql` — service-role RPCs that atomically maintain plan workout/activity links
+- `20260706000000_create_training_plan_atomic.sql` — service-role RPC for atomic active training plan creation
+- `20260708000000_intervals_connections.sql` — encrypted Intervals.icu OAuth connection storage
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -333,3 +335,23 @@ one athlete while allowing different athletes to generate plans independently.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Additive migration; no backfill or data rewrite required.
+
+## 20260708000000 — Intervals.icu OAuth connections (2026-07-08)
+
+**File:** `supabase/migrations/20260708000000_intervals_connections.sql`
+
+**Change:** Creates `public.intervals_connections` for per-user Intervals.icu
+OAuth connections. Rows store the Intervals athlete id/name, granted scopes, an
+encrypted access token ciphertext, timestamps, and `revoked_at` for local
+disconnects. A partial unique index enforces one active connection per user.
+
+**Why:** Coach Arden needs to connect athlete-owned Intervals.icu accounts using
+the server-side OAuth code exchange. Access tokens must remain server-only and
+encrypted before persistence.
+
+**Security note:** Row level security is enabled and no browser-facing policies
+are created. Grants are revoked from `public`, `anon`, and `authenticated`; only
+the service-role backend receives table privileges.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Additive migration; no backfill required.

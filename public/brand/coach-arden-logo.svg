@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Coach Arden logo</title>
+  <desc id="desc">A square endurance coaching mark with a mountain ridge, track line, and CA monogram.</desc>
+  <rect width="512" height="512" rx="96" fill="#0f172a"/>
+  <path d="M88 322c48-76 91-126 130-150 33 41 64 84 94 129 26-46 55-84 87-114 16 21 31 43 45 65" fill="none" stroke="#2a9d8f" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M83 358c64 34 128 51 193 51 58 0 109-14 154-43" fill="none" stroke="#f97316" stroke-width="26" stroke-linecap="round"/>
+  <path d="M145 249c21-46 54-69 99-69 31 0 58 13 81 40" fill="none" stroke="#f8fafc" stroke-width="18" stroke-linecap="round"/>
+  <text x="256" y="340" fill="#f8fafc" font-family="Avenir Next, Segoe UI, Helvetica, Arial, sans-serif" font-size="96" font-weight="700" letter-spacing="2" text-anchor="middle">CA</text>
+</svg>

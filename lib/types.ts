@@ -31,6 +31,14 @@ export type BrowserTokenResponse = {
   user_id: string;
 };
 
+export type IntervalsConnectionStatus = {
+  connected: boolean;
+  connected_at?: string | null | undefined;
+  intervals_athlete_id?: string | null | undefined;
+  intervals_athlete_name?: string | null | undefined;
+  scopes: string[];
+};
+
 export type AthleteProfile = {
   coaching_state: string;
   dietary_restrictions?: string[];

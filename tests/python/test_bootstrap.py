@@ -706,6 +706,64 @@ def test_vercel_remove_env_vars_preserves_other_targets(monkeypatch) -> None:
     ]
 
 
+def test_vercel_upsert_marks_intervals_secrets_sensitive(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+    fake_run = _make_fake_vercel_run(
+        calls,
+        {
+            ("GET", "/v10/projects/project-id/env?teamId=team-id"): {"envs": []},
+            ("POST", "/v10/projects/project-id/env?teamId=team-id"): {},
+        },
+        capture_body=True,
+    )
+    monkeypatch.setattr("scripts.bootstrap.vercel_client.subprocess.run", fake_run)
+
+    client = VercelClient("project-id", "team-id")
+    client.upsert_env_vars(
+        ["production"],
+        {
+            "INTERVALS_CLIENT_ID": "client-123",
+            "INTERVALS_CLIENT_SECRET": "secret-123",
+            "INTERVALS_TOKEN_ENCRYPTION_SECRET": "token-key-123",
+        },
+    )
+    client.close()
+
+    assert calls == [
+        ("GET", "/v10/projects/project-id/env?teamId=team-id", None),
+        (
+            "POST",
+            "/v10/projects/project-id/env?teamId=team-id",
+            {
+                "key": "INTERVALS_CLIENT_ID",
+                "target": ["production"],
+                "type": "encrypted",
+                "value": "client-123",
+            },
+        ),
+        (
+            "POST",
+            "/v10/projects/project-id/env?teamId=team-id",
+            {
+                "key": "INTERVALS_CLIENT_SECRET",
+                "target": ["production"],
+                "type": "sensitive",
+                "value": "secret-123",
+            },
+        ),
+        (
+            "POST",
+            "/v10/projects/project-id/env?teamId=team-id",
+            {
+                "key": "INTERVALS_TOKEN_ENCRYPTION_SECRET",
+                "target": ["production"],
+                "type": "sensitive",
+                "value": "token-key-123",
+            },
+        ),
+    ]
+
+
 def test_sync_vercel_env_vars_removes_preview_app_base_url_before_upsert() -> None:
     calls: list[tuple[str, list[str], dict | list[str]]] = []
 
@@ -767,6 +825,22 @@ def test_build_env_vars_sets_only_the_sentry_dsns_that_are_configured() -> None:
     assert env_vars["NEXT_PUBLIC_SENTRY_DSN"] == "https://client@o1.ingest.sentry.io/2"
     assert "SENTRY_DSN" not in env_vars
     assert "SENTRY_AUTH_TOKEN" not in env_vars
+
+
+def test_build_env_vars_sets_intervals_oauth_vars() -> None:
+    settings = _settings(
+        intervals_client_id="client-123",
+        intervals_client_secret="secret-123",
+        intervals_token_encryption_secret="token-key-123",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["INTERVALS_CLIENT_ID"] == "client-123"
+    assert env_vars["INTERVALS_CLIENT_SECRET"] == "secret-123"
+    assert env_vars["INTERVALS_TOKEN_ENCRYPTION_SECRET"] == "token-key-123"
 
 
 def test_build_env_vars_writes_auth_token_with_only_the_public_dsn() -> None:
@@ -831,6 +905,9 @@ def _settings(**overrides: str) -> BootstrapSettings:
         "r2_secret_access_key_prod": "",
         "openai_api_key": "openai-key",
         "tavily_api_key": "tavily-key",
+        "intervals_client_id": "",
+        "intervals_client_secret": "",
+        "intervals_token_encryption_secret": "",
         "production_domain": "",
         "smtp_host": "smtp.resend.com",
         "smtp_port": 465,

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Keep reasoning light: screenshot extraction is a perception task, not a reasoning one.
     # Low effort leaves more of the token budget for output and reduces latency.
     openai_vision_reasoning_effort: Literal["minimal", "low", "medium", "high"] = "low"
+    intervals_client_id: str = ""
+    intervals_client_secret: str = ""
+    intervals_token_encryption_secret: str = ""
 
     @field_validator("openai_activity_text_model")
     @classmethod
