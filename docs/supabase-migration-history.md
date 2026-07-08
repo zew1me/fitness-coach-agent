@@ -315,6 +315,31 @@ backend's write path, never called directly from the browser.
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Additive migration; no backfill or data rewrite required.
 
+## 20260707000000 — threshold recalibration candidates (2026-07-07)
+
+**File:** `supabase/migrations/20260707000000_threshold_recalibration_candidates.sql`
+
+**Change:** Creates `public.threshold_recalibration_candidates` for proposed
+sport-threshold updates. Rows store the candidate threshold JSON, evidence
+metadata, confidence, status, and optional manual-threshold decision payload.
+The `(user_id, sport)` partial index over `status = 'pending'` is `unique`,
+enforcing at most one pending candidate per athlete/sport. Adds
+`create_recalibration_candidate_atomic(p_candidate jsonb)`, a
+`security definer` RPC (mirrors `create_training_plan_atomic`) that locks the
+athlete profile row, supersedes the prior pending candidate for that
+athlete/sport, and inserts the replacement candidate in one transaction —
+`backend/repos/supabase_repo.py`'s `create_recalibration_candidate` calls this
+RPC instead of doing the supersede-then-insert as two round trips.
+
+**Why:** Recalibration should queue athlete-reviewable threshold candidates
+rather than silently overwriting athlete-confirmed or active thresholds from
+daily automation/tool runs. The unique index and atomic RPC close a race where
+concurrent recalibration requests for the same athlete/sport could each see
+the prior candidate as pending and both insert, leaving two pending rows.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally).
+
 ## 20260706000000 — atomic active training plan creation (2026-07-06)
 
 **File:** `supabase/migrations/20260706000000_create_training_plan_atomic.sql`

@@ -419,6 +419,71 @@ describe("streamCoachTurn", () => {
     );
   });
 
+  it("does not imply recalibrate_thresholds applied threshold changes in deterministic fallback", async () => {
+    orchestratorMocks.runEventSequences.push(
+      [
+        {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "recalibrate_thresholds",
+              arguments: "{}",
+            },
+          },
+        },
+        {
+          type: "run_item_stream_event",
+          name: "tool_output",
+          item: {
+            rawItem: {
+              type: "function_call_result",
+              callId: "call-1",
+              name: "recalibrate_thresholds",
+            },
+            output: {
+              results: [
+                {
+                  sport: "running",
+                  status: "candidate_queued",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      [],
+    );
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    const text = await response.text();
+    expect(text).toContain(
+      "I checked your thresholds against recent efforts and noted the result.",
+    );
+    expect(text).not.toContain("made some adjustments");
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain(
+      "I checked your thresholds against recent efforts and noted the result.",
+    );
+  });
+
   it("writes the generic fallback when a no-tool turn is silent", async () => {
     orchestratorMocks.runEventSequences.push([]);
     const fetchMock = vi.fn(() =>

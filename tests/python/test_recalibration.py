@@ -1,10 +1,14 @@
 """Tests for backend/services/recalibration.py — threshold recalibration evaluation."""
 
-from datetime import date
+from datetime import date, timedelta
 
 from backend.models.athlete import SportThreshold, ThresholdSource
 from backend.models.training import Activity
-from backend.services.recalibration import evaluate_all, evaluate_recalibration
+from backend.services.recalibration import (
+    evaluate_all,
+    evaluate_recalibration,
+    recalibration_cadence_gate,
+)
 
 TODAY = date(2026, 7, 4)
 USER_ID = "athlete-1"
@@ -215,3 +219,38 @@ class TestEvaluateAll:
         assert statuses["running"] == "recalibrated"
         assert statuses["cycling"] == "insufficient_evidence"
         assert statuses["swimming"] == "insufficient_evidence"
+
+
+class TestCadenceGate:
+    def test_low_confidence_can_reask_weekly(self) -> None:
+        last_generated_at = TODAY - timedelta(days=6)
+
+        assert recalibration_cadence_gate(
+            "low",
+            last_generated_at,
+            today=TODAY,
+        ) == TODAY + timedelta(days=1)
+        assert (
+            recalibration_cadence_gate(
+                "low",
+                TODAY - timedelta(days=7),
+                today=TODAY,
+            )
+            is None
+        )
+
+    def test_medium_and_high_confidence_wait_28_days(self) -> None:
+        for confidence in ("medium", "high"):
+            assert recalibration_cadence_gate(
+                confidence,
+                TODAY - timedelta(days=27),
+                today=TODAY,
+            ) == TODAY + timedelta(days=1)
+            assert (
+                recalibration_cadence_gate(
+                    confidence,
+                    TODAY - timedelta(days=28),
+                    today=TODAY,
+                )
+                is None
+            )
