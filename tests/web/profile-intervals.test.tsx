@@ -108,10 +108,17 @@ describe("ProfilePage Intervals.icu connection", () => {
   });
 
   it("shows the callback success notice when Intervals redirects back", async () => {
-    window.history.replaceState({}, "", "/profile?intervals=connected");
+    window.history.replaceState(
+      {},
+      "",
+      "/profile?intervals=connected&tab=connections#linked",
+    );
 
     render(<ProfilePage />);
 
     expect(await screen.findByText("Intervals.icu connected.")).toBeTruthy();
+    expect(window.location.pathname).toBe("/profile");
+    expect(window.location.search).toBe("?tab=connections");
+    expect(window.location.hash).toBe("#linked");
   });
 });

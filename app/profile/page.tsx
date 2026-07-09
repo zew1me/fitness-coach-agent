@@ -491,6 +491,15 @@ export default function ProfilePage(): JSX.Element {
     } else if (intervalResult === "error") {
       setIntervalsError("Intervals.icu authorization was not completed.");
     }
+    if (intervalResult !== null) {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("intervals");
+      window.history.replaceState(
+        {},
+        "",
+        `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`,
+      );
+    }
 
     async function loadMetricsData(): Promise<void> {
       try {
