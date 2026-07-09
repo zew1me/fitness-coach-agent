@@ -165,10 +165,12 @@ class IntervalsOAuthService:
             try:
                 response = await client.post(
                     INTERVALS_TOKEN_URL,
-                    data={
+                    json={
+                        "grant_type": "authorization_code",
+                        "code": code,
                         "client_id": settings.intervals_client_id,
                         "client_secret": settings.intervals_client_secret,
-                        "code": code,
+                        "redirect_uri": self._redirect_uri(),
                     },
                 )
                 response.raise_for_status()

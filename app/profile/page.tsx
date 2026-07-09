@@ -588,6 +588,7 @@ export default function ProfilePage(): JSX.Element {
   const disconnectIntervalsConnection = useCallback((): void => {
     setIntervalsAction("disconnect");
     setIntervalsError(null);
+    setIntervalsNotice(null);
     disconnectIntervals()
       .then(setIntervalsStatus)
       .catch((err: unknown) => {
@@ -615,23 +616,23 @@ export default function ProfilePage(): JSX.Element {
         {metrics === null && error === null && (
           <p className={styles.loading}>Loading…</p>
         )}
+        {(metrics !== null || error !== null) && (
+          <IntervalsSection
+            action={intervalsAction}
+            error={intervalsError}
+            notice={intervalsNotice}
+            onConnect={connectIntervals}
+            onDisconnect={disconnectIntervalsConnection}
+            status={intervalsStatus}
+          />
+        )}
         {metrics !== null && userId !== "" && (
-          <>
-            <IntervalsSection
-              action={intervalsAction}
-              error={intervalsError}
-              notice={intervalsNotice}
-              onConnect={connectIntervals}
-              onDisconnect={disconnectIntervalsConnection}
-              status={intervalsStatus}
-            />
-            <LoadedView
-              confirming={confirming}
-              metrics={metrics}
-              onConfirm={confirm}
-              userId={userId}
-            />
-          </>
+          <LoadedView
+            confirming={confirming}
+            metrics={metrics}
+            onConfirm={confirm}
+            userId={userId}
+          />
         )}
       </div>
     </div>

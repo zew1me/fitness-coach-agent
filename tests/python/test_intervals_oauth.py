@@ -1,7 +1,8 @@
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
-from urllib.parse import parse_qs, parse_qsl, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -161,7 +162,7 @@ async def test_exchange_code_stores_encrypted_token_and_returns_connection_statu
     token_requests: list[dict[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        token_requests.append(dict(parse_qsl(request.content.decode())))
+        token_requests.append(json.loads(request.content.decode()))
         return httpx.Response(
             200,
             json={
@@ -179,9 +180,11 @@ async def test_exchange_code_stores_encrypted_token_and_returns_connection_statu
 
     assert token_requests == [
         {
+            "grant_type": "authorization_code",
+            "code": "intervals-code",
             "client_id": "client-123",
             "client_secret": "client-secret-123",
-            "code": "intervals-code",
+            "redirect_uri": "https://coach.nigels.dev/api/intervals/callback",
         }
     ]
     assert status.connected is True
