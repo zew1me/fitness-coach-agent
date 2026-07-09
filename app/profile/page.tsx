@@ -612,26 +612,24 @@ export default function ProfilePage(): JSX.Element {
         </nav>
         <h1 className={styles.pageTitle}>Fitness profile</h1>
         {error !== null && <p className={styles.error}>{error}</p>}
+        <IntervalsSection
+          action={intervalsAction}
+          error={intervalsError}
+          notice={intervalsNotice}
+          onConnect={connectIntervals}
+          onDisconnect={disconnectIntervalsConnection}
+          status={intervalsStatus}
+        />
         {metrics === null && error === null && (
           <p className={styles.loading}>Loading…</p>
         )}
         {metrics !== null && userId !== "" && (
-          <>
-            <IntervalsSection
-              action={intervalsAction}
-              error={intervalsError}
-              notice={intervalsNotice}
-              onConnect={connectIntervals}
-              onDisconnect={disconnectIntervalsConnection}
-              status={intervalsStatus}
-            />
-            <LoadedView
-              confirming={confirming}
-              metrics={metrics}
-              onConfirm={confirm}
-              userId={userId}
-            />
-          </>
+          <LoadedView
+            confirming={confirming}
+            metrics={metrics}
+            onConfirm={confirm}
+            userId={userId}
+          />
         )}
       </div>
     </div>
