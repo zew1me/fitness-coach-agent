@@ -1,0 +1,57 @@
+.page {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.shell {
+  margin: 0 auto;
+  max-width: 760px;
+  padding: 40px 20px 64px;
+}
+
+.backLink {
+  color: var(--text-muted);
+  display: inline-flex;
+  font-size: 0.9rem;
+  margin-bottom: 28px;
+  text-decoration: none;
+}
+
+.backLink:hover {
+  color: var(--text);
+}
+
+.shell h1 {
+  font-size: 2rem;
+  line-height: 1.15;
+  margin: 0 0 8px;
+}
+
+.updated {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin: 0 0 32px;
+}
+
+.shell section {
+  border-top: 1px solid var(--border);
+  padding: 24px 0;
+}
+
+.shell h2 {
+  font-size: 1rem;
+  margin: 0 0 10px;
+}
+
+.shell p {
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1.65;
+  margin: 0;
+}
+
+.shell a {
+  color: var(--accent-strong);
+  font-weight: 600;
+}

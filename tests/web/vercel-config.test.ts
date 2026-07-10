@@ -44,6 +44,7 @@ describe("vercel routing", () => {
         { source: "/api/oauth/:path*", destination: "/api/index.py" },
         { source: "/api/engine/:path*", destination: "/api/index.py" },
         { source: "/api/files/:path*", destination: "/api/index.py" },
+        { source: "/api/intervals/:path*", destination: "/api/index.py" },
         { source: "/api/chat/(.*)", destination: "/api/index.py" },
       ]),
     );
@@ -54,6 +55,12 @@ describe("vercel routing", () => {
       "/api/index.py",
     );
     expect(rewrittenDestination("/api/engine/get-athlete-summary")).toBe(
+      "/api/index.py",
+    );
+    expect(rewrittenDestination("/api/intervals/authorize")).toBe(
+      "/api/index.py",
+    );
+    expect(rewrittenDestination("/api/intervals/callback")).toBe(
       "/api/index.py",
     );
     expect(rewrittenDestination("/api/chat/thread")).toBe("/api/index.py");

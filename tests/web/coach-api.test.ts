@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadChatMessages, loadChatThread } from "../../lib/coach-api";
+import {
+  disconnectIntervals,
+  loadChatMessages,
+  loadChatThread,
+  loadIntervalsStatus,
+  startIntervalsAuthorization,
+} from "../../lib/coach-api";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -94,6 +100,67 @@ describe("loadChatMessages", () => {
       );
 
     await expect(loadChatMessages("cursor", fetchMock)).rejects.toThrow();
+  });
+});
+
+describe("Intervals.icu helpers", () => {
+  it("loads the current user's Intervals connection status", async () => {
+    const status = {
+      connected: true,
+      intervals_athlete_id: "i135168",
+      intervals_athlete_name: "Nigel",
+      scopes: ["ACTIVITY:READ"],
+      connected_at: "2026-07-08T07:00:00Z",
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(jsonResponse(status));
+
+    await expect(loadIntervalsStatus(fetchMock)).resolves.toEqual(status);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/intervals/status",
+      expect.objectContaining({
+        method: "GET",
+        headers: expect.any(Headers),
+      }),
+    );
+  });
+
+  it("starts authorization and returns the Intervals redirect URL", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          redirect_url:
+            "https://intervals.icu/oauth/authorize?client_id=client-123",
+        }),
+      );
+
+    await expect(startIntervalsAuthorization(fetchMock)).resolves.toBe(
+      "https://intervals.icu/oauth/authorize?client_id=client-123",
+    );
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/intervals/authorize",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("disconnects the current user's Intervals connection", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(jsonResponse({ connected: false, scopes: [] }));
+
+    await expect(disconnectIntervals(fetchMock)).resolves.toEqual({
+      connected: false,
+      scopes: [],
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/intervals/connection",
+      expect.objectContaining({ method: "DELETE" }),
+    );
   });
 });
 

@@ -8,6 +8,10 @@ declare const styles: {
   readonly badge_user: string;
   readonly bestTimes: string;
   readonly confirmBtn: string;
+  readonly connectionActions: string;
+  readonly connectionMeta: string;
+  readonly connectionPanel: string;
+  readonly connectionText: string;
   readonly error: string;
   readonly estimated: string;
   readonly loading: string;
@@ -16,10 +20,12 @@ declare const styles: {
   readonly metricValue: string;
   readonly nav: string;
   readonly notes: string;
+  readonly notice: string;
   readonly page: string;
   readonly pageTitle: string;
   readonly section: string;
   readonly sectionTitle: string;
+  readonly secondaryBtn: string;
   readonly shell: string;
   readonly stale: string;
   readonly weightNote: string;

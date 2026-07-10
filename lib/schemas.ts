@@ -99,6 +99,18 @@ export const chatThreadResponseSchema = z.object({
 
 export type ParsedChatThreadResponse = z.infer<typeof chatThreadResponseSchema>;
 
+export const intervalsConnectionStatusSchema = z.object({
+  connected: z.boolean(),
+  connected_at: z.string().nullable().optional(),
+  intervals_athlete_id: z.string().nullable().optional(),
+  intervals_athlete_name: z.string().nullable().optional(),
+  scopes: z.array(z.string()).default([]),
+});
+
+export const intervalsAuthorizeResponseSchema = z.object({
+  redirect_url: z.string().url(),
+});
+
 export const modelStateSchema = z.object({
   thread_id: z.string().min(1),
   version: z.number().int().nonnegative(),

@@ -57,6 +57,9 @@ class BootstrapSettings(BaseSettings):
     # App secrets passed through to Vercel env vars
     openai_api_key: str
     tavily_api_key: str
+    intervals_client_id: str = ""
+    intervals_client_secret: str = ""
+    intervals_token_encryption_secret: str = ""
 
     # Sentry observability. Two distinct DSNs (separate Sentry Client Keys):
     #   sentry_dsn        — server/edge/python (SENTRY_DSN); treated as a secret.
