@@ -510,6 +510,30 @@ class TestResolvePlanWorkout:
         )
         assert response.status_code == 503
 
+    async def test_postgrest_unique_violation_returns_409(self, monkeypatch) -> None:
+        # The centralized handler refines class-23 mapping: a 23505 unique_violation
+        # is a conflict (409), distinct from a class-22 data fault (422).
+        repo = ComplianceRepository(plan=_plan())
+
+        async def _raise_unique_violation(*_args, **_kwargs) -> PlanWorkout:
+            raise PostgRESTAPIError(
+                {
+                    "message": "duplicate key value violates unique constraint",
+                    "code": "23505",
+                    "hint": None,
+                    "details": None,
+                }
+            )
+
+        monkeypatch.setattr(repo, "get_plan_workout", _raise_unique_violation)
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/resolve-plan-workout",
+            {"plan_workout_id": WORKOUT_ID, "outcome": "completed", "source": "coach"},
+        )
+        assert response.status_code == 409
+
 
 @pytest.mark.usefixtures("as_athlete")
 class TestFindPlanWorkout:
