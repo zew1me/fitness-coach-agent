@@ -229,7 +229,7 @@ const resolvePlanWorkoutInputSchema = z.object({
 
 const findPlanWorkoutInputSchema = z.object({
   // ISO date (YYYY-MM-DD) of the planned session to look up.
-  workout_date: z.string().min(1),
+  workout_date: z.iso.date(),
   sport: z.string().min(1).nullish(),
 });
 
