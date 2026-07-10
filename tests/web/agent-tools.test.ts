@@ -40,6 +40,7 @@ describe("coachToolDefinitions", () => {
       "get_recent_activities",
       "get_active_plan",
       "get_compliance_summary",
+      "find_plan_workout",
       "resolve_plan_workout",
       "save_activity_from_text",
       "process_uploaded_file",

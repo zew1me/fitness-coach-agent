@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Literal
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 import sentry_sdk
@@ -26,7 +27,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, RedirectResponse
 from postgrest.exceptions import APIError as PostgRESTAPIError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import settings
 from backend.logging_config import configure_logging
@@ -96,6 +97,21 @@ else:
 
 logger = logging.getLogger(__name__)
 MAX_CHAT_MESSAGE_PAGE_SIZE = 100
+
+# PostgREST surfaces the underlying Postgres SQLSTATE on ``APIError.code``. SQLSTATE
+# class 22 (data exception, e.g. 22P02 "invalid input syntax for type uuid") and class
+# 23 (integrity constraint violation) are caused by malformed/invalid client input, not
+# by the service being down, so they must map to HTTP 422 rather than 503. Everything
+# else — connectivity errors, PostgREST schema-cache misses (PGRSTxxx), internal server
+# faults — remains a 503. See the resolve-plan-workout 503 investigation: a coach-sent
+# non-UUID ``plan_workout_id`` was surfacing as a spurious 503 "service unavailable".
+_CLIENT_FAULT_SQLSTATE_CLASSES = ("22", "23")
+
+
+def _is_client_input_fault(exc: PostgRESTAPIError) -> bool:
+    """True when a PostgREST error reflects bad client input (→ 422), not an outage."""
+    code = getattr(exc, "code", None)
+    return isinstance(code, str) and code[:2] in _CLIENT_FAULT_SQLSTATE_CLASSES
 
 
 async def log_startup() -> None:
@@ -1822,6 +1838,60 @@ async def get_compliance_summary(
     return summary
 
 
+class FindPlanWorkoutRequest(BaseModel):
+    """Look up planned workouts on/around a date to obtain a concrete id."""
+
+    workout_date: date
+    sport: str | None = None
+
+
+@app.post("/api/engine/find-plan-workout")
+async def find_plan_workout(
+    payload: FindPlanWorkoutRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Resolve a loose date/sport description to concrete plan-workout ids.
+
+    Gives the coach a reliable way to obtain a real ``plan_workout_id`` before
+    calling resolve_plan_workout, instead of guessing one.
+    """
+    user_id = user_context.user_id
+    window = timedelta(days=1)
+    try:
+        workouts = await repo.list_plan_workouts_between(
+            user_id,
+            start=payload.workout_date - window,
+            end=payload.workout_date + window,
+        )
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("find_plan_workout failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to look up plan workouts.") from exc
+
+    sport = payload.sport
+    candidates = [w for w in workouts if sport is None or w.sport == sport]
+    # Closest to the requested date first so the coach's top candidate is the
+    # most likely match.
+    candidates.sort(
+        key=lambda w: (abs((w.workout_date - payload.workout_date).days), w.workout_date)
+    )
+    return {
+        "candidates": [
+            {
+                "plan_workout_id": w.id,
+                "workout_date": w.workout_date.isoformat(),
+                "sport": w.sport,
+                "title": w.title,
+                "workout_type": w.workout_type,
+                "status": w.status,
+                "target_duration_minutes": w.target_duration_minutes,
+            }
+            for w in candidates
+        ]
+    }
+
+
 class ResolvePlanWorkoutRequest(BaseModel):
     """Explicit athlete/coach resolution of a planned workout."""
 
@@ -1829,6 +1899,17 @@ class ResolvePlanWorkoutRequest(BaseModel):
     outcome: Literal["completed", "skipped"]
     activity_id: str | None = None
     source: Literal["athlete", "coach"] = "coach"
+
+    @field_validator("plan_workout_id")
+    @classmethod
+    def _require_uuid(cls, value: str) -> str:
+        # Reject fabricated/placeholder ids at the boundary (422) rather than letting
+        # a non-UUID reach Postgres and surface as a confusing 503. Callers must resolve
+        # a real id first (find_plan_workout / compliance summary).
+        try:
+            return str(UUID(value))
+        except ValueError as exc:
+            raise ValueError("plan_workout_id must be a valid UUID") from exc
 
 
 async def _apply_workout_resolution(
@@ -1859,6 +1940,16 @@ async def resolve_plan_workout(
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        if isinstance(exc, PostgRESTAPIError) and _is_client_input_fault(exc):
+            logger.info(
+                "resolve_plan_workout rejected bad input user_id=%s workout_id=%s code=%s",
+                user_id,
+                payload.plan_workout_id,
+                getattr(exc, "code", None),
+            )
+            raise HTTPException(
+                status_code=422, detail="Invalid plan workout resolution request."
+            ) from exc
         logger.exception(
             "resolve_plan_workout failed user_id=%s workout_id=%s",
             user_id,

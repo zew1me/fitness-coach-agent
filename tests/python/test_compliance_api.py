@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
 from backend.models.auth import UserContext
@@ -16,6 +17,9 @@ from backend.models.training import Activity, PlanWorkout, TrainingPlan
 from backend.repos.supabase_repo import RecordNotFoundError
 
 TODAY = datetime.now(UTC).date()
+# resolve_plan_workout now enforces a real UUID at the boundary, so tests use a
+# canonical uuid rather than the "workout-1" style sentinel used elsewhere.
+WORKOUT_ID = "00000000-0000-0000-0000-000000000011"
 
 
 def _user_context() -> UserContext:
@@ -291,36 +295,36 @@ class TestUnplannedActivities:
 @pytest.mark.usefixtures("as_athlete")
 class TestResolvePlanWorkout:
     async def test_athlete_confirms_completed(self, monkeypatch) -> None:
-        repo = ComplianceRepository(plan=_plan(), workouts=[_workout()])
+        repo = ComplianceRepository(plan=_plan(), workouts=[_workout(id=WORKOUT_ID)])
         monkeypatch.setattr(api_index, "repo", repo)
 
         response = await _post(
             "/api/engine/resolve-plan-workout",
-            {"plan_workout_id": "workout-1", "outcome": "completed", "source": "athlete"},
+            {"plan_workout_id": WORKOUT_ID, "outcome": "completed", "source": "athlete"},
         )
 
         assert response.status_code == 200
         assert response.json()["workout"]["status"] == "completed"
         assert repo.workout_updates == [
             (
-                "workout-1",
+                WORKOUT_ID,
                 {"status": "completed", "completion_source": "athlete_confirmed"},
             )
         ]
 
     async def test_coach_marks_skipped(self, monkeypatch) -> None:
-        repo = ComplianceRepository(plan=_plan(), workouts=[_workout()])
+        repo = ComplianceRepository(plan=_plan(), workouts=[_workout(id=WORKOUT_ID)])
         monkeypatch.setattr(api_index, "repo", repo)
 
         response = await _post(
             "/api/engine/resolve-plan-workout",
-            {"plan_workout_id": "workout-1", "outcome": "skipped", "source": "coach"},
+            {"plan_workout_id": WORKOUT_ID, "outcome": "skipped", "source": "coach"},
         )
 
         assert response.status_code == 200
         assert repo.workout_updates == [
             (
-                "workout-1",
+                WORKOUT_ID,
                 {
                     "status": "skipped",
                     "completion_source": "coach_confirmed",
@@ -330,13 +334,15 @@ class TestResolvePlanWorkout:
         ]
 
     async def test_completed_with_activity_links_both_sides(self, monkeypatch) -> None:
-        repo = ComplianceRepository(plan=_plan(), workouts=[_workout()], activities=[_activity()])
+        repo = ComplianceRepository(
+            plan=_plan(), workouts=[_workout(id=WORKOUT_ID)], activities=[_activity()]
+        )
         monkeypatch.setattr(api_index, "repo", repo)
 
         response = await _post(
             "/api/engine/resolve-plan-workout",
             {
-                "plan_workout_id": "workout-1",
+                "plan_workout_id": WORKOUT_ID,
                 "outcome": "completed",
                 "activity_id": "activity-1",
                 "source": "athlete",
@@ -346,7 +352,7 @@ class TestResolvePlanWorkout:
         assert response.status_code == 200
         assert repo.workout_updates == [
             (
-                "workout-1",
+                WORKOUT_ID,
                 {
                     "status": "completed",
                     "completion_source": "athlete_confirmed",
@@ -355,25 +361,25 @@ class TestResolvePlanWorkout:
             )
         ]
         assert len(repo.activity_updates) == 1
-        assert repo.activity_updates[0].planned_workout_id == "workout-1"
+        assert repo.activity_updates[0].planned_workout_id == WORKOUT_ID
 
     async def test_skipping_a_matched_workout_unlinks_the_activity(self, monkeypatch) -> None:
         repo = ComplianceRepository(
             plan=_plan(),
-            workouts=[_workout(status="completed", actual_activity_id="activity-1")],
-            activities=[_activity(planned_workout_id="workout-1")],
+            workouts=[_workout(id=WORKOUT_ID, status="completed", actual_activity_id="activity-1")],
+            activities=[_activity(planned_workout_id=WORKOUT_ID)],
         )
         monkeypatch.setattr(api_index, "repo", repo)
 
         response = await _post(
             "/api/engine/resolve-plan-workout",
-            {"plan_workout_id": "workout-1", "outcome": "skipped", "source": "athlete"},
+            {"plan_workout_id": WORKOUT_ID, "outcome": "skipped", "source": "athlete"},
         )
 
         assert response.status_code == 200
         assert repo.workout_updates == [
             (
-                "workout-1",
+                WORKOUT_ID,
                 {
                     "status": "skipped",
                     "completion_source": "athlete_confirmed",
@@ -389,9 +395,11 @@ class TestResolvePlanWorkout:
     ) -> None:
         repo = ComplianceRepository(
             plan=_plan(),
-            workouts=[_workout(status="completed", actual_activity_id="activity-old")],
+            workouts=[
+                _workout(id=WORKOUT_ID, status="completed", actual_activity_id="activity-old")
+            ],
             activities=[
-                _activity(id="activity-old", planned_workout_id="workout-1"),
+                _activity(id="activity-old", planned_workout_id=WORKOUT_ID),
                 _activity(id="activity-new"),
             ],
         )
@@ -400,7 +408,7 @@ class TestResolvePlanWorkout:
         response = await _post(
             "/api/engine/resolve-plan-workout",
             {
-                "plan_workout_id": "workout-1",
+                "plan_workout_id": WORKOUT_ID,
                 "outcome": "completed",
                 "activity_id": "activity-new",
                 "source": "athlete",
@@ -409,24 +417,25 @@ class TestResolvePlanWorkout:
 
         assert response.status_code == 200
         linked_ids = [(a.id, a.planned_workout_id) for a in repo.activity_updates]
-        assert ("activity-new", "workout-1") in linked_ids
+        assert ("activity-new", WORKOUT_ID) in linked_ids
         assert ("activity-old", None) in linked_ids
 
     async def test_unknown_workout_returns_404(self, monkeypatch) -> None:
+        # A well-formed but absent id resolves past the boundary and 404s at lookup.
         monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
         response = await _post(
             "/api/engine/resolve-plan-workout",
-            {"plan_workout_id": "nope", "outcome": "completed", "source": "athlete"},
+            {"plan_workout_id": WORKOUT_ID, "outcome": "completed", "source": "athlete"},
         )
         assert response.status_code == 404
 
     async def test_unknown_activity_returns_404(self, monkeypatch) -> None:
-        repo = ComplianceRepository(plan=_plan(), workouts=[_workout()])
+        repo = ComplianceRepository(plan=_plan(), workouts=[_workout(id=WORKOUT_ID)])
         monkeypatch.setattr(api_index, "repo", repo)
         response = await _post(
             "/api/engine/resolve-plan-workout",
             {
-                "plan_workout_id": "workout-1",
+                "plan_workout_id": WORKOUT_ID,
                 "outcome": "completed",
                 "activity_id": "nope",
                 "source": "athlete",
@@ -439,9 +448,118 @@ class TestResolvePlanWorkout:
         monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
         response = await _post(
             "/api/engine/resolve-plan-workout",
-            {"plan_workout_id": "workout-1", "outcome": "missed", "source": "athlete"},
+            {"plan_workout_id": WORKOUT_ID, "outcome": "missed", "source": "athlete"},
         )
         assert response.status_code == 422
+
+    async def test_non_uuid_plan_workout_id_rejected_at_boundary(self, monkeypatch) -> None:
+        # Tier 2: the coach fabricating "placeholder"/"<unknown>" (the original 503
+        # incident) is rejected at request validation with a 422 before any DB call.
+        monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
+        response = await _post(
+            "/api/engine/resolve-plan-workout",
+            {"plan_workout_id": "placeholder", "outcome": "completed", "source": "coach"},
+        )
+        assert response.status_code == 422
+
+    async def test_postgrest_client_fault_returns_422_not_503(self, monkeypatch) -> None:
+        # Tier 1: a PostgREST client-class SQLSTATE (e.g. 22P02) reaching the handler
+        # is bad input, not an outage, so it maps to 422 rather than 503.
+        repo = ComplianceRepository(plan=_plan())
+
+        async def _raise_invalid_uuid(*_args, **_kwargs) -> PlanWorkout:
+            raise PostgRESTAPIError(
+                {
+                    "message": 'invalid input syntax for type uuid: "…"',
+                    "code": "22P02",
+                    "hint": None,
+                    "details": None,
+                }
+            )
+
+        monkeypatch.setattr(repo, "get_plan_workout", _raise_invalid_uuid)
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/resolve-plan-workout",
+            {"plan_workout_id": WORKOUT_ID, "outcome": "completed", "source": "coach"},
+        )
+        assert response.status_code == 422
+
+    async def test_postgrest_outage_still_returns_503(self, monkeypatch) -> None:
+        # A genuine service fault (schema-cache miss / connectivity) is not client
+        # input and must remain a 503.
+        repo = ComplianceRepository(plan=_plan())
+
+        async def _raise_schema_cache_miss(*_args, **_kwargs) -> PlanWorkout:
+            raise PostgRESTAPIError(
+                {
+                    "message": "Could not find the table in the schema cache",
+                    "code": "PGRST205",
+                    "hint": None,
+                    "details": None,
+                }
+            )
+
+        monkeypatch.setattr(repo, "get_plan_workout", _raise_schema_cache_miss)
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/resolve-plan-workout",
+            {"plan_workout_id": WORKOUT_ID, "outcome": "completed", "source": "coach"},
+        )
+        assert response.status_code == 503
+
+
+@pytest.mark.usefixtures("as_athlete")
+class TestFindPlanWorkout:
+    async def test_returns_candidate_id_for_date_and_sport(self, monkeypatch) -> None:
+        target = TODAY - timedelta(days=1)
+        repo = ComplianceRepository(
+            plan=_plan(),
+            workouts=[_workout(id=WORKOUT_ID, workout_date=target, sport="cycling")],
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/find-plan-workout",
+            {"workout_date": target.isoformat(), "sport": "cycling"},
+        )
+
+        assert response.status_code == 200
+        candidates = response.json()["candidates"]
+        assert [c["plan_workout_id"] for c in candidates] == [WORKOUT_ID]
+
+    async def test_filters_by_sport(self, monkeypatch) -> None:
+        target = TODAY - timedelta(days=1)
+        repo = ComplianceRepository(
+            plan=_plan(),
+            workouts=[
+                _workout(id=WORKOUT_ID, workout_date=target, sport="cycling"),
+                _workout(
+                    id="00000000-0000-0000-0000-000000000022", workout_date=target, sport="running"
+                ),
+            ],
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/find-plan-workout",
+            {"workout_date": target.isoformat(), "sport": "running"},
+        )
+
+        assert response.status_code == 200
+        candidates = response.json()["candidates"]
+        assert [c["sport"] for c in candidates] == ["running"]
+
+    async def test_no_match_returns_empty(self, monkeypatch) -> None:
+        monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
+        response = await _post(
+            "/api/engine/find-plan-workout",
+            {"workout_date": TODAY.isoformat(), "sport": "cycling"},
+        )
+        assert response.status_code == 200
+        assert response.json()["candidates"] == []
 
 
 @pytest.mark.usefixtures("as_athlete")
