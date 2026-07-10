@@ -12,6 +12,7 @@ from backend.models.chat import (
     ChatModelStateReplaceRequest,
     ChatPersistRequest,
     ChatThread,
+    ChatTurnLeaseStatus,
 )
 from backend.services.chat import ChatService, _decode_message_cursor, _encode_message_cursor
 
@@ -235,6 +236,11 @@ class ModelStateRepo(OnboardingRepo):
         assert user_id == "athlete-1"
         return self.model_state
 
+    async def get_chat_turn_lease_status(self, *, thread_id: str, user_id: str):
+        assert thread_id == "thread-1"
+        assert user_id == "athlete-1"
+        return ChatTurnLeaseStatus(in_flight=True, expires_at=datetime(2026, 6, 21, tzinfo=UTC))
+
     async def replace_chat_model_state(self, **kwargs):
         replacement = kwargs["replacement"]
         assert isinstance(replacement, ChatModelStateReplaceRequest)
@@ -295,6 +301,18 @@ async def test_model_state_service_acquires_and_releases_turn_lease() -> None:
 
     assert leased.lease_id == "lease-1"
     assert released.lease_id is None
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_reads_lease_status_without_loading_model_state() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    status = await service.get_turn_lease_status("athlete-1")
+
+    assert status.in_flight is True
+    assert status.expires_at == datetime(2026, 6, 21, tzinfo=UTC)
+    assert repo.thread_lookup_include_messages == [False]
 
 
 @pytest.mark.asyncio

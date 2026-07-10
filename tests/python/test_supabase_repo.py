@@ -1203,6 +1203,38 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_turn_lease_status_returns_only_an_active_unexpired_lease() -> None:
+    now = datetime.now(UTC)
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [{"role": "user", "content": "private replay state"}],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 3,
+                "lease_id": "lease-owner",
+                "lease_expires_at": (now + timedelta(minutes=5)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    status = await repo.get_chat_turn_lease_status(thread_id="thread-1", user_id="athlete-1")
+
+    assert status.in_flight is True
+    assert status.expires_at is not None
+    assert status.model_dump() == {
+        "expires_at": status.expires_at,
+        "in_flight": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_chat_model_state_initialization_recovers_from_concurrent_insert() -> None:
     now = datetime.now(UTC).isoformat()
     concurrent_row: dict[str, object] = {

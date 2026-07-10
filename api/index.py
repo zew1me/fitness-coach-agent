@@ -551,6 +551,20 @@ async def replace_chat_model_state(
     )
 
 
+@app.get("/api/chat/model-state/lease")
+async def get_chat_turn_lease_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = await chat_service.get_turn_lease_status(user_context.user_id)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+        logger.exception("chat lease status get failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return status.model_dump(mode="json")
+
+
 @app.post("/api/chat/model-state/lease")
 async def acquire_chat_turn_lease(
     payload: ChatTurnLeaseRequest,

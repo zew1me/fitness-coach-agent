@@ -24,7 +24,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest
+from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest, ChatTurnLeaseStatus
 from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
@@ -420,6 +420,13 @@ class ModelStateChatService:
     async def get_model_state(self, user_id: str) -> ChatModelState:
         assert user_id == "athlete-1"
         return self.state
+
+    async def get_turn_lease_status(self, user_id: str) -> ChatTurnLeaseStatus:
+        assert user_id == "athlete-1"
+        return ChatTurnLeaseStatus(
+            in_flight=self.state.lease_id is not None,
+            expires_at=(datetime(2026, 7, 10, tzinfo=UTC) if self.state.lease_id else None),
+        )
 
     async def replace_model_state(
         self, user_id: str, replacement: ChatModelStateReplaceRequest
@@ -3043,6 +3050,25 @@ async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoi
 
 
 @pytest.mark.asyncio
+async def test_chat_turn_lease_status_hides_private_model_state(
+    model_state_chat_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        initial = await client.get("/api/chat/model-state/lease")
+        await client.post(
+            "/api/chat/model-state/lease", json={"lease_id": "lease-1", "ttl_seconds": 60}
+        )
+        active = await client.get("/api/chat/model-state/lease")
+
+    assert initial.json() == {"expires_at": None, "in_flight": False}
+    assert active.json() == {
+        "expires_at": "2026-07-10T00:00:00Z",
+        "in_flight": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_chat_model_state_replace_rejects_stale_version(
     model_state_chat_service_fixture,
 ) -> None:
@@ -3070,6 +3096,7 @@ async def test_chat_model_state_replace_rejects_stale_version(
     ("method", "path", "json"),
     [
         ("GET", "/api/chat/model-state", None),
+        ("GET", "/api/chat/model-state/lease", None),
         (
             "PUT",
             "/api/chat/model-state",
@@ -3096,6 +3123,7 @@ async def test_chat_model_state_endpoints_require_authentication(
     [
         ("GET", "/api/chat/messages", None),
         ("GET", "/api/chat/model-state", None),
+        ("GET", "/api/chat/model-state/lease", None),
         (
             "PUT",
             "/api/chat/model-state",
@@ -3124,6 +3152,7 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
 
     service.list_messages = unavailable
     service.get_model_state = unavailable
+    service.get_turn_lease_status = unavailable
     service.replace_model_state = unavailable
     service.acquire_turn_lease = unavailable
     service.release_turn_lease = unavailable

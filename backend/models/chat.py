@@ -90,6 +90,11 @@ class ChatModelStateReplaceRequest(BaseModel):
     lease_id: str = Field(min_length=1)
 
 
+class ChatTurnLeaseStatus(BaseModel):
+    expires_at: datetime | None = None
+    in_flight: bool
+
+
 class ChatTurnLeaseRequest(BaseModel):
     lease_id: str = Field(min_length=1)
     ttl_seconds: int = Field(default=300, ge=30, le=900)

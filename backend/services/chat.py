@@ -14,6 +14,7 @@ from backend.models.chat import (
     ChatModelState,
     ChatModelStateReplaceRequest,
     ChatThreadBootstrap,
+    ChatTurnLeaseStatus,
     MessageAttachment,
     MessagePart,
 )
@@ -139,6 +140,10 @@ class ChatService:
     async def get_model_state(self, user_id: str) -> ChatModelState:
         thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
         return await self._repo.get_or_create_chat_model_state(thread_id=thread.id, user_id=user_id)
+
+    async def get_turn_lease_status(self, user_id: str) -> ChatTurnLeaseStatus:
+        thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
+        return await self._repo.get_chat_turn_lease_status(thread_id=thread.id, user_id=user_id)
 
     async def replace_model_state(
         self,
