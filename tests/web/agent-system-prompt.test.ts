@@ -85,6 +85,21 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("context-aware prompt to continue");
   });
 
+  it("frames recalibration as an athlete-reviewed candidate workflow", () => {
+    const prompt = buildCoachSystemPrompt({
+      ...context,
+      profile: {
+        ...context.profile,
+        coaching_state: "active",
+      },
+    });
+
+    expect(prompt).toContain("candidate_queued");
+    expect(prompt).toContain("accept the candidate");
+    expect(prompt).toContain("keep their current threshold");
+    expect(prompt).toContain("enter a manual threshold");
+  });
+
   it("includes both training models and age-specific balance note for classification by the LLM", () => {
     const longevityContext: AthleteContextBundle = {
       ...context,
@@ -231,6 +246,15 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("Workout specialist suggests moving intervals");
     expect(prompt).toContain("Keep intensity conservative");
     expect(prompt).toContain("user-facing response");
+    expect(prompt).toContain(
+      "candidate_queued means a threshold proposal is awaiting athlete review",
+    );
+    expect(prompt).toContain(
+      "insufficient_evidence, no_change, already_user_confirmed, and cadence_gated mean no threshold was applied",
+    );
+    expect(prompt).toContain(
+      "Do not offer to auto-apply or schedule future threshold changes",
+    );
   });
 
   it("marks coaching-memory follow-ups as untrusted data", () => {

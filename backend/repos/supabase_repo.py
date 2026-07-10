@@ -9,10 +9,12 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 from backend.config import settings
 from backend.models.athlete import (
     AthleteProfile,
+    RecalibrationCandidateStatus,
     RecoveryLog,
     ScheduleAvailability,
     ScheduleOverride,
     SportThreshold,
+    ThresholdRecalibrationCandidate,
 )
 from backend.models.chat import (
     ChatMessage,
@@ -340,6 +342,79 @@ class SupabaseRepository:
         if not rows:
             raise RuntimeError("Supabase did not return the inserted sport threshold row.")
         return SportThreshold.model_validate(rows[0])
+
+    async def get_latest_recalibration_candidate(
+        self, user_id: str, sport: str
+    ) -> ThresholdRecalibrationCandidate | None:
+        client = self._require_client()
+        response = (
+            client.table("threshold_recalibration_candidates")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("sport", sport)
+            .order("generated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return ThresholdRecalibrationCandidate.model_validate(rows[0]) if rows else None
+
+    async def create_recalibration_candidate(
+        self, candidate: ThresholdRecalibrationCandidate
+    ) -> ThresholdRecalibrationCandidate:
+        client = self._require_client()
+        payload = candidate.model_dump(mode="json", exclude={"created_at", "updated_at"})
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = client.rpc(
+            "create_recalibration_candidate_atomic", {"p_candidate": payload}
+        ).execute()
+        rows = response.data or []
+        if not rows:
+            raise RuntimeError("Supabase did not return the inserted recalibration candidate row.")
+        return ThresholdRecalibrationCandidate.model_validate(rows[0])
+
+    async def get_recalibration_candidate(
+        self, user_id: str, candidate_id: str
+    ) -> ThresholdRecalibrationCandidate | None:
+        client = self._require_client()
+        response = (
+            client.table("threshold_recalibration_candidates")
+            .select("*")
+            .eq("id", candidate_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        rows = response.data or []
+        return ThresholdRecalibrationCandidate.model_validate(rows[0]) if rows else None
+
+    async def decide_recalibration_candidate(
+        self,
+        *,
+        user_id: str,
+        candidate_id: str,
+        status: RecalibrationCandidateStatus,
+        manual_threshold: SportThreshold | None = None,
+    ) -> ThresholdRecalibrationCandidate:
+        client = self._require_client()
+        payload: dict[str, object] = {
+            "decided_at": datetime.now(UTC).isoformat(),
+            "status": status,
+        }
+        if manual_threshold is not None:
+            payload["manual_threshold"] = manual_threshold.model_dump(mode="json")
+        response = (
+            client.table("threshold_recalibration_candidates")
+            .update(payload)
+            .eq("id", candidate_id)
+            .eq("user_id", user_id)
+            .eq("status", "pending")
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            raise RecordNotFoundError("Recalibration candidate not found.")
+        return ThresholdRecalibrationCandidate.model_validate(rows[0])
 
     # ── Activities ────────────────────────────────────────────
 

@@ -7,6 +7,8 @@ import {
   calendarResponseSchema,
   chatMessagePageSchema,
   chatThreadResponseSchema,
+  intervalsAuthorizeResponseSchema,
+  intervalsConnectionStatusSchema,
   type ParsedChatMessagePage,
   type ParsedChatThreadResponse,
   resolvePlanWorkoutResponseSchema,
@@ -16,6 +18,7 @@ import type {
   AthleteProfile,
   BrowserTokenResponse,
   FitnessMetrics,
+  IntervalsConnectionStatus,
   PresignUploadRequest,
   PresignUploadResponse,
 } from "./types";
@@ -215,6 +218,39 @@ export async function loadFitnessMetrics(
     fetchImpl,
   );
   return summary.fitness_metrics;
+}
+
+export async function loadIntervalsStatus(
+  fetchImpl: FetchLike = fetch,
+): Promise<IntervalsConnectionStatus> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/status",
+    { method: "GET" },
+    fetchImpl,
+  );
+  return intervalsConnectionStatusSchema.parse(raw);
+}
+
+export async function startIntervalsAuthorization(
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/authorize",
+    { method: "POST" },
+    fetchImpl,
+  );
+  return intervalsAuthorizeResponseSchema.parse(raw).redirect_url;
+}
+
+export async function disconnectIntervals(
+  fetchImpl: FetchLike = fetch,
+): Promise<IntervalsConnectionStatus> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/connection",
+    { method: "DELETE" },
+    fetchImpl,
+  );
+  return intervalsConnectionStatusSchema.parse(raw);
 }
 
 export async function confirmSportThreshold(

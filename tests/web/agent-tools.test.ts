@@ -4,6 +4,33 @@ import { z } from "zod";
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import { coachToolDefinitions } from "../../lib/agent/tools";
 
+type RecordedRequest = { body: unknown; url: string };
+
+function createRecordingFetch(responseBody: unknown): {
+  fetchImpl: typeof fetch;
+  requests: RecordedRequest[];
+} {
+  const requests: RecordedRequest[] = [];
+  const fetchImpl = (
+    url: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    requests.push({
+      body: JSON.parse(String(init?.body)),
+      url: String(url),
+    });
+
+    return Promise.resolve(
+      new Response(JSON.stringify(responseBody), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+  };
+
+  return { fetchImpl, requests };
+}
+
 function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
   if (schema === null || typeof schema !== "object") {
     return;
@@ -360,6 +387,105 @@ describe("coachToolDefinitions", () => {
     ]);
   });
 
+  it.each([
+    ["application/vnd.garmin.fit", "ride.fit"],
+    ["application/gpx+xml", "run.gpx"],
+    ["application/vnd.garmin.tcx+xml", "run.tcx"],
+  ])(
+    "redirects a %s upload stub passed to save_activity_from_text to process_uploaded_file",
+    async (contentType, filename) => {
+      const { fetchImpl, requests } = createRecordingFetch({
+        activity: { duration_seconds: 5880, sport: "cycling" },
+        status: "saved",
+      });
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl,
+      });
+
+      const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
+      const publicUrl = `https://cdn.example.com/${filename}`;
+      const stub =
+        `Uploaded file: ${filename}\r\n` +
+        `content_type=${contentType}\r\n` +
+        `public_url=${publicUrl}\r\n` +
+        `object_key=${objectKey}`;
+
+      const result = await (
+        tools["save_activity_from_text"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ text: stub });
+
+      expect(result).toEqual({
+        activity: { duration_seconds: 5880, sport: "cycling" },
+        status: "saved",
+      });
+      expect(requests).toEqual([
+        {
+          body: {
+            content_type: contentType,
+            filename,
+            object_key: objectKey,
+            public_url: publicUrl,
+          },
+          url: "https://coach.test/api/engine/process-uploaded-file",
+        },
+      ]);
+    },
+  );
+
+  it("does not redirect ordinary free-text activity descriptions", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    await (
+      tools["save_activity_from_text"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ text: "Add RPE 9 and two gels." });
+
+    expect(requests).toEqual([
+      {
+        body: { text: "Add RPE 9 and two gels." },
+        url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
+  it("does not redirect a stub-shaped text for a non-activity content_type", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const stub =
+      "Uploaded file: notes.pdf\n" +
+      "content_type=application/pdf\n" +
+      "public_url=https://cdn.example.com/notes.pdf\n" +
+      "object_key=users/athlete-1/chat-attachment/2026/07/06/notes.pdf";
+
+    await (
+      tools["save_activity_from_text"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ text: stub });
+
+    expect(requests).toEqual([
+      {
+        body: { text: stub },
+        url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
   it("routes get_compliance_summary to the engine compliance endpoint", async () => {
     const requests: Array<{ body: unknown; url: string }> = [];
     const fetchImpl = (
@@ -511,10 +637,11 @@ describe("coachToolDefinitions", () => {
           JSON.stringify({
             results: [
               {
+                candidate_id: "candidate-1",
                 confidence: "high",
                 explanation: "…",
                 sport: "running",
-                status: "recalibrated",
+                status: "candidate_queued",
               },
             ],
           }),

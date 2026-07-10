@@ -13,7 +13,7 @@ export const metadata: Metadata = {
   title: siteConfig.appName,
   description: siteConfig.description,
   icons: {
-    icon: "/brand/peak-mark-horizon.svg",
+    icon: "/brand/coach-arden-logo.svg",
   },
 };
 

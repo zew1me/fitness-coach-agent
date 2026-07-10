@@ -160,6 +160,59 @@
   cursor: default;
 }
 
+.secondaryBtn {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+
+.secondaryBtn:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.secondaryBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Connections ─────────────────────────────────────────── */
+
+.connectionPanel {
+  padding: 14px 16px 16px;
+}
+
+.connectionText {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.connectionMeta {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.connectionActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-start;
+  margin-top: 12px;
+}
+
 /* ── Best times ──────────────────────────────────────────── */
 
 .bestTimes {
@@ -186,4 +239,11 @@
   color: var(--error, #ef4444);
   font-size: 0.875rem;
   margin-bottom: 16px;
+}
+
+.notice {
+  color: var(--accent-strong);
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0 0 10px;
 }

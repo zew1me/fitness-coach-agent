@@ -97,7 +97,7 @@ function stateInstructions(state: string): string {
     "Coach the ongoing loop: log work, monitor compliance, update recovery, recalibrate, and adjust.",
     "Use get_compliance_summary to see planned-versus-done. If it lists unconfirmed_sessions, ask about them conversationally (never more than the listed sessions, never as an interrogation) and resolve each answer with resolve_plan_workout.",
     "resolve_plan_workout requires the workout's real UUID. Take it from the unconfirmed_sessions ids in get_compliance_summary, or call find_plan_workout with the workout's date (and sport) to look it up. Never guess, fabricate, or pass a placeholder id — if you don't have a real id, look it up first.",
-    "Before calling recalibrate_thresholds, briefly tell the athlete you're about to re-check their thresholds against recent hard efforts and confirm they're fine with that, then call the tool.",
+    "Before calling recalibrate_thresholds, briefly tell the athlete you're about to re-check their thresholds against recent hard efforts and confirm they're fine with that, then call the tool. Treat returned candidate_queued results as proposals: ask the athlete to accept the candidate, keep their current threshold, or enter a manual threshold.",
   ].join(" ");
 }
 
@@ -260,8 +260,10 @@ export function buildLeadCoachPrompt(
     "Synthesize specialist reports into one concise user-facing response. Resolve conflicts conservatively.",
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
     "After any tool call, continue with a concise user-facing response that explains what changed, what was saved, or what you need next.",
+    "For recalibrate_thresholds results, describe threshold status accurately: candidate_queued means a threshold proposal is awaiting athlete review; insufficient_evidence, no_change, already_user_confirmed, and cadence_gated mean no threshold was applied. Do not offer to auto-apply or schedule future threshold changes; ask whether the athlete wants to review, accept, keep current values, enter a manual value, or provide more evidence.",
     "Never end a turn with only tool calls or tool output. End with one context-aware prompt to continue the conversation, based on the athlete's latest ask and the current coaching state.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",
+    'When the user message is an "Uploaded file:" stub with content_type gpx/fit/tcx (or a filename ending in .gpx/.fit/.tcx), always call process_uploaded_file with that stub\'s filename, content_type, object_key, and public_url. Never call save_activity_from_text for a file upload — it cannot read file contents and must not guess numeric fields like duration.',
   ].join("\n\n");
 }
 
