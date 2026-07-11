@@ -93,7 +93,9 @@ from backend.services.intervals import (
 )
 from backend.services.r2 import R2Service
 
-ActivityPersistenceEndpoint = Literal["process_uploaded_file", "save_activity_from_text"]
+ActivityPersistenceEndpoint = Literal[
+    "process_uploaded_file", "save_activity_from_text", "process_uploaded_zip"
+]
 
 configure_logging(debug=settings.app_env == "development")
 
@@ -1449,7 +1451,7 @@ def _empty_zip_result(skipped_count: int = 0) -> dict[str, object]:
     }
 
 
-def _zip_activity_entry(
+async def _zip_activity_entry(
     *, user_id: str, filename: str, content_type: str, zip_object_key: str, member_bytes: bytes
 ) -> dict[str, object] | None:
     try:
@@ -1457,6 +1459,8 @@ def _zip_activity_entry(
             user_id=user_id,
             filename=filename,
             content_type=content_type,
+            # Every persisted member shares the archive's key as its source_file_key —
+            # we store only the uploaded zip, not per-member extracts.
             object_key=zip_object_key,
             public_url=None,
             file_bytes=member_bytes,
@@ -1464,7 +1468,16 @@ def _zip_activity_entry(
     except Exception:  # best-effort per member; a bad file must not abort the whole zip
         logger.exception("failed to parse activity from zip member user_id=%s", user_id)
         return None
-    return {"kind": "activity", "activity": activity.model_dump(mode="json")}
+    try:
+        # Persist like the single-file path so zip activities reach the calendar and
+        # compliance instead of being surfaced and dropped.
+        persisted = await _persist_extracted_activity(
+            user_id, activity, calling_endpoint="process_uploaded_zip"
+        )
+    except HTTPException:  # a failed save must not abort the whole zip
+        logger.exception("failed to persist activity from zip member user_id=%s", user_id)
+        return None
+    return {"kind": "activity", **persisted}
 
 
 async def _zip_image_entry(
@@ -1488,7 +1501,11 @@ async def _zip_image_entry(
     if uploaded.public_url is None:
         logger.warning("zip image member has no public url (R2 base unset) user_id=%s", user_id)
         return None
-    result = await analyze_screenshot(uploaded.public_url)
+    try:
+        result = await analyze_screenshot(uploaded.public_url)
+    except Exception:  # best-effort per member; a flaky image must not abort the whole zip
+        logger.exception("failed to analyze zip image member user_id=%s", user_id)
+        return None
     return {
         "kind": "image_analysis",
         "screenshot_type": result.screenshot_type,
@@ -1532,7 +1549,7 @@ async def _process_zip_member(
         return _ZipMemberResult(counts_as_skipped=True)
 
     if activity_content_type is not None:
-        entry = _zip_activity_entry(
+        entry = await _zip_activity_entry(
             user_id=user_id,
             filename=filename,
             content_type=activity_content_type,
