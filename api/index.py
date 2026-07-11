@@ -2235,8 +2235,10 @@ async def find_plan_workout(
         logger.exception("find_plan_workout failed user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to look up plan workouts.") from exc
 
-    sport = payload.sport
-    candidates = [w for w in workouts if sport is None or w.sport == sport]
+    # Case-insensitive sport match: the coach supplies ``payload.sport`` loosely
+    # (e.g. "Running"), while stored ``w.sport`` is canonical lowercase.
+    sport = payload.sport.strip().casefold() if payload.sport else None
+    candidates = [w for w in workouts if sport is None or ((w.sport or "").casefold() == sport)]
     # Closest to the requested date first so the coach's top candidate is the
     # most likely match.
     candidates.sort(

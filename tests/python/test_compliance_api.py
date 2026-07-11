@@ -576,6 +576,23 @@ class TestFindPlanWorkout:
         candidates = response.json()["candidates"]
         assert [c["sport"] for c in candidates] == ["running"]
 
+    async def test_sport_filter_is_case_insensitive(self, monkeypatch) -> None:
+        target = TODAY - timedelta(days=1)
+        repo = ComplianceRepository(
+            plan=_plan(),
+            workouts=[_workout(id=WORKOUT_ID, workout_date=target, sport="running")],
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/find-plan-workout",
+            {"workout_date": target.isoformat(), "sport": "Running"},
+        )
+
+        assert response.status_code == 200
+        candidates = response.json()["candidates"]
+        assert [c["sport"] for c in candidates] == ["running"]
+
     async def test_no_match_returns_empty(self, monkeypatch) -> None:
         monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
         response = await _post(
