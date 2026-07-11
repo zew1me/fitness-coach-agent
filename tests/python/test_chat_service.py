@@ -262,6 +262,10 @@ class ModelStateRepo(OnboardingRepo):
         )
         return self.model_state
 
+    async def renew_chat_turn_lease(self, **kwargs):
+        assert kwargs["lease_id"] == self.model_state.lease_id
+        return self.model_state
+
     async def release_chat_turn_lease(self, **kwargs):
         assert kwargs["lease_id"] == self.model_state.lease_id
         self.model_state = self.model_state.model_copy(update={"lease_id": None})
@@ -301,6 +305,17 @@ async def test_model_state_service_acquires_and_releases_turn_lease() -> None:
 
     assert leased.lease_id == "lease-1"
     assert released.lease_id is None
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_renews_an_owned_turn_lease() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    renewed = await service.renew_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+
+    assert renewed.lease_id == "lease-1"
 
 
 @pytest.mark.asyncio

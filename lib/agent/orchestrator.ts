@@ -30,9 +30,12 @@ import {
 } from "./durable-compaction-session";
 import { fetchSignalWithTimeout } from "./fetch-signal";
 import {
+  CHAT_TURN_LEASE_TTL_SECONDS,
   LeaseAcquisitionError,
   acquireChatTurnLease,
   releaseChatTurnLease,
+  renewChatTurnLease,
+  type ChatTurnLeaseState,
 } from "./lease-client";
 import { nonImageFilePart, selectMessagesForModel } from "./message-context";
 import {
@@ -47,9 +50,11 @@ import { recordStageUsage } from "./usage-metrics";
 
 export type StreamCoachTurnOptions = {
   accessToken: string;
+  acquiredLease?: ChatTurnLeaseState;
   baseUrl: string;
   context: AthleteContextBundle;
   extraHeaders?: Record<string, string>;
+  leaseId?: string;
   messages: UIMessage[];
   messagesAreModelSelected?: boolean;
   signal?: AbortSignal;
@@ -62,7 +67,7 @@ const MAX_COACH_STEPS = 4;
 const MODEL = "gpt-5.4-mini";
 const LAZY_SEED_TOKEN_BUDGET = 200_000;
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
-const CHAT_TURN_LEASE_TTL_SECONDS = 900;
+const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;
 const ACKNOWLEDGEMENT_PROMPT =
   "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
 const EMPTY_MODEL_RESPONSE = "Hey, can you remind me of where we are at?";
@@ -73,6 +78,7 @@ type PrepareDurableSessionOptions = {
   context: AthleteContextBundle;
   extraHeaders?: Record<string, string>;
   leaseId: string;
+  leaseState?: ChatTurnLeaseState;
   markLeaseAcquired: () => void;
   selectedMessages: UIMessage[];
   signal?: AbortSignal;
@@ -340,7 +346,8 @@ async function compactIfNeeded(
 async function prepareDurableSession(
   options: PrepareDurableSessionOptions,
 ): Promise<PreparedDurableSession | null> {
-  const leaseState = await acquireDurableLeaseState(options);
+  const leaseState =
+    options.leaseState ?? (await acquireDurableLeaseState(options));
   if (leaseState === null) return null;
 
   const traceGroupId = leaseState.thread_id ?? options.context.profile.user_id;
@@ -393,11 +400,41 @@ function createTavilyServer(url: string | undefined): MCPServer | null {
   });
 }
 
+function startLeaseRenewal({
+  accessToken,
+  baseUrl,
+  extraHeaders,
+  leaseId,
+}: Pick<
+  PrepareDurableSessionOptions,
+  "accessToken" | "baseUrl" | "extraHeaders" | "leaseId"
+>): () => void {
+  const intervalId = setInterval(() => {
+    void renewChatTurnLease({
+      accessToken,
+      baseUrl,
+      ...(extraHeaders ? { extraHeaders } : {}),
+      leaseId,
+      ttlSeconds: CHAT_TURN_LEASE_TTL_SECONDS,
+    }).catch((error) => {
+      Sentry.captureException(error, {
+        tags: { subsystem: "lease-renew" },
+        extra: { leaseId },
+      });
+    });
+  }, CHAT_TURN_LEASE_RENEW_INTERVAL_MS);
+  return (): void => {
+    clearInterval(intervalId);
+  };
+}
+
 export function streamCoachTurn({
   accessToken,
+  acquiredLease,
   baseUrl,
   context,
   extraHeaders,
+  leaseId: providedLeaseId,
   messages,
   messagesAreModelSelected = false,
   signal,
@@ -440,8 +477,17 @@ export function streamCoachTurn({
         textStarted: false,
       };
 
-      const leaseId = crypto.randomUUID();
-      const leaseStatus = { acquired: false };
+      const leaseId = providedLeaseId ?? crypto.randomUUID();
+      const leaseStatus = { acquired: acquiredLease !== undefined };
+      let stopLeaseRenewal: (() => void) | undefined =
+        acquiredLease === undefined
+          ? undefined
+          : startLeaseRenewal({
+              accessToken,
+              baseUrl,
+              ...(extraHeaders ? { extraHeaders } : {}),
+              leaseId,
+            });
       try {
         let durableSession: DurableCompactionSession | undefined;
         let underlyingSession: SupabaseAgentSession | undefined;
@@ -453,8 +499,15 @@ export function streamCoachTurn({
             context,
             ...(extraHeaders ? { extraHeaders } : {}),
             leaseId,
+            ...(acquiredLease ? { leaseState: acquiredLease } : {}),
             markLeaseAcquired: () => {
               leaseStatus.acquired = true;
+              stopLeaseRenewal = startLeaseRenewal({
+                accessToken,
+                baseUrl,
+                ...(extraHeaders ? { extraHeaders } : {}),
+                leaseId,
+              });
             },
             selectedMessages,
             ...(signal ? { signal } : {}),
@@ -665,6 +718,7 @@ export function streamCoachTurn({
           message.replace(/key=[^&\s]+/g, "key=***"),
         );
       } finally {
+        stopLeaseRenewal?.();
         if (leaseStatus.acquired) {
           try {
             await releaseChatTurnLease({

@@ -1235,6 +1235,46 @@ async def test_chat_turn_lease_status_returns_only_an_active_unexpired_lease() -
 
 
 @pytest.mark.asyncio
+async def test_chat_turn_lease_renewal_requires_the_current_unexpired_owner() -> None:
+    now = datetime.now(UTC)
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 3,
+                "lease_id": "lease-owner",
+                "lease_expires_at": (now + timedelta(seconds=1)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    renewed = await repo.renew_chat_turn_lease(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        lease_id="lease-owner",
+        ttl_seconds=60,
+    )
+
+    assert renewed.lease_expires_at is not None
+    assert renewed.lease_expires_at > now
+    with pytest.raises(ValueError, match="no longer owned"):
+        await repo.renew_chat_turn_lease(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            lease_id="another-request",
+            ttl_seconds=60,
+        )
+
+
+@pytest.mark.asyncio
 async def test_chat_model_state_initialization_recovers_from_concurrent_insert() -> None:
     now = datetime.now(UTC).isoformat()
     concurrent_row: dict[str, object] = {

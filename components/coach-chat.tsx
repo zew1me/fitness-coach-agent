@@ -23,6 +23,7 @@ import { useBrowserSession } from "../lib/use-browser-session";
 import { useChatThread } from "../lib/use-chat-thread";
 import { useIsMobile } from "../lib/use-is-mobile";
 
+import { useChatTurnLease } from "./chat-turn-lease-provider";
 import styles from "./coach-chat.module.css";
 import { ThemeSwitcher } from "./theme-switcher";
 
@@ -903,12 +904,14 @@ function SendButton({
 }
 
 function ComposerHint({
+  leaseInFlight,
   syncingThread,
   sending,
   threadError,
   isMobile,
   waitingStatus,
 }: Readonly<{
+  leaseInFlight: boolean;
   syncingThread: boolean;
   sending: boolean;
   threadError: string | null;
@@ -929,6 +932,13 @@ function ComposerHint({
       </span>
     );
   }
+  if (leaseInFlight) {
+    return (
+      <span aria-live="polite" className={styles.waitingStatus} role="status">
+        Coach is finishing your previous message...
+      </span>
+    );
+  }
   if (threadError !== null) {
     return <span className={styles.errorTextInline}>{threadError}</span>;
   }
@@ -946,6 +956,7 @@ function Composer({
   onComposerChange,
   attachments,
   composerBusy,
+  leaseInFlight,
   sending,
   syncingThread,
   threadError,
@@ -959,6 +970,7 @@ function Composer({
   onComposerChange: (_next: string) => void;
   attachments: LocalAttachment[];
   composerBusy: boolean;
+  leaseInFlight: boolean;
   sending: boolean;
   syncingThread: boolean;
   threadError: string | null;
@@ -1083,6 +1095,7 @@ function Composer({
         <div className={styles.composerHint}>
           <ComposerHint
             isMobile={isMobile}
+            leaseInFlight={leaseInFlight}
             sending={sending}
             syncingThread={syncingThread}
             threadError={threadError}
@@ -1386,7 +1399,10 @@ function CoachChatBody({
       }),
     }),
   });
-  const composerBusy = sending || syncingThread;
+  const { releaseVersion, startTurn, turnInFlight } = useChatTurnLease(
+    token.user_id,
+  );
+  const composerBusy = sending || syncingThread || turnInFlight;
   const displayedMessages = useMemo<ChatMessage[]>(() => {
     const knownPersistedMessageIds = knownPersistedMessageIdsRef.current;
     const additional = liveMessages
@@ -1445,6 +1461,26 @@ function CoachChatBody({
       removePreviewUrls(attachments);
     };
   }, [attachments]);
+
+  useEffect(() => {
+    if (releaseVersion === 0) return;
+    setSyncingThread(true);
+    olderRequestVersionRef.current += 1;
+    void refetchThread()
+      .catch((refreshError) => {
+        Sentry.logger.warn("chat thread refresh failed after lease release");
+        console.error(
+          "Chat thread refresh failed after lease release",
+          refreshError,
+        );
+        setThreadError(
+          "Your previous message finished, but the thread failed to refresh. Reload to see the latest.",
+        );
+      })
+      .finally(() => {
+        setSyncingThread(false);
+      });
+  }, [refetchThread, releaseVersion, setThreadError]);
 
   async function uploadOneAttachment(
     attachmentId: string,
@@ -1571,6 +1607,7 @@ function CoachChatBody({
     if (!hasSendableContent(composer, attachments)) return;
 
     sendInFlightRef.current = true;
+    startTurn();
     setSending(true);
     setThreadError(null);
     // Snapshot the draft before we clear it so the catch block can restore it.
@@ -1749,6 +1786,7 @@ function CoachChatBody({
             composer={composer}
             composerBusy={composerBusy}
             isMobile={isMobile}
+            leaseInFlight={turnInFlight}
             onComposerChange={setComposer}
             onFilesAdded={(files) => {
               void handleFilesAdded(files);

@@ -168,6 +168,17 @@ class ChatService:
             ttl_seconds=ttl_seconds,
         )
 
+    async def renew_turn_lease(
+        self, user_id: str, lease_id: str, *, ttl_seconds: int
+    ) -> ChatModelState:
+        thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
+        return await self._repo.renew_chat_turn_lease(
+            thread_id=thread.id,
+            user_id=user_id,
+            lease_id=lease_id,
+            ttl_seconds=ttl_seconds,
+        )
+
     async def release_turn_lease(self, user_id: str, lease_id: str) -> ChatModelState:
         thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
         return await self._repo.release_chat_turn_lease(

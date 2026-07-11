@@ -1073,6 +1073,38 @@ class SupabaseRepository:
 
         return await _with_schema_cache_retry(_attempt)
 
+    async def renew_chat_turn_lease(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        lease_id: str,
+        ttl_seconds: int,
+    ) -> ChatModelState:
+        async def _attempt() -> ChatModelState:
+            client = self._require_client()
+            now = datetime.now(UTC)
+            response = (
+                client.table("chat_model_states")
+                .update(
+                    {
+                        "lease_expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(),
+                        "updated_at": now.isoformat(),
+                    }
+                )
+                .eq("thread_id", thread_id)
+                .eq("user_id", user_id)
+                .eq("lease_id", lease_id)
+                .gt("lease_expires_at", now.isoformat())
+                .execute()
+            )
+            rows = response.data or []
+            if not rows:
+                raise ValueError("Chat turn lease is no longer owned by this request.")
+            return self._parse_chat_model_state(rows[0])
+
+        return await _with_schema_cache_retry(_attempt)
+
     async def acquire_chat_turn_lease(
         self,
         *,

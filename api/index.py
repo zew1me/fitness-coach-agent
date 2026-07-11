@@ -578,6 +578,19 @@ async def acquire_chat_turn_lease(
     )
 
 
+@app.patch("/api/chat/model-state/lease")
+async def renew_chat_turn_lease(
+    payload: ChatTurnLeaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.renew_turn_lease(
+            user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
+        ),
+        failure_log_message="chat lease renew failed error_type=%s",
+    )
+
+
 @app.delete("/api/chat/model-state/lease")
 async def release_chat_turn_lease(
     payload: ChatTurnLeaseReleaseRequest,

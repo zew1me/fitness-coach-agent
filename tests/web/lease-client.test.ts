@@ -4,6 +4,7 @@ import {
   LeaseAcquisitionError,
   acquireChatTurnLease,
   releaseChatTurnLease,
+  renewChatTurnLease,
 } from "../../lib/agent/lease-client";
 
 afterEach(() => {
@@ -99,5 +100,29 @@ describe("releaseChatTurnLease", () => {
         leaseId: "lease-1",
       }),
     ).rejects.toThrow("Unable to release chat turn lease (409)");
+  });
+});
+
+describe("renewChatTurnLease", () => {
+  it("patches the current lease with its next expiry", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+
+    await renewChatTurnLease({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      fetchImpl,
+      leaseId: "lease-1",
+      ttlSeconds: 60,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({
+        body: JSON.stringify({ lease_id: "lease-1", ttl_seconds: 60 }),
+        method: "PATCH",
+      }),
+    );
   });
 });

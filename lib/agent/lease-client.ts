@@ -19,12 +19,24 @@ type AcquireLeaseOptions = {
   ttlSeconds: number;
 };
 
-type ChatTurnLeaseState = {
+type RenewLeaseOptions = {
+  accessToken: string;
+  baseUrl: string;
+  extraHeaders?: Record<string, string>;
+  fetchImpl?: typeof fetch;
+  leaseId: string;
+  timeoutMs?: number;
+  ttlSeconds: number;
+};
+
+export type ChatTurnLeaseState = {
   thread_id?: string;
 };
 
 const RELEASE_TIMEOUT_MS = 2_000;
 const ACQUIRE_TIMEOUT_MS = 10_000;
+const RENEW_TIMEOUT_MS = 5_000;
+export const CHAT_TURN_LEASE_TTL_SECONDS = 60;
 
 export class LeaseAcquisitionError extends Error {
   readonly status: number | undefined;
@@ -32,6 +44,26 @@ export class LeaseAcquisitionError extends Error {
   constructor(message: string, options?: { cause?: unknown; status?: number }) {
     super(message, options);
     this.name = "LeaseAcquisitionError";
+    this.status = options?.status;
+  }
+}
+
+export class LeaseReleaseError extends Error {
+  readonly status: number | undefined;
+
+  constructor(message: string, options?: { cause?: unknown; status?: number }) {
+    super(message, options);
+    this.name = "LeaseReleaseError";
+    this.status = options?.status;
+  }
+}
+
+export class LeaseRenewalError extends Error {
+  readonly status: number | undefined;
+
+  constructor(message: string, options?: { cause?: unknown; status?: number }) {
+    super(message, options);
+    this.name = "LeaseRenewalError";
     this.status = options?.status;
   }
 }
@@ -100,9 +132,39 @@ export async function releaseChatTurnLease({
       signal: controller.signal,
     });
     if (!response.ok) {
-      throw new Error(`Unable to release chat turn lease (${response.status})`);
+      throw new LeaseReleaseError(
+        `Unable to release chat turn lease (${response.status})`,
+        { status: response.status },
+      );
     }
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+export async function renewChatTurnLease({
+  accessToken,
+  baseUrl,
+  extraHeaders,
+  fetchImpl = fetch,
+  leaseId,
+  timeoutMs = RENEW_TIMEOUT_MS,
+  ttlSeconds,
+}: RenewLeaseOptions): Promise<void> {
+  const response = await fetchImpl(`${baseUrl}/api/chat/model-state/lease`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      ...(extraHeaders ?? {}),
+    },
+    body: JSON.stringify({ lease_id: leaseId, ttl_seconds: ttlSeconds }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new LeaseRenewalError(
+      `Unable to renew chat turn lease (${response.status})`,
+      { status: response.status },
+    );
   }
 }
