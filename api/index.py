@@ -6,10 +6,12 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Literal, cast
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 import sentry_sdk
@@ -21,12 +23,13 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Request,
     Response,
     UploadFile,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
 from postgrest.exceptions import APIError as PostgRESTAPIError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import settings
 from backend.logging_config import configure_logging
@@ -108,6 +111,45 @@ logger = logging.getLogger(__name__)
 MAX_CHAT_MESSAGE_PAGE_SIZE = 100
 
 
+def _postgrest_http_status(exc: PostgRESTAPIError) -> int:
+    """Map a PostgREST/Postgres error to the HTTP status a client should see.
+
+    PostgREST surfaces the underlying Postgres SQLSTATE on ``APIError.code`` (a
+    5-char string like ``"22P02"``; PostgREST's own faults instead use ``PGRSTxxx``).
+    We branch on the SQLSTATE because the *same* exception type covers both "you
+    sent bad data" and "the database is unreachable" — only the code distinguishes
+    them. Origin story: a coach-sent non-UUID ``plan_workout_id`` reached Postgres,
+    raised ``22P02``, and surfaced as a spurious 503 "service unavailable".
+
+    Per-code decisions and rationale:
+
+    - ``23505`` unique_violation → **409 Conflict**. The request was well-formed but
+      collides with a row that already exists; "conflict" is the honest status, not
+      "invalid" (422) and not "outage" (503).
+    - ``23502`` not_null_violation → **503**. A missing NOT NULL column almost always
+      means *server* code omitted a field, not that the client sent bad input — so a
+      422 blaming the client would mislead. Treat it as an internal fault.
+    - Any other class ``23`` (integrity constraint), e.g. ``23503`` foreign_key or
+      ``23514`` check_violation → **422**. These reflect client-supplied values that
+      violate a constraint (unknown FK id, out-of-range value).
+    - Class ``22`` (data exception), e.g. ``22P02`` invalid uuid syntax or ``22007``
+      invalid datetime → **422**. Malformed client input that Postgres could not parse.
+    - Everything else — connectivity errors, PostgREST schema-cache misses
+      (``PGRST205`` and friends), permission errors (``42501``), internal faults, or a
+      missing/non-string code → **503**. Not attributable to client input.
+    """
+    code = getattr(exc, "code", None)
+    if not isinstance(code, str):
+        return 503
+    if code == "23505":  # unique_violation → the row already exists
+        return 409
+    if code == "23502":  # not_null_violation → server omitted a column, not client input
+        return 503
+    if code[:2] in ("22", "23"):  # data exception / integrity violation from client input
+        return 422
+    return 503  # PGRSTxxx schema-cache, connectivity, permissions, internal faults
+
+
 async def log_startup() -> None:
     """Emit startup diagnostics so it is clear which optional features are active."""
     features = {
@@ -135,6 +177,47 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
+
+# Client-facing 4xx/5xx detail per status. Deliberately generic: the specific
+# SQLSTATE and request path go to logs/Sentry (below), never to the client, so we
+# don't leak DB internals. Shape mirrors FastAPI's default HTTPException body
+# (``{"detail": ...}``) for a consistent envelope across the API.
+_POSTGREST_STATUS_DETAIL = {
+    409: "Conflicts with existing data.",
+    422: "Invalid request.",
+    503: "Service temporarily unavailable.",
+}
+
+
+@app.exception_handler(PostgRESTAPIError)
+async def _handle_postgrest_error(request: Request, exc: PostgRESTAPIError) -> JSONResponse:
+    """Centralized PostgREST → HTTP mapping for *every* endpoint.
+
+    Any ``PostgRESTAPIError`` that a route handler does not catch locally lands here
+    (see ``_postgrest_http_status`` for the per-SQLSTATE decisions). This is the
+    single point that classifies DB errors, so individual endpoints no longer need
+    to blanket-map them to 503 — and endpoints with no local try/except (which used
+    to leak a raw 500) are now covered too.
+    """
+    status = _postgrest_http_status(exc)
+    code = getattr(exc, "code", None)
+    if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+        # exc_info=exc so Sentry's logging integration still captures the outage:
+        # returning a Response marks the exception "handled", so it won't be
+        # auto-reported otherwise.
+        logger.error(
+            "PostgREST error path=%s code=%s -> %s",
+            request.url.path,
+            code,
+            status,
+            exc_info=exc,
+        )
+    else:
+        # Client fault (bad input / conflict): expected, not an incident — log at info.
+        logger.info("PostgREST client-fault path=%s code=%s -> %s", request.url.path, code, status)
+    return JSONResponse(status_code=status, content={"detail": _POSTGREST_STATUS_DETAIL[status]})
+
+
 auth_service = AuthService()
 chat_service = ChatService()
 goal_service = GoalService()
@@ -174,7 +257,9 @@ async def _run_chat_model_state_operation(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    # PostgRESTAPIError is intentionally *not* caught here: it propagates to the
+    # centralized _handle_postgrest_error handler, which classifies it by SQLSTATE.
+    except httpx.HTTPError as exc:
         logger.exception(failure_log_message, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
@@ -520,7 +605,7 @@ async def list_chat_messages(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("chat messages list failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return page.model_dump(mode="json")
@@ -534,7 +619,7 @@ async def get_chat_model_state(
         state = await chat_service.get_model_state(user_context.user_id)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("chat model state get failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
@@ -1578,7 +1663,7 @@ async def _activity_repo_call(awaitable, *, detail: str, log_message: str):
         return await awaitable
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("%s error_type=%s", log_message, type(exc).__name__)
         raise HTTPException(status_code=503, detail=detail) from exc
 
@@ -1816,6 +1901,10 @@ async def generate_plan_structure(  # noqa: C901
             await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, skeleton.start_date)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
+    # this is a server-composed write, and the block runs compensating cleanup (supersede
+    # the partial plan below) that must happen on *any* persistence failure. A mid-write
+    # integrity error here is a server-side fault → 503, not a client 422.
     except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
         logger.exception("generate_plan: persistence failed user_id=%s", user_id)
         if persisted_plan is not None and persisted_plan.id:
@@ -1981,6 +2070,9 @@ async def adjust_plan(
         await repo.update_training_plan_generation_context(user_id, plan_id, context)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
+    # a failure mid-recompose of this server-composed write is a server-side fault → 503,
+    # not a client 422, and it is grouped with RuntimeError/ValueError from composition.
     except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
         logger.exception("adjust_plan: persistence failed user_id=%s plan_id=%s", user_id, plan_id)
         raise HTTPException(status_code=503, detail="Failed to adjust training plan.") from exc
@@ -2123,7 +2215,7 @@ async def get_compliance_summary(
         ]
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("get_compliance_summary failed user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to load compliance data.") from exc
 
@@ -2139,6 +2231,62 @@ async def get_compliance_summary(
     return summary
 
 
+class FindPlanWorkoutRequest(BaseModel):
+    """Look up planned workouts on/around a date to obtain a concrete id."""
+
+    workout_date: date
+    sport: str | None = None
+
+
+@app.post("/api/engine/find-plan-workout")
+async def find_plan_workout(
+    payload: FindPlanWorkoutRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Resolve a loose date/sport description to concrete plan-workout ids.
+
+    Gives the coach a reliable way to obtain a real ``plan_workout_id`` before
+    calling resolve_plan_workout, instead of guessing one.
+    """
+    user_id = user_context.user_id
+    window = timedelta(days=1)
+    try:
+        workouts = await repo.list_plan_workouts_between(
+            user_id,
+            start=payload.workout_date - window,
+            end=payload.workout_date + window,
+        )
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("find_plan_workout failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to look up plan workouts.") from exc
+
+    # Case-insensitive sport match: the coach supplies ``payload.sport`` loosely
+    # (e.g. "Running"), while stored ``w.sport`` is canonical lowercase.
+    sport = payload.sport.strip().casefold() if payload.sport else None
+    candidates = [w for w in workouts if sport is None or ((w.sport or "").casefold() == sport)]
+    # Closest to the requested date first so the coach's top candidate is the
+    # most likely match.
+    candidates.sort(
+        key=lambda w: (abs((w.workout_date - payload.workout_date).days), w.workout_date)
+    )
+    return {
+        "candidates": [
+            {
+                "plan_workout_id": w.id,
+                "workout_date": w.workout_date.isoformat(),
+                "sport": w.sport,
+                "title": w.title,
+                "workout_type": w.workout_type,
+                "status": w.status,
+                "target_duration_minutes": w.target_duration_minutes,
+            }
+            for w in candidates
+        ]
+    }
+
+
 class ResolvePlanWorkoutRequest(BaseModel):
     """Explicit athlete/coach resolution of a planned workout."""
 
@@ -2146,6 +2294,17 @@ class ResolvePlanWorkoutRequest(BaseModel):
     outcome: Literal["completed", "skipped"]
     activity_id: str | None = None
     source: Literal["athlete", "coach"] = "coach"
+
+    @field_validator("plan_workout_id")
+    @classmethod
+    def _require_uuid(cls, value: str) -> str:
+        # Reject fabricated/placeholder ids at the boundary (422) rather than letting
+        # a non-UUID reach Postgres and surface as a confusing 503. Callers must resolve
+        # a real id first (find_plan_workout / compliance summary).
+        try:
+            return str(UUID(value))
+        except ValueError as exc:
+            raise ValueError("plan_workout_id must be a valid UUID") from exc
 
 
 async def _apply_workout_resolution(
@@ -2175,7 +2334,11 @@ async def resolve_plan_workout(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    # PostgRESTAPIError propagates to the centralized _handle_postgrest_error handler,
+    # which maps a client-fault SQLSTATE (e.g. 22P02 from a non-UUID id) to 422 and a
+    # genuine outage to 503 — the behavior this endpoint's boundary validator and the
+    # original 503 investigation established, now shared across every endpoint.
+    except httpx.HTTPError as exc:
         logger.exception(
             "resolve_plan_workout failed user_id=%s workout_id=%s",
             user_id,

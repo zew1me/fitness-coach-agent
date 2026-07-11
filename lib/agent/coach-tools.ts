@@ -250,6 +250,7 @@ function executeDeterministicEngineTool(
     adjust_plan: "/api/engine/adjust-plan",
     calculate_zones: "/api/engine/calculate-zones",
     estimate_thresholds: "/api/engine/estimate-thresholds",
+    find_plan_workout: "/api/engine/find-plan-workout",
     generate_training_plan: "/api/engine/generate-plan-structure",
     get_compliance_summary: "/api/engine/get-compliance-summary",
     recalibrate_thresholds: "/api/engine/recalibrate-thresholds",

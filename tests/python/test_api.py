@@ -3178,10 +3178,28 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method", "path", "json", "service_method", "exception"),
+    ("method", "path", "json", "service_method", "exception", "expected_detail"),
     [
-        ("GET", "/api/chat/messages", None, "list_messages", HTTPError("connection reset")),
-        ("GET", "/api/chat/model-state", None, "get_model_state", HTTPError("timeout")),
+        # httpx transport errors are still handled locally by the endpoint, which keeps
+        # its own message.
+        (
+            "GET",
+            "/api/chat/messages",
+            None,
+            "list_messages",
+            HTTPError("connection reset"),
+            "Chat session service unavailable",
+        ),
+        (
+            "GET",
+            "/api/chat/model-state",
+            None,
+            "get_model_state",
+            HTTPError("timeout"),
+            "Chat session service unavailable",
+        ),
+        # A PostgREST schema-cache miss now flows to the centralized handler, which maps
+        # it to 503 with the shared generic detail.
         (
             "PUT",
             "/api/chat/model-state",
@@ -3201,6 +3219,7 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
                     "details": None,
                 }
             ),
+            "Service temporarily unavailable.",
         ),
     ],
 )
@@ -3210,6 +3229,7 @@ async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
     json: dict[str, object] | None,
     service_method: str,
     exception: Exception,
+    expected_detail: str,
     model_state_chat_service_fixture,
 ) -> None:
     service = model_state_chat_service_fixture
@@ -3223,7 +3243,7 @@ async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
         response = await client.request(method, path, json=json)
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Chat session service unavailable"
+    assert response.json()["detail"] == expected_detail
 
 
 @pytest.mark.asyncio
