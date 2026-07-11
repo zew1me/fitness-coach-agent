@@ -221,7 +221,16 @@ const adjustPlanInputSchema = z.object({
 const resolvePlanWorkoutInputSchema = z.object({
   activity_id: z.string().min(1).nullish(),
   outcome: z.enum(["completed", "skipped"]),
-  plan_workout_id: z.string().min(1),
+  // A real plan-workout UUID, obtained from find_plan_workout or a compliance
+  // summary — never a fabricated placeholder. Enforced so the coach cannot resolve
+  // against a made-up id.
+  plan_workout_id: z.uuid(),
+});
+
+const findPlanWorkoutInputSchema = z.object({
+  // ISO date (YYYY-MM-DD) of the planned session to look up.
+  workout_date: z.iso.date(),
+  sport: z.string().min(1).nullish(),
 });
 
 type ToolDefinition<TSchema extends z.ZodTypeAny> = {
@@ -253,8 +262,12 @@ export const coachToolDefinitions = {
     "Summarize planned versus actual workout completion since the plan started (up to 4 weeks). Auto-matches recorded activities to planned workouts, reports compliance percentage, and lists up to 3 recent unconfirmed sessions worth asking the athlete about.",
     userInputSchema,
   ),
+  find_plan_workout: defineTool(
+    "Look up the planned workout(s) on a given date (optionally filtered by sport) to get the real plan_workout_id. Call this before resolve_plan_workout whenever you do not already hold a concrete id — never guess or fabricate one.",
+    findPlanWorkoutInputSchema,
+  ),
   resolve_plan_workout: defineTool(
-    "Mark a planned workout completed or skipped after the athlete confirms what happened. Optionally link the recorded activity that fulfilled it.",
+    "Mark a planned workout completed or skipped after the athlete confirms what happened. Optionally link the recorded activity that fulfilled it. plan_workout_id must be a real UUID from find_plan_workout or a compliance summary.",
     resolvePlanWorkoutInputSchema,
   ),
   save_activity_from_text: defineTool(
@@ -302,7 +315,7 @@ export const coachToolDefinitions = {
     adjustPlanInputSchema,
   ),
   recalibrate_thresholds: defineTool(
-    "Re-estimate thresholds from recent performance evidence.",
+    "Re-estimate thresholds from recent activities, non-overwriting.",
     userInputSchema,
   ),
 } as const;

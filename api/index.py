@@ -8,10 +8,12 @@ import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 import sentry_sdk
@@ -23,12 +25,13 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Request,
     Response,
     UploadFile,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
 from postgrest.exceptions import APIError as PostgRESTAPIError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import settings
 from backend.logging_config import configure_logging
@@ -41,6 +44,7 @@ from backend.models.athlete import (
     ScheduleDayAvailability,
     ScheduleOverride,
     SportThreshold,
+    ThresholdRecalibrationCandidate,
 )
 from backend.models.auth import (
     BrowserSessionRequest,
@@ -59,6 +63,7 @@ from backend.models.chat import (
 )
 from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
+from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -79,7 +84,15 @@ from backend.services.goal_service import (
     InvalidGoalPayloadError,
     UnknownGoalActionError,
 )
+from backend.services.intervals import (
+    IntervalsConfigurationError,
+    IntervalsOAuthExchangeError,
+    IntervalsOAuthService,
+    IntervalsStateError,
+)
 from backend.services.r2 import R2Service
+
+ActivityPersistenceEndpoint = Literal["process_uploaded_file", "save_activity_from_text"]
 
 configure_logging(debug=settings.app_env == "development")
 
@@ -98,6 +111,45 @@ else:
 
 logger = logging.getLogger(__name__)
 MAX_CHAT_MESSAGE_PAGE_SIZE = 100
+
+
+def _postgrest_http_status(exc: PostgRESTAPIError) -> int:
+    """Map a PostgREST/Postgres error to the HTTP status a client should see.
+
+    PostgREST surfaces the underlying Postgres SQLSTATE on ``APIError.code`` (a
+    5-char string like ``"22P02"``; PostgREST's own faults instead use ``PGRSTxxx``).
+    We branch on the SQLSTATE because the *same* exception type covers both "you
+    sent bad data" and "the database is unreachable" — only the code distinguishes
+    them. Origin story: a coach-sent non-UUID ``plan_workout_id`` reached Postgres,
+    raised ``22P02``, and surfaced as a spurious 503 "service unavailable".
+
+    Per-code decisions and rationale:
+
+    - ``23505`` unique_violation → **409 Conflict**. The request was well-formed but
+      collides with a row that already exists; "conflict" is the honest status, not
+      "invalid" (422) and not "outage" (503).
+    - ``23502`` not_null_violation → **503**. A missing NOT NULL column almost always
+      means *server* code omitted a field, not that the client sent bad input — so a
+      422 blaming the client would mislead. Treat it as an internal fault.
+    - Any other class ``23`` (integrity constraint), e.g. ``23503`` foreign_key or
+      ``23514`` check_violation → **422**. These reflect client-supplied values that
+      violate a constraint (unknown FK id, out-of-range value).
+    - Class ``22`` (data exception), e.g. ``22P02`` invalid uuid syntax or ``22007``
+      invalid datetime → **422**. Malformed client input that Postgres could not parse.
+    - Everything else — connectivity errors, PostgREST schema-cache misses
+      (``PGRST205`` and friends), permission errors (``42501``), internal faults, or a
+      missing/non-string code → **503**. Not attributable to client input.
+    """
+    code = getattr(exc, "code", None)
+    if not isinstance(code, str):
+        return 503
+    if code == "23505":  # unique_violation → the row already exists
+        return 409
+    if code == "23502":  # not_null_violation → server omitted a column, not client input
+        return 503
+    if code[:2] in ("22", "23"):  # data exception / integrity violation from client input
+        return 422
+    return 503  # PGRSTxxx schema-cache, connectivity, permissions, internal faults
 
 
 async def log_startup() -> None:
@@ -127,9 +179,51 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
+
+# Client-facing 4xx/5xx detail per status. Deliberately generic: the specific
+# SQLSTATE and request path go to logs/Sentry (below), never to the client, so we
+# don't leak DB internals. Shape mirrors FastAPI's default HTTPException body
+# (``{"detail": ...}``) for a consistent envelope across the API.
+_POSTGREST_STATUS_DETAIL = {
+    409: "Conflicts with existing data.",
+    422: "Invalid request.",
+    503: "Service temporarily unavailable.",
+}
+
+
+@app.exception_handler(PostgRESTAPIError)
+async def _handle_postgrest_error(request: Request, exc: PostgRESTAPIError) -> JSONResponse:
+    """Centralized PostgREST → HTTP mapping for *every* endpoint.
+
+    Any ``PostgRESTAPIError`` that a route handler does not catch locally lands here
+    (see ``_postgrest_http_status`` for the per-SQLSTATE decisions). This is the
+    single point that classifies DB errors, so individual endpoints no longer need
+    to blanket-map them to 503 — and endpoints with no local try/except (which used
+    to leak a raw 500) are now covered too.
+    """
+    status = _postgrest_http_status(exc)
+    code = getattr(exc, "code", None)
+    if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+        # exc_info=exc so Sentry's logging integration still captures the outage:
+        # returning a Response marks the exception "handled", so it won't be
+        # auto-reported otherwise.
+        logger.error(
+            "PostgREST error path=%s code=%s -> %s",
+            request.url.path,
+            code,
+            status,
+            exc_info=exc,
+        )
+    else:
+        # Client fault (bad input / conflict): expected, not an incident — log at info.
+        logger.info("PostgREST client-fault path=%s code=%s -> %s", request.url.path, code, status)
+    return JSONResponse(status_code=status, content={"detail": _POSTGREST_STATUS_DETAIL[status]})
+
+
 auth_service = AuthService()
 chat_service = ChatService()
 goal_service = GoalService()
+intervals_service = IntervalsOAuthService()
 repo = SupabaseRepository()
 r2_service = R2Service()
 
@@ -165,7 +259,9 @@ async def _run_chat_model_state_operation(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    # PostgRESTAPIError is intentionally *not* caught here: it propagates to the
+    # centralized _handle_postgrest_error handler, which classifies it by SQLSTATE.
+    except httpx.HTTPError as exc:
         logger.exception(failure_log_message, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
@@ -330,6 +426,72 @@ async def oauth_browser_token(
         return token
 
 
+# ── Intervals.icu OAuth ───────────────────────────────────────
+
+
+@app.post("/api/intervals/authorize")
+async def intervals_authorize(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        response = intervals_service.build_authorization_url(user_context.user_id)
+    except IntervalsConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response.model_dump(mode="json")
+
+
+@app.get("/api/intervals/callback")
+async def intervals_callback(
+    code: str | None = None,
+    error: str | None = None,
+    state: str | None = None,
+) -> RedirectResponse:
+    profile_base_url = f"{settings.base_url.rstrip('/')}/profile"
+    profile_error_url = f"{profile_base_url}?intervals=error"
+    if error is not None:
+        logger.info("intervals callback denied error=%s", error)
+        return RedirectResponse(profile_error_url, status_code=302)
+    if not code or not state:
+        logger.warning("intervals callback missing required parameters")
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    try:
+        await intervals_service.exchange_code_for_connection(code=code, state=state)
+    except (
+        IntervalsConfigurationError,
+        IntervalsOAuthExchangeError,
+        IntervalsRepositoryNotConfiguredError,
+        IntervalsStateError,
+    ) as exc:
+        logger.warning("intervals callback failed error_type=%s", type(exc).__name__)
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    logger.info("intervals callback completed")
+    return RedirectResponse(f"{profile_base_url}?intervals=connected", status_code=302)
+
+
+@app.get("/api/intervals/status")
+async def intervals_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = intervals_service.get_status(user_context.user_id)
+    except IntervalsRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
+
+
+@app.delete("/api/intervals/connection")
+async def intervals_disconnect(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = intervals_service.disconnect(user_context.user_id)
+    except IntervalsRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
+
+
 @app.post("/api/oauth/authorize/decision")
 async def oauth_authorize_decision(  # noqa: PLR0913
     client_id: str = Form(...),
@@ -445,7 +607,7 @@ async def list_chat_messages(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("chat messages list failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return page.model_dump(mode="json")
@@ -459,7 +621,7 @@ async def get_chat_model_state(
         state = await chat_service.get_model_state(user_context.user_id)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("chat model state get failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return state.model_dump(mode="json")
@@ -774,6 +936,22 @@ class RecalibrateThresholdsRequest(BaseModel):
     pass
 
 
+class ManualThresholdInput(BaseModel):
+    lt1_power_watts: int | None = None
+    lt1_pace_sec_per_km: int | None = None
+    lt1_hr_bpm: int | None = None
+    lt2_power_watts: int | None = None
+    lt2_pace_sec_per_km: int | None = None
+    lt2_hr_bpm: int | None = None
+    css_sec_per_100: int | None = None
+
+
+class RecalibrationCandidateDecisionRequest(BaseModel):
+    candidate_id: str
+    decision: Literal["accept_candidate", "keep_current", "manual_threshold"]
+    manual_threshold: ManualThresholdInput | None = None
+
+
 @app.post("/api/engine/recalibrate-thresholds")
 async def recalibrate_thresholds_endpoint(
     payload: RecalibrateThresholdsRequest,
@@ -789,6 +967,7 @@ async def recalibrate_thresholds_endpoint(
         ESTIMABLE_SPORTS,
         RECALIBRATION_LOOKBACK_DAYS,
         evaluate_all,
+        recalibration_cadence_gate,
     )
 
     user_id = user_context.user_id
@@ -812,22 +991,80 @@ async def recalibrate_thresholds_endpoint(
         )
 
     results = evaluate_all(activities_by_sport, current_by_sport, user_id)
-
+    response_results: list[dict[str, object]] = []
     for result in results:
         if result.status == "recalibrated" and result.candidate is not None:
-            saved = await _activity_repo_call(
-                repo.upsert_sport_threshold(result.candidate),
-                detail="Failed to save recalibrated threshold.",
+            candidate_confidence = cast(
+                Literal["low", "medium", "high"], result.confidence or "low"
+            )
+            latest_candidate = await _activity_repo_call(
+                repo.get_latest_recalibration_candidate(user_id, result.sport),
+                detail="Failed to load recalibration candidate history.",
                 log_message=(
-                    f"upsert_sport_threshold failed for user_id={user_id} sport={result.sport}"
+                    "get_latest_recalibration_candidate failed for "
+                    f"user_id={user_id} sport={result.sport}"
+                ),
+            )
+            next_eligible_date = recalibration_cadence_gate(
+                candidate_confidence,
+                latest_candidate.generated_at.date() if latest_candidate else None,
+            )
+            if next_eligible_date is not None:
+                logger.info(
+                    "threshold recalibration cadence gated user_id=%s sport=%s confidence=%s "
+                    "next_eligible_date=%s",
+                    user_id,
+                    result.sport,
+                    result.confidence,
+                    next_eligible_date,
+                )
+                response_results.append(
+                    {
+                        "sport": result.sport,
+                        "status": "cadence_gated",
+                        "confidence": result.confidence,
+                        "explanation": result.explanation,
+                        "evidence_activity_id": result.evidence_activity_id,
+                        "next_eligible_date": next_eligible_date.isoformat(),
+                    }
+                )
+                continue
+
+            candidate = await _activity_repo_call(
+                repo.create_recalibration_candidate(
+                    ThresholdRecalibrationCandidate(
+                        user_id=user_id,
+                        sport=result.sport,
+                        confidence=candidate_confidence,
+                        evidence_activity_id=result.evidence_activity_id,
+                        evidence_reason=result.evidence_reason,
+                        explanation=result.explanation,
+                        candidate_threshold=result.candidate,
+                    )
+                ),
+                detail="Failed to queue recalibration candidate.",
+                log_message=(
+                    f"create_recalibration_candidate failed for user_id={user_id} "
+                    f"sport={result.sport}"
                 ),
             )
             logger.info(
-                "threshold recalibrated user_id=%s sport=%s confidence=%s method=%s",
+                "threshold recalibration candidate queued user_id=%s sport=%s confidence=%s "
+                "candidate_id=%s",
                 user_id,
                 result.sport,
                 result.confidence,
-                saved.estimation_method,
+                candidate.id,
+            )
+            response_results.append(
+                {
+                    "sport": result.sport,
+                    "status": "candidate_queued",
+                    "confidence": result.confidence,
+                    "explanation": result.explanation,
+                    "evidence_activity_id": result.evidence_activity_id,
+                    "candidate_id": candidate.id,
+                }
             )
         else:
             logger.info(
@@ -836,18 +1073,143 @@ async def recalibrate_thresholds_endpoint(
                 result.sport,
                 result.status,
             )
+            response_results.append(
+                {
+                    "sport": result.sport,
+                    "status": result.status,
+                    "confidence": result.confidence,
+                    "explanation": result.explanation,
+                    "evidence_activity_id": result.evidence_activity_id,
+                }
+            )
 
+    return {"results": response_results}
+
+
+def _manual_threshold_from_candidate(
+    candidate: ThresholdRecalibrationCandidate,
+    manual_threshold: ManualThresholdInput,
+    *,
+    today: date,
+) -> SportThreshold:
+    from backend.engine.zones import compute_zones
+
+    updates = manual_threshold.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="manual_threshold must include a value.")
+
+    threshold = candidate.candidate_threshold.model_copy(
+        update={
+            **updates,
+            "confidence": "high",
+            "effective_from": today,
+            "estimation_method": "manual",
+            "estimation_source": f"manual_threshold_decision:{candidate.id}",
+            "id": None,
+            "source": "user",
+            "superseded_at": None,
+            "user_id": candidate.user_id,
+            "sport": candidate.sport,
+        }
+    )
+    threshold.zones = [
+        z.to_dict()
+        for z in compute_zones(
+            threshold.sport,
+            ftp_watts=threshold.lt2_power_watts,
+            lt1_power_watts=threshold.lt1_power_watts,
+            lt2_pace_sec_km=threshold.lt2_pace_sec_per_km,
+            lt1_pace_sec_km=threshold.lt1_pace_sec_per_km,
+            max_hr=None,
+            lt2_hr=threshold.lt2_hr_bpm,
+            lt1_hr=threshold.lt1_hr_bpm,
+        )
+    ]
+    return threshold
+
+
+@app.post("/api/engine/recalibration-candidate-decision")
+async def decide_recalibration_candidate(
+    payload: RecalibrationCandidateDecisionRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    candidate = await _activity_repo_call(
+        repo.get_recalibration_candidate(user_id, payload.candidate_id),
+        detail="Failed to load recalibration candidate.",
+        log_message=(
+            f"get_recalibration_candidate failed for user_id={user_id} "
+            f"candidate_id={payload.candidate_id}"
+        ),
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Recalibration candidate not found.")
+    if candidate.status != "pending":
+        raise HTTPException(status_code=409, detail="Recalibration candidate is already decided.")
+
+    saved_threshold: SportThreshold | None = None
+    if payload.decision == "accept_candidate":
+        threshold = candidate.candidate_threshold.model_copy(
+            update={"id": None, "superseded_at": None, "user_id": user_id}
+        )
+        saved_threshold = await _activity_repo_call(
+            repo.upsert_sport_threshold(threshold),
+            detail="Failed to save accepted recalibration candidate.",
+            log_message=(
+                f"upsert_sport_threshold failed for accepted candidate user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+        status = "accepted"
+    elif payload.decision == "keep_current":
+        status = "kept_current"
+    else:
+        if payload.manual_threshold is None:
+            raise HTTPException(status_code=400, detail="manual_threshold is required.")
+        manual = _manual_threshold_from_candidate(
+            candidate,
+            payload.manual_threshold,
+            today=date.today(),
+        )
+        saved_threshold = await _activity_repo_call(
+            repo.upsert_sport_threshold(manual),
+            detail="Failed to save manual threshold.",
+            log_message=(
+                f"upsert_sport_threshold failed for manual threshold user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+        status = "manual_entered"
+
+    try:
+        decided = await _activity_repo_call(
+            repo.decide_recalibration_candidate(
+                user_id=user_id,
+                candidate_id=payload.candidate_id,
+                status=status,
+                manual_threshold=saved_threshold if status == "manual_entered" else None,
+            ),
+            detail="Failed to record recalibration candidate decision.",
+            log_message=(
+                f"decide_recalibration_candidate failed for user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+    except RecordNotFoundError as exc:
+        # We just confirmed status == "pending" above, so a missing row here means
+        # a concurrent request already decided this candidate first.
+        raise HTTPException(
+            status_code=409, detail="Recalibration candidate is already decided."
+        ) from exc
+    logger.info(
+        "threshold recalibration candidate decided user_id=%s candidate_id=%s status=%s",
+        user_id,
+        payload.candidate_id,
+        status,
+    )
     return {
-        "results": [
-            {
-                "sport": r.sport,
-                "status": r.status,
-                "confidence": r.confidence,
-                "explanation": r.explanation,
-                "evidence_activity_id": r.evidence_activity_id,
-            }
-            for r in results
-        ]
+        "candidate": decided.model_dump(mode="json"),
+        "threshold": saved_threshold.model_dump(mode="json") if saved_threshold else None,
     }
 
 
@@ -1024,19 +1386,25 @@ async def process_uploaded_file_endpoint(
         Path(payload.filename).suffix.lower()[:16] or "none",
         payload.content_type,
     )
+    object_key = r2_service.resolve_object_key(
+        object_key=payload.object_key,
+        public_url=payload.public_url,
+    )
     file_bytes = await r2_service.download_file_bytes(
         user_id=user_context.user_id,
-        object_key=payload.object_key,
+        object_key=object_key,
     )
     activity = _build_uploaded_activity(
         user_id=user_context.user_id,
         filename=payload.filename,
         content_type=payload.content_type,
-        object_key=payload.object_key,
+        object_key=object_key,
         public_url=payload.public_url,
         file_bytes=file_bytes,
     )
-    return {"activity": activity.model_dump(mode="json")}
+    return await _persist_extracted_activity(
+        user_context.user_id, activity, calling_endpoint="process_uploaded_file"
+    )
 
 
 # Activity/image members inside an uploaded .zip are processed; every other member is
@@ -1460,7 +1828,7 @@ async def _activity_repo_call(awaitable, *, detail: str, log_message: str):
         return await awaitable
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("%s error_type=%s", log_message, type(exc).__name__)
         raise HTTPException(status_code=503, detail=detail) from exc
 
@@ -1558,10 +1926,17 @@ async def save_activity_from_text(
             "raw_extraction": result.raw_extraction,
             "status": "needs_clarification",
         }
-    return await _persist_extracted_activity(user_context.user_id, result.activity)
+    return await _persist_extracted_activity(
+        user_context.user_id, result.activity, calling_endpoint="save_activity_from_text"
+    )
 
 
-async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapping[str, object]:
+async def _persist_extracted_activity(
+    user_id: str,
+    extracted: Activity,
+    *,
+    calling_endpoint: ActivityPersistenceEndpoint,
+) -> Mapping[str, object]:
     try:
         activity = await _activity_repo_call(
             repo.create_activity(extracted),
@@ -1571,7 +1946,7 @@ async def _persist_extracted_activity(user_id: str, extracted: Activity) -> Mapp
     except RuntimeError as exc:
         logger.exception("create_activity failed for user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
-    logger.info("save_activity_from_text user_id=%s status=saved", user_id)
+    logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}
     if matched is not None:
@@ -1691,6 +2066,10 @@ async def generate_plan_structure(  # noqa: C901
             await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, skeleton.start_date)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
+    # this is a server-composed write, and the block runs compensating cleanup (supersede
+    # the partial plan below) that must happen on *any* persistence failure. A mid-write
+    # integrity error here is a server-side fault → 503, not a client 422.
     except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
         logger.exception("generate_plan: persistence failed user_id=%s", user_id)
         if persisted_plan is not None and persisted_plan.id:
@@ -1856,6 +2235,9 @@ async def adjust_plan(
         await repo.update_training_plan_generation_context(user_id, plan_id, context)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
+    # a failure mid-recompose of this server-composed write is a server-side fault → 503,
+    # not a client 422, and it is grouped with RuntimeError/ValueError from composition.
     except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
         logger.exception("adjust_plan: persistence failed user_id=%s plan_id=%s", user_id, plan_id)
         raise HTTPException(status_code=503, detail="Failed to adjust training plan.") from exc
@@ -1998,7 +2380,7 @@ async def get_compliance_summary(
         ]
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("get_compliance_summary failed user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to load compliance data.") from exc
 
@@ -2014,6 +2396,62 @@ async def get_compliance_summary(
     return summary
 
 
+class FindPlanWorkoutRequest(BaseModel):
+    """Look up planned workouts on/around a date to obtain a concrete id."""
+
+    workout_date: date
+    sport: str | None = None
+
+
+@app.post("/api/engine/find-plan-workout")
+async def find_plan_workout(
+    payload: FindPlanWorkoutRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Resolve a loose date/sport description to concrete plan-workout ids.
+
+    Gives the coach a reliable way to obtain a real ``plan_workout_id`` before
+    calling resolve_plan_workout, instead of guessing one.
+    """
+    user_id = user_context.user_id
+    window = timedelta(days=1)
+    try:
+        workouts = await repo.list_plan_workouts_between(
+            user_id,
+            start=payload.workout_date - window,
+            end=payload.workout_date + window,
+        )
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("find_plan_workout failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to look up plan workouts.") from exc
+
+    # Case-insensitive sport match: the coach supplies ``payload.sport`` loosely
+    # (e.g. "Running"), while stored ``w.sport`` is canonical lowercase.
+    sport = payload.sport.strip().casefold() if payload.sport else None
+    candidates = [w for w in workouts if sport is None or ((w.sport or "").casefold() == sport)]
+    # Closest to the requested date first so the coach's top candidate is the
+    # most likely match.
+    candidates.sort(
+        key=lambda w: (abs((w.workout_date - payload.workout_date).days), w.workout_date)
+    )
+    return {
+        "candidates": [
+            {
+                "plan_workout_id": w.id,
+                "workout_date": w.workout_date.isoformat(),
+                "sport": w.sport,
+                "title": w.title,
+                "workout_type": w.workout_type,
+                "status": w.status,
+                "target_duration_minutes": w.target_duration_minutes,
+            }
+            for w in candidates
+        ]
+    }
+
+
 class ResolvePlanWorkoutRequest(BaseModel):
     """Explicit athlete/coach resolution of a planned workout."""
 
@@ -2021,6 +2459,17 @@ class ResolvePlanWorkoutRequest(BaseModel):
     outcome: Literal["completed", "skipped"]
     activity_id: str | None = None
     source: Literal["athlete", "coach"] = "coach"
+
+    @field_validator("plan_workout_id")
+    @classmethod
+    def _require_uuid(cls, value: str) -> str:
+        # Reject fabricated/placeholder ids at the boundary (422) rather than letting
+        # a non-UUID reach Postgres and surface as a confusing 503. Callers must resolve
+        # a real id first (find_plan_workout / compliance summary).
+        try:
+            return str(UUID(value))
+        except ValueError as exc:
+            raise ValueError("plan_workout_id must be a valid UUID") from exc
 
 
 async def _apply_workout_resolution(
@@ -2050,7 +2499,11 @@ async def resolve_plan_workout(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    # PostgRESTAPIError propagates to the centralized _handle_postgrest_error handler,
+    # which maps a client-fault SQLSTATE (e.g. 22P02 from a non-UUID id) to 422 and a
+    # genuine outage to 503 — the behavior this endpoint's boundary validator and the
+    # original 503 investigation established, now shared across every endpoint.
+    except httpx.HTTPError as exc:
         logger.exception(
             "resolve_plan_workout failed user_id=%s workout_id=%s",
             user_id,

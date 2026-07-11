@@ -14,6 +14,13 @@ type AgentEvent = {
   type: string;
 };
 
+type CoachToolForTest = {
+  isEnabled: (args: {
+    runContext: { context: Record<string, unknown> };
+  }) => boolean;
+  name: string;
+};
+
 const orchestratorMocks = vi.hoisted(() => {
   const agentConfigs: Array<Record<string, unknown>> = [];
   const events: AgentEvent[] = [];
@@ -127,6 +134,50 @@ function messages(): UIMessage[] {
   ];
 }
 
+function messagesWithFitAttachment(): UIMessage[] {
+  return [
+    {
+      id: "d0e12f7d-6d2c-4c1b-8e8d-9c9a2c3d9c9a",
+      parts: [
+        { text: "Here's my ride from today.", type: "text" },
+        {
+          filename: "ride.fit",
+          mediaType: "application/vnd.garmin.fit",
+          type: "file",
+          url: "https://cdn.example.com/ride.fit",
+        },
+      ],
+      role: "user",
+    },
+  ];
+}
+
+function messagesWithEarlierFitAttachment(): UIMessage[] {
+  return [
+    ...messagesWithFitAttachment(),
+    {
+      id: "assistant-after-upload",
+      parts: [{ text: "I saved that ride.", type: "text" }],
+      role: "assistant",
+    },
+    {
+      id: "latest-user-text-only",
+      parts: [{ text: "Add RPE 7 for yesterday.", type: "text" }],
+      role: "user",
+    },
+  ];
+}
+
+function saveActivityFromTextTool(): CoachToolForTest | undefined {
+  const leadCoachConfig = orchestratorMocks.agentConfigs.find(
+    (config) => config["name"] === "Lead coach",
+  );
+  const tools = leadCoachConfig?.["tools"] as CoachToolForTest[];
+  return tools.find(
+    (candidate) => candidate.name === "save_activity_from_text",
+  );
+}
+
 beforeEach(() => {
   orchestratorMocks.agentConfigs.length = 0;
   orchestratorMocks.events.length = 0;
@@ -177,6 +228,94 @@ describe("streamCoachTurn", () => {
       expect.any(Function),
       expect.objectContaining({ groupId: "athlete-1" }),
     );
+  });
+
+  it("disables save_activity_from_text when the turn carries a fit/gpx/tcx attachment", async () => {
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messagesWithFitAttachment(),
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({
+        context: expect.objectContaining({ hasActivityFileAttachment: true }),
+      }),
+    );
+
+    const saveActivityFromText = saveActivityFromTextTool();
+
+    expect(
+      saveActivityFromText?.isEnabled({
+        runContext: {
+          context: { hasActivityFileAttachment: true, toolCalled: false },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps save_activity_from_text enabled when only an earlier turn has an activity attachment", async () => {
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messagesWithEarlierFitAttachment(),
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({
+        context: expect.objectContaining({
+          hasActivityFileAttachment: false,
+        }),
+      }),
+    );
+
+    const saveActivityFromText = saveActivityFromTextTool();
+
+    expect(
+      saveActivityFromText?.isEnabled({
+        runContext: {
+          context: { hasActivityFileAttachment: false, toolCalled: false },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps save_activity_from_text enabled when the turn has no file attachment", async () => {
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({
+        context: expect.objectContaining({
+          hasActivityFileAttachment: false,
+        }),
+      }),
+    );
+
+    const saveActivityFromText = saveActivityFromTextTool();
+
+    expect(
+      saveActivityFromText?.isEnabled({
+        runContext: {
+          context: { hasActivityFileAttachment: false, toolCalled: false },
+        },
+      }),
+    ).toBe(true);
   });
 
   it("streams text using the existing UI-message protocol", async () => {
@@ -416,6 +555,71 @@ describe("streamCoachTurn", () => {
     ).find(([url]) => String(url).endsWith("/api/chat/messages"));
     expect(String(persistCall?.[1]?.body)).toContain(
       "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
+    );
+  });
+
+  it("does not imply recalibrate_thresholds applied threshold changes in deterministic fallback", async () => {
+    orchestratorMocks.runEventSequences.push(
+      [
+        {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "recalibrate_thresholds",
+              arguments: "{}",
+            },
+          },
+        },
+        {
+          type: "run_item_stream_event",
+          name: "tool_output",
+          item: {
+            rawItem: {
+              type: "function_call_result",
+              callId: "call-1",
+              name: "recalibrate_thresholds",
+            },
+            output: {
+              results: [
+                {
+                  sport: "running",
+                  status: "candidate_queued",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      [],
+    );
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    const text = await response.text();
+    expect(text).toContain(
+      "I checked your thresholds against recent efforts and noted the result.",
+    );
+    expect(text).not.toContain("made some adjustments");
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain(
+      "I checked your thresholds against recent efforts and noted the result.",
     );
   });
 

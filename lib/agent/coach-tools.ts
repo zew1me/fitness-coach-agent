@@ -4,6 +4,7 @@ import { type ToolSet } from "ai";
 import { coachingMemoryToolSchema } from "./coaching-memory";
 import type { SupabaseAgentSession } from "./supabase-agent-session";
 import { coachToolDefinitions } from "./tools";
+import { parseUploadedFileText } from "./uploaded-file-stub";
 
 export type CoachToolContext = {
   accessToken: string;
@@ -88,7 +89,7 @@ function stringField(
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function isActivityFile(
+export function isActivityFile(
   contentType: string | null,
   filename: string | null,
 ): boolean {
@@ -178,6 +179,30 @@ function isValidActivityUpload(
   );
 }
 
+function routeSaveActivityFromText(
+  input: unknown,
+  context: CoachToolContext,
+): unknown {
+  const payload = engineInput(input);
+  const text = stringField(payload, "text");
+  const stub = text !== null ? parseUploadedFileText(text) : null;
+  if (stub !== null && isActivityFile(stub.contentType, stub.filename)) {
+    // The model attached a GPX/FIT/TCX upload stub as free text instead of
+    // calling process_uploaded_file. Redirect to the deterministic parser so
+    // duration/distance come from the file, never from LLM guessing.
+    return processUploadedFile(
+      {
+        content_type: stub.contentType,
+        filename: stub.filename,
+        object_key: stub.objectKey,
+        public_url: stub.publicUrl,
+      },
+      context,
+    );
+  }
+  return postEngine(context, "/api/engine/save-activity-from-text", payload);
+}
+
 function processUploadedFile(
   input: unknown,
   context: CoachToolContext,
@@ -246,6 +271,7 @@ function executeDeterministicEngineTool(
     adjust_plan: "/api/engine/adjust-plan",
     calculate_zones: "/api/engine/calculate-zones",
     estimate_thresholds: "/api/engine/estimate-thresholds",
+    find_plan_workout: "/api/engine/find-plan-workout",
     generate_training_plan: "/api/engine/generate-plan-structure",
     get_compliance_summary: "/api/engine/get-compliance-summary",
     recalibrate_thresholds: "/api/engine/recalibrate-thresholds",
@@ -292,11 +318,7 @@ export function executeCoachTool(
   }
 
   if (name === "save_activity_from_text") {
-    return postEngine(
-      context,
-      "/api/engine/save-activity-from-text",
-      engineInput(input),
-    );
+    return routeSaveActivityFromText(input, context);
   }
 
   if (name === "update_athlete_profile") {
@@ -324,6 +346,11 @@ export function executeCoachTool(
 
 export type CoachAgentRunContext = {
   toolCalled: boolean;
+  // True when this turn's messages include a gpx/fit/tcx attachment. Gates
+  // save_activity_from_text so the model can't route a file upload to the
+  // LLM-guessing text-extraction path even if it doesn't pass the stub text
+  // through verbatim (see parseUploadedFileText for the verbatim case).
+  hasActivityFileAttachment: boolean;
 };
 
 export function createAgentCoachTools(
@@ -336,7 +363,10 @@ export function createAgentCoachTools(
       name,
       description: definition.description,
       parameters: definition.inputSchema,
-      isEnabled: ({ runContext }) => !runContext.context.toolCalled,
+      isEnabled: ({ runContext }) =>
+        !runContext.context.toolCalled &&
+        (name !== "save_activity_from_text" ||
+          !runContext.context.hasActivityFileAttachment),
       execute: (input: unknown) => executeCoachTool(name, input, context),
     }),
   );

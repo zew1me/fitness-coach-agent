@@ -15,6 +15,8 @@ SENSITIVE_ENV_KEYS: frozenset[str] = frozenset(
         "SUPABASE_SERVICE_ROLE_KEY",
         "OPENAI_API_KEY",
         "TAVILY_API_KEY",
+        "INTERVALS_CLIENT_SECRET",
+        "INTERVALS_TOKEN_ENCRYPTION_SECRET",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "SENTRY_DSN",
