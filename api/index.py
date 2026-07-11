@@ -1503,8 +1503,17 @@ async def _zip_image_entry(
         return None
     try:
         result = await analyze_screenshot(uploaded.public_url)
-    except Exception:  # best-effort per member; a flaky image must not abort the whole zip
-        logger.exception("failed to analyze zip image member user_id=%s", user_id)
+    except Exception as exc:  # best-effort per member; a flaky image must not abort the zip
+        # Analysis is driven by user-uploaded images, so occasional failures are expected
+        # and shouldn't clutter the error log — record at info. Emit a single grouped
+        # Sentry signal (tag + fixed fingerprint) so a *spike* is still detectable as an
+        # outlier without one issue per failure.
+        logger.info("zip image analysis failed user_id=%s: %r", user_id, exc)
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("error.category", "zip_image_analysis_failed")
+            scope.fingerprint = ["zip-image-analysis-failed"]
+            scope.set_extra("exception", repr(exc))
+            sentry_sdk.capture_message("zip image member analysis failed", level="warning")
         return None
     return {
         "kind": "image_analysis",
@@ -1576,9 +1585,13 @@ async def process_uploaded_zip_endpoint(
 ) -> Mapping[str, object]:
     user_id = user_context.user_id
     logger.info("processing uploaded zip user_id=%s content_type=%s", user_id, payload.content_type)
-    file_bytes = await r2_service.download_file_bytes(
-        user_id=user_id, object_key=payload.object_key
+    # Resolve the key from public_url like the single-file path: the coach reliably
+    # transcribes public_url but corrupts the opaque object_key, which would otherwise
+    # fail the per-user scope/download check.
+    object_key = r2_service.resolve_object_key(
+        object_key=payload.object_key, public_url=payload.public_url
     )
+    file_bytes = await r2_service.download_file_bytes(user_id=user_id, object_key=object_key)
 
     try:
         archive = zipfile.ZipFile(io.BytesIO(file_bytes))
@@ -1594,7 +1607,7 @@ async def process_uploaded_zip_endpoint(
                 archive=archive,
                 member=member,
                 user_id=user_id,
-                zip_object_key=payload.object_key,
+                zip_object_key=object_key,
                 processed_count=len(processed),
             )
             skipped_count += int(result.counts_as_skipped)

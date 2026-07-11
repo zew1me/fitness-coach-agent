@@ -819,6 +819,53 @@ async def test_process_uploaded_zip_skips_oversized_member(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_resolves_mangled_object_key(monkeypatch) -> None:
+    # The coach can corrupt the opaque object_key while transcribing public_url
+    # correctly; the zip endpoint must resolve from public_url like the single-file
+    # path (else a valid upload 500s on the scope/download check). The resolved key
+    # is also what gets stamped as each activity's source_file_key.
+    correct_key = "users/athlete-1/chat-attachment/2026/07/08/export.zip"
+    mangled_key = "users/athlete-1/chat-attachment/deadbeef.zip"
+    monkeypatch.setattr("backend.services.r2.settings.r2_public_base_url", "https://pub-abc.r2.dev")
+
+    downloaded_keys: list[str] = []
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        downloaded_keys.append(object_key)
+        return _make_zip({"run.gpx": _SAMPLE_GPX})
+
+    created: list[Activity] = []
+
+    class RecordingRepo(EngineRepository):
+        async def create_activity(self, activity: Activity) -> Activity:
+            created.append(activity)
+            return activity.model_copy(update={"id": "activity-1"})
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    monkeypatch.setattr(api_index, "repo", RecordingRepo())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": mangled_key,
+                    "public_url": f"https://pub-abc.r2.dev/{correct_key}",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert downloaded_keys == [correct_key]
+    assert len(created) == 1
+    assert created[0].source_file_key == correct_key
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_handles_corrupt_archive(monkeypatch) -> None:
     body = await _post_process_zip(b"this is definitely not a zip file", monkeypatch)
 
