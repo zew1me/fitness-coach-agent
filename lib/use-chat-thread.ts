@@ -44,9 +44,9 @@ function localChatThreadStorageKey(userId: string): string {
 }
 
 function chatThreadQueryKey(
-  token: BrowserTokenResponse | null,
+  userId: string | null,
 ): readonly ["chat-thread", string | null] {
-  return ["chat-thread", token?.user_id ?? null];
+  return ["chat-thread", userId];
 }
 
 function firstInitialPage(
@@ -162,7 +162,8 @@ export function useChatThread(
   token: BrowserTokenResponse | null,
 ): ChatThreadHook {
   const queryClient = useQueryClient();
-  const queryKey = chatThreadQueryKey(token);
+  const userId = token?.user_id ?? null;
+  const queryKey = useMemo(() => chatThreadQueryKey(userId), [userId]);
   const [manualError, setManualError] = useState<string | null>(null);
   const fetchingOlderRef = useRef(false);
   const manualRefetchControllerRef = useRef<AbortController | null>(null);

@@ -145,6 +145,18 @@ describe("useChatThread", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("keeps refetch stable when the user is unchanged", async () => {
+    const thread = makeThread(1);
+    loadChatThreadMock.mockResolvedValueOnce(thread as never);
+    const { rerender, result } = renderUseChatThread(TOKEN);
+    await waitFor(() => expect(result.current.data).toEqual(thread));
+    const initialRefetch = result.current.refetch;
+
+    rerender();
+
+    expect(result.current.refetch).toBe(initialRefetch);
+  });
+
   it("applies data updates to the latest thread state", async () => {
     const thread = makeThread(1);
     loadChatThreadMock.mockResolvedValueOnce(thread as never);
