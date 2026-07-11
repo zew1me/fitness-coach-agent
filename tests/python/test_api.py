@@ -541,6 +541,19 @@ _SAMPLE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
   </trkseg></trk>
 </gpx>"""
 
+_SAMPLE_TCX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Activities>
+    <Activity Sport="Running">
+      <Id>2026-04-19T10:00:00Z</Id>
+      <Lap StartTime="2026-04-19T10:00:00Z">
+        <TotalTimeSeconds>60</TotalTimeSeconds>
+        <DistanceMeters>200</DistanceMeters>
+      </Lap>
+    </Activity>
+  </Activities>
+</TrainingCenterDatabase>"""
+
 
 def _make_zip(members: dict[str, bytes]) -> bytes:
     import io
@@ -725,6 +738,100 @@ async def test_process_uploaded_zip_handles_corrupt_archive(monkeypatch) -> None
 
     assert body["status"] == "no_processable_files"
     assert body["processed"] == []
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_parses_tcx_member(monkeypatch) -> None:
+    body = await _post_process_zip(_make_zip({"ride.tcx": _SAMPLE_TCX}), monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    entry = body["processed"][0]
+    assert entry["kind"] == "activity"
+    assert entry["activity"]["source"] == "tcx_upload"
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_unparseable_activity_without_aborting(
+    monkeypatch,
+) -> None:
+    # A member with an activity suffix but garbage bytes must be skipped best-effort,
+    # while a valid sibling activity still processes.
+    zip_bytes = _make_zip({"good.gpx": _SAMPLE_GPX, "broken.gpx": b"not valid gpx at all"})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_respects_processed_member_cap(monkeypatch) -> None:
+    monkeypatch.setattr("api.index._ZIP_MAX_PROCESSED_MEMBERS", 1)
+    zip_bytes = _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_directory_entries_without_counting(
+    monkeypatch,
+) -> None:
+    # Explicit directory entries (as real macOS/Windows archives carry) are skipped
+    # and must not inflate skipped_count.
+    zip_bytes = _make_zip({"activities/": b"", "activities/run.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_image_when_reupload_has_no_public_url(
+    monkeypatch,
+) -> None:
+    from backend.models.storage import PresignUploadResponse
+
+    async def mock_upload_file(**kwargs) -> PresignUploadResponse:
+        # R2 public base URL unset → no fetchable URL for the vision model.
+        return PresignUploadResponse(
+            upload_url="",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/shot.png",
+            public_url=None,
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+
+    body = await _post_process_zip(_make_zip({"shot.png": b"fake png"}), monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_image_when_reupload_raises(monkeypatch) -> None:
+    async def mock_upload_file(**kwargs):
+        raise RuntimeError("R2 unavailable")
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+
+    # A failed image upload must not abort a valid sibling activity.
+    zip_bytes = _make_zip({"run.gpx": _SAMPLE_GPX, "shot.png": b"fake png"})
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["kind"] == "activity"
+    assert body["skipped_count"] == 1
 
 
 @pytest.mark.asyncio

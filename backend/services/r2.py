@@ -116,7 +116,11 @@ class R2Service:
         )
 
     def build_object_key(self, *, user_id: str, filename: str, purpose: str) -> str:
-        """Build a fresh user-scoped object key for a direct (non-presigned) upload."""
+        """Build a fresh user-scoped object key.
+
+        Shared by the presigned-upload flow and direct server-side uploads (e.g. zip
+        image members re-uploaded via ``upload_file``).
+        """
         purpose_segment = self._sanitize_segment(purpose)
         extension = self._extract_extension(filename)
         date_prefix = datetime.now(UTC).strftime("%Y/%m/%d")
