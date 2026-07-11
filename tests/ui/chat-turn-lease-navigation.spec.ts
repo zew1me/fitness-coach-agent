@@ -53,6 +53,14 @@ test("blocks a resend after navigation until the abandoned turn's lease clears (
   );
   await page.route("**/api/chat", async (route) => {
     chatRequests += 1;
+    if (chatRequests > 1 && activeLease) {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "lease already held" }),
+      });
+      return;
+    }
     if (chatRequests === 1) {
       activeLease = true;
       await new Promise<void>((resolve) => {
@@ -94,4 +102,7 @@ test("blocks a resend after navigation until the abandoned turn's lease clears (
   await expect(sendButton).toBeEnabled();
   await sendButton.click();
   await expect.poll(() => chatRequests).toBe(2);
+  await expect(page.getByText(ASSISTANT_REPLY)).toBeVisible();
+  await expect(page.getByText("Unable to send your message.")).toHaveCount(0);
+  await expect(page.getByText("lease already held")).toHaveCount(0);
 });
