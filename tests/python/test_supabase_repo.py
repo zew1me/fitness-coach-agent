@@ -1163,6 +1163,31 @@ async def test_chat_message_pagination_rejects_non_uuid_cursor_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_chat_thread_reads_existing_thread_without_creating_one() -> None:
+    now = datetime.now(UTC).isoformat()
+    client = FakeSupabaseClient(
+        chat_thread_rows=[
+            {
+                "id": "thread-1",
+                "user_id": "athlete-1",
+                "state": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    thread = await repo.get_chat_thread("athlete-1")
+    missing = await repo.get_chat_thread("athlete-2")
+
+    assert thread is not None
+    assert thread.id == "thread-1"
+    assert missing is None
+    assert len(client._tables["chat_threads"]._rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
     now = datetime.now(UTC)
     state_row: dict[str, object] = {
@@ -1270,6 +1295,32 @@ async def test_chat_turn_lease_renewal_requires_the_current_unexpired_owner() ->
             thread_id="thread-1",
             user_id="athlete-1",
             lease_id="another-request",
+            ttl_seconds=60,
+        )
+
+    expired_client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 3,
+                "lease_id": "lease-owner",
+                "lease_expires_at": (now - timedelta(seconds=1)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    expired_repo = SupabaseRepository(client=expired_client)
+    with pytest.raises(ValueError, match="no longer owned"):
+        await expired_repo.renew_chat_turn_lease(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            lease_id="lease-owner",
             ttl_seconds=60,
         )
 

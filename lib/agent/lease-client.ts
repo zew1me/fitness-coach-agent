@@ -118,27 +118,21 @@ export async function releaseChatTurnLease({
   leaseId,
   timeoutMs = RELEASE_TIMEOUT_MS,
 }: ReleaseLeaseOptions): Promise<void> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetchImpl(`${baseUrl}/api/chat/model-state/lease`, {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        ...(extraHeaders ?? {}),
-      },
-      body: JSON.stringify({ lease_id: leaseId }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new LeaseReleaseError(
-        `Unable to release chat turn lease (${response.status})`,
-        { status: response.status },
-      );
-    }
-  } finally {
-    clearTimeout(timeout);
+  const response = await fetchImpl(`${baseUrl}/api/chat/model-state/lease`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      ...(extraHeaders ?? {}),
+    },
+    body: JSON.stringify({ lease_id: leaseId }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new LeaseReleaseError(
+      `Unable to release chat turn lease (${response.status})`,
+      { status: response.status },
+    );
   }
 }
 

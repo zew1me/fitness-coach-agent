@@ -337,10 +337,11 @@ export async function loadChatMessages(
 
 export async function loadChatTurnLeaseStatus(
   fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<ParsedChatTurnLeaseStatus> {
   const raw = await authorizedFetch<unknown>(
     "/api/chat/model-state/lease",
-    { cache: "no-store", method: "GET" },
+    { cache: "no-store", method: "GET", signal: signal ?? null },
     fetchImpl,
   );
   return chatTurnLeaseStatusSchema.parse(raw);

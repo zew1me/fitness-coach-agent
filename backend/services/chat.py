@@ -142,7 +142,9 @@ class ChatService:
         return await self._repo.get_or_create_chat_model_state(thread_id=thread.id, user_id=user_id)
 
     async def get_turn_lease_status(self, user_id: str) -> ChatTurnLeaseStatus:
-        thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
+        thread = await self._repo.get_chat_thread(user_id)
+        if thread is None:
+            return ChatTurnLeaseStatus(in_flight=False, expires_at=None)
         return await self._repo.get_chat_turn_lease_status(thread_id=thread.id, user_id=user_id)
 
     async def replace_model_state(
@@ -171,7 +173,9 @@ class ChatService:
     async def renew_turn_lease(
         self, user_id: str, lease_id: str, *, ttl_seconds: int
     ) -> ChatModelState:
-        thread = await self._repo.get_or_create_chat_thread(user_id, include_messages=False)
+        thread = await self._repo.get_chat_thread(user_id)
+        if thread is None:
+            raise ValueError("Chat turn lease is no longer owned by this request.")
         return await self._repo.renew_chat_turn_lease(
             thread_id=thread.id,
             user_id=user_id,

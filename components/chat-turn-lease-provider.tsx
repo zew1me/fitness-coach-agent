@@ -74,10 +74,11 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
   useEffect(() => {
     if (context === null) return;
 
+    const controller = new AbortController();
     let cancelled = false;
     const refresh = async (): Promise<void> => {
       try {
-        const status = await loadChatTurnLeaseStatus();
+        const status = await loadChatTurnLeaseStatus(fetch, controller.signal);
         if (cancelled) return;
 
         const hadTurnInFlight = pendingTurn || leaseActive;
@@ -105,6 +106,7 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
 
     return (): void => {
       cancelled = true;
+      controller.abort();
       if (intervalId !== null) window.clearInterval(intervalId);
     };
   }, [context, leaseActive, pendingTurn, statusKnown, userId]);

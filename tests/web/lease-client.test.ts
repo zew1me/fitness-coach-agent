@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   LeaseAcquisitionError,
+  LeaseRenewalError,
   acquireChatTurnLease,
   releaseChatTurnLease,
   renewChatTurnLease,
@@ -124,5 +125,25 @@ describe("renewChatTurnLease", () => {
         method: "PATCH",
       }),
     );
+  });
+
+  it("rejects a non-success response with a typed renewal error", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("conflict", { status: 409 }));
+
+    try {
+      await renewChatTurnLease({
+        accessToken: "token",
+        baseUrl: "http://localhost",
+        fetchImpl,
+        leaseId: "lease-1",
+        ttlSeconds: 60,
+      });
+      throw new Error("Expected lease renewal to fail.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(LeaseRenewalError);
+      expect((error as LeaseRenewalError).status).toBe(409);
+    }
   });
 });
