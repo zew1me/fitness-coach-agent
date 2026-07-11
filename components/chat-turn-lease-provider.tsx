@@ -90,13 +90,14 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
           }
         }
       } catch {
-        if (!cancelled) setStatusKnown(true);
+        // Keep the composer blocked until status can be verified. Failing open
+        // here can race an active turn and produce another lease-acquire 409.
       }
     };
 
     void refresh();
     const intervalId =
-      pendingTurn || leaseActive
+      !statusKnown || pendingTurn || leaseActive
         ? window.setInterval(() => {
             void refresh();
           }, LEASE_STATUS_POLL_INTERVAL_MS)
@@ -106,7 +107,7 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
       cancelled = true;
       if (intervalId !== null) window.clearInterval(intervalId);
     };
-  }, [context, leaseActive, pendingTurn, userId]);
+  }, [context, leaseActive, pendingTurn, statusKnown, userId]);
 
   if (context === null) {
     return {
