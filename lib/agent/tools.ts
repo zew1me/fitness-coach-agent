@@ -262,7 +262,11 @@ export const coachToolDefinitions = {
     activityTextInputSchema,
   ),
   process_uploaded_file: defineTool(
-    "Process GPX, FIT, or screenshot uploads through the engine.",
+    "Process GPX, FIT, TCX, screenshot, or .zip uploads through the engine. A .zip is " +
+      "unpacked server-side: contained activity files and images are processed and " +
+      "everything else is discarded. A result with status 'no_processable_files' (or an " +
+      "empty processed list) means the archive held nothing usable — tell the athlete " +
+      "there was nothing for you in the zip.",
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(

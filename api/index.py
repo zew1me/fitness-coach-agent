@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
+import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -509,6 +511,10 @@ _ALLOWED_UPLOAD_TYPES: frozenset[str] = frozenset(
         "application/gpx+xml",
         "application/vnd.garmin.fit",
         "application/vnd.garmin.tcx+xml",
+        # Zip archives — unpacked server-side; contained activities/images are processed
+        # and everything else is discarded (see /api/engine/process-uploaded-zip).
+        "application/zip",
+        "application/x-zip-compressed",
     }
 )
 
@@ -519,8 +525,8 @@ def _check_upload_content_type(content_type: str) -> None:
             status_code=400,
             detail=(
                 f"Uploading {content_type} files is not supported. "
-                "Supported types: images (GIF, JPEG, PNG, WebP) "
-                "and activity files (.gpx, .fit, .tcx)."
+                "Supported types: images (GIF, JPEG, PNG, WebP), "
+                "activity files (.gpx, .fit, .tcx), and .zip archives of those."
             ),
         )
 
@@ -957,6 +963,56 @@ def _parse_uploaded_activity_file(filename: str, content_type: str, file_bytes: 
         return parser(tmp.name)
 
 
+def _build_uploaded_activity(  # noqa: PLR0913
+    *,
+    user_id: str,
+    filename: str,
+    content_type: str,
+    object_key: str,
+    public_url: str | None,
+    file_bytes: bytes,
+) -> Activity:
+    """Parse an activity file's bytes and build a summarized ``Activity``.
+
+    Shared by the single-file and zip upload endpoints so both derive the same
+    ``source``/``source_file_key``/``raw_extraction`` shape from the parsed metrics.
+    """
+    parsed = _parse_uploaded_activity_file(filename, content_type, file_bytes)
+    activity = Activity(
+        user_id=user_id,
+        sport=parsed.sport,
+        activity_date=parsed.activity_date,
+        started_at=parsed.started_at,
+        duration_seconds=parsed.duration_seconds,
+        distance_meters=parsed.distance_meters,
+        elevation_gain_meters=parsed.elevation_gain_meters,
+        avg_hr_bpm=parsed.avg_hr_bpm,
+        max_hr_bpm=parsed.max_hr_bpm,
+        avg_power_watts=parsed.avg_power_watts,
+        avg_cadence_rpm=parsed.avg_cadence_rpm,
+        source=_activity_source_for_filename(filename),
+        source_file_key=object_key,
+        raw_extraction={
+            "content_type": content_type,
+            "filename": filename,
+            "hrv": parsed.hrv_summary,
+            "public_url": public_url,
+            "rr_interval_count": len(parsed.rr_intervals_ms or []),
+        },
+    )
+    activity = activity.model_copy(
+        update={"activity_summary": build_activity_summary_from_fields(activity)}
+    )
+    logger.info(
+        "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
+        user_id,
+        parsed.sport,
+        parsed.activity_date,
+        parsed.distance_meters or 0,
+    )
+    return activity
+
+
 @app.post("/api/engine/process-uploaded-file")
 async def process_uploaded_file_endpoint(
     payload: ProcessUploadedFileRequest,
@@ -972,40 +1028,176 @@ async def process_uploaded_file_endpoint(
         user_id=user_context.user_id,
         object_key=payload.object_key,
     )
-    parsed = _parse_uploaded_activity_file(payload.filename, payload.content_type, file_bytes)
-    activity = Activity(
+    activity = _build_uploaded_activity(
         user_id=user_context.user_id,
-        sport=parsed.sport,
-        activity_date=parsed.activity_date,
-        started_at=parsed.started_at,
-        duration_seconds=parsed.duration_seconds,
-        distance_meters=parsed.distance_meters,
-        elevation_gain_meters=parsed.elevation_gain_meters,
-        avg_hr_bpm=parsed.avg_hr_bpm,
-        max_hr_bpm=parsed.max_hr_bpm,
-        avg_power_watts=parsed.avg_power_watts,
-        avg_cadence_rpm=parsed.avg_cadence_rpm,
-        source=_activity_source_for_filename(payload.filename),
-        source_file_key=payload.object_key,
-        raw_extraction={
-            "content_type": payload.content_type,
-            "filename": payload.filename,
-            "hrv": parsed.hrv_summary,
-            "public_url": payload.public_url,
-            "rr_interval_count": len(parsed.rr_intervals_ms or []),
-        },
-    )
-    activity = activity.model_copy(
-        update={"activity_summary": build_activity_summary_from_fields(activity)}
-    )
-    logger.info(
-        "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
-        user_context.user_id,
-        parsed.sport,
-        parsed.activity_date,
-        parsed.distance_meters or 0,
+        filename=payload.filename,
+        content_type=payload.content_type,
+        object_key=payload.object_key,
+        public_url=payload.public_url,
+        file_bytes=file_bytes,
     )
     return {"activity": activity.model_dump(mode="json")}
+
+
+# Activity/image members inside an uploaded .zip are processed; every other member is
+# discarded. See /api/engine/process-uploaded-zip.
+_ACTIVITY_SUFFIX_TO_CONTENT_TYPE: Mapping[str, str] = {
+    ".fit": "application/vnd.garmin.fit",
+    ".gpx": "application/gpx+xml",
+    ".tcx": "application/vnd.garmin.tcx+xml",
+}
+_IMAGE_SUFFIX_TO_CONTENT_TYPE: Mapping[str, str] = {
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+# Lightweight MVP guards. Full zip-bomb / decompression-ratio hardening is deferred.
+_ZIP_MEMBER_MAX_BYTES = 25 * 1024 * 1024
+_ZIP_MAX_PROCESSED_MEMBERS = 20
+
+
+def _is_zip_junk_member(name: str, basename: str) -> bool:
+    """OS/archiver noise (macOS ``__MACOSX``/AppleDouble, ``.DS_Store``) — never useful."""
+    return name.startswith("__MACOSX/") or basename == ".DS_Store" or basename.startswith("._")
+
+
+def _empty_zip_result(skipped_count: int = 0) -> dict[str, object]:
+    return {
+        "processed": [],
+        "skipped_count": skipped_count,
+        "status": "no_processable_files",
+        "detail": ("I couldn't find any activity files or images I can read inside that zip."),
+    }
+
+
+def _zip_activity_entry(
+    *, user_id: str, filename: str, content_type: str, zip_object_key: str, member_bytes: bytes
+) -> dict[str, object] | None:
+    try:
+        activity = _build_uploaded_activity(
+            user_id=user_id,
+            filename=filename,
+            content_type=content_type,
+            object_key=zip_object_key,
+            public_url=None,
+            file_bytes=member_bytes,
+        )
+    except Exception:  # best-effort per member; a bad file must not abort the whole zip
+        logger.exception("failed to parse activity from zip member user_id=%s", user_id)
+        return None
+    return {"kind": "activity", "activity": activity.model_dump(mode="json")}
+
+
+async def _zip_image_entry(
+    *, user_id: str, filename: str, content_type: str, member_bytes: bytes
+) -> dict[str, object] | None:
+    from backend.services.screenshot import analyze_screenshot
+
+    object_key = r2_service.build_object_key(
+        user_id=user_id, filename=filename, purpose="chat-attachment"
+    )
+    try:
+        uploaded = await r2_service.upload_file(
+            user_id=user_id,
+            object_key=object_key,
+            file_stream=io.BytesIO(member_bytes),
+            content_type=content_type,
+        )
+    except Exception:  # best-effort per member; a failed upload must not abort the whole zip
+        logger.exception("failed to re-upload zip image member user_id=%s", user_id)
+        return None
+    if uploaded.public_url is None:
+        logger.warning("zip image member has no public url (R2 base unset) user_id=%s", user_id)
+        return None
+    result = await analyze_screenshot(uploaded.public_url)
+    return {
+        "kind": "image_analysis",
+        "screenshot_type": result.screenshot_type,
+        "data": result.data,
+        "public_url": uploaded.public_url,
+        "object_key": object_key,
+    }
+
+
+@app.post("/api/engine/process-uploaded-zip")
+async def process_uploaded_zip_endpoint(  # noqa: C901
+    payload: ProcessUploadedFileRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    logger.info("processing uploaded zip user_id=%s content_type=%s", user_id, payload.content_type)
+    file_bytes = await r2_service.download_file_bytes(
+        user_id=user_id, object_key=payload.object_key
+    )
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(file_bytes))
+    except zipfile.BadZipFile:
+        logger.warning("uploaded zip is not a valid archive user_id=%s", user_id)
+        return _empty_zip_result()
+
+    processed: list[dict[str, object]] = []
+    skipped_count = 0
+    with archive:
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            basename = Path(member.filename).name
+            suffix = Path(member.filename).suffix.lower()
+            activity_ct = _ACTIVITY_SUFFIX_TO_CONTENT_TYPE.get(suffix)
+            image_ct = _IMAGE_SUFFIX_TO_CONTENT_TYPE.get(suffix)
+
+            if (
+                _is_zip_junk_member(member.filename, basename)
+                or (activity_ct is None and image_ct is None)
+                or member.file_size > _ZIP_MEMBER_MAX_BYTES
+                or len(processed) >= _ZIP_MAX_PROCESSED_MEMBERS
+            ):
+                skipped_count += 1
+                continue
+
+            try:
+                member_bytes = archive.read(member)
+            except Exception:  # a corrupt member must not abort the whole zip
+                logger.warning("failed to read zip member user_id=%s", user_id)
+                skipped_count += 1
+                continue
+
+            if activity_ct is not None:
+                entry = _zip_activity_entry(
+                    user_id=user_id,
+                    filename=basename,
+                    content_type=activity_ct,
+                    zip_object_key=payload.object_key,
+                    member_bytes=member_bytes,
+                )
+            elif image_ct is not None:
+                entry = await _zip_image_entry(
+                    user_id=user_id,
+                    filename=basename,
+                    content_type=image_ct,
+                    member_bytes=member_bytes,
+                )
+            else:  # pragma: no cover - filtered above
+                entry = None
+
+            if entry is None:
+                skipped_count += 1
+            else:
+                processed.append(entry)
+
+    if not processed:
+        return _empty_zip_result(skipped_count)
+
+    logger.info(
+        "uploaded zip processed user_id=%s processed=%d skipped=%d",
+        user_id,
+        len(processed),
+        skipped_count,
+    )
+    return {"processed": processed, "skipped_count": skipped_count, "status": "ok"}
 
 
 def _build_fitness_metrics(

@@ -111,11 +111,17 @@ class R2Service:
         )
 
     def _build_object_key(self, *, user_id: str, request: PresignUploadRequest) -> str:
-        purpose = self._sanitize_segment(request.purpose)
-        extension = self._extract_extension(request.filename)
+        return self.build_object_key(
+            user_id=user_id, filename=request.filename, purpose=request.purpose
+        )
+
+    def build_object_key(self, *, user_id: str, filename: str, purpose: str) -> str:
+        """Build a fresh user-scoped object key for a direct (non-presigned) upload."""
+        purpose_segment = self._sanitize_segment(purpose)
+        extension = self._extract_extension(filename)
         date_prefix = datetime.now(UTC).strftime("%Y/%m/%d")
         object_name = f"{uuid4()}{extension}"
-        return str(PurePosixPath("users", user_id, purpose, date_prefix, object_name))
+        return str(PurePosixPath("users", user_id, purpose_segment, date_prefix, object_name))
 
     def _build_public_url(self, object_key: str) -> str | None:
         base = self._configured_value(settings.r2_public_base_url)

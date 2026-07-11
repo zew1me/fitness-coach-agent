@@ -103,6 +103,18 @@ function isActivityFile(
   );
 }
 
+function isZipUpload(
+  contentType: string | null,
+  filename: string | null,
+): boolean {
+  const lowerFilename = filename?.toLowerCase() ?? "";
+  return (
+    contentType === "application/zip" ||
+    contentType === "application/x-zip-compressed" ||
+    lowerFilename.endsWith(".zip")
+  );
+}
+
 function inferActivityContentType(filename: string | null): string | null {
   const lowerFilename = filename?.toLowerCase() ?? "";
 
@@ -181,6 +193,15 @@ function processUploadedFile(
   if (shouldAnalyzeScreenshot(resolvedContentType, publicUrl)) {
     return postEngine(context, "/api/engine/analyze-screenshot", {
       image_url: publicUrl,
+    });
+  }
+
+  if (isZipUpload(resolvedContentType, filename) && objectKey !== null) {
+    return postEngine(context, "/api/engine/process-uploaded-zip", {
+      content_type: resolvedContentType,
+      filename,
+      object_key: objectKey,
+      public_url: publicUrl,
     });
   }
 

@@ -495,7 +495,6 @@ async def test_chat_attachments_presign_requires_bearer_token() -> None:
     [
         "application/pdf",
         "text/plain",
-        "application/zip",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ],
 )
@@ -525,6 +524,207 @@ async def test_chat_attachments_presign_rejects_unsupported_type(content_type: s
 
     assert response.status_code == 400
     assert content_type in response.json()["detail"]
+
+
+_ZIP_TEST_USER = UserContext(
+    user_id="athlete-1",
+    scopes=["profile:read"],
+    client_id="test-client",
+    grant_id="grant-1",
+)
+
+_SAMPLE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+
+def _make_zip(members: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+async def _post_process_zip(zip_bytes: bytes, monkeypatch) -> dict[str, Any]:
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return zip_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+    assert response.status_code == 200
+    return response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", ["application/zip", "application/x-zip-compressed"])
+async def test_chat_attachments_presign_accepts_zip(content_type: str, monkeypatch) -> None:
+    from backend.models.storage import PresignUploadResponse
+
+    def mock_create_presigned_upload(*, user_id: str, request) -> PresignUploadResponse:
+        return PresignUploadResponse(
+            upload_url="https://r2.example.com/upload",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
+            public_url="https://cdn.example.com/export.zip",
+            headers={"Content-Type": content_type},
+        )
+
+    monkeypatch.setattr(
+        "api.index.r2_service.create_presigned_upload", mock_create_presigned_upload
+    )
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/chat/attachments/presign",
+                json={
+                    "filename": "export.zip",
+                    "content_type": content_type,
+                    "content_length": 1024,
+                    "purpose": "chat-attachment",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["object_key"].endswith("export.zip")
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_parses_single_gpx_ignoring_junk(monkeypatch) -> None:
+    zip_bytes = _make_zip(
+        {
+            "activities/run.gpx": _SAMPLE_GPX,
+            "__MACOSX/activities/._run.gpx": b"apple double junk",
+            ".DS_Store": b"finder junk",
+            "notes.txt": b"discard me",
+        }
+    )
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    entry = body["processed"][0]
+    assert entry["kind"] == "activity"
+    assert entry["activity"]["sport"] == "running"
+    assert entry["activity"]["source"] == "gpx_upload"
+    # __MACOSX junk, .DS_Store, and notes.txt are all discarded.
+    assert body["skipped_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_processes_multiple_activities(monkeypatch) -> None:
+    zip_bytes = _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 2
+    assert all(entry["kind"] == "activity" for entry in body["processed"])
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_processes_activity_and_image(monkeypatch) -> None:
+    from backend.models.screenshot import ExtractionResult
+    from backend.models.storage import PresignUploadResponse
+
+    async def mock_upload_file(**kwargs) -> PresignUploadResponse:
+        return PresignUploadResponse(
+            upload_url="",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/shot.png",
+            public_url="https://cdn.example.com/shot.png",
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+
+    async def mock_analyze_screenshot(image_url: str) -> ExtractionResult:
+        return ExtractionResult(
+            screenshot_type="activity_single",
+            data={"distance_km": 10},
+            raw_response="{}",
+        )
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+    monkeypatch.setattr("backend.services.screenshot.analyze_screenshot", mock_analyze_screenshot)
+
+    zip_bytes = _make_zip(
+        {"run.gpx": _SAMPLE_GPX, "shot.png": b"fake png bytes", "readme.md": b"discard"}
+    )
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    kinds = sorted(entry["kind"] for entry in body["processed"])
+    assert kinds == ["activity", "image_analysis"]
+    image_entry = next(e for e in body["processed"] if e["kind"] == "image_analysis")
+    assert image_entry["screenshot_type"] == "activity_single"
+    assert image_entry["public_url"] == "https://cdn.example.com/shot.png"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_no_processable_when_only_unknown(monkeypatch) -> None:
+    zip_bytes = _make_zip({"notes.txt": b"nothing here", "data.csv": b"a,b,c"})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+    assert body["skipped_count"] == 2
+    assert "zip" in body["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_no_processable_when_empty(monkeypatch) -> None:
+    body = await _post_process_zip(_make_zip({}), monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_oversized_member(monkeypatch) -> None:
+    monkeypatch.setattr("api.index._ZIP_MEMBER_MAX_BYTES", 8)
+    zip_bytes = _make_zip({"run.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_handles_corrupt_archive(monkeypatch) -> None:
+    body = await _post_process_zip(b"this is definitely not a zip file", monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
 
 
 @pytest.mark.asyncio
