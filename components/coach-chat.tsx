@@ -994,7 +994,7 @@ function Composer({
     // preventDefault. Skipping it here would make the drop target invalid
     // even if handleDrop also calls preventDefault.
     event.preventDefault();
-    if (composerBusy) return;
+    if (sending || syncingThread) return;
     setDragActive(true);
   }
 
@@ -1011,7 +1011,7 @@ function Composer({
     // a drop while sending would not suppress the browser's default navigation.
     event.preventDefault();
     setDragActive(false);
-    if (composerBusy) return;
+    if (sending || syncingThread) return;
     const files = Array.from(event.dataTransfer.files);
     if (files.length === 0) return;
     onFilesAdded(files);
@@ -1036,7 +1036,8 @@ function Composer({
   const rowClass = dragActive
     ? `${styles.composerRow} ${styles.composerRowDragActive}`
     : styles.composerRow;
-  const attachClass = composerBusy
+  const attachmentBusy = sending || syncingThread;
+  const attachClass = attachmentBusy
     ? `${styles.attachButton} ${styles.attachDisabled}`
     : styles.attachButton;
 
@@ -1061,7 +1062,7 @@ function Composer({
             <input
               accept={CHAT_ATTACHMENT_ACCEPT}
               className={styles.hiddenInput}
-              disabled={composerBusy}
+              disabled={attachmentBusy}
               multiple
               onChange={handleFileSelect}
               ref={fileInputRef}
