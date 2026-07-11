@@ -794,6 +794,30 @@ async def test_process_uploaded_zip_skips_directory_entries_without_counting(
 
 
 @pytest.mark.asyncio
+async def test_process_zip_member_counts_read_failure_as_skipped(monkeypatch) -> None:
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(_make_zip({"run.gpx": _SAMPLE_GPX}))) as archive:
+        member = archive.infolist()[0]
+
+        def fail_to_read_member(_member: zipfile.ZipInfo) -> bytes:
+            raise zipfile.BadZipFile("corrupt member")
+
+        monkeypatch.setattr(archive, "read", fail_to_read_member)
+        result = await api_index._process_zip_member(
+            archive=archive,
+            member=member,
+            user_id=_ZIP_TEST_USER.user_id,
+            zip_object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
+            processed_count=0,
+        )
+
+    assert result.entry is None
+    assert result.counts_as_skipped is True
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_skips_image_when_reupload_has_no_public_url(
     monkeypatch,
 ) -> None:
