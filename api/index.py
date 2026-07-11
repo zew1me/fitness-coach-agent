@@ -7,6 +7,7 @@ import os
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
@@ -1426,6 +1427,14 @@ _ZIP_MEMBER_MAX_BYTES = 25 * 1024 * 1024
 _ZIP_MAX_PROCESSED_MEMBERS = 20
 
 
+@dataclass(frozen=True)
+class _ZipMemberResult:
+    """Outcome of examining one archive member."""
+
+    entry: dict[str, object] | None = None
+    counts_as_skipped: bool = False
+
+
 def _is_zip_junk_member(name: str, basename: str) -> bool:
     """OS/archiver noise (macOS ``__MACOSX``/AppleDouble, ``.DS_Store``) — never useful."""
     return name.startswith("__MACOSX/") or basename == ".DS_Store" or basename.startswith("._")
@@ -1489,8 +1498,62 @@ async def _zip_image_entry(
     }
 
 
+async def _process_zip_member(
+    *,
+    archive: zipfile.ZipFile,
+    member: zipfile.ZipInfo,
+    user_id: str,
+    zip_object_key: str,
+    processed_count: int,
+) -> _ZipMemberResult:
+    """Filter, read, and convert one member without aborting the archive."""
+    if member.is_dir():
+        return _ZipMemberResult()
+
+    member_path = Path(member.filename)
+    filename = member_path.name
+    suffix = member_path.suffix.lower()
+    activity_content_type = _ACTIVITY_SUFFIX_TO_CONTENT_TYPE.get(suffix)
+    image_content_type = _IMAGE_SUFFIX_TO_CONTENT_TYPE.get(suffix)
+
+    should_skip = (
+        _is_zip_junk_member(member.filename, filename)
+        or (activity_content_type is None and image_content_type is None)
+        or member.file_size > _ZIP_MEMBER_MAX_BYTES
+        or processed_count >= _ZIP_MAX_PROCESSED_MEMBERS
+    )
+    if should_skip:
+        return _ZipMemberResult(counts_as_skipped=True)
+
+    try:
+        member_bytes = archive.read(member)
+    except Exception:  # a corrupt member must not abort the whole zip
+        logger.warning("failed to read zip member user_id=%s", user_id)
+        return _ZipMemberResult(counts_as_skipped=True)
+
+    if activity_content_type is not None:
+        entry = _zip_activity_entry(
+            user_id=user_id,
+            filename=filename,
+            content_type=activity_content_type,
+            zip_object_key=zip_object_key,
+            member_bytes=member_bytes,
+        )
+    else:
+        # Filtering above guarantees that a non-activity member is a supported image.
+        assert image_content_type is not None
+        entry = await _zip_image_entry(
+            user_id=user_id,
+            filename=filename,
+            content_type=image_content_type,
+            member_bytes=member_bytes,
+        )
+
+    return _ZipMemberResult(entry=entry, counts_as_skipped=entry is None)
+
+
 @app.post("/api/engine/process-uploaded-zip")
-async def process_uploaded_zip_endpoint(  # noqa: C901
+async def process_uploaded_zip_endpoint(
     payload: ProcessUploadedFileRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
@@ -1510,51 +1573,16 @@ async def process_uploaded_zip_endpoint(  # noqa: C901
     skipped_count = 0
     with archive:
         for member in archive.infolist():
-            if member.is_dir():
-                continue
-            basename = Path(member.filename).name
-            suffix = Path(member.filename).suffix.lower()
-            activity_ct = _ACTIVITY_SUFFIX_TO_CONTENT_TYPE.get(suffix)
-            image_ct = _IMAGE_SUFFIX_TO_CONTENT_TYPE.get(suffix)
-
-            if (
-                _is_zip_junk_member(member.filename, basename)
-                or (activity_ct is None and image_ct is None)
-                or member.file_size > _ZIP_MEMBER_MAX_BYTES
-                or len(processed) >= _ZIP_MAX_PROCESSED_MEMBERS
-            ):
-                skipped_count += 1
-                continue
-
-            try:
-                member_bytes = archive.read(member)
-            except Exception:  # a corrupt member must not abort the whole zip
-                logger.warning("failed to read zip member user_id=%s", user_id)
-                skipped_count += 1
-                continue
-
-            if activity_ct is not None:
-                entry = _zip_activity_entry(
-                    user_id=user_id,
-                    filename=basename,
-                    content_type=activity_ct,
-                    zip_object_key=payload.object_key,
-                    member_bytes=member_bytes,
-                )
-            elif image_ct is not None:
-                entry = await _zip_image_entry(
-                    user_id=user_id,
-                    filename=basename,
-                    content_type=image_ct,
-                    member_bytes=member_bytes,
-                )
-            else:  # pragma: no cover - filtered above
-                entry = None
-
-            if entry is None:
-                skipped_count += 1
-            else:
-                processed.append(entry)
+            result = await _process_zip_member(
+                archive=archive,
+                member=member,
+                user_id=user_id,
+                zip_object_key=payload.object_key,
+                processed_count=len(processed),
+            )
+            skipped_count += int(result.counts_as_skipped)
+            if result.entry is not None:
+                processed.append(result.entry)
 
     if not processed:
         return _empty_zip_result(skipped_count)
