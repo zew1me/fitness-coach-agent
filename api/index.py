@@ -201,20 +201,21 @@ async def _handle_postgrest_error(request: Request, exc: PostgRESTAPIError) -> J
     """
     status = _postgrest_http_status(exc)
     code = getattr(exc, "code", None)
+    safe_path = request.url.path.encode("unicode_escape").decode("ascii")
     if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
         # exc_info=exc so Sentry's logging integration still captures the outage:
         # returning a Response marks the exception "handled", so it won't be
         # auto-reported otherwise.
         logger.error(
             "PostgREST error path=%s code=%s -> %s",
-            request.url.path,
+            safe_path,
             code,
             status,
             exc_info=exc,
         )
     else:
         # Client fault (bad input / conflict): expected, not an incident — log at info.
-        logger.info("PostgREST client-fault path=%s code=%s -> %s", request.url.path, code, status)
+        logger.info("PostgREST client-fault path=%s code=%s -> %s", safe_path, code, status)
     return JSONResponse(status_code=status, content={"detail": _POSTGREST_STATUS_DETAIL[status]})
 
 
