@@ -186,10 +186,15 @@ function routeSaveActivityFromText(
   const payload = engineInput(input);
   const text = stringField(payload, "text");
   const stub = text !== null ? parseUploadedFileText(text) : null;
-  if (stub !== null && isActivityFile(stub.contentType, stub.filename)) {
-    // The model attached a GPX/FIT/TCX upload stub as free text instead of
-    // calling process_uploaded_file. Redirect to the deterministic parser so
-    // duration/distance come from the file, never from LLM guessing.
+  if (
+    stub !== null &&
+    (isActivityFile(stub.contentType, stub.filename) ||
+      isZipUpload(stub.contentType, stub.filename))
+  ) {
+    // The model attached a GPX/FIT/TCX or .zip upload stub as free text instead
+    // of calling process_uploaded_file. Redirect to process_uploaded_file so the
+    // file is parsed deterministically (activities) or unpacked (.zip archives),
+    // never parsed as plain text where numeric fields would be LLM-guessed.
     return processUploadedFile(
       {
         content_type: stub.contentType,
