@@ -19,6 +19,7 @@ import { finishAgentText, writeAgentStreamEvent } from "./agent-stream";
 import {
   createAgentCoachTools,
   isActivityFile,
+  isZipUpload,
   type CoachAgentRunContext,
 } from "./coach-tools";
 import { oldestDueFollowUp } from "./coaching-memory";
@@ -376,7 +377,11 @@ function hasActivityFileAttachment(messages: UIMessage[]): boolean {
   return messages.some((message) =>
     message.parts.some((part) => {
       const file = nonImageFilePart(part);
-      return file !== null && isActivityFile(file.mediaType, file.filename);
+      return (
+        file !== null &&
+        (isActivityFile(file.mediaType, file.filename) ||
+          isZipUpload(file.mediaType, file.filename))
+      );
     }),
   );
 }

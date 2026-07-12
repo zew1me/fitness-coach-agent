@@ -436,6 +436,56 @@ describe("coachToolDefinitions", () => {
     },
   );
 
+  it.each([
+    ["application/zip", "garmin-export.zip"],
+    ["application/x-zip-compressed", "activities.zip"],
+  ])(
+    "redirects a %s upload stub passed to save_activity_from_text to the zip unpacker",
+    async (contentType, filename) => {
+      const { fetchImpl, requests } = createRecordingFetch({
+        processed: [{ activity: { sport: "running" }, kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl,
+      });
+
+      const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
+      const publicUrl = `https://cdn.example.com/${filename}`;
+      const stub =
+        `Uploaded file: ${filename}\r\n` +
+        `content_type=${contentType}\r\n` +
+        `public_url=${publicUrl}\r\n` +
+        `object_key=${objectKey}`;
+
+      const result = await (
+        tools["save_activity_from_text"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ text: stub });
+
+      expect(result).toEqual({
+        processed: [{ activity: { sport: "running" }, kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      expect(requests).toEqual([
+        {
+          body: {
+            content_type: contentType,
+            filename,
+            object_key: objectKey,
+            public_url: publicUrl,
+          },
+          url: "https://coach.test/api/engine/process-uploaded-zip",
+        },
+      ]);
+    },
+  );
+
   it("does not redirect ordinary free-text activity descriptions", async () => {
     const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
     const tools = createCoachTools({
@@ -846,6 +896,135 @@ describe("coachToolDefinitions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("describes zip handling and the no_processable_files outcome for the coach", () => {
+    const description = coachToolDefinitions.process_uploaded_file.description;
+
+    expect(description).toContain(".zip");
+    expect(description).toContain("unpacked server-side");
+    expect(description).toContain("no_processable_files");
+  });
+
+  it.each([
+    ["application/zip", "garmin-export.zip"],
+    ["application/x-zip-compressed", "garmin-export.zip"],
+  ])(
+    "routes a %s upload to process-uploaded-zip",
+    async (contentType, filename) => {
+      const { fetchImpl, requests } = createRecordingFetch({
+        processed: [{ kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl,
+      });
+
+      const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
+      const publicUrl = `https://cdn.example.com/${filename}`;
+
+      const result = await (
+        tools["process_uploaded_file"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({
+        content_type: contentType,
+        filename,
+        object_key: objectKey,
+        public_url: publicUrl,
+        user_id: "ignored-client-user",
+      });
+
+      expect(result).toEqual({
+        processed: [{ kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      expect(requests).toEqual([
+        {
+          body: {
+            content_type: contentType,
+            filename,
+            object_key: objectKey,
+            public_url: publicUrl,
+          },
+          url: "https://coach.test/api/engine/process-uploaded-zip",
+        },
+      ]);
+    },
+  );
+
+  it("routes a .zip filename with a generic content_type to process-uploaded-zip", async () => {
+    // resolveContentType only infers gpx/fit/tcx from filename, so a zip with a
+    // generic/missing content_type must still be detected as a zip by filename.
+    const { fetchImpl, requests } = createRecordingFetch({
+      processed: [],
+      skipped_count: 0,
+      status: "no_processable_files",
+    });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/octet-stream",
+      filename: "garmin-export.zip",
+      object_key:
+        "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
+      public_url: "https://cdn.example.com/garmin-export.zip",
+    });
+
+    expect(requests).toEqual([
+      {
+        body: {
+          content_type: "application/octet-stream",
+          filename: "garmin-export.zip",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
+          public_url: "https://cdn.example.com/garmin-export.zip",
+        },
+        url: "https://coach.test/api/engine/process-uploaded-zip",
+      },
+    ]);
+  });
+
+  it("does not route a .zip upload to any engine endpoint when object_key is missing", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({ status: "ok" });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/zip",
+      filename: "garmin-export.zip",
+      public_url: "https://cdn.example.com/garmin-export.zip",
+    });
+
+    expect(requests).toEqual([]);
+    expect(result).toEqual({
+      input: {
+        content_type: "application/zip",
+        filename: "garmin-export.zip",
+        public_url: "https://cdn.example.com/garmin-export.zip",
+      },
+      status: "pending_implementation",
+      tool: "process_uploaded_file",
+    });
   });
 
   it("forwards extra internal headers to engine tool calls", async () => {

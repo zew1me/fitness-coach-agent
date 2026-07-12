@@ -73,7 +73,8 @@ const COACHING_STARTERS: StarterPrompt[] = [
   },
 ];
 
-const CHAT_ATTACHMENT_ACCEPT = "image/*,application/gpx+xml,.gpx,.fit,.tcx";
+const CHAT_ATTACHMENT_ACCEPT =
+  "image/*,application/gpx+xml,.gpx,.fit,.tcx,application/zip,.zip";
 const MESSAGE_RENDER_BATCH_SIZE = 60;
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20_000;
 const WAITING_STATUS_INTERVAL_MS = 1600;
@@ -187,7 +188,7 @@ function friendlyToolStatus(toolName: string): string {
     analyze_screenshot: "Reviewing your uploaded image...",
     calculate_zones: "Calculating your training zones...",
     get_athlete_context: "Looking up your info...",
-    process_uploaded_file: "Reading your activity file...",
+    process_uploaded_file: "Reading your file...",
     save_check_in: "Saving your check-in...",
     update_athlete_profile: "Updating your profile...",
   };
@@ -270,6 +271,7 @@ function activityContentType(file: File): string {
   if (name.endsWith(".gpx")) return "application/gpx+xml";
   if (name.endsWith(".fit")) return "application/vnd.garmin.fit";
   if (name.endsWith(".tcx")) return "application/vnd.garmin.tcx+xml";
+  if (name.endsWith(".zip")) return "application/zip";
   return "application/octet-stream";
 }
 
@@ -279,7 +281,10 @@ function isSupportedAttachment(file: File): boolean {
   }
   const name = file.name.toLowerCase();
   return (
-    name.endsWith(".gpx") || name.endsWith(".fit") || name.endsWith(".tcx")
+    name.endsWith(".gpx") ||
+    name.endsWith(".fit") ||
+    name.endsWith(".tcx") ||
+    name.endsWith(".zip")
   );
 }
 
@@ -291,7 +296,9 @@ function fileTypeBadge(attachment: {
     return null;
   }
   const suffix = attachment.filename.split(".").pop()?.toUpperCase();
-  return suffix && ["GPX", "FIT", "TCX"].includes(suffix) ? suffix : "FILE";
+  return suffix && ["GPX", "FIT", "TCX", "ZIP"].includes(suffix)
+    ? suffix
+    : "FILE";
 }
 
 function composerPlaceholderFor(
@@ -1578,7 +1585,7 @@ function CoachChatBody({
     for (const file of files) {
       if (!isSupportedAttachment(file)) {
         setThreadError(
-          "Only image, GPX, FIT, and TCX attachments are supported in the coach chat.",
+          "Only image, GPX, FIT, TCX, and ZIP attachments are supported in the coach chat.",
         );
         continue;
       }
