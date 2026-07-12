@@ -912,6 +912,33 @@ async def test_process_uploaded_zip_respects_processed_member_cap(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_cap_counts_failed_member_attempts(monkeypatch) -> None:
+    # The work cap counts *attempts*, not successes: an archive of corrupt members
+    # (which never land in `processed`) must not make us read/parse every one, or the
+    # cap could be bypassed by uploading many unparseable files.
+    monkeypatch.setattr("api.index._ZIP_MAX_PROCESSED_MEMBERS", 2)
+
+    attempts = 0
+
+    async def counting_entry(**_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+
+    monkeypatch.setattr(api_index, "_zip_activity_entry", counting_entry)
+
+    zip_bytes = _make_zip({f"broken{i}.gpx": b"not valid gpx at all" for i in range(5)})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+    # Only the first two members were read/attempted; the cap declined the remaining
+    # three before touching them, even though none succeeded.
+    assert attempts == 2
+    assert body["skipped_count"] == 5
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_skips_directory_entries_without_counting(
     monkeypatch,
 ) -> None:
@@ -943,11 +970,14 @@ async def test_process_zip_member_counts_read_failure_as_skipped(monkeypatch) ->
             member=member,
             user_id=_ZIP_TEST_USER.user_id,
             zip_object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
-            processed_count=0,
+            attempted_count=0,
         )
 
     assert result.entry is None
     assert result.counts_as_skipped is True
+    # A read failure is still a processable candidate we attempted, so it must
+    # consume the work budget — otherwise a corrupt-heavy archive bypasses the cap.
+    assert result.counts_as_attempt is True
 
 
 @pytest.mark.asyncio

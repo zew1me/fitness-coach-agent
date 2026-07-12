@@ -1435,6 +1435,11 @@ class _ZipMemberResult:
 
     entry: dict[str, object] | None = None
     counts_as_skipped: bool = False
+    # True when this member was a processable candidate we actually read and
+    # attempted to parse/upload (success *or* failure). Used to bound total work:
+    # the per-archive cap counts attempts, not just successes, so an archive full
+    # of corrupt members cannot make us read every one of them.
+    counts_as_attempt: bool = False
 
 
 def _is_zip_junk_member(name: str, basename: str) -> bool:
@@ -1530,7 +1535,7 @@ async def _process_zip_member(
     member: zipfile.ZipInfo,
     user_id: str,
     zip_object_key: str,
-    processed_count: int,
+    attempted_count: int,
 ) -> _ZipMemberResult:
     """Filter, read, and convert one member without aborting the archive."""
     if member.is_dir():
@@ -1542,20 +1547,29 @@ async def _process_zip_member(
     activity_content_type = _ACTIVITY_SUFFIX_TO_CONTENT_TYPE.get(suffix)
     image_content_type = _IMAGE_SUFFIX_TO_CONTENT_TYPE.get(suffix)
 
-    should_skip = (
+    # Cheap rejects — junk, unknown type, oversized. We never read these, so they
+    # cost nothing and must not consume the work budget.
+    is_unprocessable = (
         _is_zip_junk_member(member.filename, filename)
         or (activity_content_type is None and image_content_type is None)
         or member.file_size > _ZIP_MEMBER_MAX_BYTES
-        or processed_count >= _ZIP_MAX_PROCESSED_MEMBERS
     )
-    if should_skip:
+    if is_unprocessable:
+        return _ZipMemberResult(counts_as_skipped=True)
+
+    # This member is a processable candidate; reading + parsing/uploading it is the
+    # expensive work the cap exists to bound. Enforce the cap here (before any read)
+    # so declining an over-budget member costs nothing and does not count as an
+    # attempt. Counting only successes would let a corrupt-heavy archive read every
+    # member — the cap must count attempts.
+    if attempted_count >= _ZIP_MAX_PROCESSED_MEMBERS:
         return _ZipMemberResult(counts_as_skipped=True)
 
     try:
         member_bytes = archive.read(member)
     except Exception:  # a corrupt member must not abort the whole zip
         logger.warning("failed to read zip member user_id=%s", user_id)
-        return _ZipMemberResult(counts_as_skipped=True)
+        return _ZipMemberResult(counts_as_skipped=True, counts_as_attempt=True)
 
     if activity_content_type is not None:
         entry = await _zip_activity_entry(
@@ -1575,7 +1589,7 @@ async def _process_zip_member(
             member_bytes=member_bytes,
         )
 
-    return _ZipMemberResult(entry=entry, counts_as_skipped=entry is None)
+    return _ZipMemberResult(entry=entry, counts_as_skipped=entry is None, counts_as_attempt=True)
 
 
 @app.post("/api/engine/process-uploaded-zip")
@@ -1601,6 +1615,7 @@ async def process_uploaded_zip_endpoint(
 
     processed: list[dict[str, object]] = []
     skipped_count = 0
+    attempted = 0
     with archive:
         for member in archive.infolist():
             result = await _process_zip_member(
@@ -1608,8 +1623,9 @@ async def process_uploaded_zip_endpoint(
                 member=member,
                 user_id=user_id,
                 zip_object_key=object_key,
-                processed_count=len(processed),
+                attempted_count=attempted,
             )
+            attempted += int(result.counts_as_attempt)
             skipped_count += int(result.counts_as_skipped)
             if result.entry is not None:
                 processed.append(result.entry)
