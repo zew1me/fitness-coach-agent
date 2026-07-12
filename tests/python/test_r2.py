@@ -24,6 +24,55 @@ def test_build_object_key_scopes_to_user_and_purpose() -> None:
     assert object_key.endswith(".png")
 
 
+def test_build_object_key_public_method_scopes_to_user_and_purpose() -> None:
+    # build_object_key is called directly by the zip-image re-upload path (there is
+    # no PresignUploadRequest for that flow), so it needs its own coverage beyond
+    # the _build_object_key wrapper above.
+    service = R2Service()
+
+    object_key = service.build_object_key(
+        user_id="user-123", filename="shot.PNG", purpose="chat-attachment"
+    )
+
+    assert object_key.startswith("users/user-123/chat-attachment/")
+    assert object_key.endswith(".png")
+
+
+def test_build_object_key_public_method_sanitizes_purpose_and_generates_unique_names() -> None:
+    service = R2Service()
+
+    first = service.build_object_key(
+        user_id="user-123", filename="run.gpx", purpose="Zip Activity Member!"
+    )
+    second = service.build_object_key(
+        user_id="user-123", filename="run.gpx", purpose="Zip Activity Member!"
+    )
+
+    assert "/zip-activity-member/" in first
+    assert first != second
+
+
+def test_build_object_key_public_method_matches_wrapper_shape() -> None:
+    # _build_object_key is now a thin wrapper around build_object_key; both must
+    # produce keys with the same scoping/extension shape for the same inputs.
+    service = R2Service()
+    request = PresignUploadRequest(
+        filename="race.fit",
+        content_type="application/vnd.garmin.fit",
+        content_length=2048,
+        purpose="chat-attachment",
+    )
+
+    via_wrapper = service._build_object_key(user_id="user-123", request=request)
+    via_public_method = service.build_object_key(
+        user_id="user-123", filename="race.fit", purpose="chat-attachment"
+    )
+
+    assert via_wrapper.rsplit("/", 1)[0] == via_public_method.rsplit("/", 1)[0]
+    assert via_wrapper.endswith(".fit")
+    assert via_public_method.endswith(".fit")
+
+
 def test_public_url_uses_configured_base(monkeypatch) -> None:
     service = R2Service()
     monkeypatch.setattr(

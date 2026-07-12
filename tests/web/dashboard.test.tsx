@@ -2701,7 +2701,9 @@ describe("CoachChat", () => {
     const fileInput = container.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
-    expect(fileInput.accept).toBe("image/*,application/gpx+xml,.gpx,.fit,.tcx");
+    expect(fileInput.accept).toBe(
+      "image/*,application/gpx+xml,.gpx,.fit,.tcx,application/zip,.zip",
+    );
 
     fireEvent.change(fileInput, {
       target: {
@@ -2739,6 +2741,136 @@ describe("CoachChat", () => {
             mediaType: "application/gpx+xml",
             type: "file",
             url: "https://example.com/morning-run.gpx",
+          },
+        ],
+      });
+    });
+  });
+
+  it("uploads a ZIP attachment through the chat attachment endpoint and shows a ZIP badge", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2026-04-02T08:00:00Z",
+              scopes: [
+                "profile:read",
+                "profile:write",
+                "plans:read",
+                "plans:write",
+                "metrics:write",
+              ],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: true,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [],
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/attachments/presign") {
+        expect(init?.body).toBe(
+          JSON.stringify({
+            content_length: 19,
+            content_type: "application/zip",
+            filename: "garmin-export.zip",
+            purpose: "chat-attachment",
+          }),
+        );
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "x-upload": "1" },
+              method: "PUT",
+              object_key: "uploads/garmin-export.zip",
+              public_url: "https://example.com/garmin-export.zip",
+              upload_url: "https://upload.example/garmin-export.zip",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+
+      if (url === "/api/chat/attachments/upload") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              headers: { "Content-Type": "application/zip" },
+              method: "POST",
+              object_key: "uploads/garmin-export.zip",
+              public_url: "https://example.com/garmin-export.zip",
+              upload_url: "",
+            }),
+            { status: 201 },
+          ),
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const { container } = renderCoachChat();
+
+    await screen.findByPlaceholderText(/Ask your coach/i);
+    const fileInput = container.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(["<zip archive bytes>"], "garmin-export.zip", {
+            type: "application/zip",
+          }),
+        ],
+      },
+    });
+
+    await screen.findByText("garmin-export.zip");
+    expect(screen.getByText("ZIP")).toBeTruthy();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/chat/attachments/upload",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    await screen.findByText("Ready");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(chatMocks.sendMessage).toHaveBeenCalledWith({
+        id: expect.stringMatching(uuidPattern),
+        parts: [
+          {
+            filename: "garmin-export.zip",
+            mediaType: "application/zip",
+            type: "file",
+            url: "https://example.com/garmin-export.zip",
           },
         ],
       });
