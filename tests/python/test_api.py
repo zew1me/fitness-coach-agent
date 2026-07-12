@@ -6,6 +6,7 @@ from hashlib import sha256
 from typing import Any, Literal, TypedDict, cast
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient, HTTPError
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
@@ -1099,6 +1100,73 @@ async def test_process_uploaded_zip_skips_image_when_analysis_raises(monkeypatch
     assert len(body["processed"]) == 1
     assert body["processed"][0]["kind"] == "activity"
     assert body["skipped_count"] == 1
+
+
+def test_check_upload_content_type_rejects_message_mentions_zip_archives() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        api_index._check_upload_content_type("application/pdf")
+
+    assert exc_info.value.status_code == 400
+    assert ".zip archives of those" in exc_info.value.detail
+    assert "application/pdf" in exc_info.value.detail
+
+
+def test_check_upload_content_type_accepts_zip_variants() -> None:
+    # Must not raise for either zip content type accepted by the presign endpoint.
+    api_index._check_upload_content_type("application/zip")
+    api_index._check_upload_content_type("application/x-zip-compressed")
+
+
+def test_is_zip_junk_member_detects_macosx_ds_store_and_appledouble() -> None:
+    assert api_index._is_zip_junk_member("__MACOSX/activities/._run.gpx", "._run.gpx")
+    assert api_index._is_zip_junk_member(".DS_Store", ".DS_Store")
+    assert api_index._is_zip_junk_member("activities/._run.gpx", "._run.gpx")
+    assert not api_index._is_zip_junk_member("activities/run.gpx", "run.gpx")
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_appledouble_disguised_activity_file(
+    monkeypatch,
+) -> None:
+    # An AppleDouble sidecar file (macOS metadata for "run.gpx") carries the same
+    # .gpx suffix but must be discarded as junk rather than parsed as a broken
+    # activity.
+    zip_bytes = _make_zip(
+        {"activities/run.gpx": _SAMPLE_GPX, "activities/._run.gpx": b"apple double junk"}
+    )
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["kind"] == "activity"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_matches_extension_case_insensitively(
+    monkeypatch,
+) -> None:
+    body = await _post_process_zip(_make_zip({"RUN.GPX": _SAMPLE_GPX}), monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["kind"] == "activity"
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_activity_member_omits_public_url_and_stamps_zip_key(
+    monkeypatch,
+) -> None:
+    # Zip activity members are re-derived server-side, not fetched from a public
+    # URL, and every member shares the archive's own object key as its
+    # source_file_key rather than a per-member key.
+    body = await _post_process_zip(_make_zip({"run.gpx": _SAMPLE_GPX}), monkeypatch)
+
+    activity = body["processed"][0]["activity"]
+    assert activity["raw_extraction"]["public_url"] is None
+    assert activity["source_file_key"] == "users/athlete-1/chat-attachment/2024/01/01/export.zip"
 
 
 @pytest.mark.asyncio
