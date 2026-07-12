@@ -105,4 +105,14 @@ test("blocks a resend after navigation until the abandoned turn's lease clears (
   await expect(page.getByText(ASSISTANT_REPLY)).toBeVisible();
   await expect(page.getByText("Unable to send your message.")).toHaveCount(0);
   await expect(page.getByText("lease already held")).toHaveCount(0);
+  await expect(
+    page.getByText(
+      "Message sent, but the thread failed to refresh. Reload to see the latest.",
+    ),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText(
+      "Your previous message finished, but the thread failed to refresh. Reload to see the latest.",
+    ),
+  ).toHaveCount(0);
 });
