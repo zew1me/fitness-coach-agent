@@ -1227,6 +1227,61 @@ describe("app/api/chat route", () => {
     );
   });
 
+  it("routes .zip uploads to the process-uploaded-zip endpoint", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            processed: [{ kind: "activity", activity: { sport: "running" } }],
+            skipped_count: 1,
+            status: "ok",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = processUploadedFile.execute({
+      content_type: "application/zip",
+      filename: "garmin-export.zip",
+      object_key:
+        "users/athlete-1/chat-attachment/2026/04/19/garmin-export.zip",
+      public_url: "https://example.com/garmin-export.zip",
+      user_id: "attacker-controlled-user",
+    });
+
+    await expect(Promise.resolve(result)).resolves.toEqual({
+      processed: [{ kind: "activity", activity: { sport: "running" } }],
+      skipped_count: 1,
+      status: "ok",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/process-uploaded-zip",
+      expect.objectContaining({
+        body: JSON.stringify({
+          content_type: "application/zip",
+          filename: "garmin-export.zip",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/04/19/garmin-export.zip",
+          public_url: "https://example.com/garmin-export.zip",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
   it("schedules a Sentry flush via after() on every successful chat request", async () => {
     const fetchMock = vi.fn((url: RequestInfo | URL) => {
       if (String(url).endsWith("/api/oauth/browser-token")) {

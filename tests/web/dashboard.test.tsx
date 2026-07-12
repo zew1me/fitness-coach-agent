@@ -2701,7 +2701,9 @@ describe("CoachChat", () => {
     const fileInput = container.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
-    expect(fileInput.accept).toBe("image/*,application/gpx+xml,.gpx,.fit,.tcx");
+    expect(fileInput.accept).toBe(
+      "image/*,application/gpx+xml,.gpx,.fit,.tcx,application/zip,.zip",
+    );
 
     fireEvent.change(fileInput, {
       target: {
