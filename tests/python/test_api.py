@@ -3198,6 +3198,14 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
             HTTPError("timeout"),
             "Chat session service unavailable",
         ),
+        (
+            "GET",
+            "/api/chat/model-state/lease",
+            None,
+            "get_turn_lease_status",
+            HTTPError("connection reset"),
+            "Chat session service unavailable",
+        ),
         # A PostgREST schema-cache miss now flows to the centralized handler, which maps
         # it to 503 with the shared generic detail.
         (
@@ -3244,6 +3252,29 @@ async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
 
     assert response.status_code == 503
     assert response.json()["detail"] == expected_detail
+
+
+@pytest.mark.asyncio
+async def test_chat_lease_status_delegates_postgrest_conflicts_to_shared_handler(
+    model_state_chat_service_fixture,
+) -> None:
+    async def conflict(*_args, **_kwargs):
+        raise PostgRESTAPIError(
+            {
+                "message": "lease conflict",
+                "code": "23505",
+                "hint": None,
+                "details": None,
+            }
+        )
+
+    model_state_chat_service_fixture.get_turn_lease_status = conflict
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/chat/model-state/lease")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Conflicts with existing data."}
 
 
 @pytest.mark.asyncio

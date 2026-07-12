@@ -645,7 +645,7 @@ async def get_chat_turn_lease_status(
         status = await chat_service.get_turn_lease_status(user_context.user_id)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (PostgRESTAPIError, httpx.HTTPError) as exc:
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
         logger.exception("chat lease status get failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
     return status.model_dump(mode="json")
