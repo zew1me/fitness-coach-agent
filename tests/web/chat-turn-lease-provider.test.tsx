@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ChatTurnLeaseProvider,
+  LEASE_STATUS_POLL_INTERVAL_MS,
   useChatTurnLease,
 } from "../../components/chat-turn-lease-provider";
 import { loadChatTurnLeaseStatus } from "../../lib/coach-api";
@@ -41,7 +42,7 @@ describe("useChatTurnLease", () => {
     expect(loadLeaseStatusMock).toHaveBeenCalledOnce();
     expect(result.current.turnInFlight).toBe(true);
 
-    await act(() => vi.advanceTimersByTimeAsync(750));
+    await act(() => vi.advanceTimersByTimeAsync(LEASE_STATUS_POLL_INTERVAL_MS));
 
     expect(loadLeaseStatusMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(result.current.turnInFlight).toBe(false);

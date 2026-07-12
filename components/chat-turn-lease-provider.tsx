@@ -13,7 +13,7 @@ import {
 
 import { loadChatTurnLeaseStatus } from "../lib/coach-api";
 
-const LEASE_STATUS_POLL_INTERVAL_MS = 750;
+export const LEASE_STATUS_POLL_INTERVAL_MS = 750;
 
 type ChatTurnLeaseContextValue = {
   clearPendingTurn: (_userId: string) => void;
