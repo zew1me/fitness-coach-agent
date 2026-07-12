@@ -104,7 +104,7 @@ export function isActivityFile(
   );
 }
 
-function isZipUpload(
+export function isZipUpload(
   contentType: string | null,
   filename: string | null,
 ): boolean {
@@ -351,10 +351,11 @@ export function executeCoachTool(
 
 export type CoachAgentRunContext = {
   toolCalled: boolean;
-  // True when this turn's messages include a gpx/fit/tcx attachment. Gates
-  // save_activity_from_text so the model can't route a file upload to the
-  // LLM-guessing text-extraction path even if it doesn't pass the stub text
-  // through verbatim (see parseUploadedFileText for the verbatim case).
+  // True when this turn's messages include a gpx/fit/tcx activity file or a .zip
+  // archive attachment. Gates save_activity_from_text so the model can't route a
+  // file upload to the LLM-guessing text-extraction path even if it doesn't pass
+  // the stub text through verbatim (see parseUploadedFileText for the verbatim
+  // case). Zip archives belong to process_uploaded_file, which unpacks them.
   hasActivityFileAttachment: boolean;
 };
 

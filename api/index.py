@@ -1479,7 +1479,10 @@ async def _zip_activity_entry(
         persisted = await _persist_extracted_activity(
             user_id, activity, calling_endpoint="process_uploaded_zip"
         )
-    except HTTPException:  # a failed save must not abort the whole zip
+    except Exception:  # best-effort per member; a failed save must not abort the whole zip
+        # Catch broadly (not just HTTPException): _persist_extracted_activity lets a raw
+        # PostgRESTAPIError propagate to the global handler, which would 500 the whole
+        # archive instead of skipping this one member.
         logger.exception("failed to persist activity from zip member user_id=%s", user_id)
         return None
     return {"kind": "activity", **persisted}

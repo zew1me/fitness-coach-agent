@@ -748,6 +748,57 @@ async def test_process_uploaded_zip_isolates_persist_failure_per_member(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_isolates_postgrest_persist_failure(monkeypatch) -> None:
+    # A raw PostgRESTAPIError from persistence must not abort the archive. It is not an
+    # HTTPException, so it would otherwise propagate to the global handler and 500 the
+    # whole zip; the per-member catch must swallow it and skip only that member.
+    class PostgrestFailingRepo(EngineRepository):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.calls += 1
+            if self.calls == 1:
+                raise PostgRESTAPIError(
+                    {
+                        "message": "deadlock detected",
+                        "code": "40P01",
+                        "hint": None,
+                        "details": None,
+                    }
+                )
+            return activity.model_copy(update={"id": "activity-2"})
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    monkeypatch.setattr(api_index, "repo", PostgrestFailingRepo())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["activity"]["id"] == "activity-2"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_processes_activity_and_image(monkeypatch) -> None:
     from backend.models.screenshot import ExtractionResult
     from backend.models.storage import PresignUploadResponse
