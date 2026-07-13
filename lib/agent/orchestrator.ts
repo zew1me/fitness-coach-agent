@@ -49,13 +49,11 @@ import { buildLeadCoachPrompt } from "./system-prompt";
 import type { AthleteContextBundle } from "./types";
 import { recordStageUsage } from "./usage-metrics";
 
-export type StreamCoachTurnOptions = {
+type StreamCoachTurnBaseOptions = {
   accessToken: string;
-  acquiredLease?: ChatTurnLeaseState;
   baseUrl: string;
   context: AthleteContextBundle;
   extraHeaders?: Record<string, string>;
-  leaseId?: string;
   messages: UIMessage[];
   messagesAreModelSelected?: boolean;
   signal?: AbortSignal;
@@ -63,6 +61,16 @@ export type StreamCoachTurnOptions = {
   tavilyMcpUrl?: string;
   useDurableSession?: boolean;
 };
+
+// acquiredLease was obtained under a specific leaseId; the two must travel together
+// so renewal/release target the lease that was actually acquired. The independent-
+// acquisition variant (no acquiredLease yet) may still supply an optional leaseId
+// up front, or let one be generated.
+export type StreamCoachTurnOptions = StreamCoachTurnBaseOptions &
+  (
+    | { acquiredLease: ChatTurnLeaseState; leaseId: string }
+    | { acquiredLease?: undefined; leaseId?: string }
+  );
 
 const MAX_COACH_STEPS = 4;
 const MODEL = "gpt-5.4-mini";
