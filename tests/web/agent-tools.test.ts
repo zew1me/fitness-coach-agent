@@ -978,7 +978,8 @@ describe("coachToolDefinitions", () => {
     ).execute({
       content_type: "application/octet-stream",
       filename: "garmin-export.zip",
-      object_key: "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
+      object_key:
+        "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
       public_url: "https://cdn.example.com/garmin-export.zip",
     });
 
