@@ -1516,6 +1516,14 @@ async def _zip_activity_entry(
     return {"kind": "activity", **persisted}
 
 
+async def _best_effort_delete_r2_object(*, user_id: str, object_key: str) -> None:
+    """Delete an R2 object without letting a delete failure mask the caller's error."""
+    try:
+        await r2_service.delete_file(user_id=user_id, object_key=object_key)
+    except Exception:
+        logger.exception("failed to clean up orphaned r2 object user_id=%s", user_id)
+
+
 async def _zip_image_entry(
     *, user_id: str, filename: str, content_type: str, member_bytes: bytes
 ) -> dict[str, object] | None:
@@ -1536,6 +1544,7 @@ async def _zip_image_entry(
         return None
     if uploaded.public_url is None:
         logger.warning("zip image member has no public url (R2 base unset) user_id=%s", user_id)
+        await _best_effort_delete_r2_object(user_id=user_id, object_key=object_key)
         return None
     try:
         result = await analyze_screenshot(uploaded.public_url)
@@ -1550,6 +1559,7 @@ async def _zip_image_entry(
             scope.fingerprint = ["zip-image-analysis-failed"]
             scope.set_extra("exception", repr(exc))
             sentry_sdk.capture_message("zip image member analysis failed", level="warning")
+        await _best_effort_delete_r2_object(user_id=user_id, object_key=object_key)
         return None
     return {
         "kind": "image_analysis",
