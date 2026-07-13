@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import type { JSX } from "react";
 
+import { StatusCard } from "../../components/status-card";
 import {
   confirmProfileMetric,
   confirmSportThreshold,
@@ -612,9 +613,19 @@ export default function ProfilePage(): JSX.Element {
           </Link>
         </nav>
         <h1 className={styles.pageTitle}>Fitness profile</h1>
-        {error !== null && <p className={styles.error}>{error}</p>}
+        {error !== null && (
+          <StatusCard
+            body={error}
+            role="alert"
+            title="Unable to load profile"
+          />
+        )}
         {metrics === null && error === null && (
-          <p className={styles.loading}>Loading…</p>
+          <StatusCard
+            body="Your latest fitness metrics and connected services will appear here."
+            role="status"
+            title="Loading profile…"
+          />
         )}
         {(metrics !== null || error !== null) && (
           <IntervalsSection

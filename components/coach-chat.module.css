@@ -222,35 +222,12 @@
   padding: 24px 0 8px;
 }
 
-.emptyCard {
-  display: grid;
-  gap: 18px;
-  max-width: 720px;
-  text-align: center;
-}
-
 .eyebrow {
   color: var(--accent-strong);
   font-size: 0.83rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.emptyTitle {
-  margin: 0;
-  color: var(--text);
-  font-size: 3.2rem;
-  letter-spacing: 0;
-  line-height: 1;
-}
-
-.emptyText {
-  margin: 0 auto;
-  max-width: 56ch;
-  color: var(--text-muted);
-  font-size: 1.02rem;
-  line-height: 1.6;
 }
 
 .starterRow {

@@ -29,10 +29,7 @@ declare const styles: {
   readonly drawerStatus: string;
   readonly drawerText: string;
   readonly drawerTitle: string;
-  readonly emptyCard: string;
   readonly emptyState: string;
-  readonly emptyText: string;
-  readonly emptyTitle: string;
   readonly errorArt: string;
   readonly errorCard: string;
   readonly errorDetail: string;
