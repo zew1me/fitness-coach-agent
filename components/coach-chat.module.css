@@ -769,11 +769,6 @@
     gap: 8px;
   }
 
-  .emptyTitle {
-    font-size: 2.2rem;
-    line-height: 1.05;
-  }
-
   .sendButton {
     width: 44px;
     min-width: 44px;
