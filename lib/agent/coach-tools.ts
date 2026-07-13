@@ -104,6 +104,18 @@ export function isActivityFile(
   );
 }
 
+export function isZipUpload(
+  contentType: string | null,
+  filename: string | null,
+): boolean {
+  const lowerFilename = filename?.toLowerCase() ?? "";
+  return (
+    contentType === "application/zip" ||
+    contentType === "application/x-zip-compressed" ||
+    lowerFilename.endsWith(".zip")
+  );
+}
+
 function inferActivityContentType(filename: string | null): string | null {
   const lowerFilename = filename?.toLowerCase() ?? "";
 
@@ -174,10 +186,15 @@ function routeSaveActivityFromText(
   const payload = engineInput(input);
   const text = stringField(payload, "text");
   const stub = text !== null ? parseUploadedFileText(text) : null;
-  if (stub !== null && isActivityFile(stub.contentType, stub.filename)) {
-    // The model attached a GPX/FIT/TCX upload stub as free text instead of
-    // calling process_uploaded_file. Redirect to the deterministic parser so
-    // duration/distance come from the file, never from LLM guessing.
+  if (
+    stub !== null &&
+    (isActivityFile(stub.contentType, stub.filename) ||
+      isZipUpload(stub.contentType, stub.filename))
+  ) {
+    // The model attached a GPX/FIT/TCX or .zip upload stub as free text instead
+    // of calling process_uploaded_file. Redirect to process_uploaded_file so the
+    // file is parsed deterministically (activities) or unpacked (.zip archives),
+    // never parsed as plain text where numeric fields would be LLM-guessed.
     return processUploadedFile(
       {
         content_type: stub.contentType,
@@ -206,6 +223,15 @@ function processUploadedFile(
   if (shouldAnalyzeScreenshot(resolvedContentType, publicUrl)) {
     return postEngine(context, "/api/engine/analyze-screenshot", {
       image_url: publicUrl,
+    });
+  }
+
+  if (isZipUpload(resolvedContentType, filename) && objectKey !== null) {
+    return postEngine(context, "/api/engine/process-uploaded-zip", {
+      content_type: resolvedContentType,
+      filename,
+      object_key: objectKey,
+      public_url: publicUrl,
     });
   }
 
@@ -325,10 +351,11 @@ export function executeCoachTool(
 
 export type CoachAgentRunContext = {
   toolCalled: boolean;
-  // True when this turn's messages include a gpx/fit/tcx attachment. Gates
-  // save_activity_from_text so the model can't route a file upload to the
-  // LLM-guessing text-extraction path even if it doesn't pass the stub text
-  // through verbatim (see parseUploadedFileText for the verbatim case).
+  // True when this turn's messages include a gpx/fit/tcx activity file or a .zip
+  // archive attachment. Gates save_activity_from_text so the model can't route a
+  // file upload to the LLM-guessing text-extraction path even if it doesn't pass
+  // the stub text through verbatim (see parseUploadedFileText for the verbatim
+  // case). Zip archives belong to process_uploaded_file, which unpacks them.
   hasActivityFileAttachment: boolean;
 };
 

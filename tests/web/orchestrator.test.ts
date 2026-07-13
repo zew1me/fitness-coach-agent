@@ -152,6 +152,24 @@ function messagesWithFitAttachment(): UIMessage[] {
   ];
 }
 
+function messagesWithZipAttachment(): UIMessage[] {
+  return [
+    {
+      id: "e1f23a8e-7e3d-4d2c-9f9e-0d0b3d4e0d0b",
+      parts: [
+        { text: "Here's my Garmin export.", type: "text" },
+        {
+          filename: "garmin-export.zip",
+          mediaType: "application/zip",
+          type: "file",
+          url: "https://cdn.example.com/garmin-export.zip",
+        },
+      ],
+      role: "user",
+    },
+  ];
+}
+
 function messagesWithEarlierFitAttachment(): UIMessage[] {
   return [
     ...messagesWithFitAttachment(),
@@ -236,6 +254,34 @@ describe("streamCoachTurn", () => {
       baseUrl: "http://localhost",
       context: athleteContextFixture,
       messages: messagesWithFitAttachment(),
+    });
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({
+        context: expect.objectContaining({ hasActivityFileAttachment: true }),
+      }),
+    );
+
+    const saveActivityFromText = saveActivityFromTextTool();
+
+    expect(
+      saveActivityFromText?.isEnabled({
+        runContext: {
+          context: { hasActivityFileAttachment: true, toolCalled: false },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("disables save_activity_from_text when the turn carries a .zip attachment", async () => {
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messagesWithZipAttachment(),
     });
     await response.text();
 

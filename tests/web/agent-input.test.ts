@@ -121,6 +121,42 @@ describe("toAgentInputItems", () => {
     ]);
   });
 
+  it("converts a .zip file attachment to a link-preserving text reference so the coach can unpack it", () => {
+    // A .zip is non-image, so it must become text (never input_file) while
+    // preserving the object_key/public_url the coach passes to
+    // process_uploaded_file for server-side unpacking.
+    const messages: UIMessage[] = [
+      {
+        id: "message-1",
+        role: "user",
+        parts: [
+          {
+            type: "file",
+            filename: "garmin-export.zip",
+            mediaType: "application/zip",
+            url: "https://files.example/garmin-export.zip",
+          },
+        ],
+      },
+    ];
+
+    expect(toAgentInputItems(messages)).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text:
+              "Uploaded file: garmin-export.zip\n" +
+              "content_type=application/zip\n" +
+              "public_url=https://files.example/garmin-export.zip\n" +
+              "object_key=garmin-export.zip",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("concatenates multiple text parts in a system message", () => {
     const messages = [
       {

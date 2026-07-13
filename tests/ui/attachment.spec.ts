@@ -46,10 +46,10 @@ test.describe("attachment button structure", () => {
     await expect(label).toBeVisible();
 
     const fileInput = label.locator("input[type='file']");
-    // CHAT_ATTACHMENT_ACCEPT in components/coach-chat.tsx — images plus GPX/FIT/TCX.
+    // CHAT_ATTACHMENT_ACCEPT in components/coach-chat.tsx — images plus GPX/FIT/TCX/ZIP.
     await expect(fileInput).toHaveAttribute(
       "accept",
-      "image/*,application/gpx+xml,.gpx,.fit,.tcx",
+      "image/*,application/gpx+xml,.gpx,.fit,.tcx,application/zip,.zip",
     );
     await expect(fileInput).toHaveAttribute("multiple");
   });

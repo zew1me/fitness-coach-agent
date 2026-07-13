@@ -6,6 +6,7 @@ from hashlib import sha256
 from typing import Any, Literal, TypedDict, cast
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient, HTTPError
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
@@ -748,6 +749,57 @@ async def test_process_uploaded_zip_isolates_persist_failure_per_member(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_isolates_postgrest_persist_failure(monkeypatch) -> None:
+    # A raw PostgRESTAPIError from persistence must not abort the archive. It is not an
+    # HTTPException, so it would otherwise propagate to the global handler and 500 the
+    # whole zip; the per-member catch must swallow it and skip only that member.
+    class PostgrestFailingRepo(EngineRepository):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.calls += 1
+            if self.calls == 1:
+                raise PostgRESTAPIError(
+                    {
+                        "message": "deadlock detected",
+                        "code": "40P01",
+                        "hint": None,
+                        "details": None,
+                    }
+                )
+            return activity.model_copy(update={"id": "activity-2"})
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    monkeypatch.setattr(api_index, "repo", PostgrestFailingRepo())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["activity"]["id"] == "activity-2"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_processes_activity_and_image(monkeypatch) -> None:
     from backend.models.screenshot import ExtractionResult
     from backend.models.storage import PresignUploadResponse
@@ -912,6 +964,33 @@ async def test_process_uploaded_zip_respects_processed_member_cap(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_cap_counts_failed_member_attempts(monkeypatch) -> None:
+    # The work cap counts *attempts*, not successes: an archive of corrupt members
+    # (which never land in `processed`) must not make us read/parse every one, or the
+    # cap could be bypassed by uploading many unparseable files.
+    monkeypatch.setattr("api.index._ZIP_MAX_PROCESSED_MEMBERS", 2)
+
+    attempts = 0
+
+    async def counting_entry(**_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+
+    monkeypatch.setattr(api_index, "_zip_activity_entry", counting_entry)
+
+    zip_bytes = _make_zip({f"broken{i}.gpx": b"not valid gpx at all" for i in range(5)})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+    # Only the first two members were read/attempted; the cap declined the remaining
+    # three before touching them, even though none succeeded.
+    assert attempts == 2
+    assert body["skipped_count"] == 5
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_skips_directory_entries_without_counting(
     monkeypatch,
 ) -> None:
@@ -943,11 +1022,14 @@ async def test_process_zip_member_counts_read_failure_as_skipped(monkeypatch) ->
             member=member,
             user_id=_ZIP_TEST_USER.user_id,
             zip_object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
-            processed_count=0,
+            attempted_count=0,
         )
 
     assert result.entry is None
     assert result.counts_as_skipped is True
+    # A read failure is still a processable candidate we attempted, so it must
+    # consume the work budget — otherwise a corrupt-heavy archive bypasses the cap.
+    assert result.counts_as_attempt is True
 
 
 @pytest.mark.asyncio
@@ -1036,9 +1118,7 @@ def test_check_upload_content_type_accepts_zip_variants() -> None:
 
 
 def test_is_zip_junk_member_detects_macosx_ds_store_and_appledouble() -> None:
-    assert api_index._is_zip_junk_member(
-        "__MACOSX/activities/._run.gpx", "._run.gpx"
-    )
+    assert api_index._is_zip_junk_member("__MACOSX/activities/._run.gpx", "._run.gpx")
     assert api_index._is_zip_junk_member(".DS_Store", ".DS_Store")
     assert api_index._is_zip_junk_member("activities/._run.gpx", "._run.gpx")
     assert not api_index._is_zip_junk_member("activities/run.gpx", "run.gpx")
@@ -1086,10 +1166,7 @@ async def test_process_uploaded_zip_activity_member_omits_public_url_and_stamps_
 
     activity = body["processed"][0]["activity"]
     assert activity["raw_extraction"]["public_url"] is None
-    assert (
-        activity["source_file_key"]
-        == "users/athlete-1/chat-attachment/2024/01/01/export.zip"
-    )
+    assert activity["source_file_key"] == "users/athlete-1/chat-attachment/2024/01/01/export.zip"
 
 
 @pytest.mark.asyncio

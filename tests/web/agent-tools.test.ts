@@ -436,6 +436,56 @@ describe("coachToolDefinitions", () => {
     },
   );
 
+  it.each([
+    ["application/zip", "garmin-export.zip"],
+    ["application/x-zip-compressed", "activities.zip"],
+  ])(
+    "redirects a %s upload stub passed to save_activity_from_text to the zip unpacker",
+    async (contentType, filename) => {
+      const { fetchImpl, requests } = createRecordingFetch({
+        processed: [{ activity: { sport: "running" }, kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl,
+      });
+
+      const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
+      const publicUrl = `https://cdn.example.com/${filename}`;
+      const stub =
+        `Uploaded file: ${filename}\r\n` +
+        `content_type=${contentType}\r\n` +
+        `public_url=${publicUrl}\r\n` +
+        `object_key=${objectKey}`;
+
+      const result = await (
+        tools["save_activity_from_text"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ text: stub });
+
+      expect(result).toEqual({
+        processed: [{ activity: { sport: "running" }, kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      expect(requests).toEqual([
+        {
+          body: {
+            content_type: contentType,
+            filename,
+            object_key: objectKey,
+            public_url: publicUrl,
+          },
+          url: "https://coach.test/api/engine/process-uploaded-zip",
+        },
+      ]);
+    },
+  );
+
   it("does not redirect ordinary free-text activity descriptions", async () => {
     const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
     const tools = createCoachTools({
@@ -928,7 +978,8 @@ describe("coachToolDefinitions", () => {
     ).execute({
       content_type: "application/octet-stream",
       filename: "garmin-export.zip",
-      object_key: "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
+      object_key:
+        "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
       public_url: "https://cdn.example.com/garmin-export.zip",
     });
 
