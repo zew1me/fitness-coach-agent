@@ -1,7 +1,10 @@
 import type { UIMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { streamCoachTurn } from "../../lib/agent/orchestrator";
+import {
+  CHAT_TURN_LEASE_RENEW_INTERVAL_MS,
+  streamCoachTurn,
+} from "../../lib/agent/orchestrator";
 import { runSpecialists } from "../../lib/agent/specialists";
 import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
 
@@ -1103,7 +1106,7 @@ describe("streamCoachTurn", () => {
       const textPromise = response.text();
 
       // Fire one lease-renewal tick; the mocked fetch answers it with 409.
-      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(CHAT_TURN_LEASE_RENEW_INTERVAL_MS);
 
       const text = await textPromise;
 
