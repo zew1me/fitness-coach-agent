@@ -52,6 +52,34 @@ afterEach(() => {
 });
 
 describe("ProfilePage Intervals.icu connection", () => {
+  it("shows a status card while the profile is loading", () => {
+    coachApiMocks.fetchBrowserToken.mockReturnValueOnce(
+      new Promise(() => undefined),
+    );
+
+    render(<ProfilePage />);
+
+    expect(
+      screen.getByRole("status", { name: "Loading profile…" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/latest fitness metrics and connected services/i),
+    ).toBeTruthy();
+  });
+
+  it("shows a status card when profile loading fails", async () => {
+    coachApiMocks.loadFitnessMetrics.mockRejectedValueOnce(
+      new Error("Fitness service unavailable."),
+    );
+
+    render(<ProfilePage />);
+
+    expect(
+      await screen.findByRole("alert", { name: "Unable to load profile" }),
+    ).toBeTruthy();
+    expect(screen.getByText("Fitness service unavailable.")).toBeTruthy();
+  });
+
   it("shows the disconnected state and starts authorization from the connect button", async () => {
     coachApiMocks.startIntervalsAuthorization.mockRejectedValueOnce(
       new Error("Intervals.icu integration is not configured yet."),

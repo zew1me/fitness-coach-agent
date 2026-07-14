@@ -25,6 +25,7 @@ import { useIsMobile } from "../lib/use-is-mobile";
 
 import { useChatTurnLease } from "./chat-turn-lease-provider";
 import styles from "./coach-chat.module.css";
+import { StatusCard } from "./status-card";
 import { ThemeSwitcher } from "./theme-switcher";
 
 type LocalAttachment = {
@@ -633,10 +634,7 @@ function EmptyChatLandingCard({
       : "Use this thread for quick training updates, image-backed check-ins, and your next 14-day plan. I’ll keep the details in the background and keep the surface focused.";
   return (
     <div className={styles.emptyState}>
-      <div className={styles.emptyCard}>
-        <p className={styles.eyebrow}>Coach Chat</p>
-        <h1 className={styles.emptyTitle}>{title}</h1>
-        <p className={styles.emptyText}>{body}</p>
+      <StatusCard body={body} headingLevel="h1" title={title}>
         <div className={styles.starterRow}>
           {starters.map((starter) => (
             <button
@@ -650,7 +648,7 @@ function EmptyChatLandingCard({
           ))}
         </div>
         {children}
-      </div>
+      </StatusCard>
     </div>
   );
 }

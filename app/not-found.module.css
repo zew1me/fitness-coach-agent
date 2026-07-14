@@ -1,0 +1,22 @@
+.page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: var(--bg);
+  padding: 24px;
+}
+
+.content {
+  width: min(100%, 680px);
+}
+
+.link {
+  width: fit-content;
+  color: var(--accent-strong);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.link:hover {
+  text-decoration: underline;
+}

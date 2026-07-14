@@ -14,7 +14,6 @@ declare const styles: {
   readonly connectionText: string;
   readonly error: string;
   readonly estimated: string;
-  readonly loading: string;
   readonly metricLabel: string;
   readonly metricRow: string;
   readonly metricValue: string;
