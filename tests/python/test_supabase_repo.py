@@ -244,9 +244,14 @@ class FakeSupabaseClient:
 
     def rpc(self, function_name: str, params: dict[str, object]) -> "FakeRpcQuery":
         if function_name == "create_training_plan_atomic":
-            return FakeRpcQuery([self._create_training_plan_atomic(params)])
+            # `create_training_plan_atomic` is declared `returns public.training_plans`
+            # (a single composite row), so PostgREST hands back a JSON object, not an
+            # array. Mirror that shape — a list-wrapped fake is what let the `rows[0]`
+            # `KeyError: 0` regression ship unnoticed.
+            return FakeRpcQuery(self._create_training_plan_atomic(params))
         if function_name == "create_recalibration_candidate_atomic":
-            return FakeRpcQuery([self._create_recalibration_candidate_atomic(params)])
+            # Single-composite return → dict, not array (see note above).
+            return FakeRpcQuery(self._create_recalibration_candidate_atomic(params))
         raise AssertionError(f"Unexpected RPC call: {function_name}")
 
     def _create_training_plan_atomic(self, params: dict[str, object]) -> dict[str, object]:
@@ -912,7 +917,11 @@ async def test_create_training_plan_uses_atomic_rpc() -> None:
         "weekly_tss_target": 420.0,
         "weekly_hours_target": 7.5,
     }
-    client = FakeRpcClient([returned_row])
+    # PostgREST returns a `returns public.training_plans` RPC result as a single JSON
+    # object, not an array. The fake must mirror that shape or it hides the very bug
+    # that shipped: a list-shaped fake makes `rows[0]` pass while production raises
+    # `KeyError: 0` on the real dict.
+    client = FakeRpcClient(returned_row)
     repo = SupabaseRepository(client=client)
     plan = TrainingPlan(
         id=returned_row["id"],

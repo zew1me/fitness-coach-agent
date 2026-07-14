@@ -21,6 +21,7 @@ After applying 20260624055541:
 import os
 import uuid
 from collections.abc import Callable
+from datetime import date
 from typing import Any, cast
 
 import pytest
@@ -29,6 +30,7 @@ from httpx import ASGITransport, AsyncClient
 import api.index as api_index
 from backend.models.athlete import AthleteProfile, SportThreshold
 from backend.models.auth import UserContext
+from backend.models.training import TrainingPlan
 from backend.repos.supabase_repo import SupabaseRepository
 
 _SUPABASE_CONFIGURED = bool(
@@ -152,6 +154,81 @@ async def test_new_profile_row_has_null_specialization_pct_not_default_80(
     assert profile.specialization_pct is None, (
         "New rows must have NULL specialization_pct, not the old DEFAULT 80"
     )
+
+
+@pytest.mark.asyncio
+async def test_create_training_plan_atomic_rpc_returns_persisted_plan(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """`create_training_plan` must round-trip the atomic RPC against a real DB.
+
+    Regression for the `KeyError: 0` 500 in `/api/engine/generate-plan-structure`
+    (Sentry PYTHON-FASTAPI-T). `create_training_plan_atomic` is declared
+    `returns public.training_plans` (a single composite row), so PostgREST returns
+    the row as a JSON object, not an array. The repo previously indexed it as a list
+    (`rows[0]`), which raises `KeyError: 0` on the dict. Unit tests missed this because
+    their fake RPC client returned a list — only a live PostgREST call exercises the
+    real object shape. The RPC also `for update`s athlete_profiles, so a profile row
+    must exist first or it raises P0002 (`Athlete profile not found`) instead.
+    """
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["running"], coaching_state="active")
+    )
+    plan = TrainingPlan(
+        user_id=unique_user,
+        title="Half-marathon build",
+        plan_type="full_cycle",
+        start_date=date(2026, 7, 14),
+        end_date=date(2026, 8, 29),
+        phases=[{"name": "base", "start_week": 1, "end_week": 4}],
+        generation_context={"training_model": "performance"},
+        weekly_tss_target=380.0,
+        weekly_hours_target=8.0,
+    )
+
+    created = await repo.create_training_plan(plan)
+
+    assert created.id is not None
+    assert created.user_id == unique_user
+    assert created.status == "active"
+    assert created.title == "Half-marathon build"
+
+
+@pytest.mark.asyncio
+async def test_create_training_plan_supersedes_prior_active_plan(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """A second `create_training_plan` must flip the prior active plan to superseded.
+
+    Exercises the atomic supersede-then-insert path of `create_training_plan_atomic`
+    end-to-end against a live DB, guarding the single-active-plan invariant.
+    """
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["running"], coaching_state="active")
+    )
+    first = await repo.create_training_plan(
+        TrainingPlan(
+            user_id=unique_user,
+            title="First",
+            plan_type="weekly",
+            start_date=date(2026, 7, 14),
+            end_date=date(2026, 8, 14),
+        )
+    )
+    second = await repo.create_training_plan(
+        TrainingPlan(
+            user_id=unique_user,
+            title="Second",
+            plan_type="weekly",
+            start_date=date(2026, 7, 21),
+            end_date=date(2026, 8, 21),
+        )
+    )
+
+    active = await repo.get_active_plan(unique_user)
+    assert active is not None
+    assert active.id == second.id
+    assert active.id != first.id
 
 
 @pytest.mark.skipif(

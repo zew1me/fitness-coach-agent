@@ -797,6 +797,44 @@ async def upload_chat_attachment(
 _CALENDAR_MAX_RANGE_DAYS = 200
 
 
+def _scope_planned_workouts_to_active_plan(
+    planned: list[PlanWorkout],
+    active_plan_id: str | None,
+    today: date,
+) -> list[PlanWorkout]:
+    """Drop stale future scheduled workouts belonging to superseded plans.
+
+    Enforces the "one active plan is the source of truth" invariant at read
+    time so the calendar no longer depends solely on the generate-time
+    ``delete_future_scheduled_workouts`` cleanup side-effect (issue #315). The
+    exclusion predicate is the exact read-time mirror of that cleanup primitive:
+    a workout is dropped only when it is *future* (``workout_date >= today``),
+    ``status == 'scheduled'``, unmatched (``actual_activity_id is None``), and
+    owned by a *non-active* plan.
+
+    Every other row is explicitly retained — active-plan rows of any status, and
+    any non-active-plan rows that are past-dated, completed/skipped/modified, or
+    matched — so historical and past-dated "unconfirmed" (still-scheduled)
+    workouts from superseded plans remain visible.
+
+    When there is no active plan (``active_plan_id is None``) the exclusion is
+    skipped entirely and the planned list is returned unchanged, so we never
+    hide legitimate rows for an athlete who has no active plan.
+    """
+    if active_plan_id is None:
+        return planned
+    return [
+        workout
+        for workout in planned
+        if not (
+            workout.plan_id != active_plan_id
+            and workout.status == "scheduled"
+            and workout.actual_activity_id is None
+            and workout.workout_date >= today
+        )
+    ]
+
+
 @app.get("/api/calendar")
 async def get_calendar(
     start: date,
@@ -812,9 +850,16 @@ async def get_calendar(
             detail=f"date range too large; maximum is {_CALENDAR_MAX_RANGE_DAYS} days",
         )
 
-    planned, activities = await asyncio.gather(
+    today = datetime.now(UTC).date()
+    planned, activities, active_plan = await asyncio.gather(
         repo.list_plan_workouts_between(user_context.user_id, start=start, end=end),
         repo.list_activities_between(user_context.user_id, start=start, end=end),
+        repo.get_active_plan(user_context.user_id),
+    )
+    # Scope planned reads to the active plan so superseded plans with lingering
+    # future scheduled rows never double-show alongside the active timeline.
+    planned = _scope_planned_workouts_to_active_plan(
+        planned, active_plan.id if active_plan else None, today
     )
     logger.debug(
         "calendar user_id=%s start=%s end=%s planned=%d activities=%d",
