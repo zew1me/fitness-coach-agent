@@ -369,10 +369,13 @@ class SupabaseRepository:
         response = client.rpc(
             "create_recalibration_candidate_atomic", {"p_candidate": payload}
         ).execute()
-        rows = response.data or []
-        if not rows:
+        # Declared `returns public.threshold_recalibration_candidates` (a single composite
+        # row), so PostgREST returns a JSON object, not an array — same shape contract as
+        # `create_training_plan_atomic`. Indexing it as a list raises `KeyError: 0`.
+        row = response.data
+        if not row:
             raise RuntimeError("Supabase did not return the inserted recalibration candidate row.")
-        return ThresholdRecalibrationCandidate.model_validate(rows[0])
+        return ThresholdRecalibrationCandidate.model_validate(row)
 
     async def get_recalibration_candidate(
         self, user_id: str, candidate_id: str
@@ -659,10 +662,14 @@ class SupabaseRepository:
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = client.rpc("create_training_plan_atomic", {"p_plan": payload}).execute()
-        rows = response.data or []
-        if not rows:
+        # ``create_training_plan_atomic`` is declared ``returns public.training_plans``
+        # (a single composite row, not ``setof``), so PostgREST returns the inserted row
+        # as a JSON *object*, not an array. Treating it as a list (``rows[0]``) raised
+        # ``KeyError: 0`` on the dict and surfaced as an unhandled 500.
+        row = response.data
+        if not row:
             raise RuntimeError("Supabase did not return the inserted training plan row.")
-        return TrainingPlan.model_validate(rows[0])
+        return TrainingPlan.model_validate(row)
 
     async def update_training_plan_status(self, user_id: str, plan_id: str, status: str) -> None:
         client = self._require_client()
