@@ -25,6 +25,7 @@ import { useIsMobile } from "../lib/use-is-mobile";
 
 import { useChatTurnLease } from "./chat-turn-lease-provider";
 import styles from "./coach-chat.module.css";
+import { SessionLoading } from "./session-loading";
 import { StatusCard } from "./status-card";
 import { ThemeSwitcher } from "./theme-switcher";
 
@@ -330,16 +331,6 @@ function SendIcon(): JSX.Element {
         strokeWidth="1.8"
       />
     </svg>
-  );
-}
-
-function ChatLoading(): JSX.Element {
-  return (
-    <main className={styles.landingWrap}>
-      <section className={styles.statusBanner}>
-        <p className={styles.meta}>Checking your browser session…</p>
-      </section>
-    </main>
   );
 }
 
@@ -1281,7 +1272,7 @@ function ProfileDrawerBody({
 export function CoachChat(): JSX.Element {
   const session = useBrowserSession();
   if (session.loading) {
-    return <ChatLoading />;
+    return <SessionLoading />;
   }
   if (session.token === null) {
     return <LoggedOutLanding error={session.error} />;

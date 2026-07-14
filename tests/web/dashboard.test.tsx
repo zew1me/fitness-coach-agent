@@ -102,6 +102,24 @@ afterEach(() => {
 });
 
 describe("CoachChat", () => {
+  it("shows a branded and accessible session loading experience", () => {
+    globalThis.fetch = vi.fn(
+      () => new Promise<Response>(() => undefined),
+    ) as unknown as typeof fetch;
+
+    renderCoachChat();
+
+    expect(
+      screen.getByRole("heading", { name: "Your coach is warming up." }),
+    ).toBeTruthy();
+    expect(screen.getByText("Coach Arden")).toBeTruthy();
+    expect(screen.getByRole("main").getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("status").textContent).toContain(
+      "No refresh needed",
+    );
+    expect(screen.queryByText("Checking your browser session…")).toBeNull();
+  });
+
   it("shows a login prompt when the browser session cannot mint a token", async () => {
     globalThis.fetch = vi.fn(() =>
       Promise.resolve(
