@@ -3500,11 +3500,9 @@ async def test_generate_plan_structure_persists_explicit_mixed_sport_schedule(
     assert recording_repo.created_plan.start_date.isoformat() == "2026-07-14"
     assert recording_repo.created_plan.end_date.isoformat() == "2026-08-29"
     assert recording_repo.created_plan.target_goal_id == "goal-1"
-    assert recording_repo.created_plan.generation_context == {
-        "plan_mode": "explicit",
-        "training_model": "performance",
-        "training_model_source": "explicit",
-    }
+    # Explicit plans carry no generated training model — only the plan_mode marker.
+    assert recording_repo.created_plan.generation_context == {"plan_mode": "explicit"}
+    assert body["training_model"] is None
     assert recording_repo.created_plan.weekly_hours_target is None
     assert recording_repo.created_plan.weekly_tss_target is None
     assert {workout.sport for workout in recording_repo.created_workouts} == {

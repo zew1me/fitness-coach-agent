@@ -2198,8 +2198,6 @@ def _build_explicit_training_plan(
     *,
     user_id: str,
     target_goal: Goal | None,
-    training_model: Literal["longevity", "performance", "recovery_return"],
-    training_model_source: str,
 ) -> tuple[TrainingPlan, str, int]:
     entries = payload.workouts
     if entries is None:  # pragma: no cover - guarded by the endpoint branch
@@ -2227,11 +2225,10 @@ def _build_explicit_training_plan(
         end_date=plan_end,
         target_goal_id=target_goal.id if target_goal else None,
         phases=[],
-        generation_context={
-            "plan_mode": "explicit",
-            "training_model": training_model,
-            "training_model_source": training_model_source,
-        },
+        # Explicit plans prescribe every workout verbatim, so there is no
+        # generated training model behind them — omit the vestigial
+        # training_model/source metadata that only applies to composed plans.
+        generation_context={"plan_mode": "explicit"},
         weekly_tss_target=(
             round(sum(value for value in tss_targets if value is not None) / total_weeks, 1)
             if all(value is not None for value in tss_targets)
@@ -2377,8 +2374,6 @@ async def generate_plan_structure(  # noqa: C901
             payload,
             user_id=user_id,
             target_goal=target_goal,
-            training_model=training_model,
-            training_model_source=training_model_source,
         )
         skeleton = None
     else:
@@ -2451,7 +2446,9 @@ async def generate_plan_structure(  # noqa: C901
         "plan_mode": "explicit" if explicit_entries is not None else "generated",
         "plan_id": persisted_plan.id,
         "sport": plan_sport,
-        "training_model": training_model,
+        # Explicit plans have no generated training model; suppress the field so
+        # the coach doesn't mislabel a bespoke schedule as a generic model.
+        "training_model": None if explicit_entries is not None else training_model,
         "workouts_created": len(persisted_workouts),
         "total_weeks": total_weeks,
         "start_date": plan.start_date.isoformat(),
