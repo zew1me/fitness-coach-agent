@@ -7,10 +7,12 @@ import {
   calendarResponseSchema,
   chatMessagePageSchema,
   chatThreadResponseSchema,
+  chatTurnLeaseStatusSchema,
   intervalsAuthorizeResponseSchema,
   intervalsConnectionStatusSchema,
   type ParsedChatMessagePage,
   type ParsedChatThreadResponse,
+  type ParsedChatTurnLeaseStatus,
   resolvePlanWorkoutResponseSchema,
   uploadRequestSchema,
 } from "./schemas";
@@ -331,6 +333,18 @@ export async function loadChatMessages(
     fetchImpl,
   );
   return chatMessagePageSchema.parse(page);
+}
+
+export async function loadChatTurnLeaseStatus(
+  fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
+): Promise<ParsedChatTurnLeaseStatus> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/chat/model-state/lease",
+    { cache: "no-store", method: "GET", signal: signal ?? null },
+    fetchImpl,
+  );
+  return chatTurnLeaseStatusSchema.parse(raw);
 }
 
 export async function loadCalendar(

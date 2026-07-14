@@ -32,6 +32,12 @@ type OlderThreadPage = {
 type ChatThreadPage = InitialThreadPage | OlderThreadPage;
 type ChatThreadQueryData = InfiniteData<ChatThreadPage, string | null>;
 
+type ManualRefreshOperation = {
+  controller: AbortController;
+  promise: Promise<void>;
+  queryKey: readonly ["chat-thread", string | null];
+};
+
 function canUseLocalChatHistory(): boolean {
   return (
     window.location.hostname === "localhost" ||
@@ -44,9 +50,9 @@ function localChatThreadStorageKey(userId: string): string {
 }
 
 function chatThreadQueryKey(
-  token: BrowserTokenResponse | null,
+  userId: string | null,
 ): readonly ["chat-thread", string | null] {
-  return ["chat-thread", token?.user_id ?? null];
+  return ["chat-thread", userId];
 }
 
 function firstInitialPage(
@@ -162,10 +168,18 @@ export function useChatThread(
   token: BrowserTokenResponse | null,
 ): ChatThreadHook {
   const queryClient = useQueryClient();
-  const queryKey = chatThreadQueryKey(token);
+  const userId = token?.user_id ?? null;
+  const queryKey = useMemo(() => chatThreadQueryKey(userId), [userId]);
   const [manualError, setManualError] = useState<string | null>(null);
   const fetchingOlderRef = useRef(false);
-  const manualRefetchControllerRef = useRef<AbortController | null>(null);
+  const manualRefreshRef = useRef<ManualRefreshOperation | null>(null);
+
+  const cancelManualRefresh = useCallback((): void => {
+    const operation = manualRefreshRef.current;
+    if (operation === null) return;
+    manualRefreshRef.current = null;
+    operation.controller.abort();
+  }, []);
 
   const query = useInfiniteQuery<
     ChatThreadPage,
@@ -236,10 +250,11 @@ export function useChatThread(
     writeLocalChatThread(data, token.user_id);
   }, [data, token]);
 
+  useEffect(() => cancelManualRefresh, [cancelManualRefresh, queryKey]);
+
   const setData = useCallback(
     async (update: ChatThreadDataUpdate) => {
-      manualRefetchControllerRef.current?.abort();
-      manualRefetchControllerRef.current = null;
+      cancelManualRefresh();
       await queryClient.cancelQueries({ queryKey });
       queryClient.setQueryData<ChatThreadQueryData>(queryKey, (current) => {
         const currentThread = mergeThreadPages(current);
@@ -259,27 +274,50 @@ export function useChatThread(
       });
       setManualError(null);
     },
-    [queryClient, queryKey],
+    [cancelManualRefresh, queryClient, queryKey],
   );
 
   const setError = useCallback((nextError: string | null) => {
     setManualError(nextError);
   }, []);
 
-  const refetch = useCallback(async (): Promise<void> => {
-    manualRefetchControllerRef.current?.abort();
-    const controller = new AbortController();
-    manualRefetchControllerRef.current = controller;
-    setManualError(null);
-    await queryClient.cancelQueries({ queryKey });
-    const thread = await loadChatThread(fetch, controller.signal);
-    if (!controller.signal.aborted) {
-      queryClient.setQueryData<ChatThreadQueryData>(queryKey, {
-        pageParams: [null],
-        pages: [{ kind: "initial", thread }],
-      });
+  const refetch = useCallback((): Promise<void> => {
+    const activeOperation = manualRefreshRef.current;
+    if (activeOperation?.queryKey === queryKey) {
+      return activeOperation.promise;
     }
-  }, [queryClient, queryKey]);
+
+    cancelManualRefresh();
+    const controller = new AbortController();
+    let operation!: ManualRefreshOperation;
+    const promise = (async (): Promise<void> => {
+      try {
+        setManualError(null);
+        await queryClient.cancelQueries({ queryKey });
+        if (controller.signal.aborted) return;
+        const thread = await loadChatThread(fetch, controller.signal);
+        if (manualRefreshRef.current === operation) {
+          queryClient.setQueryData<ChatThreadQueryData>(queryKey, {
+            pageParams: [null],
+            pages: [{ kind: "initial", thread }],
+          });
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+      } finally {
+        if (manualRefreshRef.current === operation) {
+          manualRefreshRef.current = null;
+        }
+      }
+    })();
+    operation = { controller, promise, queryKey };
+    manualRefreshRef.current = operation;
+    // The operation may outlive every caller during unmount or a token swap.
+    // Mark its rejection as observed while preserving the original promise for
+    // active callers, which still receive genuine refresh failures.
+    void promise.catch(() => undefined);
+    return promise;
+  }, [cancelManualRefresh, queryClient, queryKey]);
 
   const fetchOlderMessages = useCallback(async (): Promise<number> => {
     if (fetchingOlderRef.current || !query.hasNextPage) {

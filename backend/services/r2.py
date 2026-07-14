@@ -78,6 +78,22 @@ class R2Service:
             method="POST",  # Indicate this was a direct upload
         )
 
+    async def delete_file(self, *, user_id: str, object_key: str) -> None:
+        """Delete a user-scoped object from R2."""
+        self._ensure_configured()
+        self._validate_object_key_scope(user_id=user_id, object_key=object_key)
+        client = self._get_client()
+        await run_in_threadpool(
+            client.delete_object,
+            Bucket=settings.r2_bucket,
+            Key=object_key,
+        )
+        logger.info(
+            "r2 delete complete user_id=%s key_ref=%s",
+            user_id,
+            self._object_key_log_ref(object_key),
+        )
+
     async def download_file_bytes(self, *, user_id: str, object_key: str) -> bytes:
         """Download a user-scoped object from R2."""
         self._ensure_configured()

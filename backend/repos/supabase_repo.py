@@ -21,6 +21,7 @@ from backend.models.chat import (
     ChatModelState,
     ChatModelStateReplaceRequest,
     ChatThread,
+    ChatTurnLeaseStatus,
     MessageAttachment,
     MessagePart,
 )
@@ -883,6 +884,14 @@ class SupabaseRepository:
         messages = await self.list_chat_messages(thread.id)
         return thread.model_copy(update={"messages": messages})
 
+    async def get_chat_thread(self, user_id: str) -> ChatThread | None:
+        client = self._require_client()
+        response = client.table("chat_threads").select("*").eq("user_id", user_id).execute()
+        rows = response.data or []
+        if not rows:
+            return None
+        return self._parse_chat_thread(rows[0])
+
     async def update_chat_thread_state(self, thread_id: str, state: dict[str, Any]) -> ChatThread:
         client = self._require_client()
         response = (
@@ -1046,6 +1055,70 @@ class SupabaseRepository:
         if not rows:
             raise ValueError("Chat model state lease or version conflict.")
         return self._parse_chat_model_state(rows[0])
+
+    async def get_chat_turn_lease_status(
+        self, *, thread_id: str, user_id: str
+    ) -> ChatTurnLeaseStatus:
+        async def _attempt() -> ChatTurnLeaseStatus:
+            client = self._require_client()
+            response = (
+                client.table("chat_model_states")
+                .select("lease_id,lease_expires_at")
+                .eq("thread_id", thread_id)
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            rows = response.data or []
+            if not rows:
+                return ChatTurnLeaseStatus(in_flight=False)
+
+            lease_id = rows[0].get("lease_id")
+            lease_expires_at = rows[0].get("lease_expires_at")
+            if not isinstance(lease_id, str) or not isinstance(lease_expires_at, str):
+                return ChatTurnLeaseStatus(in_flight=False)
+
+            try:
+                expires_at = datetime.fromisoformat(lease_expires_at.replace("Z", "+00:00"))
+            except ValueError:
+                return ChatTurnLeaseStatus(in_flight=False)
+            if expires_at.tzinfo is None or expires_at <= datetime.now(UTC):
+                return ChatTurnLeaseStatus(in_flight=False)
+            return ChatTurnLeaseStatus(in_flight=True, expires_at=expires_at)
+
+        return await _with_schema_cache_retry(_attempt)
+
+    async def renew_chat_turn_lease(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        lease_id: str,
+        ttl_seconds: int,
+    ) -> ChatModelState:
+        async def _attempt() -> ChatModelState:
+            client = self._require_client()
+            now = datetime.now(UTC)
+            response = (
+                client.table("chat_model_states")
+                .update(
+                    {
+                        "lease_expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(),
+                        "updated_at": now.isoformat(),
+                    }
+                )
+                .eq("thread_id", thread_id)
+                .eq("user_id", user_id)
+                .eq("lease_id", lease_id)
+                .gt("lease_expires_at", now.isoformat())
+                .execute()
+            )
+            rows = response.data or []
+            if not rows:
+                raise ValueError("Chat turn lease is no longer owned by this request.")
+            return self._parse_chat_model_state(rows[0])
+
+        return await _with_schema_cache_retry(_attempt)
 
     async def acquire_chat_turn_lease(
         self,

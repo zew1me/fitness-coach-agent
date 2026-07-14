@@ -3,6 +3,12 @@ import { type UIMessage } from "ai";
 import { after } from "next/server";
 
 import {
+  CHAT_TURN_LEASE_TTL_SECONDS,
+  acquireChatTurnLease,
+  LeaseReleaseError,
+  releaseChatTurnLease,
+} from "../../../lib/agent/lease-client";
+import {
   appendImageExtractionsToMessages,
   convertUnsupportedFilePartsToText,
   selectMessagesForModel,
@@ -235,6 +241,37 @@ async function handleChatRequest(
   }
   const strategy = process.env["COACH_CONTEXT_STRATEGY"] ?? "session";
   const messages = messagesForContextStrategy(parsedBody, strategy);
+  const baseUrl = requestOrigin(request);
+  const extraHeaders = vercelProtectionBypassHeaders();
+  const leaseId = crypto.randomUUID();
+
+  after(async () => {
+    try {
+      await releaseChatTurnLease({
+        accessToken: token.access_token,
+        baseUrl,
+        extraHeaders,
+        leaseId,
+      });
+    } catch (error) {
+      if (error instanceof LeaseReleaseError && error.status === 409) return;
+      Sentry.captureException(error, {
+        tags: { subsystem: "lease-release-after" },
+        extra: { leaseId },
+      });
+    }
+  });
+  const acquiredLease =
+    strategy === "full_history"
+      ? undefined
+      : await acquireChatTurnLease({
+          accessToken: token.access_token,
+          baseUrl,
+          extraHeaders,
+          leaseId,
+          signal: request.signal,
+          ttlSeconds: CHAT_TURN_LEASE_TTL_SECONDS,
+        });
   Sentry.logger.info("chat turn start", {
     user_id: token.user_id,
     message_count: messages.length,
@@ -257,9 +294,11 @@ async function handleChatRequest(
 
   return streamCoachTurn({
     accessToken: token.access_token,
-    baseUrl: requestOrigin(request),
+    ...(acquiredLease ? { acquiredLease } : {}),
+    baseUrl,
     context,
-    extraHeaders: vercelProtectionBypassHeaders(),
+    extraHeaders,
+    leaseId,
     messages: modelMessages,
     messagesAreModelSelected: true,
     useDurableSession: strategy !== "full_history",

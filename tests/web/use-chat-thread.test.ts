@@ -145,6 +145,189 @@ describe("useChatThread", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("keeps refetch stable when the user is unchanged", async () => {
+    const thread = makeThread(1);
+    loadChatThreadMock.mockResolvedValueOnce(thread as never);
+    const { rerender, result } = renderUseChatThread(TOKEN);
+    await waitFor(() => expect(result.current.data).toEqual(thread));
+    const initialRefetch = result.current.refetch;
+
+    rerender();
+
+    expect(result.current.refetch).toBe(initialRefetch);
+  });
+
+  it("shares one in-flight refresh across concurrent callers", async () => {
+    const initialThread = makeThread(1);
+    const refreshedThread = makeThread(2);
+    loadChatThreadMock.mockResolvedValueOnce(initialThread as never);
+    const { result } = renderUseChatThread(TOKEN);
+    await waitFor(() => expect(result.current.data).toEqual(initialThread));
+
+    let resolveRefresh: ((thread: unknown) => void) | undefined;
+    loadChatThreadMock.mockImplementation((_fetchImpl, signal) => {
+      return new Promise((resolve, reject) => {
+        resolveRefresh = resolve;
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }) as never;
+    });
+
+    let firstRefresh: Promise<void> | undefined;
+    let secondRefresh: Promise<void> | undefined;
+    act(() => {
+      firstRefresh = result.current.refetch();
+      secondRefresh = result.current.refetch();
+    });
+
+    await waitFor(() => expect(resolveRefresh).toBeDefined());
+    expect(firstRefresh).toBe(secondRefresh);
+    expect(loadChatThreadMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveRefresh?.(refreshedThread);
+      await Promise.all([firstRefresh, secondRefresh]);
+    });
+
+    await waitFor(() => expect(result.current.data).toEqual(refreshedThread));
+
+    loadChatThreadMock.mockResolvedValueOnce(makeThread(3) as never);
+    await act(async () => result.current.refetch());
+    expect(loadChatThreadMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps authoritative data when it cancels an in-flight refresh", async () => {
+    const initialThread = makeThread(1);
+    const authoritativeThread = makeThread(3);
+    loadChatThreadMock.mockResolvedValueOnce(initialThread as never);
+    const { result } = renderUseChatThread(TOKEN);
+    await waitFor(() => expect(result.current.data).toEqual(initialThread));
+
+    let refreshSignal: AbortSignal | undefined;
+    loadChatThreadMock.mockImplementationOnce((_fetchImpl, signal) => {
+      refreshSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }) as never;
+    });
+
+    let refresh: Promise<void> | undefined;
+    act(() => {
+      refresh = result.current.refetch();
+    });
+    await waitFor(() => expect(refreshSignal).toBeDefined());
+
+    await act(async () => {
+      await result.current.setData(authoritativeThread as never);
+      await refresh;
+    });
+
+    expect(refreshSignal?.aborted).toBe(true);
+    await waitFor(() =>
+      expect(result.current.data).toEqual(authoritativeThread),
+    );
+    expect(result.current.error).toBeNull();
+  });
+
+  it("aborts a pending manual refresh on unmount", async () => {
+    const initialThread = makeThread(1);
+    loadChatThreadMock.mockResolvedValueOnce(initialThread as never);
+    const { result, unmount } = renderUseChatThread(TOKEN);
+    await waitFor(() => expect(result.current.data).toEqual(initialThread));
+
+    let refreshSignal: AbortSignal | undefined;
+    loadChatThreadMock.mockImplementationOnce((_fetchImpl, signal) => {
+      refreshSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }) as never;
+    });
+
+    let refresh: Promise<void> | undefined;
+    act(() => {
+      refresh = result.current.refetch();
+    });
+    await waitFor(() => expect(refreshSignal).toBeDefined());
+
+    unmount();
+    await expect(refresh).resolves.toBeUndefined();
+    expect(refreshSignal?.aborted).toBe(true);
+  });
+
+  it("aborts the previous user's refresh when the query key changes", async () => {
+    const initialThread = makeThread(1);
+    loadChatThreadMock.mockResolvedValueOnce(initialThread as never);
+    const { rerender, result } = renderHook(
+      ({ token }: { token: typeof TOKEN }) => useChatThread(token),
+      {
+        initialProps: { token: TOKEN },
+        wrapper: createQueryWrapper(),
+      },
+    );
+    await waitFor(() => expect(result.current.data).toEqual(initialThread));
+
+    let previousRefreshSignal: AbortSignal | undefined;
+    loadChatThreadMock.mockImplementationOnce((_fetchImpl, signal) => {
+      previousRefreshSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      }) as never;
+    });
+    let previousRefresh: Promise<void> | undefined;
+    act(() => {
+      previousRefresh = result.current.refetch();
+    });
+    await waitFor(() => expect(previousRefreshSignal).toBeDefined());
+
+    const nextToken = { ...TOKEN, user_id: "user-2" };
+    const nextThread = {
+      ...makeThread(2),
+      thread: { ...makeThread(2).thread, user_id: nextToken.user_id },
+    };
+    loadChatThreadMock.mockResolvedValueOnce(nextThread as never);
+    rerender({ token: nextToken });
+
+    await expect(previousRefresh).resolves.toBeUndefined();
+    expect(previousRefreshSignal?.aborted).toBe(true);
+    await waitFor(() => expect(result.current.data).toEqual(nextThread));
+  });
+
+  it("shares genuine refresh failures with every concurrent caller", async () => {
+    const initialThread = makeThread(1);
+    loadChatThreadMock.mockResolvedValueOnce(initialThread as never);
+    const { result } = renderUseChatThread(TOKEN);
+    await waitFor(() => expect(result.current.data).toEqual(initialThread));
+
+    const refreshError = new Error("refresh failed");
+    loadChatThreadMock.mockRejectedValueOnce(refreshError);
+
+    let firstRefresh: Promise<void> | undefined;
+    let secondRefresh: Promise<void> | undefined;
+    act(() => {
+      firstRefresh = result.current.refetch();
+      secondRefresh = result.current.refetch();
+    });
+
+    expect(firstRefresh).toBe(secondRefresh);
+    await expect(firstRefresh).rejects.toBe(refreshError);
+    await expect(secondRefresh).rejects.toBe(refreshError);
+  });
+
   it("applies data updates to the latest thread state", async () => {
     const thread = makeThread(1);
     loadChatThreadMock.mockResolvedValueOnce(thread as never);
