@@ -2215,6 +2215,7 @@ async def _persist_training_plan_with_workouts(
     prepare_workouts: Callable[[str], Awaitable[list[PlanWorkout]]],
 ) -> tuple[TrainingPlan, list[PlanWorkout]]:
     persisted_plan = None
+    prior_plan = None
     try:
         # Capture the plan being superseded *before* the insert so we can clean up
         # its future scheduled workouts and leave one coherent calendar timeline.
@@ -2222,11 +2223,6 @@ async def _persist_training_plan_with_workouts(
         persisted_plan = await repo.create_training_plan(plan)
         workouts = await prepare_workouts(persisted_plan.id or "")
         persisted_workouts = await repo.create_plan_workouts(workouts)
-        # Clean up the superseded plan's future scheduled workouts only *after* the
-        # new plan's workouts are safely persisted — a failed insert must never leave
-        # the athlete with the prior plan's future deleted and no replacement.
-        if prior_plan is not None and prior_plan.id:
-            _ = await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, plan.start_date)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
@@ -2247,6 +2243,24 @@ async def _persist_training_plan_with_workouts(
                     persisted_plan.id,
                 )
         raise HTTPException(status_code=503, detail="Failed to persist training plan.") from exc
+
+    # The new plan and its workouts are durably persisted at this point. Cleaning up
+    # the superseded plan's future scheduled workouts is strictly best-effort and must
+    # run *outside* the compensation-guarded block above: the calendar read already
+    # scopes to the active plan at read time (`_scope_planned_workouts_to_active_plan`,
+    # #315), so leftover future rows are already hidden. A cleanup failure here is
+    # benign and must never supersede the plan we just committed (which would leave the
+    # athlete with no active plan and a misleading 503).
+    if prior_plan is not None and prior_plan.id:
+        try:
+            _ = await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, plan.start_date)
+        except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError):
+            logger.exception(
+                "generate_plan: superseded-plan cleanup failed (read-time scoping still hides "
+                "the stale rows) user_id=%s prior_plan_id=%s",
+                user_id,
+                prior_plan.id,
+            )
 
     return persisted_plan, persisted_workouts
 

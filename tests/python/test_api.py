@@ -3632,6 +3632,61 @@ async def test_generate_plan_structure_supersedes_partial_plan_on_workout_failur
 
 
 @pytest.mark.asyncio
+async def test_generate_plan_structure_survives_superseded_cleanup_failure(monkeypatch) -> None:
+    """A benign failure cleaning up the *prior* plan's future workouts must not
+
+    supersede the freshly-persisted plan: the new plan + workouts are already
+    durable, the calendar read scopes to the active plan anyway (#315), so the
+    request must still succeed and leave the new plan active.
+    """
+
+    class CleanupFailingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def get_active_plan(self, user_id: str):
+            return TrainingPlan(
+                id="plan-prior",
+                user_id=user_id,
+                title="Prior plan",
+                plan_type="weekly",
+                start_date=datetime(2026, 1, 1, tzinfo=UTC).date(),
+                end_date=datetime(2026, 3, 1, tzinfo=UTC).date(),
+            )
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-new"})
+
+        async def delete_future_scheduled_workouts(self, user_id, plan_id, from_date) -> int:
+            raise RuntimeError("cleanup failed")
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    cleanup_repo = CleanupFailingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", cleanup_repo)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert response.json()["plan_id"] == "plan-new"
+    # The persisted plan must NOT be superseded by the benign cleanup failure.
+    assert cleanup_repo.status_updates == []
+
+
+@pytest.mark.asyncio
 async def test_generate_plan_structure_maps_composer_valueerror_to_503(monkeypatch) -> None:
     from backend.services import plan_composer
 
