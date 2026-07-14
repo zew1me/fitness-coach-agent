@@ -2418,7 +2418,7 @@ async def generate_plan_structure(  # noqa: C901
                 "sport": workout.sport,
                 "title": workout.title,
             }
-            for workout in persisted_workouts
+            for workout in sorted(persisted_workouts, key=lambda item: item.workout_date)
         ]
 
     logger.info(

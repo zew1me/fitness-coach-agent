@@ -3388,7 +3388,7 @@ async def test_generate_plan_structure_persists_explicit_mixed_sport_schedule(
 
         async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
             self.created_workouts = workouts
-            return workouts
+            return list(reversed(workouts))
 
     recording_repo = RecordingRepository()
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
