@@ -66,7 +66,13 @@ Next.js 15 App Router. Key pages:
 
 There is **one active plan** per athlete, and it is the source of truth for the
 calendar (`GET /api/calendar`) and compliance (`get-compliance-summary`), both of
-which read the single canonical `plan_workouts` table.
+which read the single canonical `plan_workouts` table. The calendar read enforces
+this invariant directly (`_scope_planned_workouts_to_active_plan` in
+`api/index.py`, issue #315): it drops future, `status='scheduled'`, unmatched rows
+belonging to non-active plans at read time — the read-time mirror of
+`delete_future_scheduled_workouts` — so correctness no longer depends solely on
+the generate-time cleanup side-effect. History (past/completed/matched rows) from
+superseded plans is preserved.
 
 - **Generate** (`POST /api/engine/generate-plan-structure`) = _new plan_. It inserts a
   new `training_plans` row, supersedes the prior active plan (status flip), and then
