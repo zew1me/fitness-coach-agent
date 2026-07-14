@@ -1521,7 +1521,11 @@ async def _best_effort_delete_r2_object(*, user_id: str, object_key: str) -> Non
     try:
         await r2_service.delete_file(user_id=user_id, object_key=object_key)
     except Exception:
-        logger.exception("failed to clean up orphaned r2 object user_id=%s", user_id)
+        logger.exception(
+            "failed to clean up orphaned r2 object user_id=%s object_key=%s",
+            user_id,
+            object_key,
+        )
 
 
 async def _zip_image_entry(
