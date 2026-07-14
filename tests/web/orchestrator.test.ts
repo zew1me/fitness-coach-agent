@@ -1,7 +1,10 @@
 import type { UIMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { streamCoachTurn } from "../../lib/agent/orchestrator";
+import {
+  CHAT_TURN_LEASE_RENEW_INTERVAL_MS,
+  streamCoachTurn,
+} from "../../lib/agent/orchestrator";
 import { runSpecialists } from "../../lib/agent/specialists";
 import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
 
@@ -1047,5 +1050,74 @@ describe("streamCoachTurn", () => {
     const reportsPassedToLeadCoach =
       vi.mocked(buildLeadCoachPrompt).mock.calls[0]?.[1];
     expect(reportsPassedToLeadCoach).toEqual(malformedReports);
+  });
+
+  it("aborts the run and skips release when a lease renewal reports the lease was lost (409)", async () => {
+    vi.useFakeTimers();
+    try {
+      const renewCalls: Array<RequestInit | undefined> = [];
+      const fetchMock = vi.fn(
+        (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "http://localhost/api/chat/model-state/lease") {
+            if (init?.method === "PATCH") {
+              renewCalls.push(init);
+              return Promise.resolve(new Response("conflict", { status: 409 }));
+            }
+            return Promise.resolve(new Response("{}", { status: 200 }));
+          }
+          if (url === "http://localhost/api/chat/messages") {
+            return Promise.resolve(new Response("{}", { status: 200 }));
+          }
+          return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+        },
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      // Simulate a lead-coach run that hangs (as a real streamed run would)
+      // until the internal abort signal fires, then rejects — this is how
+      // the real Runner behaves when its AbortSignal fires mid-stream.
+      orchestratorMocks.agentsRun.mockImplementationOnce(
+        (...args: unknown[]) => {
+          const options = args[2] as { signal: AbortSignal };
+          return Promise.resolve({
+            completed: new Promise((_resolve, reject) => {
+              options.signal.addEventListener("abort", () => {
+                reject(new Error("run aborted: lease lost"));
+              });
+            }),
+            state: { usage: undefined },
+            [Symbol.asyncIterator]: () => ({
+              next: (): Promise<IteratorResult<unknown>> =>
+                Promise.resolve({ done: true, value: undefined }),
+            }),
+          }) as unknown as ReturnType<typeof orchestratorMocks.agentsRun>;
+        },
+      );
+
+      const response = streamCoachTurn({
+        accessToken: "token-1",
+        acquiredLease: { thread_id: "thread-1" },
+        baseUrl: "http://localhost",
+        context: athleteContextFixture,
+        leaseId: "lease-1",
+        messages: messages(),
+      });
+      const textPromise = response.text();
+
+      // Fire one lease-renewal tick; the mocked fetch answers it with 409.
+      await vi.advanceTimersByTimeAsync(CHAT_TURN_LEASE_RENEW_INTERVAL_MS);
+
+      const text = await textPromise;
+
+      expect(renewCalls).toHaveLength(1);
+      expect(text).toContain("Coach is unavailable");
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        "http://localhost/api/chat/model-state/lease",
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

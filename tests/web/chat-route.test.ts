@@ -141,6 +141,53 @@ describe("app/api/chat route", () => {
     );
   });
 
+  it("acquires the durable lease before loading athlete context", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      const requestedUrl = String(url);
+      requestedUrls.push(requestedUrl);
+      if (requestedUrl.endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      if (requestedUrl.endsWith("/api/chat/model-state/lease")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ thread_id: "thread-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    const streamOptions = vi.mocked(streamCoachTurn).mock.calls.at(-1)?.[0];
+    expect(streamOptions?.acquiredLease).toEqual({ thread_id: "thread-1" });
+    expect(
+      requestedUrls.indexOf("http://localhost/api/chat/model-state/lease"),
+    ).toBeLessThan(
+      requestedUrls.indexOf("http://localhost/api/engine/get-athlete-summary"),
+    );
+  });
+
   it("persists the latest user turn to the backend before streaming", async () => {
     const messages = [
       {
@@ -1282,7 +1329,7 @@ describe("app/api/chat route", () => {
     );
   });
 
-  it("schedules a Sentry flush via after() on every successful chat request", async () => {
+  it("schedules Sentry flush and lease cleanup via after() on every successful chat request", async () => {
     const fetchMock = vi.fn((url: RequestInfo | URL) => {
       if (String(url).endsWith("/api/oauth/browser-token")) {
         return Promise.resolve(
@@ -1309,7 +1356,52 @@ describe("app/api/chat route", () => {
       }),
     );
 
-    expect(vi.mocked(after)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(after)).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the route lease from the deferred cleanup", async () => {
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    const cleanup = vi.mocked(after).mock.calls[1]?.[0];
+    expect(typeof cleanup).toBe("function");
+    await (cleanup as () => Promise<void>)();
+
+    const routeLeaseId = vi
+      .mocked(streamCoachTurn)
+      .mock.calls.at(-1)?.[0]?.leaseId;
+    expect(routeLeaseId).toEqual(expect.any(String));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({
+        body: JSON.stringify({ lease_id: routeLeaseId }),
+        method: "DELETE",
+      }),
+    );
   });
 
   it("logs a warning when Sentry.flush times out after streaming", async () => {

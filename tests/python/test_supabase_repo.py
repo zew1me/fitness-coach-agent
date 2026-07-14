@@ -244,9 +244,14 @@ class FakeSupabaseClient:
 
     def rpc(self, function_name: str, params: dict[str, object]) -> "FakeRpcQuery":
         if function_name == "create_training_plan_atomic":
-            return FakeRpcQuery([self._create_training_plan_atomic(params)])
+            # `create_training_plan_atomic` is declared `returns public.training_plans`
+            # (a single composite row), so PostgREST hands back a JSON object, not an
+            # array. Mirror that shape — a list-wrapped fake is what let the `rows[0]`
+            # `KeyError: 0` regression ship unnoticed.
+            return FakeRpcQuery(self._create_training_plan_atomic(params))
         if function_name == "create_recalibration_candidate_atomic":
-            return FakeRpcQuery([self._create_recalibration_candidate_atomic(params)])
+            # Single-composite return → dict, not array (see note above).
+            return FakeRpcQuery(self._create_recalibration_candidate_atomic(params))
         raise AssertionError(f"Unexpected RPC call: {function_name}")
 
     def _create_training_plan_atomic(self, params: dict[str, object]) -> dict[str, object]:
@@ -912,7 +917,11 @@ async def test_create_training_plan_uses_atomic_rpc() -> None:
         "weekly_tss_target": 420.0,
         "weekly_hours_target": 7.5,
     }
-    client = FakeRpcClient([returned_row])
+    # PostgREST returns a `returns public.training_plans` RPC result as a single JSON
+    # object, not an array. The fake must mirror that shape or it hides the very bug
+    # that shipped: a list-shaped fake makes `rows[0]` pass while production raises
+    # `KeyError: 0` on the real dict.
+    client = FakeRpcClient(returned_row)
     repo = SupabaseRepository(client=client)
     plan = TrainingPlan(
         id=returned_row["id"],
@@ -1163,6 +1172,31 @@ async def test_chat_message_pagination_rejects_non_uuid_cursor_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_chat_thread_reads_existing_thread_without_creating_one() -> None:
+    now = datetime.now(UTC).isoformat()
+    client = FakeSupabaseClient(
+        chat_thread_rows=[
+            {
+                "id": "thread-1",
+                "user_id": "athlete-1",
+                "state": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    thread = await repo.get_chat_thread("athlete-1")
+    missing = await repo.get_chat_thread("athlete-2")
+
+    assert thread is not None
+    assert thread.id == "thread-1"
+    assert missing is None
+    assert len(client._tables["chat_threads"]._rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
     now = datetime.now(UTC)
     state_row: dict[str, object] = {
@@ -1200,6 +1234,104 @@ async def test_chat_model_state_compare_and_swap_preserves_transcript() -> None:
     assert updated.version == 4
     assert updated.items == [{"role": "user", "content": "compacted"}]
     assert client._tables["chat_messages"]._rows == transcript
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_lease_status_returns_only_an_active_unexpired_lease() -> None:
+    now = datetime.now(UTC)
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [{"role": "user", "content": "private replay state"}],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 3,
+                "lease_id": "lease-owner",
+                "lease_expires_at": (now + timedelta(minutes=5)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    status = await repo.get_chat_turn_lease_status(thread_id="thread-1", user_id="athlete-1")
+
+    assert status.in_flight is True
+    assert status.expires_at is not None
+    assert status.model_dump() == {
+        "expires_at": status.expires_at,
+        "in_flight": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_lease_renewal_requires_the_current_unexpired_owner() -> None:
+    now = datetime.now(UTC)
+    client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 3,
+                "lease_id": "lease-owner",
+                "lease_expires_at": (now + timedelta(seconds=1)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    repo = SupabaseRepository(client=client)
+
+    renewed = await repo.renew_chat_turn_lease(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        lease_id="lease-owner",
+        ttl_seconds=60,
+    )
+
+    assert renewed.lease_expires_at is not None
+    assert renewed.lease_expires_at > now
+    with pytest.raises(ValueError, match="no longer owned"):
+        await repo.renew_chat_turn_lease(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            lease_id="another-request",
+            ttl_seconds=60,
+        )
+
+    expired_client = FakeSupabaseClient(
+        chat_model_state_rows=[
+            {
+                "thread_id": "thread-1",
+                "user_id": "athlete-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+                "schema_version": 1,
+                "version": 3,
+                "lease_id": "lease-owner",
+                "lease_expires_at": (now - timedelta(seconds=1)).isoformat(),
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+        ]
+    )
+    expired_repo = SupabaseRepository(client=expired_client)
+    with pytest.raises(ValueError, match="no longer owned"):
+        await expired_repo.renew_chat_turn_lease(
+            thread_id="thread-1",
+            user_id="athlete-1",
+            lease_id="lease-owner",
+            ttl_seconds=60,
+        )
 
 
 @pytest.mark.asyncio
