@@ -62,6 +62,12 @@ Next.js 15 App Router. Key pages:
 - `backend/repos/` — Supabase persistence: `oauth_repo.py` (grants/codes/refresh tokens), `supabase_repo.py` (athlete profiles + check-ins)
 - `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `planner.py` (14-day plan composition), `r2.py` (Cloudflare R2 presigned URLs)
 
+`api/index.py` has a centralized `PostgRESTAPIError` exception handler that maps
+Postgres SQLSTATE codes to the shared 409/422/503 response contract. Route handlers
+should normally let `PostgRESTAPIError` propagate to it and catch only transport-level
+`httpx.HTTPError`. Catch `PostgRESTAPIError` locally only when an endpoint intentionally
+requires a different response contract, and document that exception at the catch site.
+
 ### Plan lifecycle & adjust semantics
 
 There is **one active plan** per athlete, and it is the source of truth for the

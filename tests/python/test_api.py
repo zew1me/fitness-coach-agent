@@ -25,7 +25,7 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest
+from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest, ChatTurnLeaseStatus
 from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
@@ -422,6 +422,13 @@ class ModelStateChatService:
         assert user_id == "athlete-1"
         return self.state
 
+    async def get_turn_lease_status(self, user_id: str) -> ChatTurnLeaseStatus:
+        assert user_id == "athlete-1"
+        return ChatTurnLeaseStatus(
+            in_flight=self.state.lease_id is not None,
+            expires_at=(datetime(2026, 7, 10, tzinfo=UTC) if self.state.lease_id else None),
+        )
+
     async def replace_model_state(
         self, user_id: str, replacement: ChatModelStateReplaceRequest
     ) -> ChatModelState:
@@ -447,6 +454,17 @@ class ModelStateChatService:
         assert ttl_seconds == 60
         self.state = self.state.model_copy(
             update={"lease_id": lease_id, "version": self.state.version + 1}
+        )
+        return self.state
+
+    async def renew_turn_lease(
+        self, user_id: str, lease_id: str, *, ttl_seconds: int
+    ) -> ChatModelState:
+        assert user_id == "athlete-1"
+        assert lease_id == self.state.lease_id
+        assert ttl_seconds == 60
+        self.state = self.state.model_copy(
+            update={"lease_expires_at": datetime(2026, 7, 10, tzinfo=UTC)}
         )
         return self.state
 
@@ -3914,6 +3932,25 @@ async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoi
 
 
 @pytest.mark.asyncio
+async def test_chat_turn_lease_status_hides_private_model_state(
+    model_state_chat_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        initial = await client.get("/api/chat/model-state/lease")
+        await client.post(
+            "/api/chat/model-state/lease", json={"lease_id": "lease-1", "ttl_seconds": 60}
+        )
+        active = await client.get("/api/chat/model-state/lease")
+
+    assert initial.json() == {"expires_at": None, "in_flight": False}
+    assert active.json() == {
+        "expires_at": "2026-07-10T00:00:00Z",
+        "in_flight": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_chat_model_state_replace_rejects_stale_version(
     model_state_chat_service_fixture,
 ) -> None:
@@ -3941,12 +3978,14 @@ async def test_chat_model_state_replace_rejects_stale_version(
     ("method", "path", "json"),
     [
         ("GET", "/api/chat/model-state", None),
+        ("GET", "/api/chat/model-state/lease", None),
         (
             "PUT",
             "/api/chat/model-state",
             {"expected_version": 0, "lease_id": "lease-1"},
         ),
         ("POST", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+        ("PATCH", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
         ("DELETE", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
     ],
 )
@@ -3967,6 +4006,7 @@ async def test_chat_model_state_endpoints_require_authentication(
     [
         ("GET", "/api/chat/messages", None),
         ("GET", "/api/chat/model-state", None),
+        ("GET", "/api/chat/model-state/lease", None),
         (
             "PUT",
             "/api/chat/model-state",
@@ -3995,8 +4035,10 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
 
     service.list_messages = unavailable
     service.get_model_state = unavailable
+    service.get_turn_lease_status = unavailable
     service.replace_model_state = unavailable
     service.acquire_turn_lease = unavailable
+    service.renew_turn_lease = unavailable
     service.release_turn_lease = unavailable
     transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -4025,6 +4067,14 @@ async def test_private_chat_state_endpoints_map_repository_configuration_errors_
             None,
             "get_model_state",
             HTTPError("timeout"),
+            "Chat session service unavailable",
+        ),
+        (
+            "GET",
+            "/api/chat/model-state/lease",
+            None,
+            "get_turn_lease_status",
+            HTTPError("connection reset"),
             "Chat session service unavailable",
         ),
         # A PostgREST schema-cache miss now flows to the centralized handler, which maps
@@ -4076,6 +4126,29 @@ async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
 
 
 @pytest.mark.asyncio
+async def test_chat_lease_status_delegates_postgrest_conflicts_to_shared_handler(
+    model_state_chat_service_fixture,
+) -> None:
+    async def conflict(*_args, **_kwargs):
+        raise PostgRESTAPIError(
+            {
+                "message": "lease conflict",
+                "code": "23505",
+                "hint": None,
+                "details": None,
+            }
+        )
+
+    model_state_chat_service_fixture.get_turn_lease_status = conflict
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/chat/model-state/lease")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Conflicts with existing data."}
+
+
+@pytest.mark.asyncio
 async def test_private_chat_state_endpoints_do_not_mask_programming_errors(
     model_state_chat_service_fixture,
 ) -> None:
@@ -4110,6 +4183,10 @@ async def test_chat_turn_lease_acquire_and_release(model_state_chat_service_fixt
             "/api/chat/model-state/lease",
             json={"lease_id": "lease-1", "ttl_seconds": 60},
         )
+        renewed = await client.patch(
+            "/api/chat/model-state/lease",
+            json={"lease_id": "lease-1", "ttl_seconds": 60},
+        )
         released = await client.request(
             "DELETE",
             "/api/chat/model-state/lease",
@@ -4118,5 +4195,7 @@ async def test_chat_turn_lease_acquire_and_release(model_state_chat_service_fixt
 
     assert acquired.status_code == 200
     assert acquired.json()["lease_id"] == "lease-1"
+    assert renewed.status_code == 200
+    assert renewed.json()["lease_expires_at"] == "2026-07-10T00:00:00Z"
     assert released.status_code == 200
     assert released.json()["lease_id"] is None

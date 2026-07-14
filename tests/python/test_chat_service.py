@@ -12,6 +12,7 @@ from backend.models.chat import (
     ChatModelStateReplaceRequest,
     ChatPersistRequest,
     ChatThread,
+    ChatTurnLeaseStatus,
 )
 from backend.services.chat import ChatService, _decode_message_cursor, _encode_message_cursor
 
@@ -223,6 +224,7 @@ class ModelStateRepo(OnboardingRepo):
             user_id="athlete-1",
         )
         self.thread_lookup_include_messages: list[bool] = []
+        self.existing_thread_lookups = 0
 
     async def get_or_create_chat_thread(
         self, user_id: str, *, include_messages: bool = True
@@ -230,10 +232,21 @@ class ModelStateRepo(OnboardingRepo):
         self.thread_lookup_include_messages.append(include_messages)
         return await super().get_or_create_chat_thread(user_id, include_messages=include_messages)
 
+    async def get_chat_thread(self, user_id: str) -> ChatThread | None:
+        self.existing_thread_lookups += 1
+        if user_id != "athlete-1":
+            return None
+        return await super().get_or_create_chat_thread(user_id, include_messages=False)
+
     async def get_or_create_chat_model_state(self, *, thread_id: str, user_id: str):
         assert thread_id == "thread-1"
         assert user_id == "athlete-1"
         return self.model_state
+
+    async def get_chat_turn_lease_status(self, *, thread_id: str, user_id: str):
+        assert thread_id == "thread-1"
+        assert user_id == "athlete-1"
+        return ChatTurnLeaseStatus(in_flight=True, expires_at=datetime(2026, 6, 21, tzinfo=UTC))
 
     async def replace_chat_model_state(self, **kwargs):
         replacement = kwargs["replacement"]
@@ -254,6 +267,10 @@ class ModelStateRepo(OnboardingRepo):
         self.model_state = self.model_state.model_copy(
             update={"lease_id": kwargs["lease_id"], "version": self.model_state.version + 1}
         )
+        return self.model_state
+
+    async def renew_chat_turn_lease(self, **kwargs):
+        assert kwargs["lease_id"] == self.model_state.lease_id
         return self.model_state
 
     async def release_chat_turn_lease(self, **kwargs):
@@ -295,6 +312,43 @@ async def test_model_state_service_acquires_and_releases_turn_lease() -> None:
 
     assert leased.lease_id == "lease-1"
     assert released.lease_id is None
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_renews_an_owned_turn_lease() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    await service.acquire_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+    renewed = await service.renew_turn_lease("athlete-1", "lease-1", ttl_seconds=60)
+
+    assert renewed.lease_id == "lease-1"
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_reads_lease_status_without_loading_model_state() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    status = await service.get_turn_lease_status("athlete-1")
+
+    assert status.in_flight is True
+    assert status.expires_at == datetime(2026, 6, 21, tzinfo=UTC)
+    assert repo.existing_thread_lookups == 1
+    assert repo.thread_lookup_include_messages == []
+
+
+@pytest.mark.asyncio
+async def test_model_state_service_reports_no_lease_without_creating_thread() -> None:
+    repo = ModelStateRepo()
+    service = ChatService(repo=cast(Any, repo), r2_service=cast(Any, object()))
+
+    status = await service.get_turn_lease_status("new-athlete")
+
+    assert status.in_flight is False
+    assert status.expires_at is None
+    assert repo.existing_thread_lookups == 1
+    assert repo.thread_lookup_include_messages == []
 
 
 @pytest.mark.asyncio

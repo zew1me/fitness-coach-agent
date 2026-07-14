@@ -6,9 +6,12 @@
 including ones with no local try/except (which previously surfaced a raw 500).
 """
 
-from typing import Any
+import logging
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
@@ -44,6 +47,22 @@ def test_postgrest_http_status_non_string_code_is_503() -> None:
     # bypasses the str-typed attribute so we can exercise the guard.
     object.__setattr__(exc, "code", 22)
     assert api_index._postgrest_http_status(exc) == 503
+
+
+@pytest.mark.parametrize(("code", "level"), [("22P02", logging.INFO), ("PGRST205", logging.ERROR)])
+async def test_postgrest_handler_escapes_control_characters_in_logged_path(
+    code: str, level: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    request = cast(
+        Request,
+        cast(object, SimpleNamespace(url=SimpleNamespace(path="/chat\r\nforged"))),
+    )
+
+    with caplog.at_level(level, logger=api_index.logger.name):
+        await api_index._handle_postgrest_error(request, _api_error(code))
+
+    assert "/chat\\r\\nforged" in caplog.text
+    assert "/chat\r\nforged" not in caplog.text
 
 
 class _RaisingQuery:

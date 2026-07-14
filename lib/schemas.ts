@@ -99,6 +99,15 @@ export const chatThreadResponseSchema = z.object({
 
 export type ParsedChatThreadResponse = z.infer<typeof chatThreadResponseSchema>;
 
+export const chatTurnLeaseStatusSchema = z.object({
+  expires_at: z.string().datetime().nullable(),
+  in_flight: z.boolean(),
+});
+
+export type ParsedChatTurnLeaseStatus = z.infer<
+  typeof chatTurnLeaseStatusSchema
+>;
+
 export const intervalsConnectionStatusSchema = z.object({
   connected: z.boolean(),
   connected_at: z.string().nullable().optional(),

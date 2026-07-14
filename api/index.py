@@ -206,20 +206,21 @@ async def _handle_postgrest_error(request: Request, exc: PostgRESTAPIError) -> J
     """
     status = _postgrest_http_status(exc)
     code = getattr(exc, "code", None)
+    safe_path = request.url.path.encode("unicode_escape").decode("ascii")
     if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
         # exc_info=exc so Sentry's logging integration still captures the outage:
         # returning a Response marks the exception "handled", so it won't be
         # auto-reported otherwise.
         logger.error(
             "PostgREST error path=%s code=%s -> %s",
-            request.url.path,
+            safe_path,
             code,
             status,
             exc_info=exc,
         )
     else:
         # Client fault (bad input / conflict): expected, not an incident — log at info.
-        logger.info("PostgREST client-fault path=%s code=%s -> %s", request.url.path, code, status)
+        logger.info("PostgREST client-fault path=%s code=%s -> %s", safe_path, code, status)
     return JSONResponse(status_code=status, content={"detail": _POSTGREST_STATUS_DETAIL[status]})
 
 
@@ -641,6 +642,20 @@ async def replace_chat_model_state(
     )
 
 
+@app.get("/api/chat/model-state/lease")
+async def get_chat_turn_lease_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = await chat_service.get_turn_lease_status(user_context.user_id)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("chat lease status get failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return status.model_dump(mode="json")
+
+
 @app.post("/api/chat/model-state/lease")
 async def acquire_chat_turn_lease(
     payload: ChatTurnLeaseRequest,
@@ -651,6 +666,19 @@ async def acquire_chat_turn_lease(
             user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
         ),
         failure_log_message="chat lease acquire failed error_type=%s",
+    )
+
+
+@app.patch("/api/chat/model-state/lease")
+async def renew_chat_turn_lease(
+    payload: ChatTurnLeaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.renew_turn_lease(
+            user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
+        ),
+        failure_log_message="chat lease renew failed error_type=%s",
     )
 
 
@@ -1533,6 +1561,18 @@ async def _zip_activity_entry(
     return {"kind": "activity", **persisted}
 
 
+async def _best_effort_delete_r2_object(*, user_id: str, object_key: str) -> None:
+    """Delete an R2 object without letting a delete failure mask the caller's error."""
+    try:
+        await r2_service.delete_file(user_id=user_id, object_key=object_key)
+    except Exception:
+        logger.exception(
+            "failed to clean up orphaned r2 object user_id=%s object_key=%s",
+            user_id,
+            object_key,
+        )
+
+
 async def _zip_image_entry(
     *, user_id: str, filename: str, content_type: str, member_bytes: bytes
 ) -> dict[str, object] | None:
@@ -1553,6 +1593,7 @@ async def _zip_image_entry(
         return None
     if uploaded.public_url is None:
         logger.warning("zip image member has no public url (R2 base unset) user_id=%s", user_id)
+        await _best_effort_delete_r2_object(user_id=user_id, object_key=object_key)
         return None
     try:
         result = await analyze_screenshot(uploaded.public_url)
@@ -1567,6 +1608,7 @@ async def _zip_image_entry(
             scope.fingerprint = ["zip-image-analysis-failed"]
             scope.set_extra("exception", repr(exc))
             sentry_sdk.capture_message("zip image member analysis failed", level="warning")
+        await _best_effort_delete_r2_object(user_id=user_id, object_key=object_key)
         return None
     return {
         "kind": "image_analysis",
