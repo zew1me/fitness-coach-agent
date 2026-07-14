@@ -23,6 +23,7 @@ import { useBrowserSession } from "../lib/use-browser-session";
 import { useChatThread } from "../lib/use-chat-thread";
 import { useIsMobile } from "../lib/use-is-mobile";
 
+import { BrandMark } from "./brand-mark";
 import styles from "./coach-chat.module.css";
 import { StatusCard } from "./status-card";
 import { ThemeSwitcher } from "./theme-switcher";
@@ -334,9 +335,44 @@ function SendIcon(): JSX.Element {
 
 function ChatLoading(): JSX.Element {
   return (
-    <main className={styles.landingWrap}>
-      <section className={styles.statusBanner}>
-        <p className={styles.meta}>Checking your browser session…</p>
+    <main
+      aria-busy="true"
+      className={`${styles.landingWrap} ${styles.loadingPage}`}
+    >
+      <section
+        aria-labelledby="session-loading-title"
+        className={styles.loadingCard}
+      >
+        <div className={styles.loadingBrand}>
+          <span className={styles.loadingMark}>
+            <BrandMark />
+          </span>
+          <span className={styles.loadingBrandName}>{siteConfig.appName}</span>
+        </div>
+
+        <div className={styles.loadingCopy}>
+          <p className={styles.eyebrow}>Endurance coaching, made personal</p>
+          <h1 className={styles.loadingTitle} id="session-loading-title">
+            Your coach is warming up.
+          </h1>
+          <p className={styles.loadingText}>
+            We&apos;re checking your sign-in and getting your coaching space
+            ready. This usually takes just a moment.
+          </p>
+        </div>
+
+        <div aria-hidden="true" className={styles.loadingCourse}>
+          <span className={styles.courseLine} />
+          <span className={styles.finishLine} />
+          <span className={styles.loadingAthlete}>🏃</span>
+          <span className={styles.loadingAthlete}>🚴</span>
+          <span className={styles.loadingAthlete}>🏊</span>
+        </div>
+
+        <p aria-atomic="true" className={styles.loadingStatus} role="status">
+          <span aria-hidden="true" className={styles.statusPulse} />
+          No refresh needed. We&apos;ll take you to the right place.
+        </p>
       </section>
     </main>
   );
