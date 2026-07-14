@@ -3374,6 +3374,178 @@ async def test_generate_plan_structure_persists_plan_and_workouts(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_generate_plan_structure_persists_explicit_mixed_sport_schedule(
+    monkeypatch,
+) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-explicit"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    workouts = [
+        {
+            "description": "Keep this easy after travel.",
+            "phase_name": "Run build",
+            "sport": "running",
+            "target_distance_meters": None,
+            "target_duration_minutes": 45,
+            "target_tss": None,
+            "title": "Easy trail run",
+            "workout_date": "2026-07-14",
+            "workout_type": "endurance",
+        },
+        {
+            "description": "Planned bike intensity; running remains the priority.",
+            "phase_name": "Run build",
+            "sport": "cycling",
+            "target_distance_meters": None,
+            "target_duration_minutes": 165,
+            "target_tss": None,
+            "title": "Ride with criterium",
+            "workout_date": "2026-07-16",
+            "workout_type": "race",
+        },
+        {
+            "description": "Primary trail-running goal event.",
+            "phase_name": "Race",
+            "sport": "running",
+            "target_distance_meters": 21_097,
+            "target_duration_minutes": None,
+            "target_tss": None,
+            "title": "Coldwater Lake half marathon",
+            "workout_date": "2026-08-29",
+            "workout_type": "race",
+        },
+    ]
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={
+                "goal_id": "goal-1",
+                "title": "Half-marathon-first plan",
+                "training_model": "performance",
+                "workouts": workouts,
+            },
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["plan_mode"] == "explicit"
+    assert body["plan_id"] == "plan-explicit"
+    assert body["start_date"] == "2026-07-14"
+    assert body["end_date"] == "2026-08-29"
+    assert body["workouts_created"] == 3
+    assert body["scheduled_workouts"] == [
+        {
+            "day_name": "Tuesday",
+            "sport": "running",
+            "title": "Easy trail run",
+            "workout_date": "2026-07-14",
+        },
+        {
+            "day_name": "Thursday",
+            "sport": "cycling",
+            "title": "Ride with criterium",
+            "workout_date": "2026-07-16",
+        },
+        {
+            "day_name": "Saturday",
+            "sport": "running",
+            "title": "Coldwater Lake half marathon",
+            "workout_date": "2026-08-29",
+        },
+    ]
+
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.title == "Half-marathon-first plan"
+    assert recording_repo.created_plan.start_date.isoformat() == "2026-07-14"
+    assert recording_repo.created_plan.end_date.isoformat() == "2026-08-29"
+    assert recording_repo.created_plan.target_goal_id == "goal-1"
+    assert recording_repo.created_plan.generation_context == {
+        "plan_mode": "explicit",
+        "training_model": "performance",
+        "training_model_source": "explicit",
+    }
+    assert {workout.sport for workout in recording_repo.created_workouts} == {
+        "cycling",
+        "running",
+    }
+    assert [workout.day_of_week for workout in recording_repo.created_workouts] == [1, 3, 5]
+    assert [workout.week_number for workout in recording_repo.created_workouts] == [1, 1, 7]
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_rejects_unknown_goal_for_explicit_schedule(
+    monkeypatch,
+) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.create_called: bool = False
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.create_called = True
+            return plan
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={
+                "goal_id": "missing-goal",
+                "workouts": [
+                    {
+                        "description": None,
+                        "phase_name": None,
+                        "sport": "running",
+                        "target_distance_meters": None,
+                        "target_duration_minutes": 30,
+                        "target_tss": None,
+                        "title": "Easy run",
+                        "workout_date": "2026-07-14",
+                        "workout_type": "endurance",
+                    }
+                ],
+            },
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == ("goal_id does not match an active goal for this athlete.")
+    assert recording_repo.create_called is False
+
+
+@pytest.mark.asyncio
 async def test_generate_plan_structure_accepts_training_model_policy(monkeypatch) -> None:
     class RecordingRepository(EngineRepository):
         def __init__(self) -> None:

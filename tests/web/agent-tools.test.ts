@@ -137,6 +137,48 @@ describe("coachToolDefinitions", () => {
     });
   });
 
+  it("accepts an exact mixed-sport workout schedule for plan generation", () => {
+    const workouts = [
+      {
+        description: "Keep this easy after travel.",
+        phase_name: "Run build",
+        sport: "running",
+        target_distance_meters: null,
+        target_duration_minutes: 45,
+        target_tss: null,
+        title: "Easy trail run",
+        workout_date: "2026-07-14",
+        workout_type: "endurance",
+      },
+      {
+        description: "Planned bike intensity; running remains the priority.",
+        phase_name: "Run build",
+        sport: "cycling",
+        target_distance_meters: null,
+        target_duration_minutes: 165,
+        target_tss: null,
+        title: "Ride with criterium",
+        workout_date: "2026-07-16",
+        workout_type: "race",
+      },
+    ];
+
+    const parsed =
+      coachToolDefinitions.generate_training_plan.inputSchema.parse({
+        goal_id: "goal-1",
+        title: "Half-marathon-first plan",
+        training_model: "performance",
+        workouts,
+      });
+
+    expect(parsed).toEqual({
+      goal_id: "goal-1",
+      title: "Half-marathon-first plan",
+      training_model: "performance",
+      workouts,
+    });
+  });
+
   it("accepts complete and abandon actions without a goal payload", () => {
     for (const action of ["complete", "abandon"] as const) {
       const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
