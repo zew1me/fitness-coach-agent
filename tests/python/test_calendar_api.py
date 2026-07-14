@@ -307,16 +307,19 @@ def test_scope_helper_predicate_cases() -> None:
 
     active_future = _workout("a-fut", "active", future)
     other_future = _workout("o-fut", "other", future)
+    other_today = _workout("o-today", "other", today)
     other_past = _workout("o-past", "other", past)
     other_done = _workout("o-done", "other", future, status="completed", actual_activity_id="act-1")
     other_matched = _workout("o-match", "other", future, actual_activity_id="act-2")
 
-    planned = [active_future, other_future, other_past, other_done, other_matched]
+    planned = [active_future, other_future, other_today, other_past, other_done, other_matched]
 
     kept = api_index._scope_planned_workouts_to_active_plan(planned, "active", today)
     kept_ids = {w.id for w in kept}
     assert kept_ids == {"a-fut", "o-past", "o-done", "o-match"}
     assert "o-fut" not in kept_ids
+    # `today` is on the future side of the `>= today` cutoff → dropped.
+    assert "o-today" not in kept_ids
 
     # No active plan → passthrough.
     passthrough = api_index._scope_planned_workouts_to_active_plan(planned, None, today)
