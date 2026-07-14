@@ -3487,6 +3487,8 @@ async def test_generate_plan_structure_persists_explicit_mixed_sport_schedule(
         "training_model": "performance",
         "training_model_source": "explicit",
     }
+    assert recording_repo.created_plan.weekly_hours_target is None
+    assert recording_repo.created_plan.weekly_tss_target is None
     assert {workout.sport for workout in recording_repo.created_workouts} == {
         "cycling",
         "running",

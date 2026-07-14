@@ -136,6 +136,42 @@ class TestRegenerateCleansCalendar:
         assert surviving[0]["status"] == "completed"
         assert surviving[0]["actual_activity_id"] == "activity-x"
 
+    async def test_explicit_schedule_without_goal_id_does_not_bind_first_goal(
+        self, monkeypatch
+    ) -> None:
+        client = _seeded_client()
+        monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+
+        response = await _post(
+            "/api/engine/generate-plan-structure",
+            {
+                "title": "Unrelated running block",
+                "workouts": [
+                    {
+                        "description": "This is not for the active cycling event.",
+                        "phase_name": None,
+                        "sport": "running",
+                        "target_distance_meters": None,
+                        "target_duration_minutes": 45,
+                        "target_tss": None,
+                        "title": "Easy run",
+                        "workout_date": TODAY.isoformat(),
+                        "workout_type": "endurance",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["target_goal"] is None
+        assert response.json()["sport"] == "running"
+        plan_id = response.json()["plan_id"]
+        saved_plan = next(
+            row for row in client._tables["training_plans"]._rows if row["id"] == plan_id
+        )
+        assert saved_plan["target_goal_id"] is None
+        assert saved_plan["plan_type"] == "weekly"
+
 
 @pytest.mark.usefixtures("as_athlete")
 class TestAdjustPlan:

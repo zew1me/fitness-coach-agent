@@ -2167,12 +2167,8 @@ def _build_explicit_training_plan(
     plan_start = ordered_entries[0].workout_date
     plan_end = ordered_entries[-1].workout_date
     total_weeks = ((plan_end - plan_start).days // 7) + 1
-    duration_minutes = [
-        entry.target_duration_minutes
-        for entry in ordered_entries
-        if entry.target_duration_minutes is not None
-    ]
-    tss_targets = [entry.target_tss for entry in ordered_entries if entry.target_tss is not None]
+    duration_minutes = [entry.target_duration_minutes for entry in ordered_entries]
+    tss_targets = [entry.target_tss for entry in ordered_entries]
     plan = TrainingPlan(
         user_id=user_id,
         title=payload.title
@@ -2194,9 +2190,18 @@ def _build_explicit_training_plan(
             "training_model": training_model,
             "training_model_source": training_model_source,
         },
-        weekly_tss_target=(round(sum(tss_targets) / total_weeks, 1) if tss_targets else None),
+        weekly_tss_target=(
+            round(sum(value for value in tss_targets if value is not None) / total_weeks, 1)
+            if all(value is not None for value in tss_targets)
+            else None
+        ),
         weekly_hours_target=(
-            round(sum(duration_minutes) / 60 / total_weeks, 1) if duration_minutes else None
+            round(
+                sum(value for value in duration_minutes if value is not None) / 60 / total_weeks,
+                1,
+            )
+            if all(value is not None for value in duration_minutes)
+            else None
         ),
     )
     plan_sport = (target_goal.sport if target_goal else None) or ordered_entries[0].sport
@@ -2297,7 +2302,7 @@ async def generate_plan_structure(  # noqa: C901
                 user_id,
                 payload.goal_id,
             )
-    elif goals:
+    elif goals and payload.workouts is None:
         target_goal = goals[0]
 
     training_model, training_model_source = _select_training_model(
