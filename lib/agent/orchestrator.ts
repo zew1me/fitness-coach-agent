@@ -33,6 +33,7 @@ import { fetchSignalWithTimeout } from "./fetch-signal";
 import {
   CHAT_TURN_LEASE_TTL_SECONDS,
   LeaseAcquisitionError,
+  LeaseRenewalError,
   acquireChatTurnLease,
   releaseChatTurnLease,
   renewChatTurnLease,
@@ -418,26 +419,46 @@ function startLeaseRenewal({
   baseUrl,
   extraHeaders,
   leaseId,
+  onLeaseLost,
 }: Pick<
   PrepareDurableSessionOptions,
   "accessToken" | "baseUrl" | "extraHeaders" | "leaseId"
->): () => void {
+> & {
+  onLeaseLost: (error: unknown) => void;
+}): () => Promise<void> {
+  // Renew requests always settle within RENEW_TIMEOUT_MS (5s), well under the
+  // 20s tick interval, so ticks can't overlap in practice. We still track the
+  // in-flight promise so stop() can await it before the caller releases the
+  // lease, instead of letting a trailing renewal race the release call.
+  let inFlight: Promise<void> | null = null;
   const intervalId = setInterval(() => {
-    void renewChatTurnLease({
+    if (inFlight) return;
+    inFlight = renewChatTurnLease({
       accessToken,
       baseUrl,
       ...(extraHeaders ? { extraHeaders } : {}),
       leaseId,
       ttlSeconds: CHAT_TURN_LEASE_TTL_SECONDS,
-    }).catch((error) => {
-      Sentry.captureException(error, {
-        tags: { subsystem: "lease-renew" },
-        extra: { leaseId },
+    })
+      .catch((error) => {
+        Sentry.captureException(error, {
+          tags: { subsystem: "lease-renew" },
+          extra: { leaseId },
+        });
+        // A 409 means another request has taken over this chat turn's
+        // lease; keeping this turn running risks two turns writing the
+        // same durable session concurrently, so abort it.
+        if (error instanceof LeaseRenewalError && error.status === 409) {
+          onLeaseLost(error);
+        }
+      })
+      .finally(() => {
+        inFlight = null;
       });
-    });
   }, CHAT_TURN_LEASE_RENEW_INTERVAL_MS);
-  return (): void => {
+  return async (): Promise<void> => {
     clearInterval(intervalId);
+    await inFlight;
   };
 }
 
@@ -491,8 +512,30 @@ export function streamCoachTurn({
       };
 
       const leaseId = providedLeaseId ?? crypto.randomUUID();
-      const leaseStatus = { acquired: acquiredLease !== undefined };
-      let stopLeaseRenewal: (() => void) | undefined =
+      const leaseStatus = {
+        acquired: acquiredLease !== undefined,
+        lost: false,
+      };
+      // Lease renewal runs concurrently with the turn; if the lease is lost
+      // (another request took it over), abort this turn via the same signal
+      // already threaded through runner.run() rather than letting it keep
+      // writing to a durable session it no longer owns.
+      const leaseAbortController = new AbortController();
+      const effectiveSignal = signal
+        ? AbortSignal.any([signal, leaseAbortController.signal])
+        : leaseAbortController.signal;
+      // Indirection through a function, rather than reading
+      // effectiveSignal.aborted directly at each call site, keeps
+      // typescript-eslint from narrowing it to a stale literal across the
+      // `await`s below — the signal can flip to aborted at any time.
+      const isTurnAborted = (): boolean => effectiveSignal.aborted;
+      const onLeaseLost = (error: unknown): void => {
+        leaseStatus.lost = true;
+        leaseAbortController.abort(
+          error instanceof Error ? error : new Error("chat turn lease lost"),
+        );
+      };
+      let stopLeaseRenewal: (() => Promise<void>) | undefined =
         acquiredLease === undefined
           ? undefined
           : startLeaseRenewal({
@@ -500,6 +543,7 @@ export function streamCoachTurn({
               baseUrl,
               ...(extraHeaders ? { extraHeaders } : {}),
               leaseId,
+              onLeaseLost,
             });
       try {
         let durableSession: DurableCompactionSession | undefined;
@@ -520,10 +564,11 @@ export function streamCoachTurn({
                 baseUrl,
                 ...(extraHeaders ? { extraHeaders } : {}),
                 leaseId,
+                onLeaseLost,
               });
             },
             selectedMessages,
-            ...(signal ? { signal } : {}),
+            signal: effectiveSignal,
           });
           if (prepared !== null) {
             durableSession = prepared.durableSession;
@@ -632,7 +677,7 @@ export function streamCoachTurn({
                     {
                       context: runContext,
                       maxTurns: MAX_COACH_STEPS,
-                      ...(signal ? { signal } : {}),
+                      signal: effectiveSignal,
                       ...(durableSession ? { session: durableSession } : {}),
                       stream: true,
                     },
@@ -647,7 +692,7 @@ export function streamCoachTurn({
                   const ranTool =
                     runContext.toolCalled ||
                     textState.lastToolName !== undefined;
-                  if (ranTool && !textState.textStarted && !signal?.aborted) {
+                  if (ranTool && !textState.textStarted && !isTurnAborted()) {
                     try {
                       const acknowledgement = new Agent<CoachAgentRunContext>({
                         name: "Coach acknowledgement",
@@ -662,7 +707,7 @@ export function streamCoachTurn({
                         {
                           context: runContext,
                           maxTurns: 2,
-                          ...(signal ? { signal } : {}),
+                          signal: effectiveSignal,
                           stream: true,
                         },
                       );
@@ -672,7 +717,7 @@ export function streamCoachTurn({
                       await followup.completed;
                       recordStageUsage("lead-followup", followup.state.usage);
                     } catch (error) {
-                      if (!signal?.aborted) {
+                      if (!isTurnAborted()) {
                         Sentry.captureException(error, {
                           tags: { subsystem: "coach-followup" },
                         });
@@ -683,7 +728,7 @@ export function streamCoachTurn({
                     }
                   }
 
-                  if (!textState.textStarted && !signal?.aborted) {
+                  if (!textState.textStarted && !isTurnAborted()) {
                     writeDeterministicText(
                       writer,
                       textState,
@@ -721,18 +766,24 @@ export function streamCoachTurn({
         writer.write({ type: "error", errorText: streamErrorMessage });
         writer.write({ type: "finish-step" });
         writer.write({ type: "finish", finishReason: "error" });
-        Sentry.captureException(error, {
-          tags: { subsystem: "coach-stream" },
-          extra: { textStarted: textState.textStarted },
-        });
+        // The lease-lost case already reported to Sentry from onLeaseLost;
+        // this `error` here is just the resulting abort, not new information.
+        if (!leaseStatus.lost) {
+          Sentry.captureException(error, {
+            tags: { subsystem: "coach-stream" },
+            extra: { textStarted: textState.textStarted },
+          });
+        }
         const message = error instanceof Error ? error.message : String(error);
         console.error(
           "[chat] stream error:",
           message.replace(/key=[^&\s]+/g, "key=***"),
         );
       } finally {
-        stopLeaseRenewal?.();
-        if (leaseStatus.acquired) {
+        await stopLeaseRenewal?.();
+        // If we lost the lease, we no longer own it — attempting to release
+        // it would just fail with another 409 that only adds Sentry noise.
+        if (leaseStatus.acquired && !leaseStatus.lost) {
           try {
             await releaseChatTurnLease({
               accessToken,
