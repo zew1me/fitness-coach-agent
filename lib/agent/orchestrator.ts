@@ -77,7 +77,7 @@ const MAX_COACH_STEPS = 4;
 const MODEL = "gpt-5.4-mini";
 const LAZY_SEED_TOKEN_BUDGET = 200_000;
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
-const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;
+export const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;
 const ACKNOWLEDGEMENT_PROMPT =
   "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
 const EMPTY_MODEL_RESPONSE = "Hey, can you remind me of where we are at?";
@@ -559,6 +559,11 @@ export function streamCoachTurn({
             ...(acquiredLease ? { leaseState: acquiredLease } : {}),
             markLeaseAcquired: () => {
               leaseStatus.acquired = true;
+              // Acquisition fires at most once per turn, but guard anyway: a
+              // second call must not overwrite a live renewal's stop closure,
+              // which would orphan the first interval so the turn-end
+              // stopLeaseRenewal?.() could never clear it.
+              if (stopLeaseRenewal) return;
               stopLeaseRenewal = startLeaseRenewal({
                 accessToken,
                 baseUrl,
