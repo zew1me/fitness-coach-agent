@@ -7,6 +7,7 @@ declare const styles: {
   readonly chipActivity: string;
   readonly chipLabel: string;
   readonly chipList: string;
+  readonly chipMarker: string;
   readonly chipPlanned: string;
   readonly dayCell: string;
   readonly dayNumber: string;
@@ -36,10 +37,12 @@ declare const styles: {
   readonly landingTitle: string;
   readonly landingWrap: string;
   readonly legend: string;
-  readonly legendActivity: string;
+  readonly legendGroup: string;
   readonly legendItem: string;
-  readonly legendPlanned: string;
+  readonly legendMarker: string;
   readonly legendSwatch: string;
+  readonly legendTitle: string;
+  readonly legends: string;
   readonly meta: string;
   readonly monthRow: string;
   readonly moreCount: string;
@@ -58,6 +61,7 @@ declare const styles: {
   readonly weekRow: string;
   readonly weekdayCell: string;
   readonly weekdayRow: string;
+  readonly workoutVisual: string;
 };
 
 export default styles;

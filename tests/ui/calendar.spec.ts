@@ -132,19 +132,35 @@ test("shows planned workouts and recorded activities as day chips", async ({
   const upcomingDay = page.locator(
     '[data-testid="calendar-day"][data-date="2026-07-04"]',
   );
-  await expect(upcomingDay.getByTestId("calendar-chip-planned")).toContainText(
-    "cycling: Sweet spot 3x12",
-  );
+  const upcomingPlan = upcomingDay.getByTestId("calendar-chip-planned");
+  await expect(upcomingPlan).toContainText("○cycling: Sweet spot 3x12");
+  await expect(upcomingPlan).toHaveAttribute("data-entry-kind", "planned");
+  await expect(upcomingPlan).toHaveAttribute("data-status", "scheduled");
+  await expect(upcomingPlan).toHaveAttribute("data-workout-family", "tempo");
 
   const pastDay = page.locator(
     '[data-testid="calendar-day"][data-date="2026-06-20"]',
   );
-  await expect(pastDay.getByTestId("calendar-chip-planned")).toHaveAttribute(
-    "data-status",
-    "completed",
+  const completedPlan = pastDay.getByTestId("calendar-chip-planned");
+  await expect(pastDay).toHaveAccessibleName(
+    /1 planned workout\. 1 recorded activity\./,
   );
-  await expect(pastDay.getByTestId("calendar-chip-activity")).toContainText(
-    "running · 1h",
+  await expect(completedPlan).toHaveAttribute("data-status", "completed");
+  await expect(completedPlan).toHaveAttribute(
+    "data-workout-family",
+    "recovery",
+  );
+  await expect(completedPlan).toContainText("✓running: Easy shakeout");
+
+  const recordedActivity = pastDay.getByTestId("calendar-chip-activity");
+  await expect(recordedActivity).toHaveAttribute("data-entry-kind", "recorded");
+  await expect(recordedActivity).toContainText("●Recorded running · 1h");
+
+  await expect(page.getByLabel("Workout type colors")).toContainText(
+    "VO₂ / anaerobic / race",
+  );
+  await expect(page.getByLabel("Workout entry markers")).toContainText(
+    "Scheduled plan",
   );
 });
 
