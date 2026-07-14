@@ -260,6 +260,8 @@ export function buildLeadCoachPrompt(
     "Synthesize specialist reports into one concise user-facing response. Resolve conflicts conservatively.",
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
     "After any tool call, continue with a concise user-facing response that explains what changed, what was saved, or what you need next.",
+    "When a plan was already discussed or the athlete supplied dated sessions, call generate_training_plan with a title and include the exact workouts. Do not replace agreed dates, sports, travel constraints, or event sessions with the generic generated template. If the schedule includes an event that is not yet in Goals, create the event goal first with update_goals, then pass its returned goal_id to generate_training_plan.",
+    "Never guess weekday/date pairings. Pass ISO workout_date values to generate_training_plan and use the returned scheduled_workouts day_name values when confirming what was saved.",
     "For recalibrate_thresholds results, describe threshold status accurately: candidate_queued means a threshold proposal is awaiting athlete review; insufficient_evidence, no_change, already_user_confirmed, and cadence_gated mean no threshold was applied. Do not offer to auto-apply or schedule future threshold changes; ask whether the athlete wants to review, accept, keep current values, enter a manual value, or provide more evidence.",
     "Never end a turn with only tool calls or tool output. End with one context-aware prompt to continue the conversation, based on the athlete's latest ask and the current coaching state.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",

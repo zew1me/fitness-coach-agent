@@ -136,6 +136,42 @@ class TestRegenerateCleansCalendar:
         assert surviving[0]["status"] == "completed"
         assert surviving[0]["actual_activity_id"] == "activity-x"
 
+    async def test_explicit_schedule_without_goal_id_does_not_bind_first_goal(
+        self, monkeypatch
+    ) -> None:
+        client = _seeded_client()
+        monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+
+        response = await _post(
+            "/api/engine/generate-plan-structure",
+            {
+                "title": "Unrelated running block",
+                "workouts": [
+                    {
+                        "description": "This is not for the active cycling event.",
+                        "phase_name": None,
+                        "sport": "running",
+                        "target_distance_meters": None,
+                        "target_duration_minutes": 45,
+                        "target_tss": None,
+                        "title": "Easy run",
+                        "workout_date": TODAY.isoformat(),
+                        "workout_type": "endurance",
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["target_goal"] is None
+        assert response.json()["sport"] == "running"
+        plan_id = response.json()["plan_id"]
+        saved_plan = next(
+            row for row in client._tables["training_plans"]._rows if row["id"] == plan_id
+        )
+        assert saved_plan["target_goal_id"] is None
+        assert saved_plan["plan_type"] == "weekly"
+
 
 @pytest.mark.usefixtures("as_athlete")
 class TestAdjustPlan:
@@ -201,6 +237,61 @@ class TestAdjustPlan:
             "/api/engine/adjust-plan", {"plan_id": "not-the-active-plan", "reason": "x"}
         )
         assert response.status_code == 409
+
+    async def test_adjust_plan_rejects_formula_recomposition_of_exact_schedule(
+        self, monkeypatch
+    ) -> None:
+        client = _seeded_client()
+        monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+        explicit_workouts = [
+            {
+                "description": "Run-first session.",
+                "phase_name": "Build",
+                "sport": "running",
+                "target_distance_meters": None,
+                "target_duration_minutes": 45,
+                "target_tss": None,
+                "title": "Easy trail run",
+                "workout_date": TODAY.isoformat(),
+                "workout_type": "endurance",
+            },
+            {
+                "description": "Keep the athlete's planned ride.",
+                "phase_name": "Build",
+                "sport": "cycling",
+                "target_distance_meters": None,
+                "target_duration_minutes": 90,
+                "target_tss": None,
+                "title": "Group ride",
+                "workout_date": (TODAY + timedelta(days=2)).isoformat(),
+                "workout_type": "tempo",
+            },
+        ]
+        generated = await _post(
+            "/api/engine/generate-plan-structure",
+            {
+                "goal_id": "goal-1",
+                "title": "Exact mixed-sport schedule",
+                "workouts": explicit_workouts,
+            },
+        )
+        assert generated.status_code == 200, generated.text
+        plan_id = generated.json()["plan_id"]
+        workout_ids_before = {
+            row["id"] for row in client._tables["plan_workouts"]._rows if row["plan_id"] == plan_id
+        }
+
+        response = await _post(
+            "/api/engine/adjust-plan",
+            {"plan_id": plan_id, "reason": "Move the ride."},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"].startswith("Exact-workout plans cannot")
+        workout_ids_after = {
+            row["id"] for row in client._tables["plan_workouts"]._rows if row["plan_id"] == plan_id
+        }
+        assert workout_ids_after == workout_ids_before
 
     async def test_adjust_plan_without_active_plan_returns_404(self, monkeypatch) -> None:
         monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=FakeSupabaseClient()))

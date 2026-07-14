@@ -85,6 +85,21 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("context-aware prompt to continue");
   });
 
+  it("preserves an agreed dated plan instead of replacing it with a generic template", () => {
+    const prompt = buildCoachSystemPrompt({
+      ...context,
+      profile: { ...context.profile, coaching_state: "active" },
+      goals: [],
+    });
+
+    expect(prompt).toContain(
+      "already discussed or the athlete supplied dated sessions",
+    );
+    expect(prompt).toContain("include the exact workouts");
+    expect(prompt).toContain("create the event goal first");
+    expect(prompt).toContain("Never guess weekday/date pairings");
+  });
+
   it("frames recalibration as an athlete-reviewed candidate workflow", () => {
     const prompt = buildCoachSystemPrompt({
       ...context,
@@ -224,7 +239,7 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("update_schedule {");
     expect(prompt).toContain("update_goals {");
     expect(prompt).toContain(
-      "generate_training_plan {goal_id?, training_model?}",
+      "generate_training_plan {goal_id?, title?, training_model?, workouts?:",
     );
     expect(prompt).toContain("adjust_plan {plan_id, reason}");
     expect(prompt).toContain("recalibrate_thresholds {}");

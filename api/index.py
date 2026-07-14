@@ -2119,11 +2119,203 @@ async def _persist_extracted_activity(
 
 
 TrainingModelRequest = Literal["auto", "longevity", "performance", "recovery_return"]
+WorkoutTypeRequest = Literal[
+    "recovery",
+    "endurance",
+    "tempo",
+    "sweet_spot",
+    "threshold",
+    "vo2max",
+    "anaerobic",
+    "sprint",
+    "race",
+    "strength",
+    "mobility",
+    "rest",
+    "long_run",
+    "long_ride",
+    "brick",
+    "interval",
+    "fartlek",
+    "hill_repeats",
+]
+
+
+class ExplicitPlanWorkoutRequest(BaseModel):
+    description: str | None
+    phase_name: str | None
+    sport: str = Field(min_length=1)
+    target_distance_meters: float | None = Field(gt=0)
+    target_duration_minutes: int | None = Field(gt=0)
+    target_tss: float | None = Field(ge=0)
+    title: str = Field(min_length=1)
+    workout_date: date
+    workout_type: WorkoutTypeRequest
 
 
 class GeneratePlanStructureRequest(BaseModel):
     goal_id: str | None = None
+    title: str | None = Field(default=None, min_length=1)
     training_model: TrainingModelRequest = "auto"
+    workouts: list[ExplicitPlanWorkoutRequest] | None = Field(
+        default=None, min_length=1, max_length=366
+    )
+
+
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _build_explicit_plan_workouts(
+    entries: list[ExplicitPlanWorkoutRequest],
+    *,
+    user_id: str,
+    plan_id: str,
+    start_date: date,
+) -> list[PlanWorkout]:
+    return [
+        PlanWorkout(
+            plan_id=plan_id,
+            user_id=user_id,
+            workout_date=entry.workout_date,
+            day_of_week=entry.workout_date.weekday(),
+            week_number=((entry.workout_date - start_date).days // 7) + 1,
+            phase_name=entry.phase_name,
+            sport=entry.sport,
+            title=entry.title,
+            description=entry.description,
+            workout_type=entry.workout_type,
+            target_duration_minutes=entry.target_duration_minutes,
+            target_distance_meters=entry.target_distance_meters,
+            target_tss=entry.target_tss,
+            status="scheduled",
+        )
+        for entry in sorted(entries, key=lambda item: item.workout_date)
+    ]
+
+
+def _build_explicit_training_plan(
+    payload: GeneratePlanStructureRequest,
+    *,
+    user_id: str,
+    target_goal: Goal | None,
+) -> tuple[TrainingPlan, str, int]:
+    entries = payload.workouts
+    if entries is None:  # pragma: no cover - guarded by the endpoint branch
+        raise ValueError("Explicit plan workouts are required.")
+
+    ordered_entries = sorted(entries, key=lambda item: item.workout_date)
+    plan_start = ordered_entries[0].workout_date
+    plan_end = ordered_entries[-1].workout_date
+    total_weeks = ((plan_end - plan_start).days // 7) + 1
+    duration_minutes = [entry.target_duration_minutes for entry in ordered_entries]
+    tss_targets = [entry.target_tss for entry in ordered_entries]
+    plan = TrainingPlan(
+        user_id=user_id,
+        title=payload.title
+        or (f"Plan: {target_goal.title}" if target_goal else "Custom training plan"),
+        plan_type=(
+            "full_cycle"
+            if target_goal and target_goal.target_date
+            else "mesocycle"
+            if total_weeks > 1
+            else "weekly"
+        ),
+        status="active",
+        start_date=plan_start,
+        end_date=plan_end,
+        target_goal_id=target_goal.id if target_goal else None,
+        phases=[],
+        # Explicit plans prescribe every workout verbatim, so there is no
+        # generated training model behind them — omit the vestigial
+        # training_model/source metadata that only applies to composed plans.
+        generation_context={"plan_mode": "explicit"},
+        weekly_tss_target=(
+            round(sum(value for value in tss_targets if value is not None) / total_weeks, 1)
+            if all(value is not None for value in tss_targets)
+            else None
+        ),
+        weekly_hours_target=(
+            round(
+                sum(value for value in duration_minutes if value is not None) / 60 / total_weeks,
+                1,
+            )
+            if all(value is not None for value in duration_minutes)
+            else None
+        ),
+    )
+    plan_sport = (target_goal.sport if target_goal else None) or ordered_entries[0].sport
+    return plan, plan_sport, total_weeks
+
+
+async def _persist_training_plan_with_workouts(
+    *,
+    user_id: str,
+    plan: TrainingPlan,
+    prepare_workouts: Callable[[str], Awaitable[list[PlanWorkout]]],
+) -> tuple[TrainingPlan, list[PlanWorkout]]:
+    persisted_plan = None
+    prior_plan = None
+    try:
+        # Capture the plan being superseded *before* the insert so we can clean up
+        # its future scheduled workouts and leave one coherent calendar timeline.
+        prior_plan = await repo.get_active_plan(user_id)
+        persisted_plan = await repo.create_training_plan(plan)
+        workouts = await prepare_workouts(persisted_plan.id or "")
+        persisted_workouts = await repo.create_plan_workouts(workouts)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
+    # this is a server-composed write, and the block runs compensating cleanup (supersede
+    # the partial plan below) that must happen on any persistence failure. A mid-write
+    # integrity error here is a server-side fault -> 503, not a client 422.
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.exception("generate_plan: persistence failed user_id=%s", user_id)
+        if persisted_plan is not None and persisted_plan.id:
+            # Don't leave a workout-less plan active (create_training_plan
+            # already superseded the previous one). Best-effort cleanup.
+            try:
+                await repo.update_training_plan_status(user_id, persisted_plan.id, "superseded")
+            except Exception:
+                logger.exception(
+                    "generate_plan: failed to supersede partial plan user_id=%s plan_id=%s",
+                    user_id,
+                    persisted_plan.id,
+                )
+        raise HTTPException(status_code=503, detail="Failed to persist training plan.") from exc
+
+    # The new plan and its workouts are durably persisted at this point. Cleaning up
+    # the superseded plan's future scheduled workouts is strictly best-effort and must
+    # run *outside* the compensation-guarded block above: the calendar read already
+    # scopes to the active plan at read time (`_scope_planned_workouts_to_active_plan`,
+    # #315), so leftover future rows are already hidden. A cleanup failure here is
+    # benign and must never supersede the plan we just committed (which would leave the
+    # athlete with no active plan and a misleading 503).
+    if prior_plan is not None and prior_plan.id:
+        try:
+            _ = await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, plan.start_date)
+        except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError):
+            logger.exception(
+                "generate_plan: superseded-plan cleanup failed (read-time scoping still hides "
+                "the stale rows) user_id=%s prior_plan_id=%s",
+                user_id,
+                prior_plan.id,
+            )
+
+    return persisted_plan, persisted_workouts
+
+
+async def _load_plan_composition_inputs(
+    user_id: str, *, start: date, end: date
+) -> tuple[ScheduleAvailability | None, list[ScheduleOverride]]:
+    try:
+        schedule = await repo.get_schedule(user_id)
+        overrides = await repo.list_schedule_overrides_between(user_id, start=start, end=end)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.exception("generate_plan: failed to load schedule user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to persist training plan.") from exc
+    return schedule, overrides
 
 
 def _select_training_model(
@@ -2153,127 +2345,145 @@ async def generate_plan_structure(  # noqa: C901
     if payload.goal_id:
         target_goal = next((g for g in goals if g.id == payload.goal_id), None)
         if target_goal is None:
+            if payload.workouts is not None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="goal_id does not match an active goal for this athlete.",
+                )
             logger.warning(
-                "generate_plan: goal_id not found, falling back to first goal"
-                " user_id=%s goal_id=%s",
+                "generate_plan: goal_id not found; no target goal user_id=%s goal_id=%s",
                 user_id,
                 payload.goal_id,
             )
-    elif goals:
+    elif goals and payload.workouts is None:
         target_goal = goals[0]
+
+    training_model, training_model_source = _select_training_model(
+        payload.training_model, target_goal
+    )
 
     current_ctl = latest_load.ctl if latest_load else 0.0
     available_hours = profile.weekly_available_hours or 6.0
-
     age = profile.age
     ceiling = estimate_ctl_ceiling(age, profile.biological_sex or "not_specified")
     recovery_freq = 4 if age is None or age < RECOVERY_WEEK_AGE_BREAKPOINT else 3
 
-    skeleton = build_plan_skeleton(
-        current_ctl=current_ctl,
-        target_date=target_goal.target_date if target_goal else None,
-        available_hours_per_week=available_hours,
-        goal_type=target_goal.goal_type if target_goal else "maintenance",
-        recovery_week_frequency=recovery_freq,
-    )
-
-    from backend.services.plan_composer import PlanComposerPolicy, compose_plan_workouts
-
-    plan_sport = (
-        (target_goal.sport if target_goal else None)
-        or (profile.primary_sports[0] if profile.primary_sports else None)
-        or "cycling"
-    )
-    training_model, training_model_source = _select_training_model(
-        payload.training_model, target_goal
-    )
-    plan = TrainingPlan(
-        user_id=user_id,
-        title=(f"Plan: {target_goal.title}" if target_goal else "Rolling training plan"),
-        plan_type="full_cycle" if target_goal and target_goal.target_date else "weekly",
-        status="active",
-        start_date=skeleton.start_date,
-        end_date=skeleton.end_date,
-        target_goal_id=target_goal.id if target_goal else None,
-        phases=[p.to_dict() for p in skeleton.phases],
-        generation_context={
-            "training_model": training_model,
-            "training_model_source": training_model_source,
-        },
-        weekly_tss_target=round(skeleton.starting_weekly_tss, 1),
-        weekly_hours_target=available_hours,
-    )
-    persisted_plan = None
-    try:
-        schedule = await repo.get_schedule(user_id)
-        overrides = await repo.list_schedule_overrides_between(
-            user_id, start=skeleton.start_date, end=skeleton.end_date
+    explicit_entries = payload.workouts
+    if explicit_entries is not None:
+        plan, plan_sport, total_weeks = _build_explicit_training_plan(
+            payload,
+            user_id=user_id,
+            target_goal=target_goal,
         )
-        # Capture the plan being superseded *before* the insert so we can clean up
-        # its future scheduled workouts and leave one coherent calendar timeline.
-        prior_plan = await repo.get_active_plan(user_id)
-        persisted_plan = await repo.create_training_plan(plan)
-        workouts = compose_plan_workouts(
+        skeleton = None
+    else:
+        skeleton = build_plan_skeleton(
+            current_ctl=current_ctl,
+            target_date=target_goal.target_date if target_goal else None,
+            available_hours_per_week=available_hours,
+            goal_type=target_goal.goal_type if target_goal else "maintenance",
+            recovery_week_frequency=recovery_freq,
+        )
+        plan_sport = (
+            (target_goal.sport if target_goal else None)
+            or (profile.primary_sports[0] if profile.primary_sports else None)
+            or "cycling"
+        )
+        plan = TrainingPlan(
+            user_id=user_id,
+            title=(f"Plan: {target_goal.title}" if target_goal else "Rolling training plan"),
+            plan_type="full_cycle" if target_goal and target_goal.target_date else "weekly",
+            status="active",
+            start_date=skeleton.start_date,
+            end_date=skeleton.end_date,
+            target_goal_id=target_goal.id if target_goal else None,
+            phases=[p.to_dict() for p in skeleton.phases],
+            generation_context={
+                "training_model": training_model,
+                "training_model_source": training_model_source,
+            },
+            weekly_tss_target=round(skeleton.starting_weekly_tss, 1),
+            weekly_hours_target=available_hours,
+        )
+        total_weeks = skeleton.total_weeks
+
+    schedule: ScheduleAvailability | None = None
+    overrides: list[ScheduleOverride] = []
+    if explicit_entries is None:
+        schedule, overrides = await _load_plan_composition_inputs(
+            user_id, start=plan.start_date, end=plan.end_date
+        )
+
+    async def prepare_workouts(plan_id: str) -> list[PlanWorkout]:
+        if explicit_entries is not None:
+            return _build_explicit_plan_workouts(
+                explicit_entries,
+                user_id=user_id,
+                plan_id=plan_id,
+                start_date=plan.start_date,
+            )
+
+        from backend.services.plan_composer import PlanComposerPolicy, compose_plan_workouts
+
+        assert skeleton is not None
+        return compose_plan_workouts(
             skeleton,
             user_id=user_id,
-            plan_id=persisted_plan.id or "",
+            plan_id=plan_id,
             sport=plan_sport,
             weekly_pattern=schedule.weekly_pattern if schedule else None,
             overrides=overrides,
             policy=PlanComposerPolicy(training_model=training_model),
         )
-        persisted_workouts = await repo.create_plan_workouts(workouts)
-        # Clean up the superseded plan's future scheduled workouts only *after* the
-        # new plan's workouts are safely persisted — a failed insert must never leave
-        # the athlete with the prior plan's future deleted and no replacement.
-        if prior_plan is not None and prior_plan.id:
-            await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, skeleton.start_date)
-    except RepositoryNotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
-    # this is a server-composed write, and the block runs compensating cleanup (supersede
-    # the partial plan below) that must happen on *any* persistence failure. A mid-write
-    # integrity error here is a server-side fault → 503, not a client 422.
-    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
-        logger.exception("generate_plan: persistence failed user_id=%s", user_id)
-        if persisted_plan is not None and persisted_plan.id:
-            # Don't leave a workout-less plan active (create_training_plan
-            # already superseded the previous one). Best-effort cleanup.
-            try:
-                await repo.update_training_plan_status(user_id, persisted_plan.id, "superseded")
-            except Exception:
-                logger.exception(
-                    "generate_plan: failed to supersede partial plan user_id=%s plan_id=%s",
-                    user_id,
-                    persisted_plan.id,
-                )
-        raise HTTPException(status_code=503, detail="Failed to persist training plan.") from exc
 
-    logger.info(
-        "plan generated user_id=%s plan_id=%s weeks=%d workouts=%d goal_type=%s recovery_freq=%d",
-        user_id,
-        persisted_plan.id,
-        skeleton.total_weeks,
-        len(persisted_workouts),
-        target_goal.goal_type if target_goal else "maintenance",
-        recovery_freq,
+    persisted_plan, persisted_workouts = await _persist_training_plan_with_workouts(
+        user_id=user_id,
+        plan=plan,
+        prepare_workouts=prepare_workouts,
     )
-    return {
+
+    response: dict[str, object] = {
+        "plan_mode": "explicit" if explicit_entries is not None else "generated",
         "plan_id": persisted_plan.id,
         "sport": plan_sport,
-        "training_model": training_model,
+        # Explicit plans have no generated training model; suppress the field so
+        # the coach doesn't mislabel a bespoke schedule as a generic model.
+        "training_model": None if explicit_entries is not None else training_model,
         "workouts_created": len(persisted_workouts),
-        "total_weeks": skeleton.total_weeks,
-        "start_date": skeleton.start_date.isoformat(),
-        "end_date": skeleton.end_date.isoformat(),
-        "starting_weekly_tss": round(skeleton.starting_weekly_tss),
-        "phases": [p.to_dict() for p in skeleton.phases],
+        "total_weeks": total_weeks,
+        "start_date": plan.start_date.isoformat(),
+        "end_date": plan.end_date.isoformat(),
+        "starting_weekly_tss": (
+            round(plan.weekly_tss_target) if plan.weekly_tss_target is not None else None
+        ),
+        "phases": plan.phases,
         "target_goal": target_goal.model_dump(mode="json") if target_goal else None,
         "ctl_ceiling": {
             "age_bracket": ceiling.age_bracket,
             "committed_amateur_ctl": ceiling.committed_amateur_ctl,
         },
     }
+    if explicit_entries is not None:
+        response["scheduled_workouts"] = [
+            {
+                "workout_date": workout.workout_date.isoformat(),
+                "day_name": _WEEKDAY_NAMES[workout.day_of_week],
+                "sport": workout.sport,
+                "title": workout.title,
+            }
+            for workout in sorted(persisted_workouts, key=lambda item: item.workout_date)
+        ]
+
+    logger.info(
+        "plan generated user_id=%s plan_id=%s mode=%s weeks=%d workouts=%d goal_type=%s",
+        user_id,
+        persisted_plan.id,
+        response["plan_mode"],
+        response["total_weeks"],
+        len(persisted_workouts),
+        target_goal.goal_type if target_goal else "maintenance",
+    )
+    return response
 
 
 class AdjustPlanRequest(BaseModel):
@@ -2343,6 +2553,14 @@ async def adjust_plan(
         raise HTTPException(
             status_code=409,
             detail="plan_id does not match the athlete's active plan.",
+        )
+    if (plan.generation_context or {}).get("plan_mode") == "explicit":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Exact-workout plans cannot be formula-adjusted. Regenerate the plan with the "
+                "complete revised workout schedule."
+            ),
         )
     # plan.id == payload.plan_id (a validated non-empty str); use it downstream.
     plan_id = payload.plan_id
