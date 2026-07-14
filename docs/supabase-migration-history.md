@@ -16,6 +16,7 @@
 - `20260703110000_plan_workout_atomic_rpc.sql` — service-role RPCs that atomically maintain plan workout/activity links
 - `20260706000000_create_training_plan_atomic.sql` — service-role RPC for atomic active training plan creation
 - `20260708000000_intervals_connections.sql` — encrypted Intervals.icu OAuth connection storage
+- `20260714120000_remove_lingering_superseded_plan_workouts.sql` — one-time cleanup of lingering future scheduled workouts on non-active plans (pre-#312)
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -380,3 +381,37 @@ the service-role backend receives table privileges.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Additive migration; no backfill required.
+
+## 20260714120000 — remove lingering superseded-plan workouts (2026-07-14)
+
+**File:** `supabase/migrations/20260714120000_remove_lingering_superseded_plan_workouts.sql`
+
+**Change:** Deletes future, `status='scheduled'`, unmatched `plan_workouts` rows
+whose owning `training_plans` row is not `active`. The predicate is the exact
+mirror of the `delete_future_scheduled_workouts` cleanup primitive and the new
+calendar read-time filter, so completed/matched/past-dated history is never
+touched.
+
+**Why:** Before #312, superseding a plan did not clean up its future scheduled
+workouts, so pre-#312 superseded plans can still carry lingering future rows.
+Issue #315 scopes the calendar read to the active plan so these no longer render,
+and this migration removes the stale data at the source so it cannot resurface
+through another read path.
+
+**Preview before applying:**
+
+```sql
+select pw.id, pw.user_id, pw.plan_id, pw.workout_date, pw.status
+from public.plan_workouts as pw
+join public.training_plans as tp on tp.id = pw.plan_id
+where pw.status = 'scheduled'
+  and pw.actual_activity_id is null
+  and pw.workout_date >= current_date
+  and tp.status <> 'active';
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Preview and production are separate Supabase projects and must each be
+linked and applied independently. The migration is a no-op in an already-clean
+environment and only removes rows the app no longer surfaces, so no maintenance
+window is required.
