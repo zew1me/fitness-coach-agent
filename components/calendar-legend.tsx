@@ -7,6 +7,9 @@ import styles from "./coach-calendar.module.css";
 const ENTRY_MARKERS = [
   { label: "Scheduled plan", marker: "○", status: "scheduled" },
   { label: "Completed plan", marker: "✓", status: "completed" },
+  { label: "Skipped plan", marker: "×", status: "skipped" },
+  { label: "Modified plan", marker: "△", status: "modified" },
+  { label: "Unconfirmed plan", marker: "?", status: "unconfirmed" },
   { label: "Recorded activity", marker: "●", status: "recorded" },
 ] as const;
 

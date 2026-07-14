@@ -162,6 +162,21 @@ test("shows planned workouts and recorded activities as day chips", async ({
   await expect(page.getByLabel("Workout entry markers")).toContainText(
     "Scheduled plan",
   );
+  await expect(page.getByLabel("Workout entry markers")).toContainText(
+    "Completed plan",
+  );
+  await expect(page.getByLabel("Workout entry markers")).toContainText(
+    "Skipped plan",
+  );
+  await expect(page.getByLabel("Workout entry markers")).toContainText(
+    "Modified plan",
+  );
+  await expect(page.getByLabel("Workout entry markers")).toContainText(
+    "Unconfirmed plan",
+  );
+  await expect(page.getByLabel("Workout entry markers")).toContainText(
+    "Recorded activity",
+  );
 });
 
 test("opens a read-only day detail panel with full session context", async ({
