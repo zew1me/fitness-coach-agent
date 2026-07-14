@@ -50,17 +50,6 @@ declare const styles: {
   readonly landingText: string;
   readonly landingTitle: string;
   readonly landingWrap: string;
-  readonly loadingAthlete: string;
-  readonly loadingBrand: string;
-  readonly loadingBrandName: string;
-  readonly loadingCard: string;
-  readonly loadingCopy: string;
-  readonly loadingCourse: string;
-  readonly loadingMark: string;
-  readonly loadingPage: string;
-  readonly loadingStatus: string;
-  readonly loadingText: string;
-  readonly loadingTitle: string;
   readonly messageStack: string;
   readonly messageText: string;
   readonly messagesPane: string;
@@ -87,9 +76,6 @@ declare const styles: {
   readonly shell: string;
   readonly starterButton: string;
   readonly starterRow: string;
-  readonly statusPulse: string;
-  readonly courseLine: string;
-  readonly finishLine: string;
   readonly topbar: string;
   readonly topbarActions: string;
   readonly uploadBadge: string;
