@@ -5,6 +5,7 @@
  * makes on first paint so specs run without a live Supabase / R2 / OpenAI:
  *   - GET  /api/oauth/browser-token        → a fake browser session token
  *   - GET  /api/chat/thread                → an empty thread (override per-spec)
+ *   - GET  /api/chat/model-state/lease     → no active turn lease
  *   - GET  /api/engine/get-athlete-summary → a minimal onboarding profile
  *   - POST /api/chat/attachments/presign   → a presign that points at example.com
  *   - PUT  https://example.com/upload      → 200 (hermetic upload sink)
@@ -45,6 +46,17 @@ export async function mockAuthenticatedSession(page: Page): Promise<void> {
           updated_at: "2026-01-01T00:00:00Z",
           user_id: TEST_USER_ID,
         },
+      }),
+    }),
+  );
+
+  await page.route("**/api/chat/model-state/lease", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        expires_at: null,
+        in_flight: false,
       }),
     }),
   );
