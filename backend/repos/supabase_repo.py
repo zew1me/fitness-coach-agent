@@ -398,27 +398,35 @@ class SupabaseRepository:
         user_id: str,
         candidate_id: str,
         status: RecalibrationCandidateStatus,
-        manual_threshold: SportThreshold | None = None,
-    ) -> ThresholdRecalibrationCandidate:
+        threshold: SportThreshold | None = None,
+    ) -> tuple[ThresholdRecalibrationCandidate, SportThreshold | None]:
         client = self._require_client()
-        payload: dict[str, object] = {
-            "decided_at": datetime.now(UTC).isoformat(),
-            "status": status,
-        }
-        if manual_threshold is not None:
-            payload["manual_threshold"] = manual_threshold.model_dump(mode="json")
-        response = (
-            client.table("threshold_recalibration_candidates")
-            .update(payload)
-            .eq("id", candidate_id)
-            .eq("user_id", user_id)
-            .eq("status", "pending")
-            .execute()
-        )
-        rows = response.data or []
-        if not rows:
+        threshold_payload = None
+        if threshold is not None:
+            threshold_payload = threshold.model_dump(
+                mode="json", exclude={"created_at", "updated_at", "superseded_at"}
+            )
+            if not threshold_payload.get("id"):
+                threshold_payload["id"] = str(uuid4())
+        response = client.rpc(
+            "decide_recalibration_candidate_atomic",
+            {
+                "p_user_id": user_id,
+                "p_candidate_id": candidate_id,
+                "p_status": status,
+                "p_threshold": threshold_payload,
+            },
+        ).execute()
+        result = response.data
+        if not result:
             raise RecordNotFoundError("Recalibration candidate not found.")
-        return ThresholdRecalibrationCandidate.model_validate(rows[0])
+        candidate = ThresholdRecalibrationCandidate.model_validate(result["candidate"])
+        saved_threshold = (
+            SportThreshold.model_validate(result["threshold"])
+            if result.get("threshold") is not None
+            else None
+        )
+        return candidate, saved_threshold
 
     # ── Activities ────────────────────────────────────────────
 

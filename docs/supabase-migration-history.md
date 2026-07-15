@@ -15,8 +15,10 @@
 - `20260703094500_remove_tool_calls_from_model_state.sql` — one-time cleanup of all alpha tool-call items from durable replay state
 - `20260703110000_plan_workout_atomic_rpc.sql` — service-role RPCs that atomically maintain plan workout/activity links
 - `20260706000000_create_training_plan_atomic.sql` — service-role RPC for atomic active training plan creation
+- `20260707000000_threshold_recalibration_candidates.sql` — athlete-reviewed threshold candidates and atomic candidate creation
 - `20260708000000_intervals_connections.sql` — encrypted Intervals.icu OAuth connection storage
 - `20260714120000_remove_lingering_superseded_plan_workouts.sql` — one-time cleanup of lingering future scheduled workouts on non-active plans (pre-#312)
+- `20260715035133_atomic_recalibration_candidate_decision.sql` — service-role RPC for atomic candidate decisions and threshold replacement
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -415,3 +417,27 @@ locally). Preview and production are separate Supabase projects and must each be
 linked and applied independently. The migration is a no-op in an already-clean
 environment and only removes rows the app no longer surfaces, so no maintenance
 window is required.
+
+## 20260715035133 — atomic recalibration candidate decisions (2026-07-15)
+
+**File:** `supabase/migrations/20260715035133_atomic_recalibration_candidate_decision.sql`
+
+**Change:** Adds `decide_recalibration_candidate_atomic(p_user_id,
+p_candidate_id, p_status, p_threshold)`, a service-role-only RPC that locks a
+pending `threshold_recalibration_candidates` row, conditionally supersedes the
+active threshold for that athlete and sport, inserts the accepted/manual
+replacement, and records the candidate decision in one transaction. The RPC
+returns both the decided candidate and persisted threshold as one JSON object.
+
+**Why:** The previous endpoint saved a threshold before conditionally changing
+the candidate from `pending`. Two concurrent accepts could both insert threshold
+history before one lost the candidate-status update. The row lock turns pending
+status into a single-winner claim; after the winner commits, a waiting caller
+observes a non-pending candidate and returns a conflict without writing.
+
+**Security note:** The function uses an empty `search_path`, fully qualifies all
+relations, revokes execution from `public`, `anon`, and `authenticated`, and
+grants execution only to `service_role`.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Additive migration; no backfill or data rewrite required.
