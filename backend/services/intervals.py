@@ -210,7 +210,14 @@ class IntervalsOAuthService:
         return self._status_from_record(connection)
 
     def get_status(self, user_id: str) -> IntervalsConnectionStatus:
-        return self._status_from_record(self._repository.get_active_connection(user_id))
+        record = self._repository.get_active_connection(user_id)
+        if record is None and _dev_bypass_state() == "active":
+            return IntervalsConnectionStatus(
+                connected=True,
+                intervals_athlete_id=settings.intervals_dev_athlete_id.strip(),
+                scopes=["ACTIVITY:READ"],
+            )
+        return self._status_from_record(record)
 
     def resolve_auth(self, user_id: str) -> IntervalsAuthContext:
         bypass_state = _dev_bypass_state()

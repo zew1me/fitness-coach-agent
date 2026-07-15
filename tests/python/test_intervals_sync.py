@@ -1,10 +1,16 @@
 import base64
+from collections.abc import Callable
 from datetime import UTC, date, datetime
+from typing import Any, cast
 
 import httpx
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+import api.index as api_index
+from backend.models.auth import UserContext
 from backend.models.intervals import IntervalsConnectionCreate, IntervalsConnectionRecord
+from backend.models.training import Activity
 from backend.services.intervals import (
     IntervalsAuthContext,
     IntervalsConfigurationError,
@@ -14,6 +20,27 @@ from backend.services.intervals import (
     TokenCipher,
     map_intervals_activity,
 )
+
+_DEPENDENCY_OVERRIDE_MISSING = object()
+
+
+def _override_require_user_context(user_context: UserContext) -> Callable[[], None]:
+    previous = api_index.app.dependency_overrides.get(
+        api_index.require_user_context,
+        _DEPENDENCY_OVERRIDE_MISSING,
+    )
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: user_context
+
+    def restore() -> None:
+        if previous is _DEPENDENCY_OVERRIDE_MISSING:
+            api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
+        else:
+            api_index.app.dependency_overrides[api_index.require_user_context] = cast(
+                Callable[..., Any],
+                previous,
+            )
+
+    return restore
 
 
 class InMemoryIntervalsRepository:
@@ -55,6 +82,41 @@ class InMemoryIntervalsRepository:
             return False
         row.revoked_at = datetime.now(UTC)
         return True
+
+
+class InMemoryActivityRepository:
+    def __init__(self, existing_keys: set[str] | None = None) -> None:
+        self.existing_keys = existing_keys or set()
+        self.created: list[Activity] = []
+
+    async def list_synced_intervals_keys(self, _user_id: str) -> set[str]:
+        return set(self.existing_keys)
+
+    async def create_activity(self, activity: Activity) -> Activity:
+        persisted = activity.model_copy(update={"id": f"activity-{len(self.created) + 1}"})
+        self.created.append(persisted)
+        return persisted
+
+    async def list_plan_workouts_between(self, *_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+
+async def _post_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    service: IntervalsOAuthService,
+    activity_repo: InMemoryActivityRepository,
+    payload: dict[str, object],
+) -> httpx.Response:
+    monkeypatch.setattr(api_index, "intervals_service", service)
+    monkeypatch.setattr(api_index, "repo", activity_repo)
+    restore_override = _override_require_user_context(UserContext(user_id="user-1"))
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/api/intervals/sync", json=payload)
+    finally:
+        restore_override()
 
 
 @pytest.fixture(autouse=True)
@@ -154,6 +216,25 @@ def test_oauth_auth_decrypts_stored_token() -> None:
 def test_oauth_auth_requires_active_connection() -> None:
     with pytest.raises(IntervalsNotConnectedError, match="not connected"):
         _ = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth("user-1")
+
+
+def test_dev_bypass_returns_synthetic_connected_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_api_key",
+        "local-api-key",
+    )
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_athlete_id",
+        "i135168",
+    )
+
+    status = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).get_status("user-1")
+
+    assert status.connected is True
+    assert status.intervals_athlete_id == "i135168"
+    assert status.scopes == ["ACTIVITY:READ"]
 
 
 @pytest.mark.asyncio
@@ -290,3 +371,134 @@ def test_map_intervals_activity_normalizes_sports(
 )
 def test_map_intervals_activity_skips_missing_identity_or_date(item: dict[str, object]) -> None:
     assert map_intervals_activity("user-1", item) is None
+
+
+@pytest.mark.asyncio
+async def test_sync_endpoint_persists_new_and_skips_existing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "i100",
+                    "type": "Ride",
+                    "start_date_local": "2026-07-14T08:00:00",
+                },
+                {
+                    "id": "i200",
+                    "type": "Run",
+                    "start_date_local": "2026-07-14T09:00:00",
+                    "moving_time": 1800,
+                },
+            ],
+        )
+
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_api_key",
+        "local-api-key",
+    )
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_athlete_id",
+        "i135168",
+    )
+    service = IntervalsOAuthService(
+        repository=InMemoryIntervalsRepository(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    activity_repo = InMemoryActivityRepository(existing_keys={"intervals:i100"})
+
+    response = await _post_sync(
+        monkeypatch,
+        service=service,
+        activity_repo=activity_repo,
+        payload={"days": 14},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["synced"] == 1
+    assert response.json()["skipped"] == 1
+    assert len(response.json()["activities"]) == 1
+    assert response.json()["activities"][0]["source_file_key"] == "intervals:i200"
+    assert [activity.source_file_key for activity in activity_repo.created] == ["intervals:i200"]
+
+
+@pytest.mark.asyncio
+async def test_sync_endpoint_returns_409_without_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = await _post_sync(
+        monkeypatch,
+        service=IntervalsOAuthService(repository=InMemoryIntervalsRepository()),
+        activity_repo=InMemoryActivityRepository(),
+        payload={"days": 14},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Intervals.icu is not connected."
+
+
+@pytest.mark.asyncio
+async def test_sync_endpoint_returns_502_for_intervals_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_api_key",
+        "local-api-key",
+    )
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_athlete_id",
+        "i135168",
+    )
+    service = IntervalsOAuthService(
+        repository=InMemoryIntervalsRepository(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    response = await _post_sync(
+        monkeypatch,
+        service=service,
+        activity_repo=InMemoryActivityRepository(),
+        payload={"days": 14},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Intervals.icu activities could not be fetched."
+
+
+@pytest.mark.asyncio
+async def test_sync_endpoint_returns_503_for_half_configured_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_api_key",
+        "local-api-key",
+    )
+
+    response = await _post_sync(
+        monkeypatch,
+        service=IntervalsOAuthService(repository=InMemoryIntervalsRepository()),
+        activity_repo=InMemoryActivityRepository(),
+        payload={"days": 14},
+    )
+
+    assert response.status_code == 503
+    assert "must both be configured" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_sync_endpoint_rejects_days_outside_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = await _post_sync(
+        monkeypatch,
+        service=IntervalsOAuthService(repository=InMemoryIntervalsRepository()),
+        activity_repo=InMemoryActivityRepository(),
+        payload={"days": 0},
+    )
+
+    assert response.status_code == 422

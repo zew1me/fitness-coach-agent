@@ -87,14 +87,20 @@ from backend.services.goal_service import (
 )
 from backend.services.intervals import (
     IntervalsConfigurationError,
+    IntervalsNotConnectedError,
     IntervalsOAuthExchangeError,
     IntervalsOAuthService,
     IntervalsStateError,
+    IntervalsSyncError,
+    map_intervals_activity,
 )
 from backend.services.r2 import R2Service
 
 ActivityPersistenceEndpoint = Literal[
-    "process_uploaded_file", "save_activity_from_text", "process_uploaded_zip"
+    "process_uploaded_file",
+    "save_activity_from_text",
+    "process_uploaded_zip",
+    "intervals_sync",
 ]
 
 configure_logging(debug=settings.app_env == "development")
@@ -494,6 +500,66 @@ async def intervals_disconnect(
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
+
+
+class IntervalsSyncRequest(BaseModel):
+    days: int = Field(default=14, ge=1, le=90)
+
+
+@app.post("/api/intervals/sync")
+async def intervals_sync(
+    payload: IntervalsSyncRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    try:
+        auth = intervals_service.resolve_auth(user_id)
+    except IntervalsNotConnectedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (
+        IntervalsConfigurationError,
+        IntervalsOAuthExchangeError,
+        IntervalsRepositoryNotConfiguredError,
+    ) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    newest = datetime.now(UTC).date()
+    oldest = newest - timedelta(days=payload.days - 1)
+    try:
+        items = await intervals_service.fetch_recent_activities(
+            auth,
+            oldest=oldest,
+            newest=newest,
+        )
+    except IntervalsSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    existing_keys = await _activity_repo_call(
+        repo.list_synced_intervals_keys(user_id),
+        detail="Failed to load synced Intervals activities.",
+        log_message=f"list_synced_intervals_keys failed for user_id={user_id}",
+    )
+    synced_activities: list[object] = []
+    skipped = 0
+    for item in items:
+        activity = map_intervals_activity(user_id, item)
+        if activity is None or activity.source_file_key in existing_keys:
+            skipped += 1
+            continue
+        persisted = await _persist_extracted_activity(
+            user_id,
+            activity,
+            calling_endpoint="intervals_sync",
+        )
+        synced_activities.append(persisted["activity"])
+        if activity.source_file_key is not None:
+            existing_keys.add(activity.source_file_key)
+
+    return {
+        "synced": len(synced_activities),
+        "skipped": skipped,
+        "activities": synced_activities,
+    }
 
 
 @app.post("/api/oauth/authorize/decision")
