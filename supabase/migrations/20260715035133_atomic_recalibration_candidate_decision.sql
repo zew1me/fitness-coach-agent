@@ -19,7 +19,7 @@ declare
   claimed_candidate public.threshold_recalibration_candidates%rowtype;
   decided_candidate public.threshold_recalibration_candidates%rowtype;
   saved_threshold public.sport_thresholds%rowtype;
-  decision_time timestamptz := timezone('utc', now());
+  decision_time timestamptz := now();
 begin
   if p_status not in ('accepted', 'kept_current', 'manual_entered') then
     raise exception 'Invalid recalibration candidate status: %', p_status

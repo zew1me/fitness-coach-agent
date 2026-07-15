@@ -299,6 +299,8 @@ class FakeSupabaseClient:
         candidate_id = params["p_candidate_id"]
         status = params["p_status"]
         threshold = params["p_threshold"]
+        if status == "manual_entered" and threshold is None:
+            raise ValueError("A threshold is required for recalibration status manual_entered")
         candidate = next(
             (
                 row
@@ -831,7 +833,7 @@ async def test_decide_recalibration_candidate_rejects_already_decided_candidate(
         await repo.decide_recalibration_candidate(
             user_id="athlete-1",
             candidate_id="candidate-1",
-            status="manual_entered",
+            status="kept_current",
             threshold=None,
         )
 

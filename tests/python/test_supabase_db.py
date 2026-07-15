@@ -245,6 +245,15 @@ async def test_recalibration_candidate_decision_claim_and_threshold_write_are_at
     active_thresholds = await repo.get_active_thresholds(unique_user)
     assert len(active_thresholds) == 1
     assert active_thresholds[0].lt2_pace_sec_per_km == 250
+    history_response = (
+        repo._require_client()
+        .table("sport_thresholds")
+        .select("id")
+        .eq("user_id", unique_user)
+        .eq("sport", "running")
+        .execute()
+    )
+    assert len(history_response.data or []) == 1
 
 
 @pytest.mark.asyncio
