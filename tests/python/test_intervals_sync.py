@@ -1,14 +1,18 @@
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
+import httpx
 import pytest
 
 from backend.models.intervals import IntervalsConnectionCreate, IntervalsConnectionRecord
 from backend.services.intervals import (
+    IntervalsAuthContext,
     IntervalsConfigurationError,
     IntervalsNotConnectedError,
     IntervalsOAuthService,
+    IntervalsSyncError,
     TokenCipher,
+    map_intervals_activity,
 )
 
 
@@ -150,3 +154,139 @@ def test_oauth_auth_decrypts_stored_token() -> None:
 def test_oauth_auth_requires_active_connection() -> None:
     with pytest.raises(IntervalsNotConnectedError, match="not connected"):
         _ = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth("user-1")
+
+
+@pytest.mark.asyncio
+async def test_fetch_recent_activities_uses_auth_and_date_window() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/athlete/i135168/activities"
+        assert dict(request.url.params) == {
+            "oldest": "2026-07-01",
+            "newest": "2026-07-14",
+        }
+        assert request.headers["Authorization"] == "Bearer oauth-access-token"
+        return httpx.Response(200, json=[{"id": "activity-1"}])
+
+    service = IntervalsOAuthService(
+        repository=InMemoryIntervalsRepository(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    activities = await service.fetch_recent_activities(
+        IntervalsAuthContext(
+            athlete_id="i135168",
+            auth_header={"Authorization": "Bearer oauth-access-token"},
+            mode="oauth",
+        ),
+        oldest=date(2026, 7, 1),
+        newest=date(2026, 7, 14),
+    )
+
+    assert activities == [{"id": "activity-1"}]
+
+
+@pytest.mark.asyncio
+async def test_fetch_recent_activities_wraps_http_errors() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    service = IntervalsOAuthService(
+        repository=InMemoryIntervalsRepository(),
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    auth = IntervalsAuthContext(
+        athlete_id="i135168",
+        auth_header={"Authorization": "Bearer oauth-access-token"},
+        mode="oauth",
+    )
+
+    with pytest.raises(IntervalsSyncError, match="could not be fetched"):
+        _ = await service.fetch_recent_activities(
+            auth,
+            oldest=date(2026, 7, 1),
+            newest=date(2026, 7, 14),
+        )
+
+
+def test_map_intervals_activity_maps_summary_fields() -> None:
+    item = {
+        "id": "i987654321",
+        "type": "VirtualRide",
+        "start_date": "2026-07-14T15:30:00Z",
+        "start_date_local": "2026-07-14T08:30:00",
+        "moving_time": None,
+        "elapsed_time": 3661,
+        "distance": 40123.4,
+        "total_elevation_gain": 512.6,
+        "average_heartrate": 147.4,
+        "max_heartrate": 176,
+        "average_watts": 204.6,
+        "icu_weighted_avg_watts": 221.2,
+        "average_cadence": 88.6,
+        "icu_training_load": 74.8,
+        "icu_intensity": 86.04798,
+        "perceived_exertion": 7,
+    }
+
+    activity = map_intervals_activity("user-1", item)
+
+    assert activity is not None
+    assert activity.sport == "cycling"
+    assert activity.activity_date == date(2026, 7, 14)
+    assert activity.started_at == datetime(2026, 7, 14, 15, 30, tzinfo=UTC)
+    assert activity.duration_seconds == 3661
+    assert activity.distance_meters == 40123.4
+    assert activity.elevation_gain_meters == 512.6
+    assert activity.avg_hr_bpm == 147
+    assert activity.max_hr_bpm == 176
+    assert activity.avg_power_watts == 205
+    assert activity.normalized_power_watts == 221
+    assert activity.avg_cadence_rpm == 89
+    assert activity.tss == 74.8
+    assert activity.intensity_factor == pytest.approx(0.8604798)
+    assert activity.rpe == 7
+    assert activity.source == "intervals_sync"
+    assert activity.source_file_key == "intervals:i987654321"
+    assert activity.raw_extraction == {"intervals_summary": item}
+
+
+@pytest.mark.parametrize(
+    ("intervals_type", "expected"),
+    [
+        ("Ride", "cycling"),
+        ("Run", "running"),
+        ("Swim", "swimming"),
+        ("Rowing", "rowing"),
+        ("Hike", "hiking"),
+        ("Walk", "walking"),
+        ("WeightTraining", "strength"),
+        ("UnknownSport", "general"),
+    ],
+)
+def test_map_intervals_activity_normalizes_sports(
+    intervals_type: str,
+    expected: str,
+) -> None:
+    activity = map_intervals_activity(
+        "user-1",
+        {
+            "id": "activity-1",
+            "type": intervals_type,
+            "start_date_local": "2026-07-14T08:30:00",
+        },
+    )
+
+    assert activity is not None
+    assert activity.sport == expected
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"start_date_local": "2026-07-14T08:30:00"},
+        {"id": None, "start_date_local": "2026-07-14T08:30:00"},
+        {"id": "activity-1"},
+        {"id": "activity-1", "start_date_local": "not-a-date"},
+    ],
+)
+def test_map_intervals_activity_skips_missing_identity_or_date(item: dict[str, object]) -> None:
+    assert map_intervals_activity("user-1", item) is None

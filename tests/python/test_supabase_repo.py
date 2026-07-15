@@ -802,6 +802,40 @@ async def test_create_activity_builds_summary_when_activity_has_default_summary(
 
 
 @pytest.mark.asyncio
+async def test_list_synced_intervals_keys_is_user_and_source_scoped() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            activity_rows=[
+                {
+                    "user_id": "athlete-1",
+                    "source": "intervals_sync",
+                    "source_file_key": "intervals:i100",
+                },
+                {
+                    "user_id": "athlete-1",
+                    "source": "manual",
+                    "source_file_key": "intervals:i200",
+                },
+                {
+                    "user_id": "athlete-2",
+                    "source": "intervals_sync",
+                    "source_file_key": "intervals:i300",
+                },
+                {
+                    "user_id": "athlete-1",
+                    "source": "intervals_sync",
+                    "source_file_key": None,
+                },
+            ]
+        )
+    )
+
+    keys = await repo.list_synced_intervals_keys("athlete-1")
+
+    assert keys == {"intervals:i100"}
+
+
+@pytest.mark.asyncio
 async def test_upsert_athlete_profile_persists_dietary_restrictions() -> None:
     repo = SupabaseRepository(client=FakeSupabaseClient())
 

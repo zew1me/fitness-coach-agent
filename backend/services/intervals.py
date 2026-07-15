@@ -6,9 +6,9 @@ import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
-from urllib.parse import urlencode
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, Literal, Protocol, cast
+from urllib.parse import quote, urlencode
 
 import httpx
 import jwt
@@ -24,14 +24,39 @@ from backend.models.intervals import (
     IntervalsOAuthState,
     IntervalsTokenResponse,
 )
+from backend.models.training import Activity
 from backend.repos.intervals_repo import IntervalsRepository
 
 logger = logging.getLogger(__name__)
 
 INTERVALS_AUTHORIZE_URL = "https://intervals.icu/oauth/authorize"
 INTERVALS_TOKEN_URL = "https://intervals.icu/api/oauth/token"
+INTERVALS_API_BASE = "https://intervals.icu/api/v1"
 INTERVALS_DEFAULT_SCOPE = "ACTIVITY:READ,WELLNESS:READ,CALENDAR:READ"
 INTERVALS_STATE_TYPE = "intervals_oauth_state"
+_ISO_DATE_LENGTH = 10
+
+_INTERVALS_SPORT_MAP = {
+    "ride": "cycling",
+    "virtualride": "cycling",
+    "ebikeride": "cycling",
+    "emountainbikeride": "cycling",
+    "mountainbikeride": "cycling",
+    "gravelride": "cycling",
+    "handcycle": "cycling",
+    "velomobile": "cycling",
+    "run": "running",
+    "virtualrun": "running",
+    "trailrun": "running",
+    "swim": "swimming",
+    "rowing": "rowing",
+    "hike": "hiking",
+    "walk": "walking",
+    "snowshoe": "walking",
+    "weighttraining": "strength",
+    "crossfit": "strength",
+    "yoga": "yoga",
+}
 
 
 class IntervalsConfigurationError(RuntimeError):
@@ -219,6 +244,36 @@ class IntervalsOAuthService:
             mode="oauth",
         )
 
+    async def fetch_recent_activities(
+        self,
+        auth: IntervalsAuthContext,
+        *,
+        oldest: date,
+        newest: date,
+    ) -> list[dict[str, Any]]:
+        athlete_id = quote(auth.athlete_id, safe="")
+        url = f"{INTERVALS_API_BASE}/athlete/{athlete_id}/activities"
+        async with self._http_client_factory() as client:
+            try:
+                response = await client.get(
+                    url,
+                    params={"oldest": oldest.isoformat(), "newest": newest.isoformat()},
+                    headers=auth.auth_header,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise IntervalsSyncError("Intervals.icu activities could not be fetched.") from exc
+
+        try:
+            payload: object = response.json()
+        except ValueError as exc:
+            raise IntervalsSyncError(
+                "Intervals.icu returned an invalid activities response."
+            ) from exc
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise IntervalsSyncError("Intervals.icu returned an invalid activities response.")
+        return [cast(dict[str, Any], item) for item in payload]
+
     def disconnect(self, user_id: str) -> IntervalsConnectionStatus:
         self._repository.revoke_active_connection(user_id)
         return IntervalsConnectionStatus(connected=False)
@@ -275,3 +330,94 @@ class IntervalsOAuthService:
             or not settings.intervals_token_encryption_secret.strip()
         ):
             raise IntervalsConfigurationError("Intervals.icu integration is not configured yet.")
+
+
+def map_intervals_activity(user_id: str, item: dict[str, Any]) -> Activity | None:
+    raw_intervals_id = item.get("id")
+    if isinstance(raw_intervals_id, bool) or not isinstance(raw_intervals_id, str | int):
+        return None
+    intervals_id = str(raw_intervals_id).strip()
+    activity_date, started_at = _parse_activity_dates(item)
+    if not intervals_id or activity_date is None:
+        return None
+
+    duration_seconds = _first_positive_int(item.get("moving_time"), item.get("elapsed_time"))
+    # Intervals reports intensity as a percentage (for example 86.0 means IF 0.86).
+    intensity = _optional_float(item.get("icu_intensity"))
+    try:
+        return Activity(
+            user_id=user_id,
+            sport=_map_intervals_sport(item.get("type")),
+            activity_date=activity_date,
+            started_at=started_at,
+            duration_seconds=duration_seconds,
+            distance_meters=_optional_float(item.get("distance")),
+            elevation_gain_meters=_optional_float(item.get("total_elevation_gain")),
+            avg_hr_bpm=_optional_int(item.get("average_heartrate")),
+            max_hr_bpm=_optional_int(item.get("max_heartrate")),
+            avg_power_watts=_optional_int(item.get("average_watts")),
+            normalized_power_watts=_optional_int(item.get("icu_weighted_avg_watts")),
+            avg_cadence_rpm=_optional_int(item.get("average_cadence")),
+            tss=_optional_float(item.get("icu_training_load")),
+            intensity_factor=(intensity / 100 if intensity is not None else None),
+            rpe=_optional_int(item.get("perceived_exertion")),
+            source="intervals_sync",
+            source_file_key=f"intervals:{intervals_id}",
+            raw_extraction={"intervals_summary": item},
+        )
+    except (TypeError, ValueError):
+        logger.warning("skipping malformed Intervals activity id=%s", intervals_id)
+        return None
+
+
+def _map_intervals_sport(value: object) -> str:
+    normalized = str(value or "").strip().casefold().replace("_", "").replace(" ", "")
+    return _INTERVALS_SPORT_MAP.get(normalized, "general")
+
+
+def _parse_activity_dates(item: dict[str, Any]) -> tuple[date | None, datetime | None]:
+    local_value = item.get("start_date_local")
+    absolute_value = item.get("start_date")
+    activity_date = _optional_date(local_value) or _optional_date(absolute_value)
+    started_at = _optional_datetime(absolute_value) or _optional_datetime(local_value)
+    return activity_date, started_at
+
+
+def _optional_date(value: object) -> date | None:
+    if not isinstance(value, str) or len(value) < _ISO_DATE_LENGTH:
+        return None
+    try:
+        return date.fromisoformat(value[:_ISO_DATE_LENGTH])
+    except ValueError:
+        return None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: object) -> int | None:
+    number = _optional_float(value)
+    return round(number) if number is not None else None
+
+
+def _first_positive_int(*values: object) -> int | None:
+    for value in values:
+        number = _optional_int(value)
+        if number is not None and number > 0:
+            return number
+    return None

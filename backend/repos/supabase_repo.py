@@ -499,6 +499,21 @@ class SupabaseRepository:
         )
         return [Activity.model_validate(r) for r in (response.data or [])]
 
+    async def list_synced_intervals_keys(self, user_id: str) -> set[str]:
+        client = self._require_client()
+        response = (
+            client.table("activities")
+            .select("source_file_key")
+            .eq("user_id", user_id)
+            .eq("source", "intervals_sync")
+            .execute()
+        )
+        return {
+            key
+            for row in (response.data or [])
+            if isinstance((key := row.get("source_file_key")), str) and key
+        }
+
     # ── Daily Load Snapshots ──────────────────────────────────
 
     async def upsert_load_snapshots(
