@@ -17,6 +17,7 @@
 - `20260706000000_create_training_plan_atomic.sql` — service-role RPC for atomic active training plan creation
 - `20260708000000_intervals_connections.sql` — encrypted Intervals.icu OAuth connection storage
 - `20260714120000_remove_lingering_superseded_plan_workouts.sql` — one-time cleanup of lingering future scheduled workouts on non-active plans (pre-#312)
+- `20260714130000_activities_intervals_source.sql` — adds `'intervals_sync'` to `activities_source_check` for intervals.icu activity sync (#338)
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -415,3 +416,27 @@ locally). Preview and production are separate Supabase projects and must each be
 linked and applied independently. The migration is a no-op in an already-clean
 environment and only removes rows the app no longer surfaces, so no maintenance
 window is required.
+
+## 20260714130000 — Intervals.icu activity source (2026-07-14)
+
+**File:** `supabase/migrations/20260714130000_activities_intervals_source.sql`
+
+**Change:** Recreates `activities_source_check` with the existing allowed values
+plus `intervals_sync`.
+
+**Why:** Intervals.icu activity sync persists activity summaries through the
+existing `activities` table. Giving synced rows a dedicated source distinguishes
+them from manual and file-upload imports without changing any existing rows.
+
+**Preview before applying:**
+
+```sql
+select distinct source
+from public.activities
+order by source;
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Preview and production are separate Supabase projects and must each be
+linked and applied independently. The migration only widens the allowed source
+values and requires no backfill or maintenance window.
