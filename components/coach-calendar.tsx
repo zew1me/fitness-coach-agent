@@ -13,6 +13,7 @@ import {
   groupCalendarItemsByDay,
   monthLabel,
 } from "../lib/calendar-view";
+import { workoutVisualFamily } from "../lib/calendar-workout-visuals";
 import { loadCalendar, resolvePlannedWorkout } from "../lib/coach-api";
 import type {
   CalendarActivity,
@@ -23,6 +24,7 @@ import { siteConfig } from "../lib/site";
 import type { BrowserTokenResponse } from "../lib/types";
 import { useBrowserSession } from "../lib/use-browser-session";
 
+import { CalendarLegend } from "./calendar-legend";
 import styles from "./coach-calendar.module.css";
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -104,8 +106,14 @@ function activityPills(activity: CalendarActivity): string[] {
   return pills;
 }
 
-function plannedChipLabel(workout: CalendarPlannedWorkout): string {
-  return `${workout.sport}: ${workout.title}`;
+function plannedChipLabel(
+  workout: CalendarPlannedWorkout,
+  status?: string,
+): string {
+  const base = `${workout.sport}: ${workout.title}`;
+  return status === undefined
+    ? base
+    : `${base} · ${workoutTypeLabel(workout.workout_type)} · ${status}`;
 }
 
 function activityChipLabel(activity: CalendarActivity): string {
@@ -114,7 +122,30 @@ function activityChipLabel(activity: CalendarActivity): string {
     activity.duration_seconds !== undefined
       ? ` · ${formatMinutes(activity.duration_seconds / 60)}`
       : "";
-  return `${activity.sport}${duration}`;
+  return `Recorded ${activity.sport}${duration}`;
+}
+
+function plannedStatusMarker(status: string): string {
+  switch (status) {
+    case "completed":
+      return "✓";
+    case "skipped":
+      return "×";
+    case "modified":
+      return "△";
+    case "unconfirmed":
+      return "?";
+    default:
+      return "○";
+  }
+}
+
+function dayCellAriaLabel(dayIso: string, items: CalendarDayItems): string {
+  const plannedCount = items.planned.length;
+  const activityCount = items.activities.length;
+  const plannedLabel = `${plannedCount} planned workout${plannedCount === 1 ? "" : "s"}`;
+  const activityLabel = `${activityCount} recorded activit${activityCount === 1 ? "y" : "ies"}`;
+  return `${longDayLabel(dayIso)}. ${plannedLabel}. ${activityLabel}.`;
 }
 
 export function CoachCalendar(): JSX.Element {
@@ -204,20 +235,7 @@ function SignedInCalendar({
             </div>
           </header>
           <div className={styles.gridHeader}>
-            <div className={styles.legend}>
-              <span className={styles.legendItem}>
-                <span
-                  className={`${styles.legendSwatch} ${styles.legendPlanned}`}
-                />
-                Planned workout
-              </span>
-              <span className={styles.legendItem}>
-                <span
-                  className={`${styles.legendSwatch} ${styles.legendActivity}`}
-                />
-                Recorded activity
-              </span>
-            </div>
+            <CalendarLegend />
             <div className={styles.weekdayRow}>
               {WEEKDAY_LABELS.map((label) => (
                 <span className={styles.weekdayCell} key={label}>
@@ -350,24 +368,36 @@ function DayCell({
     .join(" ");
 
   const chips: JSX.Element[] = [
-    ...items.planned.map((workout) => (
-      <span
-        className={`${styles.chip} ${styles.chipPlanned}`}
-        data-status={workout.status}
-        data-testid="calendar-chip-planned"
-        key={`planned-${workout.id}`}
-        title={plannedChipLabel(workout)}
-      >
-        <span className={styles.chipLabel}>{plannedChipLabel(workout)}</span>
-      </span>
-    )),
+    ...items.planned.map((workout) => {
+      const status = derivedWorkoutStatus(workout, todayIso);
+      return (
+        <span
+          className={`${styles.chip} ${styles.chipPlanned} ${styles.workoutVisual}`}
+          data-entry-kind="planned"
+          data-status={status}
+          data-testid="calendar-chip-planned"
+          data-workout-family={workoutVisualFamily(workout.workout_type)}
+          key={`planned-${workout.id}`}
+          title={plannedChipLabel(workout, status)}
+        >
+          <span aria-hidden="true" className={styles.chipMarker}>
+            {plannedStatusMarker(status)}
+          </span>
+          <span className={styles.chipLabel}>{plannedChipLabel(workout)}</span>
+        </span>
+      );
+    }),
     ...items.activities.map((activity) => (
       <span
         className={`${styles.chip} ${styles.chipActivity}`}
+        data-entry-kind="recorded"
         data-testid="calendar-chip-activity"
         key={`activity-${activity.id}`}
         title={activityChipLabel(activity)}
       >
+        <span aria-hidden="true" className={styles.chipMarker}>
+          ●
+        </span>
         <span className={styles.chipLabel}>{activityChipLabel(activity)}</span>
       </span>
     )),
@@ -376,7 +406,7 @@ function DayCell({
 
   return (
     <button
-      aria-label={longDayLabel(dayIso)}
+      aria-label={dayCellAriaLabel(dayIso, items)}
       className={cellClass}
       data-date={dayIso}
       data-testid="calendar-day"
@@ -514,7 +544,10 @@ function PlannedWorkoutDetail({
   const status = derivedWorkoutStatus(workout, todayIso);
 
   return (
-    <article className={`${styles.detailItem} ${styles.detailItemPlanned}`}>
+    <article
+      className={`${styles.detailItem} ${styles.detailItemPlanned} ${styles.workoutVisual}`}
+      data-workout-family={workoutVisualFamily(workout.workout_type)}
+    >
       <h4 className={styles.detailItemTitle}>{workout.title}</h4>
       <div className={styles.detailMetaRow}>
         {plannedWorkoutPills(workout, status).map((pill) => (
