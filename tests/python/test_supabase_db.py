@@ -18,7 +18,9 @@ After applying 20260624055541:
   bun run test:db             # all db tests GREEN
 """
 
+import asyncio
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from datetime import date
@@ -28,10 +30,10 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import api.index as api_index
-from backend.models.athlete import AthleteProfile, SportThreshold
+from backend.models.athlete import AthleteProfile, SportThreshold, ThresholdRecalibrationCandidate
 from backend.models.auth import UserContext
 from backend.models.training import TrainingPlan
-from backend.repos.supabase_repo import SupabaseRepository
+from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
 
 _SUPABASE_CONFIGURED = bool(
     os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -192,6 +194,57 @@ async def test_create_training_plan_atomic_rpc_returns_persisted_plan(
     assert created.user_id == unique_user
     assert created.status == "active"
     assert created.title == "Half-marathon build"
+
+
+@pytest.mark.asyncio
+async def test_recalibration_candidate_decision_claim_and_threshold_write_are_atomic(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Concurrent accepts produce one decision and one active threshold."""
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["running"], coaching_state="active")
+    )
+    candidate = await repo.create_recalibration_candidate(
+        ThresholdRecalibrationCandidate(
+            user_id=unique_user,
+            sport="running",
+            confidence="high",
+            evidence_activity_id="activity-1",
+            explanation="Faster 5K.",
+            candidate_threshold=SportThreshold(
+                user_id=unique_user,
+                sport="running",
+                lt2_pace_sec_per_km=250,
+                source="file",
+            ),
+        )
+    )
+    threshold = candidate.candidate_threshold.model_copy(update={"id": None})
+    barrier = threading.Barrier(2)
+
+    def decide() -> object:
+        local_repo = SupabaseRepository()
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            local_repo.decide_recalibration_candidate(
+                user_id=unique_user,
+                candidate_id=candidate.id or "",
+                status="accepted",
+                threshold=threshold,
+            )
+        )
+
+    outcomes = await asyncio.gather(
+        asyncio.to_thread(decide),
+        asyncio.to_thread(decide),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(outcome, BaseException) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, RecordNotFoundError) for outcome in outcomes) == 1
+    active_thresholds = await repo.get_active_thresholds(unique_user)
+    assert len(active_thresholds) == 1
+    assert active_thresholds[0].lt2_pace_sec_per_km == 250
 
 
 @pytest.mark.asyncio

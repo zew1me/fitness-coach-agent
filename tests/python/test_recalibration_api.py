@@ -111,15 +111,19 @@ class RecalibrationRepository:
         user_id: str,
         candidate_id: str,
         status: str,
-        manual_threshold: SportThreshold | None = None,
-    ) -> ThresholdRecalibrationCandidate:
+        threshold: SportThreshold | None = None,
+    ) -> tuple[ThresholdRecalibrationCandidate, SportThreshold | None]:
         if self.raise_not_found_on_decide:
             raise RecordNotFoundError("Recalibration candidate not found.")
         candidate = self.candidates_by_id[candidate_id]
+        saved_threshold = None
+        if threshold is not None:
+            saved_threshold = threshold.model_copy(update={"id": threshold.id or "new-threshold"})
+            self.upserted.append(saved_threshold)
         decided = candidate.model_copy(
             update={
                 "decided_at": NOW,
-                "manual_threshold": manual_threshold,
+                "manual_threshold": saved_threshold if status == "manual_entered" else None,
                 "status": status,
             }
         )
@@ -127,12 +131,12 @@ class RecalibrationRepository:
         self.decisions.append(
             {
                 "candidate_id": candidate_id,
-                "manual_threshold": manual_threshold,
+                "threshold": threshold,
                 "status": status,
                 "user_id": user_id,
             }
         )
-        return decided
+        return decided, saved_threshold
 
 
 async def _post(body: dict[str, Any]) -> Any:
