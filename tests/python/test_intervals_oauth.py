@@ -99,6 +99,9 @@ def configured_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
         "backend.services.intervals.settings.intervals_token_encryption_secret",
         "encryption-secret-123",
     )
+    monkeypatch.setattr("backend.services.intervals.settings.intervals_dev_api_key", "")
+    monkeypatch.setattr("backend.services.intervals.settings.intervals_dev_athlete_id", "")
+    monkeypatch.delenv("VERCEL_URL", raising=False)
 
 
 pytestmark = pytest.mark.usefixtures("configured_intervals")

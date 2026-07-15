@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Literal, Protocol
 from urllib.parse import urlencode
 
 import httpx
@@ -42,6 +44,35 @@ class IntervalsStateError(ValueError):
 
 class IntervalsOAuthExchangeError(RuntimeError):
     """Raised when Intervals rejects or malforms the token exchange."""
+
+
+class IntervalsNotConnectedError(RuntimeError):
+    """Raised when activity sync is requested without an active connection."""
+
+
+class IntervalsSyncError(RuntimeError):
+    """Raised when Intervals activity sync cannot fetch or validate activities."""
+
+
+@dataclass(frozen=True)
+class IntervalsAuthContext:
+    athlete_id: str
+    auth_header: dict[str, str]
+    mode: Literal["oauth", "dev_api_key"]
+
+
+def _dev_bypass_state() -> Literal["active", "off", "half_configured"]:
+    """Return the fail-closed state of the local API-key bypass."""
+    if os.environ.get("VERCEL_URL"):
+        return "off"
+
+    api_key = settings.intervals_dev_api_key.strip()
+    athlete_id = settings.intervals_dev_athlete_id.strip()
+    if api_key and athlete_id:
+        return "active"
+    if api_key or athlete_id:
+        return "half_configured"
+    return "off"
 
 
 class TokenCipher:
@@ -155,6 +186,38 @@ class IntervalsOAuthService:
 
     def get_status(self, user_id: str) -> IntervalsConnectionStatus:
         return self._status_from_record(self._repository.get_active_connection(user_id))
+
+    def resolve_auth(self, user_id: str) -> IntervalsAuthContext:
+        bypass_state = _dev_bypass_state()
+        if bypass_state == "half_configured":
+            raise IntervalsConfigurationError(
+                "Intervals local development credentials must both be configured."
+            )
+        if bypass_state == "active":
+            athlete_id = settings.intervals_dev_athlete_id.strip()
+            api_key = settings.intervals_dev_api_key.strip()
+            encoded = base64.b64encode(f"API_KEY:{api_key}".encode()).decode()
+            logger.warning(
+                "using local Intervals API-key bypass athlete_id=%s",
+                athlete_id,
+            )
+            return IntervalsAuthContext(
+                athlete_id=athlete_id,
+                auth_header={"Authorization": f"Basic {encoded}"},
+                mode="dev_api_key",
+            )
+
+        connection = self._repository.get_active_connection(user_id)
+        if connection is None:
+            raise IntervalsNotConnectedError("Intervals.icu is not connected.")
+        token = TokenCipher(settings.intervals_token_encryption_secret).decrypt(
+            connection.access_token_ciphertext
+        )
+        return IntervalsAuthContext(
+            athlete_id=connection.intervals_athlete_id,
+            auth_header={"Authorization": f"Bearer {token}"},
+            mode="oauth",
+        )
 
     def disconnect(self, user_id: str) -> IntervalsConnectionStatus:
         self._repository.revoke_active_connection(user_id)

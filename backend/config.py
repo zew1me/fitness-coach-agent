@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     intervals_client_id: str = ""
     intervals_client_secret: str = ""
     intervals_token_encryption_secret: str = ""
+    intervals_dev_api_key: str = ""
+    intervals_dev_athlete_id: str = ""
 
     @field_validator("openai_activity_text_model")
     @classmethod
