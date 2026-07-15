@@ -39,6 +39,12 @@ export type IntervalsConnectionStatus = {
   scopes: string[];
 };
 
+export type IntervalsSyncResponse = {
+  activities: Record<string, unknown>[];
+  skipped: number;
+  synced: number;
+};
+
 export type AthleteProfile = {
   coaching_state: string;
   dietary_restrictions?: string[];

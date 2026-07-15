@@ -10,6 +10,7 @@ import {
   chatTurnLeaseStatusSchema,
   intervalsAuthorizeResponseSchema,
   intervalsConnectionStatusSchema,
+  intervalsSyncResponseSchema,
   type ParsedChatMessagePage,
   type ParsedChatThreadResponse,
   type ParsedChatTurnLeaseStatus,
@@ -21,6 +22,7 @@ import type {
   BrowserTokenResponse,
   FitnessMetrics,
   IntervalsConnectionStatus,
+  IntervalsSyncResponse,
   PresignUploadRequest,
   PresignUploadResponse,
 } from "./types";
@@ -253,6 +255,18 @@ export async function disconnectIntervals(
     fetchImpl,
   );
   return intervalsConnectionStatusSchema.parse(raw);
+}
+
+export async function syncIntervals(
+  days = 14,
+  fetchImpl: FetchLike = fetch,
+): Promise<IntervalsSyncResponse> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/sync",
+    { method: "POST", body: JSON.stringify({ days }) },
+    fetchImpl,
+  );
+  return intervalsSyncResponseSchema.parse(raw);
 }
 
 export async function confirmSportThreshold(
