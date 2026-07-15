@@ -409,9 +409,9 @@ class TestRecalibrationCandidateDecisionEndpoint:
         """A second request racing the first to decide the same candidate gets a 409.
 
         The endpoint's own pending check (`candidate.status != "pending"`) can't catch
-        this: both requests read the row while it's still pending. The repo's atomic
-        `.eq("status", "pending")` update guard is what actually loses the race, raising
-        RecordNotFoundError for the loser.
+        this: both requests read the row while it's still pending. The atomic RPC locks
+        and claims the pending candidate; its null result for the loser is surfaced as
+        RecordNotFoundError.
         """
         candidate = ThresholdRecalibrationCandidate(
             id="candidate-1",
