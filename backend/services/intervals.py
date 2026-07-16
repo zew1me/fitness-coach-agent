@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -88,7 +87,7 @@ class IntervalsAuthContext:
 
 def _dev_bypass_state() -> Literal["active", "off", "half_configured"]:
     """Return the fail-closed state of the local API-key bypass."""
-    if os.environ.get("VERCEL_URL"):
+    if settings.is_vercel_deployment:
         return "off"
 
     api_key = settings.intervals_dev_api_key.strip()
