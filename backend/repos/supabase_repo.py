@@ -501,18 +501,29 @@ class SupabaseRepository:
 
     async def list_synced_intervals_keys(self, user_id: str) -> set[str]:
         client = self._require_client()
-        response = (
-            client.table("activities")
-            .select("source_file_key")
-            .eq("user_id", user_id)
-            .eq("source", "intervals_sync")
-            .execute()
-        )
-        return {
-            key
-            for row in (response.data or [])
-            if isinstance((key := row.get("source_file_key")), str) and key
-        }
+        keys: set[str] = set()
+        last_key: str | None = None
+        page_size = 1000
+        while True:
+            query = (
+                client.table("activities")
+                .select("source_file_key")
+                .eq("user_id", user_id)
+                .eq("source", "intervals_sync")
+                .order("source_file_key")
+                .limit(page_size)
+            )
+            if last_key is not None:
+                query = query.gt("source_file_key", last_key)
+            response = query.execute()
+            rows = response.data or []
+            page_keys = [
+                key for row in rows if isinstance((key := row.get("source_file_key")), str) and key
+            ]
+            keys.update(page_keys)
+            if len(rows) < page_size or not page_keys:
+                return keys
+            last_key = page_keys[-1]
 
     # ── Daily Load Snapshots ──────────────────────────────────
 

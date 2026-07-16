@@ -165,7 +165,10 @@ class FakeTableQuery:
 
         rows = self._matching_rows()
         for column, desc in reversed(self._orders):
-            rows.sort(key=lambda row: row.get(column), reverse=desc)
+            rows.sort(
+                key=lambda row: (row.get(column) is None, row.get(column)),
+                reverse=desc,
+            )
         if self._limit is not None:
             rows = rows[: self._limit]
         return FakeResponse(rows)
@@ -833,6 +836,25 @@ async def test_list_synced_intervals_keys_is_user_and_source_scoped() -> None:
     keys = await repo.list_synced_intervals_keys("athlete-1")
 
     assert keys == {"intervals:i100"}
+
+
+@pytest.mark.asyncio
+async def test_list_synced_intervals_keys_reads_every_page() -> None:
+    activity_rows = [
+        {
+            "user_id": "athlete-1",
+            "source": "intervals_sync",
+            "source_file_key": f"intervals:i{index:04d}",
+        }
+        for index in range(1001)
+    ]
+    repo = SupabaseRepository(client=FakeSupabaseClient(activity_rows=activity_rows))
+
+    keys = await repo.list_synced_intervals_keys("athlete-1")
+
+    assert len(keys) == 1001
+    assert "intervals:i0000" in keys
+    assert "intervals:i1000" in keys
 
 
 @pytest.mark.asyncio
