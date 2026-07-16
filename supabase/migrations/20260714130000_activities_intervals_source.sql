@@ -11,4 +11,7 @@ alter table public.activities
     'tcx_upload',
     'screenshot_extract',
     'intervals_sync'
-  ));
+  )) not valid;
+
+alter table public.activities
+  validate constraint activities_source_check;

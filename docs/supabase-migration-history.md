@@ -424,7 +424,8 @@ window is required.
 **File:** `supabase/migrations/20260714130000_activities_intervals_source.sql`
 
 **Change:** Recreates `activities_source_check` with the existing allowed values
-plus `intervals_sync`.
+plus `intervals_sync`, adding it as `NOT VALID` before separately validating it.
+This permits ordinary writes while PostgreSQL scans existing rows.
 
 **Why:** Intervals.icu activity sync persists activity summaries through the
 existing `activities` table. Giving synced rows a dedicated source distinguishes
