@@ -840,7 +840,7 @@ async def test_list_synced_intervals_keys_is_user_and_source_scoped() -> None:
 
 @pytest.mark.asyncio
 async def test_list_synced_intervals_keys_reads_every_page() -> None:
-    activity_rows = [
+    activity_rows: list[dict[str, object]] = [
         {
             "user_id": "athlete-1",
             "source": "intervals_sync",
