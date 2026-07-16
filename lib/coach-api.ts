@@ -10,6 +10,7 @@ import {
   chatTurnLeaseStatusSchema,
   intervalsAuthorizeResponseSchema,
   intervalsConnectionStatusSchema,
+  intervalsSyncRequestSchema,
   intervalsSyncResponseSchema,
   type ParsedChatMessagePage,
   type ParsedChatThreadResponse,
@@ -261,9 +262,10 @@ export async function syncIntervals(
   days = 14,
   fetchImpl: FetchLike = fetch,
 ): Promise<IntervalsSyncResponse> {
+  const payload = intervalsSyncRequestSchema.parse({ days });
   const raw = await authorizedFetch<unknown>(
     "/api/intervals/sync",
-    { method: "POST", body: JSON.stringify({ days }) },
+    { method: "POST", body: JSON.stringify(payload) },
     fetchImpl,
   );
   return intervalsSyncResponseSchema.parse(raw);

@@ -120,6 +120,10 @@ export const intervalsAuthorizeResponseSchema = z.object({
   redirect_url: z.string().url(),
 });
 
+export const intervalsSyncRequestSchema = z.object({
+  days: z.number().int().min(1).max(90),
+});
+
 export const intervalsSyncResponseSchema = z
   .object({
     activities: z.array(z.record(z.string(), z.unknown())),

@@ -184,6 +184,13 @@ describe("Intervals.icu helpers", () => {
       }),
     );
   });
+
+  it("rejects an invalid Intervals sync window before fetching", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+
+    await expect(syncIntervals(91, fetchMock)).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("loadChatThread", () => {
