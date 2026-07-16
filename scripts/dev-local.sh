@@ -11,6 +11,11 @@ if [ -f .env.local ]; then
   set +a
 fi
 
+# `vercel env pull` writes VERCEL_URL to .env.local. This command is always a
+# local run, and the Intervals API-key bypass deliberately refuses Vercel
+# requests, so do not let a pulled deployment variable disable it.
+unset VERCEL_URL
+
 # Start Supabase if not already running
 if ! supabase status > /dev/null 2>&1; then
   echo "Starting local Supabase..."

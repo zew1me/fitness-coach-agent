@@ -34,10 +34,16 @@ ChatGPT-first endurance coaching app scaffold with:
 ```bash
 bun install
 bun run dev
+bun run dev:local
 bun run lint
 bun run typecheck
 bun run test
 ```
+
+Use `bun run dev:local` when developing against the local Supabase database or when you need the
+Python API running alongside Next.js. It starts Supabase if necessary and launches the API on port
+8001 with local development credentials. Use `bun run dev` instead when you intentionally want to
+run Next.js against the environment configured in `.env.local`.
 
 ### Python
 
