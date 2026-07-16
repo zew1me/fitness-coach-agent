@@ -143,7 +143,8 @@ describe("ProfilePage Intervals.icu connection", () => {
     });
     coachApiMocks.syncIntervals.mockResolvedValueOnce({
       activities: [{ id: "activity-1" }, { id: "activity-2" }],
-      skipped: 3,
+      skipped_duplicates: 3,
+      skipped_invalid: 0,
       synced: 2,
     });
 

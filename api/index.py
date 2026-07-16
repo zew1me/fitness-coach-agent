@@ -507,7 +507,7 @@ class IntervalsSyncRequest(BaseModel):
 
 
 @app.post("/api/intervals/sync")
-async def intervals_sync(
+async def intervals_sync(  # noqa: C901
     payload: IntervalsSyncRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
@@ -540,15 +540,28 @@ async def intervals_sync(
         log_message=f"list_synced_intervals_keys failed for user_id={user_id}",
     )
     synced_activities: list[object] = []
-    skipped = 0
+    skipped_duplicates = 0
+    skipped_invalid = 0
     for item in items:
         activity = map_intervals_activity(user_id, item)
-        if activity is None or activity.source_file_key in existing_keys:
-            skipped += 1
+        if activity is None:
+            skipped_invalid += 1
             continue
-        persisted = await _persist_extracted_activity(
+        if activity.source_file_key in existing_keys:
+            skipped_duplicates += 1
+            continue
+        persisted_activity = await _activity_repo_call(
+            repo.create_intervals_activity(activity),
+            detail="Failed to save activity.",
+            log_message=f"create_intervals_activity failed for user_id={user_id}",
+        )
+        if persisted_activity is None:
+            # Another overlapping sync inserted it after the initial key lookup.
+            skipped_duplicates += 1
+            continue
+        persisted = await _finalize_persisted_activity(
             user_id,
-            activity,
+            persisted_activity,
             calling_endpoint="intervals_sync",
         )
         synced_activities.append(persisted["activity"])
@@ -557,7 +570,8 @@ async def intervals_sync(
 
     return {
         "synced": len(synced_activities),
-        "skipped": skipped,
+        "skipped_duplicates": skipped_duplicates,
+        "skipped_invalid": skipped_invalid,
         "activities": synced_activities,
     }
 
@@ -2160,6 +2174,15 @@ async def _persist_extracted_activity(
     except RuntimeError as exc:
         logger.exception("create_activity failed for user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
+    return await _finalize_persisted_activity(user_id, activity, calling_endpoint=calling_endpoint)
+
+
+async def _finalize_persisted_activity(
+    user_id: str,
+    activity: Activity,
+    *,
+    calling_endpoint: ActivityPersistenceEndpoint,
+) -> Mapping[str, object]:
     logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}

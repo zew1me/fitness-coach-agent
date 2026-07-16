@@ -441,6 +441,24 @@ class SupabaseRepository:
             raise RuntimeError("Supabase did not return the inserted activity row.")
         return Activity.model_validate(rows[0])
 
+    async def create_intervals_activity(self, activity: Activity) -> Activity | None:
+        """Insert an Intervals activity, returning ``None`` when it was already synced."""
+        client = self._require_client()
+        payload = _activity_payload(activity)
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = (
+            client.table("activities")
+            .upsert(
+                payload,
+                on_conflict="user_id,intervals_source_file_key",
+                ignore_duplicates=True,
+            )
+            .execute()
+        )
+        rows = response.data or []
+        return Activity.model_validate(rows[0]) if rows else None
+
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         client = self._require_client()
         response = (

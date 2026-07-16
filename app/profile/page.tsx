@@ -624,8 +624,12 @@ export default function ProfilePage(): JSX.Element {
     setIntervalsError(null);
     setIntervalsNotice(null);
     syncIntervals()
-      .then(({ skipped, synced }) => {
-        setIntervalsNotice(`Synced ${synced} (${skipped} already imported).`);
+      .then(({ skipped_duplicates, skipped_invalid, synced }) => {
+        const details = [`${skipped_duplicates} already imported`];
+        if (skipped_invalid > 0) {
+          details.push(`${skipped_invalid} couldn't be imported`);
+        }
+        setIntervalsNotice(`Synced ${synced} (${details.join("; ")}).`);
       })
       .catch((err: unknown) => {
         setIntervalsError(

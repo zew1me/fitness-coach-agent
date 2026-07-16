@@ -97,6 +97,14 @@ class InMemoryActivityRepository:
         self.created.append(persisted)
         return persisted
 
+    async def create_intervals_activity(self, activity: Activity) -> Activity | None:
+        if activity.source_file_key in self.existing_keys:
+            return None
+        persisted = await self.create_activity(activity)
+        if activity.source_file_key is not None:
+            self.existing_keys.add(activity.source_file_key)
+        return persisted
+
     async def list_plan_workouts_between(self, *_args: object, **_kwargs: object) -> list[object]:
         return []
 
@@ -433,10 +441,44 @@ async def test_sync_endpoint_persists_new_and_skips_existing(
 
     assert response.status_code == 200
     assert response.json()["synced"] == 1
-    assert response.json()["skipped"] == 1
+    assert response.json()["skipped_duplicates"] == 1
+    assert response.json()["skipped_invalid"] == 0
     assert len(response.json()["activities"]) == 1
     assert response.json()["activities"][0]["source_file_key"] == "intervals:i200"
     assert [activity.source_file_key for activity in activity_repo.created] == ["intervals:i200"]
+
+
+@pytest.mark.asyncio
+async def test_sync_endpoint_counts_unmappable_activities_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"id": "i100", "type": "Ride", "start_date_local": "not-a-date"},
+                {"id": "i200", "type": "Run", "start_date_local": "2026-07-14T09:00:00"},
+            ],
+        )
+
+    monkeypatch.setattr(
+        "backend.services.intervals.settings.intervals_dev_api_key", "local-api-key"
+    )
+    monkeypatch.setattr("backend.services.intervals.settings.intervals_dev_athlete_id", "i135168")
+    response = await _post_sync(
+        monkeypatch,
+        service=IntervalsOAuthService(
+            repository=InMemoryIntervalsRepository(),
+            http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        ),
+        activity_repo=InMemoryActivityRepository(),
+        payload={"days": 14},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["synced"] == 1
+    assert response.json()["skipped_duplicates"] == 0
+    assert response.json()["skipped_invalid"] == 1
 
 
 @pytest.mark.asyncio

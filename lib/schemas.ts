@@ -127,7 +127,8 @@ export const intervalsSyncRequestSchema = z.object({
 export const intervalsSyncResponseSchema = z
   .object({
     activities: z.array(z.record(z.string(), z.unknown())),
-    skipped: z.number().int().nonnegative(),
+    skipped_duplicates: z.number().int().nonnegative(),
+    skipped_invalid: z.number().int().nonnegative(),
     synced: z.number().int().nonnegative(),
   })
   .transform((response): IntervalsSyncResponse => response);

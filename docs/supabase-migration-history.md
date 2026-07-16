@@ -20,6 +20,7 @@
 - `20260714120000_remove_lingering_superseded_plan_workouts.sql` — one-time cleanup of lingering future scheduled workouts on non-active plans (pre-#312)
 - `20260714130000_activities_intervals_source.sql` — adds `'intervals_sync'` to `activities_source_check` for intervals.icu activity sync (#338)
 - `20260715035133_atomic_recalibration_candidate_decision.sql` — service-role RPC for atomic candidate decisions and threshold replacement
+- `20260716000000_intervals_sync_idempotency.sql` — unique generated key for idempotent Intervals activity imports (#338)
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -443,6 +444,25 @@ order by source;
 locally). Preview and production are separate Supabase projects and must each be
 linked and applied independently. The migration only widens the allowed source
 values and requires no backfill or maintenance window.
+
+## 20260716000000 — idempotent Intervals activity sync (2026-07-16)
+
+**File:** `supabase/migrations/20260716000000_intervals_sync_idempotency.sql`
+
+**Change:** Adds a generated `intervals_source_file_key` column plus a unique
+constraint on `(user_id, intervals_source_file_key)`. The generated key is only
+non-null for `source = 'intervals_sync'`, so the constraint is scoped to
+Intervals imports.
+
+**Why:** Concurrent overlapping sync requests can both observe the same stale
+key list before inserting. The database constraint and `ON CONFLICT DO NOTHING`
+write path make the insert idempotent. Other sources remain unconstrained:
+multiple activities extracted from one ZIP archive legitimately share its
+`source_file_key`.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). The generated column is backfilled from existing rows automatically;
+no application data backfill is required.
 
 ## 20260715035133 — atomic recalibration candidate decisions (2026-07-15)
 

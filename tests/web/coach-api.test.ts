@@ -167,7 +167,8 @@ describe("Intervals.icu helpers", () => {
   it("syncs recent Intervals activities", async () => {
     const result = {
       activities: [{ id: "activity-1" }],
-      skipped: 2,
+      skipped_duplicates: 2,
+      skipped_invalid: 0,
       synced: 1,
     };
     const fetchMock = vi

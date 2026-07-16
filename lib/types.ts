@@ -41,7 +41,8 @@ export type IntervalsConnectionStatus = {
 
 export type IntervalsSyncResponse = {
   activities: Record<string, unknown>[];
-  skipped: number;
+  skipped_duplicates: number;
+  skipped_invalid: number;
   synced: number;
 };
 
