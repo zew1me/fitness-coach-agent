@@ -255,6 +255,8 @@ class FakeSupabaseClient:
         if function_name == "create_recalibration_candidate_atomic":
             # Single-composite return → dict, not array (see note above).
             return FakeRpcQuery(self._create_recalibration_candidate_atomic(params))
+        if function_name == "decide_recalibration_candidate_atomic":
+            return FakeRpcQuery(self._decide_recalibration_candidate_atomic(params))
         raise AssertionError(f"Unexpected RPC call: {function_name}")
 
     def _create_training_plan_atomic(self, params: dict[str, object]) -> dict[str, object]:
@@ -292,6 +294,47 @@ class FakeSupabaseClient:
                 existing["status"] = "superseded"
         self._tables["threshold_recalibration_candidates"]._rows.append(row)
         return row
+
+    def _decide_recalibration_candidate_atomic(
+        self, params: dict[str, object]
+    ) -> dict[str, object] | None:
+        user_id = params["p_user_id"]
+        candidate_id = params["p_candidate_id"]
+        status = params["p_status"]
+        threshold = params["p_threshold"]
+        if status == "manual_entered" and threshold is None:
+            raise ValueError("A threshold is required for recalibration status manual_entered")
+        candidate = next(
+            (
+                row
+                for row in self._tables["threshold_recalibration_candidates"]._rows
+                if row.get("id") == candidate_id
+                and row.get("user_id") == user_id
+                and row.get("status") == "pending"
+            ),
+            None,
+        )
+        if candidate is None:
+            return None
+
+        saved_threshold = None
+        if threshold is not None:
+            assert isinstance(threshold, dict)
+            saved_threshold = dict(threshold)
+            saved_threshold["id"] = saved_threshold.get("id") or str(uuid4())
+            for existing in self._tables["sport_thresholds"]._rows:
+                if (
+                    existing.get("user_id") == user_id
+                    and existing.get("sport") == candidate["sport"]
+                    and existing.get("superseded_at") is None
+                ):
+                    existing["superseded_at"] = "2026-07-15T00:00:00+00:00"
+            self._tables["sport_thresholds"]._rows.append(saved_threshold)
+
+        candidate["status"] = status
+        candidate["decided_at"] = "2026-07-15T00:00:00+00:00"
+        candidate["manual_threshold"] = saved_threshold if status == "manual_entered" else None
+        return {"candidate": candidate, "threshold": saved_threshold}
 
 
 class FakeRpcQuery:
@@ -707,17 +750,66 @@ async def test_decide_recalibration_candidate_records_manual_threshold() -> None
         estimation_method="manual",
     )
 
-    decided = await repo.decide_recalibration_candidate(
+    decided, saved_threshold = await repo.decide_recalibration_candidate(
         user_id="athlete-1",
         candidate_id="candidate-1",
         status="manual_entered",
-        manual_threshold=manual,
+        threshold=manual,
     )
 
     assert decided.status == "manual_entered"
     assert decided.manual_threshold is not None
     assert decided.manual_threshold.lt2_pace_sec_per_km == 260
     assert decided.decided_at is not None
+    assert saved_threshold is not None
+    assert saved_threshold.lt2_pace_sec_per_km == 260
+
+
+@pytest.mark.asyncio
+async def test_accept_recalibration_candidate_atomically_replaces_active_threshold() -> None:
+    candidate_row: dict[str, object] = {
+        "id": "candidate-1",
+        "user_id": "athlete-1",
+        "sport": "running",
+        "status": "pending",
+        "confidence": "high",
+        "evidence_activity_id": "activity-1",
+        "explanation": "Proposal",
+        "candidate_threshold": SportThreshold(
+            user_id="athlete-1", sport="running", source="file"
+        ).model_dump(mode="json"),
+        "generated_at": "2026-07-07T00:00:00+00:00",
+    }
+    active_threshold: dict[str, object] = SportThreshold(
+        id="threshold-old",
+        user_id="athlete-1",
+        sport="running",
+        lt2_pace_sec_per_km=270,
+    ).model_dump(mode="json")
+    client = FakeSupabaseClient(
+        threshold_rows=[active_threshold],
+        threshold_recalibration_candidate_rows=[candidate_row],
+    )
+    repo = SupabaseRepository(client=client)
+    replacement = SportThreshold(
+        user_id="athlete-1",
+        sport="running",
+        lt2_pace_sec_per_km=250,
+        source="file",
+    )
+
+    decided, saved = await repo.decide_recalibration_candidate(
+        user_id="athlete-1",
+        candidate_id="candidate-1",
+        status="accepted",
+        threshold=replacement,
+    )
+
+    assert decided.status == "accepted"
+    assert saved is not None
+    assert saved.lt2_pace_sec_per_km == 250
+    assert active_threshold["superseded_at"] is not None
+    assert len(client._tables["sport_thresholds"]._rows) == 2
 
 
 @pytest.mark.asyncio
@@ -744,8 +836,8 @@ async def test_decide_recalibration_candidate_rejects_already_decided_candidate(
         await repo.decide_recalibration_candidate(
             user_id="athlete-1",
             candidate_id="candidate-1",
-            status="manual_entered",
-            manual_threshold=None,
+            status="kept_current",
+            threshold=None,
         )
 
 

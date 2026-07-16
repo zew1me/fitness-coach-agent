@@ -1289,18 +1289,10 @@ async def decide_recalibration_candidate(
     if candidate.status != "pending":
         raise HTTPException(status_code=409, detail="Recalibration candidate is already decided.")
 
-    saved_threshold: SportThreshold | None = None
+    threshold: SportThreshold | None = None
     if payload.decision == "accept_candidate":
         threshold = candidate.candidate_threshold.model_copy(
             update={"id": None, "superseded_at": None, "user_id": user_id}
-        )
-        saved_threshold = await _activity_repo_call(
-            repo.upsert_sport_threshold(threshold),
-            detail="Failed to save accepted recalibration candidate.",
-            log_message=(
-                f"upsert_sport_threshold failed for accepted candidate user_id={user_id} "
-                f"candidate_id={payload.candidate_id}"
-            ),
         )
         status = "accepted"
     elif payload.decision == "keep_current":
@@ -1308,30 +1300,22 @@ async def decide_recalibration_candidate(
     else:
         if payload.manual_threshold is None:
             raise HTTPException(status_code=400, detail="manual_threshold is required.")
-        manual = _manual_threshold_from_candidate(
+        threshold = _manual_threshold_from_candidate(
             candidate,
             payload.manual_threshold,
             today=date.today(),
         )
-        saved_threshold = await _activity_repo_call(
-            repo.upsert_sport_threshold(manual),
-            detail="Failed to save manual threshold.",
-            log_message=(
-                f"upsert_sport_threshold failed for manual threshold user_id={user_id} "
-                f"candidate_id={payload.candidate_id}"
-            ),
-        )
         status = "manual_entered"
 
     try:
-        decided = await _activity_repo_call(
+        decided, saved_threshold = await _activity_repo_call(
             repo.decide_recalibration_candidate(
                 user_id=user_id,
                 candidate_id=payload.candidate_id,
                 status=status,
-                manual_threshold=saved_threshold if status == "manual_entered" else None,
+                threshold=threshold,
             ),
-            detail="Failed to record recalibration candidate decision.",
+            detail="Failed to apply recalibration candidate decision.",
             log_message=(
                 f"decide_recalibration_candidate failed for user_id={user_id} "
                 f"candidate_id={payload.candidate_id}"
