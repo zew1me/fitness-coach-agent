@@ -386,7 +386,7 @@ def _parse_activity_dates(item: dict[str, Any]) -> tuple[date | None, datetime |
     local_value = item.get("start_date_local")
     absolute_value = item.get("start_date")
     activity_date = _optional_date(local_value) or _optional_date(absolute_value)
-    started_at = _optional_datetime(absolute_value) or _optional_datetime(local_value)
+    started_at = _optional_datetime(absolute_value)
     return activity_date, started_at
 
 

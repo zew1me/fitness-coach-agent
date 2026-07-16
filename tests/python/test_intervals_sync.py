@@ -373,6 +373,21 @@ def test_map_intervals_activity_skips_missing_identity_or_date(item: dict[str, o
     assert map_intervals_activity("user-1", item) is None
 
 
+def test_map_intervals_activity_does_not_treat_local_time_as_absolute() -> None:
+    activity = map_intervals_activity(
+        "user-1",
+        {
+            "id": "activity-1",
+            "type": "Ride",
+            "start_date_local": "2026-07-14T08:30:00",
+        },
+    )
+
+    assert activity is not None
+    assert activity.activity_date == date(2026, 7, 14)
+    assert activity.started_at is None
+
+
 @pytest.mark.asyncio
 async def test_sync_endpoint_persists_new_and_skips_existing(
     monkeypatch: pytest.MonkeyPatch,
