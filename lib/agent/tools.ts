@@ -12,6 +12,8 @@ const recentActivitiesInputSchema = z.object({
 // API rejects tool schemas where `required` is missing or incomplete, even for
 // objects nested inside arrays or additionalProperties.
 
+// Canonical goal types must stay aligned with GoalType and the typed payloads in
+// backend/models/training.py. The backend alone accepts legacy aliases such as `race`.
 const goalSchema = z.object({
   course_distance_meters: z.number().positive().nullable(),
   course_elevation_gain_meters: z.number().nonnegative().nullable(),

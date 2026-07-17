@@ -2230,9 +2230,14 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
 @pytest.mark.asyncio
 async def test_update_goals_validation_errors_return_422(monkeypatch) -> None:
     class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created: Goal | None = None
+
         async def create_goal(self, goal: Goal) -> Goal:
+            self.created = goal
             return goal
 
+    repository = GoalRepository()
     restore_override = _override_require_user_context(
         UserContext(
             user_id="athlete-1",
@@ -2241,7 +2246,7 @@ async def test_update_goals_validation_errors_return_422(monkeypatch) -> None:
             grant_id="grant-1",
         )
     )
-    monkeypatch.setattr(api_index, "repo", GoalRepository())
+    monkeypatch.setattr(api_index, "repo", repository)
 
     try:
         transport = ASGITransport(app=api_index.app)
@@ -2254,6 +2259,53 @@ async def test_update_goals_validation_errors_return_422(monkeypatch) -> None:
         restore_override()
 
     assert response.status_code == 422
+    assert repository.created is None
+    assert any(
+        error["loc"] == ["title"] and error["type"] == "missing"
+        for error in response.json()["detail"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_goals_create_rejects_unsupported_goal_type(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created: Goal | None = None
+
+        async def create_goal(self, goal: Goal) -> Goal:
+            self.created = goal
+            return goal
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "create",
+                    "goal": {"goal_type": "triathlon", "title": "A race"},
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.created is None
+    assert any(
+        error["loc"] == ["goal_type"] and error["type"] == "literal_error"
+        for error in response.json()["detail"]
+    )
 
 
 @pytest.mark.asyncio
@@ -2375,7 +2427,7 @@ async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized
             response = await client.post(
                 "/api/engine/update-goals",
                 json={
-                    "action": "complete",
+                    "action": "update",
                     "goal_id": "goal-1",
                     "goal": {
                         "id": "other-goal",
@@ -2390,7 +2442,7 @@ async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized
         restore_override()
 
     assert response.status_code == 200
-    assert repository.update_call == ("goal-1", "athlete-1", {"status": "completed"})
+    assert repository.update_call == ("goal-1", "athlete-1", {"title": "Updated goal"})
 
 
 @pytest.mark.asyncio
@@ -2584,13 +2636,13 @@ async def test_update_goals_update_requires_non_empty_fields(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_update_goals_update_omits_null_fields(monkeypatch) -> None:
+async def test_update_goals_update_omits_null_fields_and_normalizes_alias(monkeypatch) -> None:
     class GoalRepository(EngineRepository):
         def __init__(self) -> None:
-            self.update_call: tuple[str, str, dict[str, object]] | None = None
+            self.update_calls: list[tuple[str, str, dict[str, object]]] = []
 
         async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
-            self.update_call = (goal_id, user_id, updates)
+            self.update_calls.append((goal_id, user_id, updates))
             return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
 
     repository = GoalRepository()
@@ -2607,24 +2659,31 @@ async def test_update_goals_update_omits_null_fields(monkeypatch) -> None:
     try:
         transport = ASGITransport(app=api_index.app)
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post(
+            null_response = await client.post(
                 "/api/engine/update-goals",
                 json={
                     "action": "update",
                     "goal_id": "goal-1",
-                    "goal": {
-                        "goal_type": None,
-                        "sport": None,
-                        "target_date": None,
-                        "title": "Updated race",
-                    },
+                    "goal": {"goal_type": None, "sport": None, "title": "Updated race"},
+                },
+            )
+            alias_response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {"goal_type": "race"},
                 },
             )
     finally:
         restore_override()
 
-    assert response.status_code == 200
-    assert repository.update_call == ("goal-1", "athlete-1", {"title": "Updated race"})
+    assert null_response.status_code == 200
+    assert alias_response.status_code == 200
+    assert repository.update_calls == [
+        ("goal-1", "athlete-1", {"title": "Updated race"}),
+        ("goal-1", "athlete-1", {"goal_type": "event"}),
+    ]
 
 
 @pytest.mark.asyncio
