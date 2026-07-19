@@ -32,7 +32,9 @@ from httpx import ASGITransport, AsyncClient
 import api.index as api_index
 from backend.models.athlete import AthleteProfile, SportThreshold, ThresholdRecalibrationCandidate
 from backend.models.auth import UserContext
+from backend.models.intervals import IntervalsConnectionCreate
 from backend.models.training import TrainingPlan
+from backend.repos.intervals_repo import IntervalsRepository
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
 
 _SUPABASE_CONFIGURED = bool(
@@ -254,6 +256,58 @@ async def test_recalibration_candidate_decision_claim_and_threshold_write_are_at
         .execute()
     )
     assert len(history_response.data or []) == 1
+
+
+@pytest.mark.asyncio
+async def test_replace_intervals_connection_serializes_concurrent_replaces(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Concurrent replaces both succeed and leave exactly one active connection.
+
+    Before migration 20260719000000 the repo revoked and inserted in two
+    independent PostgREST calls, so two interleaved replaces raced the partial
+    unique index (intervals_connections_user_active_idx) and the loser failed
+    with a unique violation. The atomic RPC serializes per user via an advisory
+    lock: the later committer revokes the earlier row and becomes active.
+    """
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["cycling"], coaching_state="active")
+    )
+    barrier = threading.Barrier(2)
+
+    def replace(athlete_id: str) -> object:
+        local_repo = IntervalsRepository()
+        barrier.wait(timeout=5)
+        return local_repo.replace_connection(
+            IntervalsConnectionCreate(
+                user_id=unique_user,
+                intervals_athlete_id=athlete_id,
+                intervals_athlete_name="Nigel",
+                scopes=["ACTIVITY:READ"],
+                access_token_ciphertext=f"ciphertext-{athlete_id}",
+                token_type="Bearer",
+            )
+        )
+
+    outcomes = await asyncio.gather(
+        asyncio.to_thread(replace, "i111"),
+        asyncio.to_thread(replace, "i222"),
+        return_exceptions=True,
+    )
+
+    assert not any(isinstance(outcome, BaseException) for outcome in outcomes), outcomes
+    rows_response = (
+        repo._require_client()
+        .table("intervals_connections")
+        .select("id, revoked_at")
+        .eq("user_id", unique_user)
+        .execute()
+    )
+    rows = rows_response.data or []
+    assert len(rows) == 2
+    assert sum(1 for row in rows if row["revoked_at"] is None) == 1
+    active = IntervalsRepository().get_active_connection(unique_user)
+    assert active is not None
 
 
 @pytest.mark.asyncio
