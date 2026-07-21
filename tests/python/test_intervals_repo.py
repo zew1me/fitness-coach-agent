@@ -131,3 +131,83 @@ def test_replace_connection_rejects_non_object_rpc_payload() -> None:
 
     with pytest.raises(TypeError, match="rows must be objects"):
         repo.replace_connection(_connection())
+
+
+class _StaticRpcClient:
+    """Returns a fixed `response.data` regardless of RPC params.
+
+    `FakeAtomicIntervalsClient` treats `rpc_data_override=None` as "no override"
+    (it still synthesizes a row), so it cannot represent a literal `data=None`
+    PostgREST response. This minimal client can.
+    """
+
+    def __init__(self, data: object) -> None:
+        self._data = data
+
+    def table(self, table_name: str) -> None:
+        raise AssertionError(f"unexpected table({table_name!r}) access")
+
+    def rpc(self, function_name: str, params: dict[str, object]) -> FakeRpcQuery:
+        assert function_name == "replace_intervals_connection"
+        return FakeRpcQuery(self._data)
+
+
+def test_replace_connection_raises_when_rpc_returns_none() -> None:
+    """A literal `response.data is None` (distinct from `{}`) must also surface as
+    the same RuntimeError rather than falling through to `_parse_connection(None)`."""
+    repo = IntervalsRepository(_StaticRpcClient(None))
+
+    with pytest.raises(RuntimeError, match="did not return the Intervals connection row"):
+        repo.replace_connection(_connection())
+
+
+def test_replace_connection_rejects_scalar_rpc_payload() -> None:
+    """A truthy but non-dict, non-list payload (e.g. a bare string) must also be
+    rejected — the guard is about the row shape, not just "not a list"."""
+    repo = IntervalsRepository(FakeAtomicIntervalsClient(rpc_data_override="not-a-row"))
+
+    with pytest.raises(TypeError, match="rows must be objects"):
+        repo.replace_connection(_connection())
+
+
+def test_replace_connection_parses_every_field_from_the_composite_row() -> None:
+    """The composite-row response must round-trip every `IntervalsConnectionRecord`
+    field, not just the few spot-checked in the happy-path test above."""
+    client = FakeAtomicIntervalsClient()
+    repo = IntervalsRepository(client)
+
+    record = repo.replace_connection(_connection())
+
+    row = client.rows[0]
+    assert record.id == row["id"]
+    assert record.user_id == "coach-user-1"
+    assert record.intervals_athlete_id == "i135168"
+    assert record.intervals_athlete_name == "Nigel"
+    assert record.scopes == ["ACTIVITY:READ"]
+    assert record.access_token_ciphertext == "ciphertext"
+    assert record.token_type == "Bearer"
+    assert record.connected_at.isoformat() == row["connected_at"]
+    assert record.updated_at.isoformat() == row["updated_at"]
+    assert record.revoked_at is None
+
+
+def test_replace_connection_forwards_model_defaults_for_scopes_and_token_type() -> None:
+    """`IntervalsConnectionCreate` defaults (empty scopes, `token_type="Bearer"`) must
+    be forwarded to the RPC verbatim rather than silently dropped or re-defaulted
+    client-side — the migration's own `coalesce()` fallbacks only apply server-side."""
+    client = FakeAtomicIntervalsClient()
+    repo = IntervalsRepository(client)
+    connection = IntervalsConnectionCreate(
+        user_id="coach-user-2",
+        intervals_athlete_id="i999",
+        access_token_ciphertext="ciphertext-2",
+    )
+
+    record = repo.replace_connection(connection)
+
+    _, params = client.rpc_calls[0]
+    assert params["p_scopes"] == []
+    assert params["p_token_type"] == "Bearer"
+    assert params["p_intervals_athlete_name"] is None
+    assert record.scopes == []
+    assert record.token_type == "Bearer"
