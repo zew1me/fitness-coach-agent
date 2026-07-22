@@ -946,6 +946,86 @@ async def test_create_activity_builds_summary_when_activity_has_default_summary(
 
 
 @pytest.mark.asyncio
+async def test_list_activities_excludes_sources_before_limit() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            activity_rows=[
+                {
+                    "id": "strava-latest",
+                    "user_id": "athlete-1",
+                    "sport": "running",
+                    "activity_date": "2026-04-04",
+                    "source": "strava_sync",
+                },
+                {
+                    "id": "manual-1",
+                    "user_id": "athlete-1",
+                    "sport": "running",
+                    "activity_date": "2026-04-03",
+                    "source": "manual",
+                },
+                {
+                    "id": "strava-older",
+                    "user_id": "athlete-1",
+                    "sport": "running",
+                    "activity_date": "2026-04-02",
+                    "source": "strava_sync",
+                },
+                {
+                    "id": "manual-2",
+                    "user_id": "athlete-1",
+                    "sport": "running",
+                    "activity_date": "2026-04-01",
+                    "source": "manual",
+                },
+            ]
+        )
+    )
+
+    activities = await repo.list_activities("athlete-1", limit=2, exclude_sources={"strava_sync"})
+
+    assert [activity.id for activity in activities] == ["manual-1", "manual-2"]
+
+
+@pytest.mark.asyncio
+async def test_get_activities_by_ids_omits_missing_and_other_users() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            activity_rows=[
+                {
+                    "id": "activity-1",
+                    "user_id": "athlete-1",
+                    "sport": "running",
+                    "activity_date": "2026-04-02",
+                    "source": "strava_sync",
+                },
+                {
+                    "id": "activity-2",
+                    "user_id": "athlete-1",
+                    "sport": "cycling",
+                    "activity_date": "2026-04-01",
+                    "source": "manual",
+                },
+                {
+                    "id": "activity-3",
+                    "user_id": "athlete-2",
+                    "sport": "running",
+                    "activity_date": "2026-04-03",
+                    "source": "manual",
+                },
+            ]
+        )
+    )
+
+    activities = await repo.get_activities_by_ids(
+        "athlete-1", ["activity-1", "missing", "activity-2", "activity-3"]
+    )
+
+    assert {activity.id for activity in activities} == {"activity-1", "activity-2"}
+    assert await repo.get_activities_by_ids("athlete-1", []) == []
+
+
+@pytest.mark.asyncio
 async def test_list_synced_intervals_keys_is_user_and_source_scoped() -> None:
     repo = SupabaseRepository(
         client=FakeSupabaseClient(
