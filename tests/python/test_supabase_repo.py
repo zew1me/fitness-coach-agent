@@ -11,7 +11,7 @@ from backend.models.athlete import (
     ThresholdRecalibrationCandidate,
 )
 from backend.models.chat import ChatModelStateReplaceRequest
-from backend.models.training import Activity, PlanWorkout, TrainingPlan
+from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos import supabase_repo
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -1192,6 +1192,41 @@ async def test_update_goal_is_scoped_to_owning_user() -> None:
     assert isinstance(updated, Goal)
     assert updated.status == "completed"
     assert updated.title == "Someone else's race"
+
+
+@pytest.mark.asyncio
+async def test_update_goal_course_profile_notes_uses_atomic_rpc() -> None:
+    row = {
+        "id": "00000000-0000-0000-0000-000000000101",
+        "user_id": "athlete-1",
+        "goal_type": "event",
+        "title": "Hill climb race",
+        "course_profile": {"notes": "Steep final mile.", "terrain": "trail"},
+    }
+    client = FakeRpcClient(row)
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.update_goal_course_profile_notes(
+        "00000000-0000-0000-0000-000000000101", "athlete-1", "Steep final mile."
+    )
+
+    assert isinstance(updated, Goal)
+    assert updated.course_profile == row["course_profile"]
+    assert client.calls == [
+        (
+            "update_goal_course_profile_notes_atomic",
+            {
+                "p_goal_id": "00000000-0000-0000-0000-000000000101",
+                "p_user_id": "athlete-1",
+                "p_notes": "Steep final mile.",
+            },
+        )
+    ]
+
+    with pytest.raises(RecordNotFoundError):
+        await SupabaseRepository(client=FakeRpcClient(None)).update_goal_course_profile_notes(
+            "00000000-0000-0000-0000-000000000101", "athlete-1", "Steep final mile."
+        )
 
 
 @pytest.mark.asyncio

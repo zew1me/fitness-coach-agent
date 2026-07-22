@@ -28,11 +28,14 @@ from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
 from backend.models.athlete import AthleteProfile, SportThreshold, ThresholdRecalibrationCandidate
 from backend.models.auth import UserContext
-from backend.models.training import TrainingPlan
+from backend.models.intervals import IntervalsConnectionCreate
+from backend.models.training import Goal, TrainingPlan
+from backend.repos.intervals_repo import IntervalsRepository
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
 
 _SUPABASE_CONFIGURED = bool(
@@ -159,6 +162,36 @@ async def test_new_profile_row_has_null_specialization_pct_not_default_80(
 
 
 @pytest.mark.asyncio
+async def test_update_goal_course_profile_notes_merges_without_losing_sibling_keys(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Concurrent notes writes retain the latest value and every existing profile key."""
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, coaching_state="onboarding")
+    )
+    goal = await repo.create_goal(
+        Goal(
+            user_id=unique_user,
+            goal_type="event",
+            title="Hill climb race",
+            course_profile={"aid_stations": 3, "terrain": "trail"},
+        )
+    )
+    assert goal.id is not None
+
+    await asyncio.gather(
+        repo.update_goal_course_profile_notes(goal.id, unique_user, "First note."),
+        repo.update_goal_course_profile_notes(goal.id, unique_user, "Second note."),
+    )
+
+    updated = await repo.get_goal(goal.id, unique_user)
+    assert updated.course_profile is not None
+    assert updated.course_profile["aid_stations"] == 3
+    assert updated.course_profile["terrain"] == "trail"
+    assert updated.course_profile["notes"] in {"First note.", "Second note."}
+
+
+@pytest.mark.asyncio
 async def test_create_training_plan_atomic_rpc_returns_persisted_plan(
     repo: SupabaseRepository, unique_user: str
 ) -> None:
@@ -254,6 +287,147 @@ async def test_recalibration_candidate_decision_claim_and_threshold_write_are_at
         .execute()
     )
     assert len(history_response.data or []) == 1
+
+
+@pytest.mark.asyncio
+async def test_replace_intervals_connection_serializes_concurrent_replaces(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Concurrent replaces both succeed and leave exactly one active connection.
+
+    Before migration 20260719000000 the repo revoked and inserted in two
+    independent PostgREST calls, so two interleaved replaces raced the partial
+    unique index (intervals_connections_user_active_idx) and the loser failed
+    with a unique violation. The atomic RPC serializes per user via an advisory
+    lock: the later committer revokes the earlier row and becomes active.
+    """
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["cycling"], coaching_state="active")
+    )
+    barrier = threading.Barrier(2)
+
+    def replace(athlete_id: str) -> object:
+        local_repo = IntervalsRepository()
+        barrier.wait(timeout=5)
+        return local_repo.replace_connection(
+            IntervalsConnectionCreate(
+                user_id=unique_user,
+                intervals_athlete_id=athlete_id,
+                intervals_athlete_name="Nigel",
+                scopes=["ACTIVITY:READ"],
+                access_token_ciphertext=f"ciphertext-{athlete_id}",
+                token_type="Bearer",
+            )
+        )
+
+    outcomes = await asyncio.gather(
+        asyncio.to_thread(replace, "i111"),
+        asyncio.to_thread(replace, "i222"),
+        return_exceptions=True,
+    )
+
+    assert not any(isinstance(outcome, BaseException) for outcome in outcomes), outcomes
+    rows_response = (
+        repo._require_client()
+        .table("intervals_connections")
+        .select("id, revoked_at")
+        .eq("user_id", unique_user)
+        .execute()
+    )
+    rows = rows_response.data or []
+    assert len(rows) == 2
+    assert sum(1 for row in rows if row["revoked_at"] is None) == 1
+    active = IntervalsRepository().get_active_connection(unique_user)
+    assert active is not None
+
+
+@pytest.mark.asyncio
+async def test_replace_intervals_connection_rpc_rejects_empty_required_fields(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """The migration's own guard clauses reject blank required inputs.
+
+    `IntervalsConnectionCreate` does not itself forbid empty strings, so the
+    RPC's `nullif(..., '') is null` checks are the only thing stopping a
+    caller from replacing a connection with a useless `user_id` or
+    `intervals_athlete_id`. Calls the RPC directly (bypassing the repo, which
+    only ever forwards a validated model) to exercise the guard itself.
+    """
+    client = repo._require_client()
+
+    with pytest.raises(PostgRESTAPIError, match="user_id is required"):
+        client.rpc(
+            "replace_intervals_connection",
+            {
+                "p_user_id": "",
+                "p_intervals_athlete_id": "i111",
+                "p_intervals_athlete_name": "Nigel",
+                "p_scopes": ["ACTIVITY:READ"],
+                "p_access_token_ciphertext": "ciphertext",
+                "p_token_type": "Bearer",
+            },
+        ).execute()
+
+    with pytest.raises(PostgRESTAPIError, match="intervals_athlete_id is required"):
+        client.rpc(
+            "replace_intervals_connection",
+            {
+                "p_user_id": unique_user,
+                "p_intervals_athlete_id": "",
+                "p_intervals_athlete_name": "Nigel",
+                "p_scopes": ["ACTIVITY:READ"],
+                "p_access_token_ciphertext": "ciphertext",
+                "p_token_type": "Bearer",
+            },
+        ).execute()
+
+    with pytest.raises(PostgRESTAPIError, match="access_token_ciphertext is required"):
+        client.rpc(
+            "replace_intervals_connection",
+            {
+                "p_user_id": unique_user,
+                "p_intervals_athlete_id": "i111",
+                "p_intervals_athlete_name": "Nigel",
+                "p_scopes": ["ACTIVITY:READ"],
+                "p_access_token_ciphertext": "",
+                "p_token_type": "Bearer",
+            },
+        ).execute()
+
+    active = IntervalsRepository().get_active_connection(unique_user)
+    assert active is None, "a rejected replacement must not leave a partial row behind"
+
+
+@pytest.mark.asyncio
+async def test_replace_intervals_connection_rpc_defaults_missing_scopes_and_token_type(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """`p_scopes IS NULL` and blank `p_token_type` must fall back to `{}` / `Bearer`.
+
+    The repo always forwards `IntervalsConnectionCreate`'s Python-side defaults, so
+    only a direct RPC call (as a raw PostgREST client would send) exercises the
+    migration's own `coalesce()` fallbacks.
+    """
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["cycling"], coaching_state="active")
+    )
+    client = repo._require_client()
+
+    response = client.rpc(
+        "replace_intervals_connection",
+        {
+            "p_user_id": unique_user,
+            "p_intervals_athlete_id": "i333",
+            "p_intervals_athlete_name": None,
+            "p_scopes": None,
+            "p_access_token_ciphertext": "ciphertext-i333",
+            "p_token_type": "",
+        },
+    ).execute()
+
+    row = response.data
+    assert row["scopes"] == []
+    assert row["token_type"] == "Bearer"
 
 
 @pytest.mark.asyncio

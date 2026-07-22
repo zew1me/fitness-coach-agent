@@ -21,6 +21,8 @@
 - `20260714130000_activities_intervals_source.sql` — adds `'intervals_sync'` to `activities_source_check` for intervals.icu activity sync (#338)
 - `20260715035133_atomic_recalibration_candidate_decision.sql` — service-role RPC for atomic candidate decisions and threshold replacement
 - `20260716000000_intervals_sync_idempotency.sql` — unique generated key for idempotent Intervals activity imports (#338)
+- `20260719000000_replace_intervals_connection_atomic.sql` — service-role RPC for atomic Intervals.icu connection replacement
+- `20260721000000_update_goal_course_profile_notes_atomic.sql` — service-role RPC for atomic course-profile note merging
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -487,3 +489,31 @@ grants execution only to `service_role`.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Additive migration; no backfill or data rewrite required.
+
+## 20260719000000 — atomic Intervals.icu connection replacement (2026-07-19)
+
+**File:** `supabase/migrations/20260719000000_replace_intervals_connection_atomic.sql`
+
+**Change:** Adds `replace_intervals_connection(p_user_id,
+p_intervals_athlete_id, p_intervals_athlete_name, p_scopes,
+p_access_token_ciphertext, p_token_type)`, a service-role-only RPC that revokes
+the athlete's active `intervals_connections` row and inserts the replacement in
+one transaction, returning the new connection as a single composite row. A
+per-user transaction-scoped advisory lock serializes concurrent replacements.
+
+**Why (issue #345):** `IntervalsRepository.replace_connection` previously
+performed the revoke UPDATE and the INSERT as two independent PostgREST calls.
+A crash or timeout between them left the athlete with zero active connections,
+and two interleaved replaces raced the partial unique index
+(`intervals_connections_user_active_idx`), failing one caller with a unique
+violation. Inside one transaction the swap is all-or-nothing, and the advisory
+lock makes concurrent replaces last-committer-wins instead of erroring.
+
+**Security note:** The function uses an empty `search_path`, fully qualifies
+all relations, revokes execution from `public`, `anon`, and `authenticated`,
+and grants execution only to `service_role`.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Additive migration; no backfill or data rewrite required. The
+application change that calls the RPC must not be deployed before the
+migration is applied.

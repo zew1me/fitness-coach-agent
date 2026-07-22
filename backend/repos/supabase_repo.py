@@ -628,6 +628,24 @@ class SupabaseRepository:
             raise RecordNotFoundError(f"Goal '{goal_id}' not found.")
         return Goal.model_validate(rows[0])
 
+    async def update_goal_course_profile_notes(
+        self, goal_id: str, user_id: str, notes: str
+    ) -> Goal:
+        """Atomically merge course-profile notes without overwriting sibling keys."""
+        client = self._require_client()
+        response = client.rpc(
+            "update_goal_course_profile_notes_atomic",
+            {
+                "p_goal_id": goal_id,
+                "p_user_id": user_id,
+                "p_notes": notes,
+            },
+        ).execute()
+        row = response.data
+        if not row:
+            raise RecordNotFoundError(f"Goal '{goal_id}' not found.")
+        return Goal.model_validate(row)
+
     # ── Recovery Logs ─────────────────────────────────────────
 
     async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:

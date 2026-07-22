@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
 from backend.config import settings
 from backend.models.intervals import IntervalsConnectionCreate, IntervalsConnectionRecord
@@ -40,31 +39,23 @@ class IntervalsRepository:
         self, connection: IntervalsConnectionCreate
     ) -> IntervalsConnectionRecord:
         client = self._require_client()
-        now = datetime.now(UTC).isoformat()
-        (
-            client.table(self._table)
-            .update({"revoked_at": now, "updated_at": now})
-            .eq("user_id", connection.user_id)
-            .is_("revoked_at", "null")
-            .execute()
-        )
-        payload = {
-            "id": str(uuid4()),
-            "user_id": connection.user_id,
-            "intervals_athlete_id": connection.intervals_athlete_id,
-            "intervals_athlete_name": connection.intervals_athlete_name,
-            "scopes": connection.scopes,
-            "access_token_ciphertext": connection.access_token_ciphertext,
-            "token_type": connection.token_type,
-            "connected_at": now,
-            "updated_at": now,
-            "revoked_at": None,
-        }
-        response = client.table(self._table).insert(payload).execute()
-        rows = response.data or []
-        if not rows:
+        response = client.rpc(
+            "replace_intervals_connection",
+            {
+                "p_user_id": connection.user_id,
+                "p_intervals_athlete_id": connection.intervals_athlete_id,
+                "p_intervals_athlete_name": connection.intervals_athlete_name,
+                "p_scopes": connection.scopes,
+                "p_access_token_ciphertext": connection.access_token_ciphertext,
+                "p_token_type": connection.token_type,
+            },
+        ).execute()
+        # The RPC is declared `returns public.intervals_connections` (a single
+        # composite row), so PostgREST hands back a JSON object, not an array.
+        row = response.data
+        if not row:
             raise RuntimeError("Supabase did not return the Intervals connection row.")
-        return self._parse_connection(rows[0])
+        return self._parse_connection(row)
 
     def revoke_active_connection(self, user_id: str) -> bool:
         now = datetime.now(UTC).isoformat()

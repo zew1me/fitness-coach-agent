@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Activity(BaseModel):
@@ -55,6 +55,53 @@ class DailyLoadSnapshot(BaseModel):
 
 
 GoalType = Literal["event", "mountain", "improvement", "maintenance", "secondary"]
+
+# Compatibility aliases are accepted at the backend boundary, then persisted canonically.
+GOAL_TYPE_ALIASES: dict[str, GoalType] = {"race": "event"}
+
+
+class _GoalPayloadFields(BaseModel):
+    goal_type: GoalType | None = None
+    sport: str | None = None
+    title: str | None = None
+    description: str | None = None
+    target_date: date | None = None
+
+    target_ctl: float | None = None
+    target_metric_name: str | None = None
+    target_metric_value: float | None = None
+
+    course_distance_meters: float | None = None
+    course_elevation_gain_meters: float | None = None
+    course_avg_grade_pct: float | None = None
+    course_max_grade_pct: float | None = None
+    course_profile: dict[str, Any] | None = None
+    course_profile_notes: str | None = None
+
+    improvement_metric: str | None = None
+    improvement_target_value: float | None = None
+    improvement_baseline_value: float | None = None
+
+    priority: int | None = None
+    status: str | None = None
+
+    @field_validator("goal_type", mode="before")
+    @classmethod
+    def normalize_goal_type_alias(cls, value: object) -> object:
+        if isinstance(value, str):
+            return GOAL_TYPE_ALIASES.get(value, value)
+        return value
+
+
+class GoalCreatePayload(_GoalPayloadFields):
+    """Strict fields accepted when creating a goal."""
+
+    goal_type: GoalType
+    title: str
+
+
+class GoalUpdatePayload(_GoalPayloadFields):
+    """Partial goal fields; explicit null values remain distinguishable from omissions."""
 
 
 class Goal(BaseModel):
