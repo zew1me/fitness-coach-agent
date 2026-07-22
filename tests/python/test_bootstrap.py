@@ -863,9 +863,9 @@ def test_build_env_vars_sets_strava_oauth_vars_and_enable_flag() -> None:
     assert env_vars["STRAVA_INTEGRATION_ENABLED"] == "true"
 
 
-def test_build_env_vars_omits_strava_enable_flag_when_disabled() -> None:
-    # Fail-closed: an operator can stage the OAuth secrets without flipping the
-    # integration on, so the enable flag must not ship as a side effect.
+def test_build_env_vars_explicitly_disables_strava_when_disabled() -> None:
+    # Synchronize the disabled state so a value from an earlier bootstrap cannot
+    # remain enabled in Vercel.
     settings = _settings(
         strava_client_id="strava-123",
         strava_client_secret="strava-secret",
@@ -877,7 +877,7 @@ def test_build_env_vars_omits_strava_enable_flag_when_disabled() -> None:
     )
 
     assert env_vars["STRAVA_CLIENT_ID"] == "strava-123"
-    assert "STRAVA_INTEGRATION_ENABLED" not in env_vars
+    assert env_vars["STRAVA_INTEGRATION_ENABLED"] == "false"
 
 
 def test_build_env_vars_writes_auth_token_with_only_the_public_dsn() -> None:
