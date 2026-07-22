@@ -517,3 +517,53 @@ and grants execution only to `service_role`.
 locally). Additive migration; no backfill or data rewrite required. The
 application change that calls the RPC must not be deployed before the
 migration is applied.
+
+---
+
+## 20260721030000 — Strava connection and rotating token lifecycle
+
+**File:** `supabase/migrations/20260721030000_strava_connections.sql`
+
+**Change:** Adds the `strava_connections` table (RLS on, service-role-only) and
+two service-role RPCs:
+
+- `replace_strava_connection(...)` — atomically revokes the athlete's active
+  connection and inserts the replacement under a per-user advisory lock,
+  mirroring `replace_intervals_connection`. Stores encrypted access **and**
+  refresh tokens plus `expires_at`, `authorization_version`, and consent time.
+- `rotate_strava_tokens(p_connection_id, p_expected_expires_at, ...)` —
+  persists a rotated access/refresh pair with a compare-and-swap on the
+  previously observed `expires_at`, so a stale refresh response cannot clobber a
+  newer rotation. A NULL result tells the caller to reload the already-rotated
+  token.
+
+**Why (issue #340):** Strava access tokens expire ~6h and refreshes may rotate
+the refresh token, so the integration needs encrypted dual-token storage and an
+atomic rotation primitive that Intervals' static-bearer model never required.
+
+**Security note:** Both functions use an empty `search_path`, fully qualify all
+relations, revoke execution from `public`/`anon`/`authenticated`, and grant
+execution only to `service_role`. No plaintext token or authorization-code
+columns exist.
+
+**Deferred:** the full advisory-lock refresh _lease_ and webhook queue tables
+are out of scope for the first PR (user-triggered sync only).
+
+---
+
+## 20260721040000 — Strava activity source and idempotency
+
+**File:** `supabase/migrations/20260721040000_activities_strava_source.sql`
+
+**Change:** Extends `activities_source_check` with `strava_sync` using the
+`NOT VALID` → `validate` pattern, and adds a generated `strava_source_file_key`
+column with a `(user_id, strava_source_file_key)` unique constraint, independent
+from `intervals_source_file_key`.
+
+**Why (issue #340):** Keeps Strava re-syncs idempotent (same canonical row
+upserted on `strava:{athlete_id}:{activity_id}`) without constraining other
+import sources.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Additive migrations; no backfill required. Apply both before deploying
+application code that calls the new RPCs.
