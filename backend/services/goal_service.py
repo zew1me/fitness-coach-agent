@@ -17,12 +17,13 @@ class UnknownGoalActionError(ValueError):
 def _payload_fields(payload: GoalCreatePayload | GoalUpdatePayload) -> dict[str, object]:
     # exclude_unset uses Pydantic's model_fields_set to retain omitted-vs-null semantics.
     fields = payload.model_dump(mode="json", exclude_unset=True)
-    if "course_profile_notes" in fields and "course_profile" not in fields:
-        notes = fields.pop("course_profile_notes")
-        if notes is not None:
+    notes = fields.pop("course_profile_notes", None)
+    course_profile = fields.get("course_profile")
+    if notes is not None:
+        if isinstance(course_profile, dict):
+            fields["course_profile"] = {**course_profile, "notes": notes}
+        elif "course_profile" not in fields:
             fields["course_profile"] = {"notes": notes}
-    else:
-        fields.pop("course_profile_notes", None)
     return fields
 
 
@@ -51,9 +52,8 @@ class GoalService:
             except ValidationError as exc:
                 raise InvalidGoalPayloadError(exc.errors()) from exc
 
-            merge_profile_notes = (
-                payload.course_profile_notes is not None
-                and "course_profile" not in payload.model_fields_set
+            merge_profile_notes = payload.course_profile_notes is not None and (
+                "course_profile" not in payload.model_fields_set or payload.course_profile is None
             )
             goal_dict = _payload_fields(payload)
             if merge_profile_notes and goal_id:

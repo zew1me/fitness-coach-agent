@@ -2687,7 +2687,7 @@ async def test_update_goals_update_omits_null_fields_and_normalizes_alias(monkey
 
 
 @pytest.mark.asyncio
-async def test_update_goals_update_merges_course_profile_notes(monkeypatch) -> None:
+async def test_update_goals_update_merges_notes_when_profile_is_null(monkeypatch) -> None:
     class GoalRepository(EngineRepository):
         def __init__(self) -> None:
             self.get_call: tuple[str, str] | None = None
@@ -2731,7 +2731,10 @@ async def test_update_goals_update_merges_course_profile_notes(monkeypatch) -> N
                 json={
                     "action": "update",
                     "goal_id": "goal-1",
-                    "goal": {"course_profile_notes": "Steep final mile."},
+                    "goal": {
+                        "course_profile": None,
+                        "course_profile_notes": "Steep final mile.",
+                    },
                 },
             )
     finally:
@@ -2739,6 +2742,58 @@ async def test_update_goals_update_merges_course_profile_notes(monkeypatch) -> N
 
     assert response.status_code == 200
     assert repository.get_call == ("goal-1", "athlete-1")
+    assert repository.update_call == (
+        "goal-1",
+        "athlete-1",
+        {
+            "course_profile": {
+                "aid_stations": 3,
+                "notes": "Steep final mile.",
+                "terrain": "trail",
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_merges_notes_into_provided_course_profile(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Hill climb race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {
+                        "course_profile": {"aid_stations": 3, "terrain": "trail"},
+                        "course_profile_notes": "Steep final mile.",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
     assert repository.update_call == (
         "goal-1",
         "athlete-1",
