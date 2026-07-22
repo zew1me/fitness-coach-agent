@@ -617,9 +617,14 @@ export default function ProfilePage(): JSX.Element {
     }
 
     async function loadProfileData(): Promise<void> {
-      await loadMetricsData();
-      await loadIntervalsData();
-      await loadStravaData();
+      // These requests are independent. Loading provider status concurrently
+      // prevents an unavailable integration from delaying the profile or the
+      // other provider's controls.
+      await Promise.all([
+        loadMetricsData(),
+        loadIntervalsData(),
+        loadStravaData(),
+      ]);
     }
 
     void loadProfileData();

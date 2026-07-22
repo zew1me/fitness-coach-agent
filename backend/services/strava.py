@@ -1,3 +1,12 @@
+"""Async Strava OAuth and activity-sync boundary.
+
+This module intentionally uses the application's existing ``httpx`` transport
+instead of ``stravalib``.  The library is synchronous and its rate limiter
+sleeps in the request thread, while these FastAPI handlers require non-blocking
+I/O and application-owned token rotation/persistence.  Keep that decision in
+sync with ``docs/strava-integration-runbook.md``.
+"""
+
 from __future__ import annotations
 
 import logging

@@ -6,6 +6,37 @@ Strava-correct rotating-token refresh. Webhooks, scheduled polling, retention
 jobs, cross-provider deduplication, and feeding Strava data into AI/agent paths
 are explicit non-goals for this PR.
 
+## Client-library decision (2026-07-21)
+
+**Decision: do not add `stravalib`; keep the direct async `httpx` boundary in
+`backend/services/strava.py`.** This is an intentional architecture decision,
+not a temporary omission. We evaluated `stravalib` 2.5.0 (released 2026-06-01)
+and will not mix it into this integration.
+
+`stravalib` is a capable, maintained client for synchronous Python applications,
+but it is a poor fit for this service:
+
+- its transport uses synchronous `requests`, and its rate limiter calls
+  `time.sleep`; invoking either in an async FastAPI handler would block the event
+  loop (offloading every call to a worker would add complexity without removing
+  the other mismatches);
+- its automatic refresh mutates tokens held by one client instance and refreshes
+  only after expiry, whereas this app refreshes one hour early, encrypts both
+  rotated tokens, and compare-and-swaps them in shared persistence so concurrent
+  serverless invocations cannot overwrite a newer refresh;
+- this release uses only four small HTTP surfaces (authorize, token,
+  deauthorize, and paginated activity summaries), with application-specific
+  response validation, retry semantics, provenance allowlisting, and HTTP error
+  contracts that a wrapper would not replace; and
+- adopting it would add `requests`, `arrow`, and `pint` to the production graph
+  while retaining most of the current service code around it.
+
+Do not add `stravalib` merely for activity models, OAuth URL construction, or
+pagination. Revisit this decision only if the integration expands enough to
+make broad endpoint coverage material **and** the library offers a genuinely
+async transport plus hooks that preserve application-owned refresh persistence
+and rate-limit/error behavior. Record any reversal here before changing code.
+
 ## Data contract
 
 - **Capacity:** one authorized athlete (Single Player Mode).
