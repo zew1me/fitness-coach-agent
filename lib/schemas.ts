@@ -129,13 +129,17 @@ export const intervalsSyncRequestSchema = z.object({
   days: z.number().int().min(1).max(90),
 });
 
+// Shared shape for provider sync responses (Intervals + Strava report the same
+// inserted/skipped counts alongside the imported activities).
+const activitySyncResponseShape = {
+  activities: z.array(z.record(z.string(), z.unknown())),
+  skipped_duplicates: z.number().int().nonnegative(),
+  skipped_invalid: z.number().int().nonnegative(),
+  synced: z.number().int().nonnegative(),
+} as const;
+
 export const intervalsSyncResponseSchema = z
-  .object({
-    activities: z.array(z.record(z.string(), z.unknown())),
-    skipped_duplicates: z.number().int().nonnegative(),
-    skipped_invalid: z.number().int().nonnegative(),
-    synced: z.number().int().nonnegative(),
-  })
+  .object(activitySyncResponseShape)
   .transform((response): IntervalsSyncResponse => response);
 
 export const stravaConnectionStatusSchema = z.object({
@@ -159,26 +163,11 @@ export const stravaSyncRequestSchema = z.object({
 });
 
 export const stravaSyncResponseSchema = z
-  .object({
-    activities: z.array(z.record(z.string(), z.unknown())),
-    skipped_duplicates: z.number().int().nonnegative(),
-    skipped_invalid: z.number().int().nonnegative(),
-    synced: z.number().int().nonnegative(),
-  })
+  .object(activitySyncResponseShape)
   .transform((response): StravaSyncResponse => response);
 
-export const stravaDisconnectResponseSchema = z
-  .object({
-    connected: z.boolean(),
-    disconnect_pending: z.boolean().optional(),
-    connected_at: z.string().nullable().optional(),
-    last_sync_at: z.string().nullable().optional(),
-    strava_athlete_id: z.number().nullable().optional(),
-    strava_athlete_name: z.string().nullable().optional(),
-    scopes: z.array(z.string()).default([]),
-    authorization_version: z.string().nullable().optional(),
-    deleted_activities: z.number().int().nonnegative().default(0),
-  })
+export const stravaDisconnectResponseSchema = stravaConnectionStatusSchema
+  .extend({ deleted_activities: z.number().int().nonnegative().default(0) })
   .transform((response): StravaDisconnectResponse => response);
 
 export const modelStateSchema = z.object({

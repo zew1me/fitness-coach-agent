@@ -27,6 +27,21 @@ from backend.models.strava import (
 )
 from backend.models.training import Activity
 from backend.repos.strava_repo import StravaRepository
+from backend.services.activity_parse import (
+    first_positive_int as _first_positive_int,
+)
+from backend.services.activity_parse import (
+    optional_date as _optional_date,
+)
+from backend.services.activity_parse import (
+    optional_datetime as _optional_datetime,
+)
+from backend.services.activity_parse import (
+    optional_float as _optional_float,
+)
+from backend.services.activity_parse import (
+    optional_int as _optional_int,
+)
 from backend.services.intervals import TokenCipher
 
 logger = logging.getLogger(__name__)
@@ -45,8 +60,6 @@ STRAVA_STATE_TYPE = "strava_oauth_state"
 STRAVA_SYNC_MAX_DAYS = 90
 STRAVA_SYNC_PER_PAGE = 100
 STRAVA_SYNC_MAX_PAGES = 10
-
-_ISO_DATE_LENGTH = 10
 
 # Strava sport_type → canonical sport. Keys are normalized (casefold, no spaces
 # or underscores). Prefer sport_type over the deprecated `type` field.
@@ -567,43 +580,3 @@ def _parse_activity_dates(item: dict[str, Any]) -> tuple[date | None, datetime |
     activity_date = _optional_date(local_value) or _optional_date(absolute_value)
     started_at = _optional_datetime(absolute_value)
     return activity_date, started_at
-
-
-def _optional_date(value: object) -> date | None:
-    if not isinstance(value, str) or len(value) < _ISO_DATE_LENGTH:
-        return None
-    try:
-        return date.fromisoformat(value[:_ISO_DATE_LENGTH])
-    except ValueError:
-        return None
-
-
-def _optional_datetime(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _optional_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float | str):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_int(value: object) -> int | None:
-    number = _optional_float(value)
-    return round(number) if number is not None else None
-
-
-def _first_positive_int(*values: object) -> int | None:
-    for value in values:
-        number = _optional_int(value)
-        if number is not None and number > 0:
-            return number
-    return None

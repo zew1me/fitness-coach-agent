@@ -61,61 +61,42 @@ class StravaAthlete(BaseModel):
         return full or self.username or None
 
 
-class StravaTokenResponse(BaseModel):
+class _StravaTokenBase(BaseModel):
+    """Shared token fields/validators for the exchange and refresh responses."""
+
+    access_token: str
+    refresh_token: str
+    expires_at: int
+    token_type: str = "Bearer"
+
+    @field_validator("access_token", "refresh_token", "token_type")
+    @classmethod
+    def non_empty_string(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Strava token fields must not be empty")
+        return stripped
+
+    @field_validator("expires_at")
+    @classmethod
+    def positive_epoch(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Strava expires_at must be a positive epoch value")
+        return value
+
+    @property
+    def expires_at_datetime(self) -> datetime:
+        return datetime.fromtimestamp(self.expires_at, tz=UTC)
+
+
+class StravaTokenResponse(_StravaTokenBase):
     """Response body from the authorization-code exchange (includes athlete)."""
 
-    access_token: str
-    refresh_token: str
-    expires_at: int
-    token_type: str = "Bearer"
     athlete: StravaAthlete
 
-    @field_validator("access_token", "refresh_token", "token_type")
-    @classmethod
-    def non_empty_string(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("Strava token fields must not be empty")
-        return stripped
 
-    @field_validator("expires_at")
-    @classmethod
-    def positive_epoch(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("Strava expires_at must be a positive epoch value")
-        return value
-
-    @property
-    def expires_at_datetime(self) -> datetime:
-        return datetime.fromtimestamp(self.expires_at, tz=UTC)
-
-
-class StravaRefreshResponse(BaseModel):
+class StravaRefreshResponse(_StravaTokenBase):
     """Response body from a refresh-token grant (no athlete, no reliable scope)."""
-
-    access_token: str
-    refresh_token: str
-    expires_at: int
-    token_type: str = "Bearer"
-
-    @field_validator("access_token", "refresh_token", "token_type")
-    @classmethod
-    def non_empty_string(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("Strava token fields must not be empty")
-        return stripped
-
-    @field_validator("expires_at")
-    @classmethod
-    def positive_epoch(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("Strava expires_at must be a positive epoch value")
-        return value
-
-    @property
-    def expires_at_datetime(self) -> datetime:
-        return datetime.fromtimestamp(self.expires_at, tz=UTC)
 
 
 class StravaConnectionCreate(BaseModel):

@@ -68,6 +68,7 @@ def test_mapping_does_not_fabricate_tss_if_or_zones() -> None:
 def test_mapping_provenance_excludes_gps_and_map() -> None:
     activity = map_strava_activity("coach-user-1", _ATHLETE_ID, _summary())
     assert activity is not None
+    assert activity.raw_extraction is not None
     provenance = activity.raw_extraction["strava_summary"]
     assert "map" not in provenance
     assert "start_latlng" not in provenance
