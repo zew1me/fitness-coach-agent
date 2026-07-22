@@ -1,10 +1,8 @@
 # Strava Integration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Do not begin implementation until the authorization gate in Task 0 is satisfied, and keep tests in the same logical commit as the behavior they cover.
+> **For agentic workers:** implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. keep tests in the same logical commit as the behavior they cover.
 
-**Goal:** Add a single-athlete Strava connection to `/profile` that follows the existing Intervals.icu interaction model—connect, status, disconnect, and **Sync now**—while implementing Strava-specific OAuth token rotation, activity pagination, rate-limit handling, webhook lifecycle, deletion, provenance, and AI-processing controls.
-
-**Authorization premise:** As of July 21, 2026, the published Strava API Policy prohibits using Strava API data to operate an AI application and generally limits cached Strava data to seven days. This plan is intentionally blocked until Coach Arden has written authorization or published terms that explicitly permit the proposed AI coaching, retention, analytics, subprocessors, and deletion model. A one-athlete (“Single Player Mode”) API application does not by itself override those restrictions.
+**Goal:** Add a per-athlete Strava connection to `/profile` that follows the existing Intervals.icu interaction model—connect, status, disconnect, and **Sync now**—while implementing Strava-specific OAuth token rotation, activity pagination, rate-limit handling, webhook lifecycle, deletion, provenance, and AI-processing controls.
 
 **Architecture:** Add a provider-specific Strava service and repository alongside the Intervals.icu implementation, but do not copy its bearer-token lifecycle directly. Store encrypted access and refresh tokens, serialize refreshes with a database lease, import only allowlisted summary fields into canonical activities, update existing imports idempotently, enqueue webhook events for prompt processing, and make disconnect/deauthorization revoke access and purge affected data. Keep Strava data out of model input by default behind a separate fail-closed AI-processing gate. Enable import and AI processing independently only when both written authorization and athlete consent cover them.
 
