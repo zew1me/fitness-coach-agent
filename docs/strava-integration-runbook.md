@@ -52,13 +52,20 @@ and rate-limit/error behavior. Record any reversal here before changing code.
 - **Not fabricated:** TSS, intensity factor, and zones are left unset — Strava's
   summary provides none and the athlete's thresholds are required to derive them
   honestly.
-- **Provider-owned vs athlete-owned:** provider updates only touch the imported
-  summary metrics. Athlete notes, RPE, fueling notes, and planned-workout links
-  are preserved on re-sync (idempotent upsert on `strava:{athlete_id}:{id}`).
-- **AI-processing state:** Strava data is **not** wired into agent tools,
-  specialist context, or durable model state in this PR. That keeps
-  disconnect-deletion tractable: purge = delete Strava activities + connection +
-  remote revoke, with no derived artifacts to chase.
+- **Provider-owned vs athlete-owned:** provider writes only the imported summary
+  metrics. Athlete notes, RPE, and fueling notes are not inferred. Strava
+  imports never create planned-workout links (idempotent insert on
+  `strava:{athlete_id}:{id}`).
+- **AI-processing boundary:** `source='strava_sync'` data is allowed in the
+  non-AI calendar and profile connection/sync flows, but is excluded from every
+  activity read reachable by an agent: recent activities, compliance and plan
+  matching, threshold recalibration, and load recomputation. Guessed activity
+  IDs cannot bypass the boundary, legacy Strava auto-matches are neutralized in
+  AI-facing plan reads, and the TypeScript tool executor rejects any response
+  that still contains Strava provenance before OpenAI or durable model state can
+  receive it. Consequently specialist/delegation context and AI-facing derived
+  results cannot acquire Strava activity data. Keep these server and tool-output
+  guards together when adding an activity-backed agent feature.
 
 ## Configuration (fail-closed)
 

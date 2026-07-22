@@ -254,6 +254,98 @@ r2_service = R2Service()
 
 RECOVERY_WEEK_AGE_BREAKPOINT = 40
 
+# Strava's API agreement for this integration excludes imported activity data
+# from AI processing. Keep that policy at the engine boundary: calendar/profile
+# reads continue to use the unfiltered repository methods, while every activity
+# read reachable by an agent tool goes through the helpers below.
+_AI_EXCLUDED_ACTIVITY_SOURCES = frozenset({"strava_sync"})
+
+
+def _is_activity_visible_to_ai(activity: Activity) -> bool:
+    return activity.source not in _AI_EXCLUDED_ACTIVITY_SOURCES
+
+
+def _filter_activities_for_ai(activities: list[Activity]) -> list[Activity]:
+    """Fail closed if a repository returns an AI-excluded activity source."""
+    return [activity for activity in activities if _is_activity_visible_to_ai(activity)]
+
+
+async def _list_activities_for_ai(
+    user_id: str,
+    *,
+    sport: str | None = None,
+    since: date | None = None,
+    limit: int = 50,
+) -> list[Activity]:
+    activities = (
+        await repo.list_activities(user_id, sport=sport, limit=limit)
+        if since is None
+        else await repo.list_activities(user_id, sport=sport, since=since, limit=limit)
+    )
+    return _filter_activities_for_ai(activities)
+
+
+async def _list_activities_between_for_ai(
+    user_id: str, *, start: date, end: date
+) -> list[Activity]:
+    activities = await repo.list_activities_between(user_id, start=start, end=end)
+    return _filter_activities_for_ai(activities)
+
+
+async def _get_activity_for_ai(user_id: str, activity_id: str) -> Activity:
+    activity = await repo.get_activity(user_id, activity_id)
+    if not _is_activity_visible_to_ai(activity):
+        # Match the ordinary not-found contract so an agent cannot use guessed
+        # identifiers to probe whether an excluded provider activity exists.
+        raise RecordNotFoundError("Activity not found.")
+    return activity
+
+
+async def _sanitize_plan_workouts_for_ai(
+    user_id: str, workouts: list[PlanWorkout]
+) -> list[PlanWorkout]:
+    """Remove Strava-linked state before plan-workout data reaches an agent.
+
+    New Strava imports are never auto-matched (see
+    ``_try_match_activity_to_plan``). This read-time guard also neutralizes any
+    Strava-linked completion persisted before that boundary existed, plus an
+    orphaned auto-match whose deleted activity can no longer prove provenance.
+    """
+    activity_ids = sorted(
+        {
+            workout.actual_activity_id
+            for workout in workouts
+            if workout.actual_activity_id is not None
+        }
+    )
+    excluded_ids: set[str] = set()
+    for activity_id in activity_ids:
+        try:
+            activity = await repo.get_activity(user_id, activity_id)
+        except RecordNotFoundError:
+            continue
+        if not _is_activity_visible_to_ai(activity):
+            excluded_ids.add(activity_id)
+
+    sanitized: list[PlanWorkout] = []
+    for workout in workouts:
+        orphaned_auto_match = (
+            workout.completion_source == "auto_matched" and workout.actual_activity_id is None
+        )
+        if workout.actual_activity_id not in excluded_ids and not orphaned_auto_match:
+            sanitized.append(workout)
+            continue
+        sanitized.append(
+            workout.model_copy(
+                update={
+                    "actual_activity_id": None,
+                    "completion_source": None,
+                    "status": "scheduled",
+                }
+            )
+        )
+    return sanitized
+
 
 def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
     if authorization is None or not authorization.startswith("Bearer "):
@@ -1330,7 +1422,7 @@ async def recalibrate_thresholds_endpoint(
     activities_by_sport = {}
     for sport in ESTIMABLE_SPORTS:
         activities_by_sport[sport] = await _activity_repo_call(
-            repo.list_activities(user_id, sport=sport, since=since, limit=200),
+            _list_activities_for_ai(user_id, sport=sport, since=since, limit=200),
             detail="Failed to load activities.",
             log_message=f"list_activities failed for user_id={user_id} sport={sport}",
         )
@@ -1556,7 +1648,7 @@ async def recompute_load_endpoint(
 
     user_id = user_context.user_id
     since = payload.since or date.today()
-    activities = await repo.list_activities(user_id, sport=payload.sport, since=since, limit=500)
+    activities = await _list_activities_for_ai(user_id, sport=payload.sport, since=since, limit=500)
     logger.debug(
         "recompute_load user_id=%s sport=%s since=%s activities=%d",
         user_id,
@@ -2221,7 +2313,7 @@ async def get_recent_activities(
     payload: GetRecentActivitiesRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    activities = await repo.list_activities(
+    activities = await _list_activities_for_ai(
         user_context.user_id,
         sport=payload.sport,
         limit=min(max(payload.limit, 1), 100),
@@ -2262,7 +2354,7 @@ async def _update_activity_from_text(
 
     try:
         existing = await _activity_repo_call(
-            repo.get_activity(user_id, activity_id),
+            _get_activity_for_ai(user_id, activity_id),
             detail="Failed to load activity.",
             log_message=f"get_activity failed for user_id={user_id} activity_id={activity_id}",
         )
@@ -2917,9 +3009,19 @@ async def _try_match_activity_to_plan(user_id: str, activity: Activity) -> dict[
     """Write-time glue: opportunistically match a just-saved activity.
 
     Best-effort by design — a matching failure must never fail the save that
-    triggered it, so errors are logged and swallowed.
+    triggered it, so errors are logged and swallowed. AI-excluded provider
+    activities are deliberately not matched because the resulting completed
+    workout would itself be an AI-facing derivative of that provider data.
     """
     from backend.services.compliance import MATCH_MAX_DAY_OFFSET, match_activities_to_workouts
+
+    if not _is_activity_visible_to_ai(activity):
+        logger.info(
+            "activity excluded from AI-facing plan match user_id=%s source=%s",
+            user_id,
+            activity.source,
+        )
+        return None
 
     try:
         window = timedelta(days=MATCH_MAX_DAY_OFFSET)
@@ -2976,11 +3078,12 @@ async def get_compliance_summary(
         match_margin = timedelta(days=MATCH_MAX_DAY_OFFSET)
         planned, activities = await asyncio.gather(
             repo.list_plan_workouts_between(user_id, start=start, end=today + match_margin),
-            repo.list_activities_between(
+            _list_activities_between_for_ai(
                 user_id, start=start - match_margin, end=today + match_margin
             ),
         )
 
+        planned = await _sanitize_plan_workouts_for_ai(user_id, planned)
         matches = match_activities_to_workouts(planned, activities, today=today)
         persisted_matches = []
         for match in matches:
@@ -3065,6 +3168,7 @@ async def find_plan_workout(
             start=payload.workout_date - window,
             end=payload.workout_date + window,
         )
+        workouts = await _sanitize_plan_workouts_for_ai(user_id, workouts)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
@@ -3120,7 +3224,7 @@ async def _apply_workout_resolution(
     user_id: str, workout: PlanWorkout, payload: ResolvePlanWorkoutRequest
 ) -> PlanWorkout:
     if payload.outcome == "completed" and payload.activity_id:
-        await repo.get_activity(user_id, payload.activity_id)
+        await _get_activity_for_ai(user_id, payload.activity_id)
     return await repo.resolve_plan_workout_atomic(
         user_id=user_id,
         workout_id=workout.id or payload.plan_workout_id,

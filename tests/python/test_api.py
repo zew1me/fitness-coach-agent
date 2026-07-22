@@ -2228,6 +2228,121 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_recent_activities_ai_boundary_drops_strava_canary(monkeypatch) -> None:
+    canary = "STRAVA_RECENT_AI_CANARY_998877"
+
+    class ActivityRepository(EngineRepository):
+        async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
+            return [
+                Activity(
+                    id=canary,
+                    user_id=user_id,
+                    sport="running",
+                    activity_date=datetime.fromisoformat("2026-04-11T00:00:00+00:00").date(),
+                    duration_seconds=3600,
+                    athlete_notes=canary,
+                    source="strava_sync",
+                    source_file_key=f"strava:{canary}",
+                    raw_extraction={"strava_summary": {"name": canary}},
+                ),
+                Activity(
+                    id="manual-activity",
+                    user_id=user_id,
+                    sport="running",
+                    activity_date=datetime.fromisoformat("2026-04-10T00:00:00+00:00").date(),
+                    duration_seconds=2700,
+                    source="manual",
+                ),
+            ]
+
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/get-recent-activities",
+            json={"limit": 20, "sport": "running"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [activity["id"] for activity in response.json()["activities"]] == ["manual-activity"]
+    assert canary not in response.text
+    assert "strava_sync" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_recompute_load_excludes_strava_from_ai_context_derivative(monkeypatch) -> None:
+    canary = "STRAVA_LOAD_AI_CANARY_998877"
+    today = datetime.today().date()
+
+    class LoadRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.snapshots: list[dict[str, Any]] = []
+
+        async def list_activities(
+            self, user_id: str, *, sport=None, since=None, limit: int = 50
+        ) -> list[Activity]:
+            return [
+                Activity(
+                    id=canary,
+                    user_id=user_id,
+                    sport="cycling",
+                    activity_date=today,
+                    tss=9999,
+                    source="strava_sync",
+                    athlete_notes=canary,
+                ),
+                Activity(
+                    id="manual-load-activity",
+                    user_id=user_id,
+                    sport="cycling",
+                    activity_date=today,
+                    tss=10,
+                    source="manual",
+                ),
+            ]
+
+        async def get_latest_load(self, user_id: str, sport=None):
+            return None
+
+        async def upsert_load_snapshots(
+            self, user_id: str, snapshots: list[dict], sport=None
+        ) -> None:
+            self.snapshots = snapshots
+
+    repository = LoadRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/recompute-load",
+            json={"since": today.isoformat(), "sport": None},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert repository.snapshots[0]["daily_tss"] == 10
+    assert canary not in response.text
+    assert "strava_sync" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_update_goals_validation_errors_return_422(monkeypatch) -> None:
     class GoalRepository(EngineRepository):
         def __init__(self) -> None:
@@ -3202,6 +3317,62 @@ async def test_save_activity_from_text_updates_existing_activity(monkeypatch) ->
     assert body["activity"]["activity_summary"]["subjective"]["overdid_it_flag"] is True
     assert repository.updated_activity is not None
     assert repository.updated_activity.source == "fit_upload"
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_cannot_open_strava_activity(monkeypatch) -> None:
+    from backend.services import activity_text
+
+    canary = "STRAVA_ACTIVITY_UPDATE_AI_CANARY_998877"
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_called = False
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            return Activity(
+                id=activity_id,
+                user_id=user_id,
+                sport="cycling",
+                activity_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+                source="strava_sync",
+                athlete_notes=canary,
+                raw_extraction={"strava_summary": {"name": canary}},
+            )
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.update_called = True
+            return activity
+
+    async def unexpected_merge(*_args, **_kwargs):
+        raise AssertionError("Strava activity reached OpenAI-backed text merge")
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "merge_activity_text_update", unexpected_merge)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": canary, "text": "Add private notes."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 404
+    assert repository.update_called is False
+    assert canary not in response.text
+    assert "strava_sync" not in response.text
 
 
 @pytest.mark.asyncio
