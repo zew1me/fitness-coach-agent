@@ -178,8 +178,12 @@ class FakeTableQuery:
 
     @staticmethod
     def _conflict_value(row: dict[str, object], column: str) -> object:
-        if column == "intervals_source_file_key":
-            return row.get("source_file_key") if row.get("source") == "intervals_sync" else None
+        source_by_generated_column = {
+            "intervals_source_file_key": "intervals_sync",
+            "strava_source_file_key": "strava_sync",
+        }
+        if source := source_by_generated_column.get(column):
+            return row.get("source_file_key") if row.get("source") == source else None
         return row.get(column)
 
     def _matching_rows(self) -> list[dict[str, object]]:
@@ -898,6 +902,24 @@ async def test_create_intervals_activity_ignores_a_duplicate_source_key() -> Non
 
 
 @pytest.mark.asyncio
+async def test_create_strava_activity_ignores_a_duplicate_source_key() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+    activity = Activity(
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 4, 1),
+        source="strava_sync",
+        source_file_key="strava:100",
+    )
+
+    created = await repo.create_strava_activity(activity)
+    duplicate = await repo.create_strava_activity(activity)
+
+    assert created is not None
+    assert duplicate is None
+
+
+@pytest.mark.asyncio
 async def test_create_activity_builds_summary_when_activity_has_default_summary() -> None:
     repo = SupabaseRepository(client=FakeSupabaseClient())
 
@@ -955,6 +977,40 @@ async def test_list_synced_intervals_keys_is_user_and_source_scoped() -> None:
     keys = await repo.list_synced_intervals_keys("athlete-1")
 
     assert keys == {"intervals:i100"}
+
+
+@pytest.mark.asyncio
+async def test_list_synced_strava_keys_is_user_and_source_scoped() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            activity_rows=[
+                {
+                    "user_id": "athlete-1",
+                    "source": "strava_sync",
+                    "source_file_key": "strava:100",
+                },
+                {
+                    "user_id": "athlete-1",
+                    "source": "intervals_sync",
+                    "source_file_key": "strava:200",
+                },
+                {
+                    "user_id": "athlete-2",
+                    "source": "strava_sync",
+                    "source_file_key": "strava:300",
+                },
+                {
+                    "user_id": "athlete-1",
+                    "source": "strava_sync",
+                    "source_file_key": None,
+                },
+            ]
+        )
+    )
+
+    keys = await repo.list_synced_strava_keys("athlete-1")
+
+    assert keys == {"strava:100"}
 
 
 @pytest.mark.asyncio

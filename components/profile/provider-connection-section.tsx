@@ -61,6 +61,7 @@ export function ProviderConnectionSection({
           onDisconnect={onDisconnect}
           onSync={onSync}
           state={state}
+          title={title}
         />
       </div>
     </section>
@@ -77,6 +78,7 @@ type ProviderStatusViewProps = Pick<
   | "onDisconnect"
   | "onSync"
   | "state"
+  | "title"
 >;
 
 function ProviderStatusView({
@@ -88,6 +90,7 @@ function ProviderStatusView({
   onDisconnect,
   onSync,
   state,
+  title,
 }: ProviderStatusViewProps): JSX.Element {
   if (state === null) {
     return (
@@ -101,6 +104,7 @@ function ProviderStatusView({
         onDisconnect={onDisconnect}
         onSync={onSync}
         state={state}
+        title={title}
       />
     );
   }
@@ -128,7 +132,11 @@ function ConnectedProviderStatus({
   onDisconnect,
   onSync,
   state,
-}: Pick<ProviderStatusViewProps, "action" | "onDisconnect" | "onSync"> & {
+  title,
+}: Pick<
+  ProviderStatusViewProps,
+  "action" | "onDisconnect" | "onSync" | "title"
+> & {
   state: ProviderConnectionState;
 }): JSX.Element {
   return (
@@ -141,7 +149,7 @@ function ConnectedProviderStatus({
       ))}
       {state.disconnectPending && (
         <p className={styles.error}>
-          Disconnect is pending — Strava access could not be revoked yet. Retry
+          Disconnect is pending — {title} access could not be revoked yet. Retry
           to complete removal.
         </p>
       )}
