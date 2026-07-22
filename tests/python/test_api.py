@@ -142,7 +142,15 @@ class EngineRepository:
     async def get_active_plan(self, user_id: str):
         return None
 
-    async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
+    async def list_activities(
+        self,
+        user_id: str,
+        *,
+        sport=None,
+        since=None,
+        limit: int = 50,
+        exclude_sources=None,
+    ):
         return []
 
     async def create_activity(self, activity: Activity) -> Activity:
@@ -164,6 +172,9 @@ class EngineRepository:
         return [
             w.model_copy(update={"id": f"workout-{i}"}) for i, w in enumerate(workouts, start=1)
         ]
+
+    async def get_activities_by_ids(self, user_id: str, activity_ids: list[str]) -> list[Activity]:
+        return [await self.get_activity(user_id, activity_id) for activity_id in activity_ids]
 
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         return Activity(
@@ -2185,7 +2196,15 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_get_recent_activities_returns_normalized_activity_list(monkeypatch) -> None:
     class ActivityRepository(EngineRepository):
-        async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
+        async def list_activities(
+            self,
+            user_id: str,
+            *,
+            sport=None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
+        ):
             assert user_id == "athlete-1"
             assert sport == "running"
             assert limit == 2
@@ -2228,11 +2247,89 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_ai_activity_helper_applies_limit_after_excluded_sources(monkeypatch) -> None:
+    class ActivityRepository:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.activities = [
+                Activity(
+                    id="strava-latest",
+                    user_id="athlete-1",
+                    sport="running",
+                    activity_date=datetime.fromisoformat("2026-04-12T00:00:00+00:00").date(),
+                    source="strava_sync",
+                ),
+                *[
+                    Activity(
+                        id=f"manual-{index}",
+                        user_id="athlete-1",
+                        sport="running",
+                        activity_date=datetime.fromisoformat(
+                            f"2026-04-{11 - index:02d}T00:00:00+00:00"
+                        ).date(),
+                        source="manual",
+                    )
+                    for index in range(1, 5)
+                ],
+            ]
+
+        async def list_activities(
+            self,
+            user_id: str,
+            *,
+            sport: str | None = None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
+        ) -> list[Activity]:
+            self.calls.append(
+                {
+                    "user_id": user_id,
+                    "sport": sport,
+                    "since": since,
+                    "limit": limit,
+                    "exclude_sources": exclude_sources,
+                }
+            )
+            activities = [
+                activity
+                for activity in self.activities
+                if not exclude_sources or activity.source not in exclude_sources
+            ]
+            return activities[:limit]
+
+    repository = ActivityRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    without_since = await api_index._list_activities_for_ai("athlete-1", sport="running", limit=3)
+    with_since = await api_index._list_activities_for_ai(
+        "athlete-1",
+        sport="running",
+        since=datetime.fromisoformat("2026-04-01T00:00:00+00:00").date(),
+        limit=3,
+    )
+
+    assert [activity.id for activity in without_since] == ["manual-1", "manual-2", "manual-3"]
+    assert [activity.id for activity in with_since] == ["manual-1", "manual-2", "manual-3"]
+    assert len(repository.calls) == 2
+    assert all(call["limit"] == 3 for call in repository.calls)
+    assert all(call["exclude_sources"] == {"strava_sync"} for call in repository.calls)
+
+
+@pytest.mark.asyncio
 async def test_recent_activities_ai_boundary_drops_strava_canary(monkeypatch) -> None:
     canary = "STRAVA_RECENT_AI_CANARY_998877"
 
     class ActivityRepository(EngineRepository):
-        async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
+        async def list_activities(
+            self,
+            user_id: str,
+            *,
+            sport=None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
+        ):
             return [
                 Activity(
                     id=canary,
@@ -2288,7 +2385,13 @@ async def test_recompute_load_excludes_strava_from_ai_context_derivative(monkeyp
             self.snapshots: list[dict[str, Any]] = []
 
         async def list_activities(
-            self, user_id: str, *, sport=None, since=None, limit: int = 50
+            self,
+            user_id: str,
+            *,
+            sport=None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
         ) -> list[Activity]:
             return [
                 Activity(

@@ -85,6 +85,7 @@ class ComplianceRepository:
         self.activities = activities or []
         self.workout_updates: list[tuple[str, dict[str, Any]]] = []
         self.activity_updates: list[Activity] = []
+        self.activity_bulk_calls: list[list[str]] = []
 
     async def get_active_plan(self, user_id: str) -> TrainingPlan | None:
         return self.plan
@@ -113,6 +114,14 @@ class ComplianceRepository:
             if activity.id == activity_id:
                 return activity
         raise RecordNotFoundError(f"Activity '{activity_id}' not found.")
+
+    async def get_activities_by_ids(self, user_id: str, activity_ids: list[str]) -> list[Activity]:
+        self.activity_bulk_calls.append(activity_ids)
+        return [
+            activity
+            for activity in self.activities
+            if activity.id is not None and activity.id in activity_ids
+        ]
 
     async def update_activity(self, activity: Activity) -> Activity:
         self.activity_updates.append(activity)
@@ -313,6 +322,7 @@ class TestGetComplianceSummary:
         assert body["compliance_pct"] == 0.0
         assert repo.workout_updates == []
         assert repo.activity_updates == []
+        assert repo.activity_bulk_calls == [[canary]]
         assert canary not in response.text
         assert "strava_sync" not in response.text
 

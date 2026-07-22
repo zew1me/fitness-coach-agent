@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, TypeVar
 from uuid import UUID, uuid4
@@ -510,6 +510,22 @@ class SupabaseRepository:
             )
         return Activity.model_validate(rows[0])
 
+    async def get_activities_by_ids(
+        self, user_id: str, activity_ids: Collection[str]
+    ) -> list[Activity]:
+        """Load the requested activities in one query; missing ids are omitted."""
+        if not activity_ids:
+            return []
+        client = self._require_client()
+        response = (
+            client.table("activities")
+            .select("*")
+            .eq("user_id", user_id)
+            .in_("id", list(activity_ids))
+            .execute()
+        )
+        return [Activity.model_validate(r) for r in (response.data or [])]
+
     async def update_activity(self, activity: Activity) -> Activity:
         if activity.id is None:
             raise ValueError("Activity id is required for update.")
@@ -534,6 +550,7 @@ class SupabaseRepository:
         sport: str | None = None,
         since: date | None = None,
         limit: int = 50,
+        exclude_sources: Collection[str] | None = None,
     ) -> list[Activity]:
         client = self._require_client()
         query = client.table("activities").select("*").eq("user_id", user_id)
@@ -541,6 +558,8 @@ class SupabaseRepository:
             query = query.eq("sport", sport)
         if since:
             query = query.gte("activity_date", since.isoformat())
+        for source in exclude_sources or ():
+            query = query.neq("source", source)
         response = query.order("activity_date", desc=True).limit(limit).execute()
         return [Activity.model_validate(r) for r in (response.data or [])]
 

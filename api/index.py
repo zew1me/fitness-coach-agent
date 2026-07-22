@@ -278,9 +278,20 @@ async def _list_activities_for_ai(
     limit: int = 50,
 ) -> list[Activity]:
     activities = (
-        await repo.list_activities(user_id, sport=sport, limit=limit)
+        await repo.list_activities(
+            user_id,
+            sport=sport,
+            limit=limit,
+            exclude_sources=_AI_EXCLUDED_ACTIVITY_SOURCES,
+        )
         if since is None
-        else await repo.list_activities(user_id, sport=sport, since=since, limit=limit)
+        else await repo.list_activities(
+            user_id,
+            sport=sport,
+            since=since,
+            limit=limit,
+            exclude_sources=_AI_EXCLUDED_ACTIVITY_SOURCES,
+        )
     )
     return _filter_activities_for_ai(activities)
 
@@ -318,14 +329,12 @@ async def _sanitize_plan_workouts_for_ai(
             if workout.actual_activity_id is not None
         }
     )
-    excluded_ids: set[str] = set()
-    for activity_id in activity_ids:
-        try:
-            activity = await repo.get_activity(user_id, activity_id)
-        except RecordNotFoundError:
-            continue
-        if not _is_activity_visible_to_ai(activity):
-            excluded_ids.add(activity_id)
+    activities = await repo.get_activities_by_ids(user_id, activity_ids)
+    excluded_ids = {
+        activity.id
+        for activity in activities
+        if activity.id is not None and not _is_activity_visible_to_ai(activity)
+    }
 
     sanitized: list[PlanWorkout] = []
     for workout in workouts:

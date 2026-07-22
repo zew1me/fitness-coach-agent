@@ -73,7 +73,13 @@ class RecalibrationRepository:
         return self.thresholds
 
     async def list_activities(
-        self, user_id: str, *, sport: str | None = None, since=None, limit: int = 50
+        self,
+        user_id: str,
+        *,
+        sport: str | None = None,
+        since=None,
+        limit: int = 50,
+        exclude_sources=None,
     ) -> list[Activity]:
         self.activity_calls.append(
             {"limit": limit, "since": since, "sport": sport, "user_id": user_id}
