@@ -1,6 +1,29 @@
 # Strava Integration Implementation Plan
 
-> **For agentic workers:** implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. keep tests in the same logical commit as the behavior they cover.
+> **Historical planning record:** This document retains the original
+> implementation proposal and its task-level intent. The dated
+> delivery-status block is the source of truth for what shipped; unchecked
+> historical tasks are not rollout instructions for the delivered release.
+
+## Delivery Status (2026-07-22)
+
+**Shipped:** one authorized athlete can connect, view status, disconnect, and
+run manual bounded summary syncs from `/profile`. The release includes
+rotating-token OAuth, encrypted token persistence, idempotent provider-key
+upserts, rate-limit handling, remote revocation, and deletion of the connection
+and imported Strava activities on disconnect.
+
+**Deferred / out of scope:** raw FIT imports; webhooks and all webhook-based
+rollback or deauthorization handling; scheduled polling; retention jobs;
+AI/agent processing; refresh-lease infrastructure (the shipped token rotation
+uses its compare-and-swap contract instead); and cross-provider
+fuzzy/destructive Intervals.icu deduplication. Re-sync deduplicates only by
+Strava's stable provider key, so connecting both providers can show duplicate
+real-world activities.
+
+**Data semantics:** Strava summaries do not contain the athlete-specific
+threshold context required for TSS, intensity factor, or zones, so those fields
+remain unset.
 
 **Goal:** Add a per-athlete Strava connection to `/profile` that follows the existing Intervals.icu interaction model—connect, status, disconnect, and **Sync now**—while implementing Strava-specific OAuth token rotation, activity pagination, rate-limit handling, webhook lifecycle, deletion, provenance, and AI-processing controls.
 
@@ -357,7 +380,10 @@ uv run ruff format --check backend/services/strava.py tests/python/test_strava_o
 
 ### Mapping
 
-- [ ] Prefer `sport_type` and use a comprehensive Strava-to-canonical map for cycling, running, swimming, rowing, hiking, walking, strength, yoga, and general fallback. Consider adding additional types as approrpiate based on Strave types where they could be useful in the future.
+- [ ] Prefer `sport_type` and use a comprehensive Strava-to-canonical map for
+      cycling, running, swimming, rowing, hiking, walking, strength, yoga, and
+      general fallback. Consider adding additional types as appropriate based on
+      Strava types where they could be useful in the future.
 - [ ] Derive `activity_date` from `start_date_local`; derive absolute `started_at` only from `start_date`.
 - [ ] Map summary metrics without semantic invention:
   - moving time, falling back to elapsed time;
@@ -367,10 +393,11 @@ uv run ruff format --check backend/services/strava.py tests/python/test_strava_o
   - average watts;
   - `weighted_average_watts` to normalized-power field with provenance;
   - average cadence.
-  - TSS (calculated)
-  - Intensity factor (calculated)
-  - Zones (calculated)
-- [ ] Leave RPE, and notes unset unless they are semantically valid from this source or are sourced from a different semantically valid source.
+- [ ] Leave TSS, intensity factor, and zones unset because Strava summary data
+      does not provide the athlete-specific threshold context required to
+      calculate them safely.
+- [ ] Leave RPE and notes unset unless they are semantically valid from this
+      source or are sourced from a different semantically valid source.
 - [ ] Build `activity_summary` using the existing canonical helper.
 - [ ] Store an allowlisted `strava_summary` provenance object.
 - [ ] Set `source="strava_sync"` and stable `source_file_key`.
@@ -381,8 +408,8 @@ uv run ruff format --check backend/services/strava.py tests/python/test_strava_o
 - [ ] Make overlapping syncs race-safe through the database upsert contract.
 - [ ] Preserve athlete-entered fields and existing planned-workout links on provider updates.
 - [ ] Run plan matching/compliance finalization.
-- [ ] Attempt fuzzy deduplication against Intervals.icu in v1. Use a 'closeness' factor for metadata and timing values to de-duplicate. When intervals.icu has a note it is from Strava and time range is aligned,
-      that's nearly 100% closeness.
+- [ ] Do not attempt cross-provider fuzzy deduplication against Intervals.icu
+      in v1; deduplicate Strava activities only by their stable provider key.
 - [ ] Document that connecting both sources can show duplicate real-world activities.
 
 **Logical commit:** `feat: sync Strava activity`
@@ -652,27 +679,35 @@ Do not create migration-only commits without updating `docs/supabase-migration-h
   - rollout and rollback steps.
 - [ ] Keep all production feature flags false when the code first lands.
 - [ ] Apply migrations before deploying application code that calls new RPCs.
-- [ ] Configure preview callback domain, OAuth credentials, webhook verify token, encryption secret, authorization version, and retention.
-- [ ] Create/verify the preview webhook subscription.
+- [ ] For the shipped manual-sync release, configure the callback domain, OAuth
+      credentials, and encryption secret. Authorization version is optional;
+      webhook and retention configuration remain deferred.
+- [ ] Defer preview webhook-subscription setup until webhook processing is
+      separately delivered.
 - [ ] Smoke-test with the sole authorized athlete:
   - connect;
   - verify returned scope;
   - force token refresh;
   - sync a small window twice;
-  - update/delete an activity in Strava and observe webhook reconciliation;
+  - defer update/delete webhook-reconciliation testing until webhook processing
+    is delivered;
   - confirm rate-limit telemetry;
   - disconnect and verify remote grant plus local data deletion.
 - [ ] Inspect Supabase directly to confirm no plaintext token and no excluded upstream fields.
 - [ ] Inspect agent/tool traces to prove Strava source exclusion while AI processing is off.
 - [ ] Enable `STRAVA_INTEGRATION_ENABLED` in preview only.
-- [ ] Repeat callback/webhook registration and smoke tests for production.
-- [ ] Monitor 401/429 rates, refresh failures, webhook lag/dead letters, sync counts, and disconnect-pending records.
+- [ ] Repeat callback registration and manual-sync smoke tests for production;
+      defer webhook registration.
+- [ ] Monitor 401/429 rates, refresh failures, sync counts, and
+      disconnect-pending records. Defer webhook lag/dead-letter monitoring.
 
 ### Rollback
 
-- Turn `STRAVA_INTEGRATION_ENABLED=false` to stop new connections and pulls while preserving the ability to process deauthorization/deletion webhooks.
-- Do not disable webhook deletion handling during rollback.
-- Revoke the Strava webhook subscription only after all active connections are revoked and required data is purged.
+- Turn `STRAVA_INTEGRATION_ENABLED=false` to stop new connections and pulls.
+  Webhook deauthorization/deletion handling is deferred and is not part of this
+  rollback path.
+- Do not create or revoke a webhook subscription for this release; manage that
+  lifecycle only with a future webhook delivery.
 - Keep additive migrations in place unless a separately reviewed rollback migration is required; do not manually delete migration history.
 
 ---
