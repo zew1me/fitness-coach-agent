@@ -268,7 +268,12 @@ class StravaOAuthService:
     # ── Status / auth resolution ─────────────────────────────────
 
     def get_status(self, user_id: str) -> StravaConnectionStatus:
-        self._require_enabled()
+        # Status is a read-only probe: when the integration is disabled or
+        # unconfigured, report "not connected" rather than raising, so the
+        # profile renders a clean Connect affordance instead of an error banner
+        # (mirrors Intervals' unconfigured behavior). Action endpoints still 503.
+        if not self._is_enabled():
+            return StravaConnectionStatus(connected=False)
         return self._status_from_record(self._repository.get_active_connection(user_id))
 
     def record_sync(self, user_id: str) -> None:
@@ -478,6 +483,15 @@ class StravaOAuthService:
             )
 
     # ── Config / cipher ──────────────────────────────────────────
+
+    @staticmethod
+    def _is_enabled() -> bool:
+        return (
+            settings.strava_integration_enabled
+            and bool(settings.strava_client_id.strip())
+            and bool(settings.strava_client_secret.strip())
+            and bool(settings.strava_token_encryption_secret.strip())
+        )
 
     def _require_enabled(self) -> None:
         if not settings.strava_integration_enabled:

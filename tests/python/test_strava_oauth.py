@@ -160,6 +160,22 @@ def test_authorization_url_raises_when_integration_disabled(
         _service().build_authorization_url(user_id="coach-user-1")
 
 
+def test_status_reports_disconnected_when_integration_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Flag-off is the landing posture: status must read as a clean "not
+    # connected" (no repo call, no error) rather than raising a 503.
+    monkeypatch.setattr("backend.services.strava.settings.strava_integration_enabled", False)
+
+    class ExplodingRepo:
+        def get_active_connection(self, user_id: str) -> None:
+            raise AssertionError("must not touch the repo while disabled")
+
+    service = StravaOAuthService(repository=ExplodingRepo())  # type: ignore[arg-type]
+    status = service.get_status("coach-user-1")
+    assert status.connected is False
+
+
 def test_state_validation_rejects_expired() -> None:
     service = _service()
     expired = service.create_state(user_id="coach-user-1", ttl_seconds=-1)
