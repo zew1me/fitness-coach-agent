@@ -4,21 +4,30 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import type { JSX } from "react";
 
+import {
+  ProviderConnectionSection,
+  type ProviderConnectionState,
+} from "../../components/profile/provider-connection-section";
 import { StatusCard } from "../../components/status-card";
 import {
   confirmProfileMetric,
   confirmSportThreshold,
   disconnectIntervals,
+  disconnectStrava,
   fetchBrowserToken,
   loadFitnessMetrics,
   loadIntervalsStatus,
+  loadStravaStatus,
   startIntervalsAuthorization,
+  startStravaAuthorization,
   syncIntervals,
+  syncStrava,
 } from "../../lib/coach-api";
 import type {
   BestTime,
   FitnessMetrics,
   IntervalsConnectionStatus,
+  StravaConnectionStatus,
   ThresholdSource,
   ThresholdValue,
 } from "../../lib/types";
@@ -172,12 +181,12 @@ function BestTimesSection({
   );
 }
 
-// ── Intervals.icu connection ────────────────────────────────
+// ── Provider connection adapters ─────────────────────────────
 
-type IntervalsAction = "connect" | "disconnect" | "sync";
+type ProviderAction = "connect" | "disconnect" | "sync";
 
 type IntervalsSectionProps = {
-  action: IntervalsAction | null;
+  action: ProviderAction | null;
   error: string | null;
   notice: string | null;
   onConnect: () => void;
@@ -185,6 +194,39 @@ type IntervalsSectionProps = {
   onSync: () => void;
   status: IntervalsConnectionStatus | null;
 };
+
+function toIntervalsState(
+  status: IntervalsConnectionStatus | null,
+): ProviderConnectionState | null {
+  if (status === null) return null;
+  if (!status.connected) {
+    return {
+      athleteLabel: "",
+      connected: false,
+      disconnectPending: false,
+      metaLines: [],
+    };
+  }
+  const metaLines: string[] = [];
+  if (
+    status.intervals_athlete_id !== undefined &&
+    status.intervals_athlete_id !== null
+  ) {
+    metaLines.push(status.intervals_athlete_id);
+  }
+  if (status.scopes.length > 0) {
+    metaLines.push(status.scopes.join(", "));
+  }
+  return {
+    athleteLabel:
+      status.intervals_athlete_name ??
+      status.intervals_athlete_id ??
+      "Intervals athlete",
+    connected: true,
+    disconnectPending: false,
+    metaLines,
+  };
+}
 
 function IntervalsSection({
   action,
@@ -196,127 +238,110 @@ function IntervalsSection({
   status,
 }: IntervalsSectionProps): JSX.Element {
   return (
-    <section className={styles.section}>
-      <h2 className={styles.sectionTitle}>Intervals.icu</h2>
-      <div className={styles.connectionPanel}>
-        <IntervalsMessages error={error} notice={notice} />
-        <IntervalsStatusView
-          action={action}
-          onConnect={onConnect}
-          onDisconnect={onDisconnect}
-          onSync={onSync}
-          status={status}
-        />
-      </div>
-    </section>
+    <ProviderConnectionSection
+      action={action}
+      connectLabel="Connect Intervals.icu"
+      connectingLabel="Connecting..."
+      error={error}
+      notice={notice}
+      onConnect={onConnect}
+      onDisconnect={onDisconnect}
+      onSync={onSync}
+      state={toIntervalsState(status)}
+      title="Intervals.icu"
+    />
   );
 }
 
-function IntervalsMessages({
+type StravaSectionProps = {
+  action: ProviderAction | null;
+  error: string | null;
+  notice: string | null;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onSync: () => void;
+  status: StravaConnectionStatus | null;
+};
+
+function stravaMetaLines(status: StravaConnectionStatus): string[] {
+  const metaLines: string[] = [];
+  const athleteId = status.strava_athlete_id;
+  if (athleteId !== undefined && athleteId !== null) {
+    metaLines.push(`Athlete ${athleteId}`);
+  }
+  if (status.scopes.length > 0) {
+    metaLines.push(status.scopes.join(", "));
+  }
+  if (status.last_sync_at) {
+    metaLines.push(
+      `Last sync ${new Date(status.last_sync_at).toLocaleString()}`,
+    );
+  }
+  return metaLines;
+}
+
+function stravaAthleteLabel(status: StravaConnectionStatus): string {
+  const athleteId = status.strava_athlete_id;
+  const idLabel =
+    athleteId !== undefined && athleteId !== null ? String(athleteId) : null;
+  return status.strava_athlete_name ?? idLabel ?? "Strava athlete";
+}
+
+function toStravaState(
+  status: StravaConnectionStatus | null,
+): ProviderConnectionState | null {
+  if (status === null) return null;
+  const disconnectPending = Boolean(status.disconnect_pending);
+  if (!status.connected) {
+    return {
+      athleteLabel: "",
+      connected: false,
+      disconnectPending,
+      metaLines: [],
+    };
+  }
+  return {
+    athleteLabel: stravaAthleteLabel(status),
+    connected: true,
+    disconnectPending,
+    metaLines: stravaMetaLines(status),
+  };
+}
+
+function StravaDisclosure(): JSX.Element {
+  return (
+    <p className={styles.connectionMeta}>
+      Imports activity summaries only (sport, time, distance, elevation, heart
+      rate, power, cadence) — never GPS, maps, or photos. Disconnecting revokes
+      Strava access and deletes imported Strava activities. See our{" "}
+      <Link href="/privacy">privacy policy</Link>.
+    </p>
+  );
+}
+
+function StravaSection({
+  action,
   error,
   notice,
-}: Pick<IntervalsSectionProps, "error" | "notice">): JSX.Element {
-  return (
-    <>
-      {notice !== null && <p className={styles.notice}>{notice}</p>}
-      {error !== null && <p className={styles.error}>{error}</p>}
-    </>
-  );
-}
-
-type IntervalsStatusViewProps = Pick<
-  IntervalsSectionProps,
-  "action" | "onConnect" | "onDisconnect" | "onSync" | "status"
->;
-
-function IntervalsStatusView({
-  action,
   onConnect,
   onDisconnect,
   onSync,
   status,
-}: IntervalsStatusViewProps): JSX.Element {
-  if (status === null) {
-    return (
-      <p className={styles.connectionText}>Loading connection status...</p>
-    );
-  }
-  if (status.connected) {
-    return (
-      <ConnectedIntervalsStatus
-        action={action}
-        onDisconnect={onDisconnect}
-        onSync={onSync}
-        status={status}
-      />
-    );
-  }
-  return <DisconnectedIntervalsStatus action={action} onConnect={onConnect} />;
-}
-
-function ConnectedIntervalsStatus({
-  action,
-  onDisconnect,
-  onSync,
-  status,
-}: Pick<IntervalsSectionProps, "action" | "onDisconnect" | "onSync"> & {
-  status: IntervalsConnectionStatus;
-}): JSX.Element {
-  const athleteLabel =
-    status.intervals_athlete_name ??
-    status.intervals_athlete_id ??
-    "Intervals athlete";
-
+}: StravaSectionProps): JSX.Element {
   return (
-    <>
-      <p className={styles.connectionText}>Connected as {athleteLabel}</p>
-      {status.intervals_athlete_id !== undefined &&
-        status.intervals_athlete_id !== null && (
-          <p className={styles.connectionMeta}>{status.intervals_athlete_id}</p>
-        )}
-      {status.scopes.length > 0 && (
-        <p className={styles.connectionMeta}>{status.scopes.join(", ")}</p>
-      )}
-      <div className={styles.connectionActions}>
-        <button
-          className={styles.confirmBtn}
-          disabled={action !== null}
-          onClick={onSync}
-          type="button"
-        >
-          {action === "sync" ? "Syncing..." : "Sync now"}
-        </button>
-        <button
-          className={styles.secondaryBtn}
-          disabled={action !== null}
-          onClick={onDisconnect}
-          type="button"
-        >
-          {action === "disconnect" ? "Disconnecting..." : "Disconnect"}
-        </button>
-      </div>
-    </>
-  );
-}
-
-function DisconnectedIntervalsStatus({
-  action,
-  onConnect,
-}: Pick<IntervalsSectionProps, "action" | "onConnect">): JSX.Element {
-  return (
-    <>
-      <p className={styles.connectionText}>Not connected</p>
-      <div className={styles.connectionActions}>
-        <button
-          className={styles.confirmBtn}
-          disabled={action !== null}
-          onClick={onConnect}
-          type="button"
-        >
-          {action === "connect" ? "Connecting..." : "Connect Intervals.icu"}
-        </button>
-      </div>
-    </>
+    <ProviderConnectionSection
+      action={action}
+      connectLabel="Connect with Strava"
+      connectingLabel="Connecting..."
+      disclosure={<StravaDisclosure />}
+      error={error}
+      notice={notice}
+      onConnect={onConnect}
+      onDisconnect={onDisconnect}
+      onSync={onSync}
+      state={toStravaState(status)}
+      title="Strava"
+    />
   );
 }
 
@@ -491,10 +516,16 @@ export default function ProfilePage(): JSX.Element {
   const [confirming, setConfirming] = useState<ConfirmKey | null>(null);
   const [intervalsStatus, setIntervalsStatus] =
     useState<IntervalsConnectionStatus | null>(null);
-  const [intervalsAction, setIntervalsAction] =
-    useState<IntervalsAction | null>(null);
+  const [intervalsAction, setIntervalsAction] = useState<ProviderAction | null>(
+    null,
+  );
   const [intervalsError, setIntervalsError] = useState<string | null>(null);
   const [intervalsNotice, setIntervalsNotice] = useState<string | null>(null);
+  const [stravaStatus, setStravaStatus] =
+    useState<StravaConnectionStatus | null>(null);
+  const [stravaAction, setStravaAction] = useState<ProviderAction | null>(null);
+  const [stravaError, setStravaError] = useState<string | null>(null);
+  const [stravaNotice, setStravaNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -507,9 +538,22 @@ export default function ProfilePage(): JSX.Element {
     } else if (intervalResult === "error") {
       setIntervalsError("Intervals.icu authorization was not completed.");
     }
-    if (intervalResult !== null) {
+    const stravaResult = new URLSearchParams(window.location.search).get(
+      "strava",
+    );
+    if (stravaResult === "connected") {
+      setStravaNotice("Strava connected.");
+    } else if (stravaResult === "scope_error") {
+      setStravaError(
+        "Strava did not grant activity access. Reconnect and allow activity read.",
+      );
+    } else if (stravaResult === "error") {
+      setStravaError("Strava authorization was not completed.");
+    }
+    if (intervalResult !== null || stravaResult !== null) {
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.delete("intervals");
+      nextUrl.searchParams.delete("strava");
       window.history.replaceState(
         {},
         "",
@@ -554,9 +598,28 @@ export default function ProfilePage(): JSX.Element {
       }
     }
 
+    async function loadStravaData(): Promise<void> {
+      try {
+        const nextStatus = await loadStravaStatus();
+        if (!isCancelled()) {
+          setStravaStatus(nextStatus);
+        }
+      } catch (err: unknown) {
+        if (!isCancelled()) {
+          setStravaStatus({ connected: false, scopes: [] });
+          setStravaError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load Strava connection status.",
+          );
+        }
+      }
+    }
+
     async function loadProfileData(): Promise<void> {
       await loadMetricsData();
       await loadIntervalsData();
+      await loadStravaData();
     }
 
     void loadProfileData();
@@ -643,6 +706,76 @@ export default function ProfilePage(): JSX.Element {
       });
   }, []);
 
+  const connectStrava = useCallback((): void => {
+    setStravaAction("connect");
+    setStravaError(null);
+    startStravaAuthorization()
+      .then((redirectUrl) => {
+        window.location.assign(redirectUrl);
+      })
+      .catch((err: unknown) => {
+        setStravaError(
+          err instanceof Error
+            ? err.message
+            : "Failed to start Strava authorization.",
+        );
+      })
+      .finally((): void => {
+        setStravaAction(null);
+      });
+  }, []);
+
+  const disconnectStravaConnection = useCallback((): void => {
+    setStravaAction("disconnect");
+    setStravaError(null);
+    setStravaNotice(null);
+    disconnectStrava()
+      .then((status) => {
+        setStravaStatus(status);
+        if (status.disconnect_pending) {
+          setStravaError(
+            "Strava access could not be revoked yet. Please retry disconnect.",
+          );
+        } else {
+          setStravaNotice(
+            `Disconnected from Strava. Deleted ${status.deleted_activities} imported ${status.deleted_activities === 1 ? "activity" : "activities"}.`,
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        setStravaError(
+          err instanceof Error ? err.message : "Failed to disconnect Strava.",
+        );
+      })
+      .finally((): void => {
+        setStravaAction(null);
+      });
+  }, []);
+
+  const syncStravaActivities = useCallback((): void => {
+    setStravaAction("sync");
+    setStravaError(null);
+    setStravaNotice(null);
+    syncStrava()
+      .then(({ skipped_duplicates, skipped_invalid, synced }) => {
+        const details = [`${skipped_duplicates} already imported`];
+        if (skipped_invalid > 0) {
+          details.push(`${skipped_invalid} couldn't be imported`);
+        }
+        setStravaNotice(`Synced ${synced} (${details.join("; ")}).`);
+      })
+      .catch((err: unknown) => {
+        setStravaError(
+          err instanceof Error
+            ? err.message
+            : "Failed to sync Strava activities.",
+        );
+      })
+      .finally((): void => {
+        setStravaAction(null);
+      });
+  }, []);
+
   return (
     <div className={styles.page}>
       <div className={styles.shell}>
@@ -667,15 +800,26 @@ export default function ProfilePage(): JSX.Element {
           />
         )}
         {(metrics !== null || error !== null) && (
-          <IntervalsSection
-            action={intervalsAction}
-            error={intervalsError}
-            notice={intervalsNotice}
-            onConnect={connectIntervals}
-            onDisconnect={disconnectIntervalsConnection}
-            onSync={syncIntervalsActivities}
-            status={intervalsStatus}
-          />
+          <>
+            <IntervalsSection
+              action={intervalsAction}
+              error={intervalsError}
+              notice={intervalsNotice}
+              onConnect={connectIntervals}
+              onDisconnect={disconnectIntervalsConnection}
+              onSync={syncIntervalsActivities}
+              status={intervalsStatus}
+            />
+            <StravaSection
+              action={stravaAction}
+              error={stravaError}
+              notice={stravaNotice}
+              onConnect={connectStrava}
+              onDisconnect={disconnectStravaConnection}
+              onSync={syncStravaActivities}
+              status={stravaStatus}
+            />
+          </>
         )}
         {metrics !== null && userId !== "" && (
           <LoadedView

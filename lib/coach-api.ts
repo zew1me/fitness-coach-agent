@@ -12,6 +12,11 @@ import {
   intervalsConnectionStatusSchema,
   intervalsSyncRequestSchema,
   intervalsSyncResponseSchema,
+  stravaAuthorizeResponseSchema,
+  stravaConnectionStatusSchema,
+  stravaDisconnectResponseSchema,
+  stravaSyncRequestSchema,
+  stravaSyncResponseSchema,
   type ParsedChatMessagePage,
   type ParsedChatThreadResponse,
   type ParsedChatTurnLeaseStatus,
@@ -26,6 +31,9 @@ import type {
   IntervalsSyncResponse,
   PresignUploadRequest,
   PresignUploadResponse,
+  StravaConnectionStatus,
+  StravaDisconnectResponse,
+  StravaSyncResponse,
 } from "./types";
 
 type FetchLike = typeof fetch;
@@ -269,6 +277,52 @@ export async function syncIntervals(
     fetchImpl,
   );
   return intervalsSyncResponseSchema.parse(raw);
+}
+
+export async function loadStravaStatus(
+  fetchImpl: FetchLike = fetch,
+): Promise<StravaConnectionStatus> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/strava/status",
+    { method: "GET" },
+    fetchImpl,
+  );
+  return stravaConnectionStatusSchema.parse(raw);
+}
+
+export async function startStravaAuthorization(
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/strava/authorize",
+    { method: "POST" },
+    fetchImpl,
+  );
+  return stravaAuthorizeResponseSchema.parse(raw).redirect_url;
+}
+
+export async function disconnectStrava(
+  fetchImpl: FetchLike = fetch,
+): Promise<StravaDisconnectResponse> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/strava/connection",
+    { method: "DELETE" },
+    fetchImpl,
+  );
+  return stravaDisconnectResponseSchema.parse(raw);
+}
+
+export async function syncStrava(
+  days = 14,
+  fetchImpl: FetchLike = fetch,
+): Promise<StravaSyncResponse> {
+  const payload = stravaSyncRequestSchema.parse({ days });
+  const raw = await authorizedFetch<unknown>(
+    "/api/strava/sync",
+    { method: "POST", body: JSON.stringify(payload) },
+    fetchImpl,
+  );
+  return stravaSyncResponseSchema.parse(raw);
 }
 
 export async function confirmSportThreshold(

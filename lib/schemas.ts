@@ -1,7 +1,12 @@
 import type { AgentInputItem } from "@openai/agents";
 import { z } from "zod";
 
-import type { ChatMessage, IntervalsSyncResponse } from "./types";
+import type {
+  ChatMessage,
+  IntervalsSyncResponse,
+  StravaDisconnectResponse,
+  StravaSyncResponse,
+} from "./types";
 
 export const athleteProfileSchema = z.object({
   coaching_state: z.string().min(1).default("onboarding"),
@@ -132,6 +137,49 @@ export const intervalsSyncResponseSchema = z
     synced: z.number().int().nonnegative(),
   })
   .transform((response): IntervalsSyncResponse => response);
+
+export const stravaConnectionStatusSchema = z.object({
+  connected: z.boolean(),
+  disconnect_pending: z.boolean().optional(),
+  connected_at: z.string().nullable().optional(),
+  last_sync_at: z.string().nullable().optional(),
+  strava_athlete_id: z.number().nullable().optional(),
+  strava_athlete_name: z.string().nullable().optional(),
+  scopes: z.array(z.string()).default([]),
+  authorization_version: z.string().nullable().optional(),
+});
+
+export const stravaAuthorizeResponseSchema = z.object({
+  redirect_url: z.string().url(),
+});
+
+// Keep the max aligned with the backend StravaSyncRequest bound.
+export const stravaSyncRequestSchema = z.object({
+  days: z.number().int().min(1).max(90),
+});
+
+export const stravaSyncResponseSchema = z
+  .object({
+    activities: z.array(z.record(z.string(), z.unknown())),
+    skipped_duplicates: z.number().int().nonnegative(),
+    skipped_invalid: z.number().int().nonnegative(),
+    synced: z.number().int().nonnegative(),
+  })
+  .transform((response): StravaSyncResponse => response);
+
+export const stravaDisconnectResponseSchema = z
+  .object({
+    connected: z.boolean(),
+    disconnect_pending: z.boolean().optional(),
+    connected_at: z.string().nullable().optional(),
+    last_sync_at: z.string().nullable().optional(),
+    strava_athlete_id: z.number().nullable().optional(),
+    strava_athlete_name: z.string().nullable().optional(),
+    scopes: z.array(z.string()).default([]),
+    authorization_version: z.string().nullable().optional(),
+    deleted_activities: z.number().int().nonnegative().default(0),
+  })
+  .transform((response): StravaDisconnectResponse => response);
 
 export const modelStateSchema = z.object({
   thread_id: z.string().min(1),

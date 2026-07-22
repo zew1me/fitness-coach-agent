@@ -2,11 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   disconnectIntervals,
+  disconnectStrava,
   loadChatMessages,
   loadChatThread,
   loadIntervalsStatus,
+  loadStravaStatus,
   startIntervalsAuthorization,
+  startStravaAuthorization,
   syncIntervals,
+  syncStrava,
 } from "../../lib/coach-api";
 
 function jsonResponse(body: unknown): Response {
@@ -190,6 +194,98 @@ describe("Intervals.icu helpers", () => {
     const fetchMock = vi.fn<typeof fetch>();
 
     await expect(syncIntervals(91, fetchMock)).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Strava helpers", () => {
+  it("loads the current user's Strava connection status", async () => {
+    const status = {
+      connected: true,
+      strava_athlete_id: 135168,
+      strava_athlete_name: "Nigel S",
+      scopes: ["read", "activity:read"],
+      connected_at: "2026-07-20T07:00:00Z",
+      last_sync_at: "2026-07-21T07:00:00Z",
+      authorization_version: "2026-07-21",
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(jsonResponse(status));
+
+    await expect(loadStravaStatus(fetchMock)).resolves.toEqual(status);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/strava/status",
+      expect.objectContaining({ method: "GET", headers: expect.any(Headers) }),
+    );
+  });
+
+  it("starts authorization and returns the Strava redirect URL", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          redirect_url:
+            "https://www.strava.com/oauth/authorize?client_id=strava-123",
+        }),
+      );
+
+    await expect(startStravaAuthorization(fetchMock)).resolves.toBe(
+      "https://www.strava.com/oauth/authorize?client_id=strava-123",
+    );
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/strava/authorize",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("disconnects Strava and returns the deletion count", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(
+        jsonResponse({ connected: false, scopes: [], deleted_activities: 7 }),
+      );
+
+    await expect(disconnectStrava(fetchMock)).resolves.toEqual({
+      connected: false,
+      scopes: [],
+      deleted_activities: 7,
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/strava/connection",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("syncs recent Strava activities", async () => {
+    const result = {
+      activities: [{ id: "strava-1" }],
+      skipped_duplicates: 2,
+      skipped_invalid: 1,
+      synced: 1,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(jsonResponse(result));
+
+    await expect(syncStrava(30, fetchMock)).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/strava/sync",
+      expect.objectContaining({
+        body: JSON.stringify({ days: 30 }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("rejects an invalid Strava sync window before fetching", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+
+    await expect(syncStrava(91, fetchMock)).rejects.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
