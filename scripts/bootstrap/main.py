@@ -363,10 +363,8 @@ def _build_env_vars(  # noqa: PLR0913
             if value
         }
     )
-    # Only provision Strava OAuth values alongside the enable flag when the operator
-    # opted in; a bare `false` still ships so the integration stays fail-closed.
-    if settings.strava_integration_enabled:
-        vars["STRAVA_INTEGRATION_ENABLED"] = "true"
+    # Always synchronize the flag so a previous true value cannot remain active in Vercel.
+    vars["STRAVA_INTEGRATION_ENABLED"] = "true" if settings.strava_integration_enabled else "false"
     # These should be two distinct Client Keys — a secret server-side DSN and a public
     # browser one — so the public browser DSN can't expose the server's. Bootstrap does
     # not verify they differ; that separation is the operator's responsibility.
