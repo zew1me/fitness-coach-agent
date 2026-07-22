@@ -949,12 +949,43 @@ async def get_calendar(
         len(planned),
         len(activities),
     )
+    # Map each active-plan week to its fueling focus (issue #53) so the calendar can
+    # show a per-week nutrition line. Focus lives on the plan's phases jsonb, not on
+    # the workout rows, and only applies to workouts belonging to the active plan.
+    focus_by_week = _nutrition_focus_by_week(active_plan)
+    active_plan_id = active_plan.id if active_plan else None
+    planned_payload: list[dict[str, object]] = []
+    for workout in planned:
+        dumped = workout.model_dump(mode="json")
+        if workout.plan_id == active_plan_id:
+            dumped["nutrition_focus"] = focus_by_week.get(workout.week_number, "")
+        planned_payload.append(dumped)
+
     return {
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "planned_workouts": [workout.model_dump(mode="json") for workout in planned],
+        "planned_workouts": planned_payload,
         "activities": [activity.model_dump(mode="json") for activity in activities],
     }
+
+
+def _nutrition_focus_by_week(plan: TrainingPlan | None) -> dict[int, str]:
+    """Build a ``week_number → nutrition_focus`` map from a plan's phases jsonb."""
+    if plan is None:
+        return {}
+    mapping: dict[int, str] = {}
+    for phase in plan.phases:
+        focus = str(phase.get("nutrition_focus", "") or "")
+        if not focus:
+            continue
+        try:
+            start_week = int(phase["start_week"])
+            end_week = int(phase["end_week"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for week in range(start_week, end_week + 1):
+            mapping[week] = focus
+    return mapping
 
 
 # ── Engine endpoints ──────────────────────────────────────────
@@ -2408,6 +2439,7 @@ async def generate_plan_structure(  # noqa: C901
 ) -> Mapping[str, object]:
     from backend.engine.periodization import build_plan_skeleton
     from backend.engine.thresholds import estimate_ctl_ceiling
+    from backend.services.nutrition_focus import derive_nutrition_focus
 
     user_id = user_context.user_id
     profile = await repo.get_athlete_profile(user_id)
@@ -2457,6 +2489,13 @@ async def generate_plan_structure(  # noqa: C901
             goal_type=target_goal.goal_type if target_goal else "maintenance",
             recovery_week_frequency=recovery_freq,
         )
+        # Tag each phase with deterministic, athlete-tailored fueling guidance so the
+        # plan itself carries nutrition context (issue #53). Stored on the phases
+        # jsonb → surfaced to the coach and calendar without a schema change.
+        for phase in skeleton.phases:
+            phase.nutrition_focus = derive_nutrition_focus(
+                phase.focus, profile.dietary_restrictions
+            )
         plan_sport = (
             (target_goal.sport if target_goal else None)
             or (profile.primary_sports[0] if profile.primary_sports else None)
@@ -2583,6 +2622,8 @@ def _rebuild_skeleton(plan: TrainingPlan):
             z1_z2_pct=int(p["z1_z2_pct"]),
             max_hiit_per_week=int(p["max_hiit_per_week"]),
             description=str(p.get("description", "")),
+            # Preserve fueling guidance across an adjust; older plans lack the key.
+            nutrition_focus=str(p.get("nutrition_focus", "")),
         )
         for p in plan.phases
     ]

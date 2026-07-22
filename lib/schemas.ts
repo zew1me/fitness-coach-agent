@@ -165,6 +165,7 @@ export const calendarPlannedWorkoutSchema = z.looseObject({
   description: z.string().nullable().optional(),
   workout_type: z.string().min(1),
   phase_name: z.string().nullable().optional(),
+  nutrition_focus: z.string().nullable().optional(),
   target_duration_minutes: z.number().nullable().optional(),
   target_distance_meters: z.number().nullable().optional(),
   target_tss: z.number().nullable().optional(),

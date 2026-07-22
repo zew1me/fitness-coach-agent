@@ -58,6 +58,8 @@ declare const styles: {
   readonly todayLabel: string;
   readonly topbar: string;
   readonly topbarActions: string;
+  readonly weekNutrition: string;
+  readonly weekNutritionLabel: string;
   readonly weekRow: string;
   readonly weekdayCell: string;
   readonly weekdayRow: string;
