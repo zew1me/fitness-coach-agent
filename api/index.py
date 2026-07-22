@@ -87,14 +87,20 @@ from backend.services.goal_service import (
 )
 from backend.services.intervals import (
     IntervalsConfigurationError,
+    IntervalsNotConnectedError,
     IntervalsOAuthExchangeError,
     IntervalsOAuthService,
     IntervalsStateError,
+    IntervalsSyncError,
+    map_intervals_activity,
 )
 from backend.services.r2 import R2Service
 
 ActivityPersistenceEndpoint = Literal[
-    "process_uploaded_file", "save_activity_from_text", "process_uploaded_zip"
+    "process_uploaded_file",
+    "save_activity_from_text",
+    "process_uploaded_zip",
+    "intervals_sync",
 ]
 
 configure_logging(debug=settings.app_env == "development")
@@ -494,6 +500,80 @@ async def intervals_disconnect(
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
+
+
+class IntervalsSyncRequest(BaseModel):
+    days: int = Field(default=14, ge=1, le=90)
+
+
+@app.post("/api/intervals/sync")
+async def intervals_sync(  # noqa: C901
+    payload: IntervalsSyncRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    try:
+        auth = intervals_service.resolve_auth(user_id)
+    except IntervalsNotConnectedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (
+        IntervalsConfigurationError,
+        IntervalsOAuthExchangeError,
+        IntervalsRepositoryNotConfiguredError,
+    ) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    newest = datetime.now(UTC).date()
+    oldest = newest - timedelta(days=payload.days - 1)
+    try:
+        items = await intervals_service.fetch_recent_activities(
+            auth,
+            oldest=oldest,
+            newest=newest,
+        )
+    except IntervalsSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    existing_keys = await _activity_repo_call(
+        repo.list_synced_intervals_keys(user_id),
+        detail="Failed to load synced Intervals activities.",
+        log_message=f"list_synced_intervals_keys failed for user_id={user_id}",
+    )
+    synced_activities: list[object] = []
+    skipped_duplicates = 0
+    skipped_invalid = 0
+    for item in items:
+        activity = map_intervals_activity(user_id, item)
+        if activity is None:
+            skipped_invalid += 1
+            continue
+        if activity.source_file_key in existing_keys:
+            skipped_duplicates += 1
+            continue
+        persisted_activity = await _activity_repo_call(
+            repo.create_intervals_activity(activity),
+            detail="Failed to save activity.",
+            log_message=f"create_intervals_activity failed for user_id={user_id}",
+        )
+        if persisted_activity is None:
+            # Another overlapping sync inserted it after the initial key lookup.
+            skipped_duplicates += 1
+            continue
+        persisted = await _finalize_persisted_activity(
+            user_id,
+            persisted_activity,
+            calling_endpoint="intervals_sync",
+        )
+        synced_activities.append(persisted["activity"])
+        if activity.source_file_key is not None:
+            existing_keys.add(activity.source_file_key)
+
+    return {
+        "synced": len(synced_activities),
+        "skipped_duplicates": skipped_duplicates,
+        "skipped_invalid": skipped_invalid,
+        "activities": synced_activities,
+    }
 
 
 @app.post("/api/oauth/authorize/decision")
@@ -2094,6 +2174,15 @@ async def _persist_extracted_activity(
     except RuntimeError as exc:
         logger.exception("create_activity failed for user_id=%s", user_id)
         raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
+    return await _finalize_persisted_activity(user_id, activity, calling_endpoint=calling_endpoint)
+
+
+async def _finalize_persisted_activity(
+    user_id: str,
+    activity: Activity,
+    *,
+    calling_endpoint: ActivityPersistenceEndpoint,
+) -> Mapping[str, object]:
     logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}

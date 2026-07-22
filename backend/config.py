@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     intervals_client_id: str = ""
     intervals_client_secret: str = ""
     intervals_token_encryption_secret: str = ""
+    intervals_dev_api_key: str = ""
+    intervals_dev_athlete_id: str = ""
 
     @field_validator("openai_activity_text_model")
     @classmethod
@@ -100,6 +102,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property
+    def is_vercel_deployment(self) -> bool:
+        """Whether the process is running on a Vercel deployment."""
+        return bool(os.environ.get("VERCEL_URL"))
+
+    @property
     def base_url(self) -> str:
         """Effective base URL for OAuth, JWTs, and redirects.
 
@@ -108,9 +115,8 @@ class Settings(BaseSettings):
         """
         if self.app_base_url:
             return self.app_base_url
-        vercel_url = os.environ.get("VERCEL_URL", "")
-        if vercel_url:
-            return f"https://{vercel_url}"
+        if self.is_vercel_deployment:
+            return f"https://{os.environ['VERCEL_URL']}"
         return "http://localhost:3000"
 
 

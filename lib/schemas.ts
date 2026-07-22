@@ -1,7 +1,7 @@
 import type { AgentInputItem } from "@openai/agents";
 import { z } from "zod";
 
-import type { ChatMessage } from "./types";
+import type { ChatMessage, IntervalsSyncResponse } from "./types";
 
 export const athleteProfileSchema = z.object({
   coaching_state: z.string().min(1).default("onboarding"),
@@ -119,6 +119,19 @@ export const intervalsConnectionStatusSchema = z.object({
 export const intervalsAuthorizeResponseSchema = z.object({
   redirect_url: z.string().url(),
 });
+
+export const intervalsSyncRequestSchema = z.object({
+  days: z.number().int().min(1).max(90),
+});
+
+export const intervalsSyncResponseSchema = z
+  .object({
+    activities: z.array(z.record(z.string(), z.unknown())),
+    skipped_duplicates: z.number().int().nonnegative(),
+    skipped_invalid: z.number().int().nonnegative(),
+    synced: z.number().int().nonnegative(),
+  })
+  .transform((response): IntervalsSyncResponse => response);
 
 export const modelStateSchema = z.object({
   thread_id: z.string().min(1),

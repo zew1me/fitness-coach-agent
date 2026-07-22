@@ -139,7 +139,10 @@ class FakeTableQuery:
             upserted_rows: list[dict[str, object]] = []
             for payload in self._upserted_payloads:
                 for index, row in enumerate(self._rows):
-                    if any(row.get(column) != payload.get(column) for column in conflict_columns):
+                    if any(
+                        self._conflict_value(row, column) != self._conflict_value(payload, column)
+                        for column in conflict_columns
+                    ):
                         continue
                     if self._ignore_duplicates:
                         break
@@ -165,10 +168,19 @@ class FakeTableQuery:
 
         rows = self._matching_rows()
         for column, desc in reversed(self._orders):
-            rows.sort(key=lambda row: row.get(column), reverse=desc)
+            rows.sort(
+                key=lambda row: (row.get(column) is None, row.get(column)),
+                reverse=desc,
+            )
         if self._limit is not None:
             rows = rows[: self._limit]
         return FakeResponse(rows)
+
+    @staticmethod
+    def _conflict_value(row: dict[str, object], column: str) -> object:
+        if column == "intervals_source_file_key":
+            return row.get("source_file_key") if row.get("source") == "intervals_sync" else None
+        return row.get(column)
 
     def _matching_rows(self) -> list[dict[str, object]]:
         return [
@@ -868,6 +880,24 @@ async def test_create_activity_persists_structured_activity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_intervals_activity_ignores_a_duplicate_source_key() -> None:
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+    activity = Activity(
+        user_id="athlete-1",
+        sport="running",
+        activity_date=date(2026, 4, 1),
+        source="intervals_sync",
+        source_file_key="intervals:i100",
+    )
+
+    created = await repo.create_intervals_activity(activity)
+    duplicate = await repo.create_intervals_activity(activity)
+
+    assert created is not None
+    assert duplicate is None
+
+
+@pytest.mark.asyncio
 async def test_create_activity_builds_summary_when_activity_has_default_summary() -> None:
     repo = SupabaseRepository(client=FakeSupabaseClient())
 
@@ -891,6 +921,59 @@ async def test_create_activity_builds_summary_when_activity_has_default_summary(
     assert activity.activity_summary["heart_rate"]["avg_bpm"] == 145
     assert activity.activity_summary["data_quality"]["has_gps"] is True
     assert activity.activity_summary["data_quality"]["has_rr_intervals"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_synced_intervals_keys_is_user_and_source_scoped() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            activity_rows=[
+                {
+                    "user_id": "athlete-1",
+                    "source": "intervals_sync",
+                    "source_file_key": "intervals:i100",
+                },
+                {
+                    "user_id": "athlete-1",
+                    "source": "manual",
+                    "source_file_key": "intervals:i200",
+                },
+                {
+                    "user_id": "athlete-2",
+                    "source": "intervals_sync",
+                    "source_file_key": "intervals:i300",
+                },
+                {
+                    "user_id": "athlete-1",
+                    "source": "intervals_sync",
+                    "source_file_key": None,
+                },
+            ]
+        )
+    )
+
+    keys = await repo.list_synced_intervals_keys("athlete-1")
+
+    assert keys == {"intervals:i100"}
+
+
+@pytest.mark.asyncio
+async def test_list_synced_intervals_keys_reads_every_page() -> None:
+    activity_rows: list[dict[str, object]] = [
+        {
+            "user_id": "athlete-1",
+            "source": "intervals_sync",
+            "source_file_key": f"intervals:i{index:04d}",
+        }
+        for index in range(1001)
+    ]
+    repo = SupabaseRepository(client=FakeSupabaseClient(activity_rows=activity_rows))
+
+    keys = await repo.list_synced_intervals_keys("athlete-1")
+
+    assert len(keys) == 1001
+    assert "intervals:i0000" in keys
+    assert "intervals:i1000" in keys
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ import {
   loadFitnessMetrics,
   loadIntervalsStatus,
   startIntervalsAuthorization,
+  syncIntervals,
 } from "../../lib/coach-api";
 import type {
   BestTime,
@@ -173,7 +174,7 @@ function BestTimesSection({
 
 // ── Intervals.icu connection ────────────────────────────────
 
-type IntervalsAction = "connect" | "disconnect";
+type IntervalsAction = "connect" | "disconnect" | "sync";
 
 type IntervalsSectionProps = {
   action: IntervalsAction | null;
@@ -181,6 +182,7 @@ type IntervalsSectionProps = {
   notice: string | null;
   onConnect: () => void;
   onDisconnect: () => void;
+  onSync: () => void;
   status: IntervalsConnectionStatus | null;
 };
 
@@ -190,6 +192,7 @@ function IntervalsSection({
   notice,
   onConnect,
   onDisconnect,
+  onSync,
   status,
 }: IntervalsSectionProps): JSX.Element {
   return (
@@ -201,6 +204,7 @@ function IntervalsSection({
           action={action}
           onConnect={onConnect}
           onDisconnect={onDisconnect}
+          onSync={onSync}
           status={status}
         />
       </div>
@@ -222,13 +226,14 @@ function IntervalsMessages({
 
 type IntervalsStatusViewProps = Pick<
   IntervalsSectionProps,
-  "action" | "onConnect" | "onDisconnect" | "status"
+  "action" | "onConnect" | "onDisconnect" | "onSync" | "status"
 >;
 
 function IntervalsStatusView({
   action,
   onConnect,
   onDisconnect,
+  onSync,
   status,
 }: IntervalsStatusViewProps): JSX.Element {
   if (status === null) {
@@ -241,6 +246,7 @@ function IntervalsStatusView({
       <ConnectedIntervalsStatus
         action={action}
         onDisconnect={onDisconnect}
+        onSync={onSync}
         status={status}
       />
     );
@@ -251,8 +257,9 @@ function IntervalsStatusView({
 function ConnectedIntervalsStatus({
   action,
   onDisconnect,
+  onSync,
   status,
-}: Pick<IntervalsSectionProps, "action" | "onDisconnect"> & {
+}: Pick<IntervalsSectionProps, "action" | "onDisconnect" | "onSync"> & {
   status: IntervalsConnectionStatus;
 }): JSX.Element {
   const athleteLabel =
@@ -271,6 +278,14 @@ function ConnectedIntervalsStatus({
         <p className={styles.connectionMeta}>{status.scopes.join(", ")}</p>
       )}
       <div className={styles.connectionActions}>
+        <button
+          className={styles.confirmBtn}
+          disabled={action !== null}
+          onClick={onSync}
+          type="button"
+        >
+          {action === "sync" ? "Syncing..." : "Sync now"}
+        </button>
         <button
           className={styles.secondaryBtn}
           disabled={action !== null}
@@ -604,6 +619,30 @@ export default function ProfilePage(): JSX.Element {
       });
   }, []);
 
+  const syncIntervalsActivities = useCallback((): void => {
+    setIntervalsAction("sync");
+    setIntervalsError(null);
+    setIntervalsNotice(null);
+    syncIntervals()
+      .then(({ skipped_duplicates, skipped_invalid, synced }) => {
+        const details = [`${skipped_duplicates} already imported`];
+        if (skipped_invalid > 0) {
+          details.push(`${skipped_invalid} couldn't be imported`);
+        }
+        setIntervalsNotice(`Synced ${synced} (${details.join("; ")}).`);
+      })
+      .catch((err: unknown) => {
+        setIntervalsError(
+          err instanceof Error
+            ? err.message
+            : "Failed to sync Intervals.icu activities.",
+        );
+      })
+      .finally((): void => {
+        setIntervalsAction(null);
+      });
+  }, []);
+
   return (
     <div className={styles.page}>
       <div className={styles.shell}>
@@ -634,6 +673,7 @@ export default function ProfilePage(): JSX.Element {
             notice={intervalsNotice}
             onConnect={connectIntervals}
             onDisconnect={disconnectIntervalsConnection}
+            onSync={syncIntervalsActivities}
             status={intervalsStatus}
           />
         )}

@@ -18,6 +18,7 @@ const coachApiMocks = vi.hoisted(() => ({
   loadFitnessMetrics: vi.fn(),
   loadIntervalsStatus: vi.fn(),
   startIntervalsAuthorization: vi.fn(),
+  syncIntervals: vi.fn(),
 }));
 
 vi.mock("../../lib/coach-api", () => coachApiMocks);
@@ -29,6 +30,7 @@ const EMPTY_METRICS = {
 };
 
 beforeEach(() => {
+  vi.resetAllMocks();
   vi.stubGlobal("React", React);
   window.history.replaceState({}, "", "/profile");
   coachApiMocks.fetchBrowserToken.mockResolvedValue({
@@ -108,15 +110,13 @@ describe("ProfilePage Intervals.icu connection", () => {
   });
 
   it("shows the connected athlete and disconnects the account", async () => {
-    coachApiMocks.loadIntervalsStatus
-      .mockResolvedValueOnce({
-        connected: true,
-        intervals_athlete_id: "i135168",
-        intervals_athlete_name: "Nigel",
-        scopes: ["ACTIVITY:READ"],
-        connected_at: "2026-07-08T07:00:00Z",
-      })
-      .mockResolvedValueOnce({ connected: false, scopes: [] });
+    coachApiMocks.loadIntervalsStatus.mockResolvedValueOnce({
+      connected: true,
+      intervals_athlete_id: "i135168",
+      intervals_athlete_name: "Nigel",
+      scopes: ["ACTIVITY:READ"],
+      connected_at: "2026-07-08T07:00:00Z",
+    });
     coachApiMocks.disconnectIntervals.mockResolvedValueOnce({
       connected: false,
       scopes: [],
@@ -133,6 +133,54 @@ describe("ProfilePage Intervals.icu connection", () => {
       expect(coachApiMocks.disconnectIntervals).toHaveBeenCalledTimes(1);
     });
     expect(await screen.findByText(/Not connected/i)).toBeTruthy();
+  });
+
+  it("syncs activities and shows the imported counts", async () => {
+    coachApiMocks.loadIntervalsStatus.mockResolvedValueOnce({
+      connected: true,
+      intervals_athlete_id: "i135168",
+      scopes: ["ACTIVITY:READ"],
+    });
+    coachApiMocks.syncIntervals.mockResolvedValueOnce({
+      activities: [{ id: "activity-1" }, { id: "activity-2" }],
+      skipped_duplicates: 3,
+      skipped_invalid: 0,
+      synced: 2,
+    });
+
+    render(<ProfilePage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+
+    await waitFor(() => {
+      expect(coachApiMocks.syncIntervals).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await screen.findByText("Synced 2 (3 already imported)."),
+    ).toBeTruthy();
+  });
+
+  it("re-enables sync after an error", async () => {
+    coachApiMocks.loadIntervalsStatus.mockResolvedValueOnce({
+      connected: true,
+      intervals_athlete_id: "i135168",
+      scopes: ["ACTIVITY:READ"],
+    });
+    coachApiMocks.syncIntervals.mockRejectedValueOnce(
+      new Error("Intervals.icu is unavailable."),
+    );
+
+    render(<ProfilePage />);
+
+    const syncButton = await screen.findByRole("button", { name: "Sync now" });
+    fireEvent.click(syncButton);
+
+    expect(
+      await screen.findByText("Intervals.icu is unavailable."),
+    ).toBeTruthy();
+    await waitFor(() => {
+      expect((syncButton as HTMLButtonElement).disabled).toBe(false);
+    });
   });
 
   it("shows the callback success notice when Intervals redirects back", async () => {

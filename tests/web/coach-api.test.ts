@@ -6,6 +6,7 @@ import {
   loadChatThread,
   loadIntervalsStatus,
   startIntervalsAuthorization,
+  syncIntervals,
 } from "../../lib/coach-api";
 
 function jsonResponse(body: unknown): Response {
@@ -161,6 +162,35 @@ describe("Intervals.icu helpers", () => {
       "/api/intervals/connection",
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+
+  it("syncs recent Intervals activities", async () => {
+    const result = {
+      activities: [{ id: "activity-1" }],
+      skipped_duplicates: 2,
+      skipped_invalid: 0,
+      synced: 1,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(browserToken())
+      .mockResolvedValueOnce(jsonResponse(result));
+
+    await expect(syncIntervals(30, fetchMock)).resolves.toEqual(result);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/intervals/sync",
+      expect.objectContaining({
+        body: JSON.stringify({ days: 30 }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("rejects an invalid Intervals sync window before fetching", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+
+    await expect(syncIntervals(91, fetchMock)).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

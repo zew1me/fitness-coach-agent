@@ -18,7 +18,9 @@
 - `20260707000000_threshold_recalibration_candidates.sql` — athlete-reviewed threshold candidates and atomic candidate creation
 - `20260708000000_intervals_connections.sql` — encrypted Intervals.icu OAuth connection storage
 - `20260714120000_remove_lingering_superseded_plan_workouts.sql` — one-time cleanup of lingering future scheduled workouts on non-active plans (pre-#312)
+- `20260714130000_activities_intervals_source.sql` — adds `'intervals_sync'` to `activities_source_check` for intervals.icu activity sync (#338)
 - `20260715035133_atomic_recalibration_candidate_decision.sql` — service-role RPC for atomic candidate decisions and threshold replacement
+- `20260716000000_intervals_sync_idempotency.sql` — unique generated key for idempotent Intervals activity imports (#338)
 - `20260719000000_replace_intervals_connection_atomic.sql` — service-role RPC for atomic Intervals.icu connection replacement
 - `20260721000000_update_goal_course_profile_notes_atomic.sql` — service-role RPC for atomic course-profile note merging
 
@@ -419,6 +421,50 @@ locally). Preview and production are separate Supabase projects and must each be
 linked and applied independently. The migration is a no-op in an already-clean
 environment and only removes rows the app no longer surfaces, so no maintenance
 window is required.
+
+## 20260714130000 — Intervals.icu activity source (2026-07-14)
+
+**File:** `supabase/migrations/20260714130000_activities_intervals_source.sql`
+
+**Change:** Recreates `activities_source_check` with the existing allowed values
+plus `intervals_sync`, adding it as `NOT VALID` before separately validating it.
+This permits ordinary writes while PostgreSQL scans existing rows.
+
+**Why:** Intervals.icu activity sync persists activity summaries through the
+existing `activities` table. Giving synced rows a dedicated source distinguishes
+them from manual and file-upload imports without changing any existing rows.
+
+**Preview before applying:**
+
+```sql
+select distinct source
+from public.activities
+order by source;
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Preview and production are separate Supabase projects and must each be
+linked and applied independently. The migration only widens the allowed source
+values and requires no backfill or maintenance window.
+
+## 20260716000000 — idempotent Intervals activity sync (2026-07-16)
+
+**File:** `supabase/migrations/20260716000000_intervals_sync_idempotency.sql`
+
+**Change:** Adds a generated `intervals_source_file_key` column plus a unique
+constraint on `(user_id, intervals_source_file_key)`. The generated key is only
+non-null for `source = 'intervals_sync'`, so the constraint is scoped to
+Intervals imports.
+
+**Why:** Concurrent overlapping sync requests can both observe the same stale
+key list before inserting. The database constraint and `ON CONFLICT DO NOTHING`
+write path make the insert idempotent. Other sources remain unconstrained:
+multiple activities extracted from one ZIP archive legitimately share its
+`source_file_key`.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). The generated column is backfilled from existing rows automatically;
+no application data backfill is required.
 
 ## 20260715035133 — atomic recalibration candidate decisions (2026-07-15)
 
