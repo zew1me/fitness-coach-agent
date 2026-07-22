@@ -2,6 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     { "source": "/api/intervals/:path*", "destination": "/api/index.py" },
+    { "source": "/api/strava/:path*", "destination": "/api/index.py" },
     { "source": "/api/oauth/:path*", "destination": "/api/index.py" },
     { "source": "/api/engine/:path*", "destination": "/api/index.py" },
     { "source": "/api/files/:path*", "destination": "/api/index.py" },

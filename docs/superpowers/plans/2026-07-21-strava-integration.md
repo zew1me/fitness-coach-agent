@@ -4,9 +4,9 @@
 
 **Goal:** Add a per-athlete Strava connection to `/profile` that follows the existing Intervals.icu interaction model—connect, status, disconnect, and **Sync now**—while implementing Strava-specific OAuth token rotation, activity pagination, rate-limit handling, webhook lifecycle, deletion, provenance, and AI-processing controls.
 
-**Architecture:** Add a provider-specific Strava service and repository alongside the Intervals.icu implementation, but do not copy its bearer-token lifecycle directly. Store encrypted access and refresh tokens, serialize refreshes with a database lease, import only allowlisted summary fields into canonical activities, update existing imports idempotently, enqueue webhook events for prompt processing, and make disconnect/deauthorization revoke access and purge affected data. Keep Strava data out of model input by default behind a separate fail-closed AI-processing gate. Enable import and AI processing independently only when both written authorization and athlete consent cover them.
+**Architecture:** Add a provider-specific Strava service and repository alongside the Intervals.icu implementation, but do not copy its bearer-token lifecycle directly. Store encrypted access and refresh tokens, serialize refreshes with a database lease, import only relevant summary fields into canonical activities, update existing imports idempotently, enqueue webhook events for prompt processing, and make disconnect/deauthorization revoke access and purge affected data. Enable import and AI processing independently only when athlete consent cover them.
 
-**Initial scope:** Activity summaries only. Do not fetch activity streams, detailed activity maps, GPS coordinates, segments, routes, photos, kudos, or raw FIT files. Do not request write scopes. Manual sync pulls a bounded recent window and webhooks maintain create/update/delete state after connection.
+**Initial scope:** Activity summaries only and raw FIT files. Do not fetch activity streams, detailed activity maps, GPS coordinates, segments, routes, photos, or kudos. Do not request write scopes. Manual sync pulls a bounded recent window and webhooks maintain create/update/delete state after connection.
 
 **Tech stack:** FastAPI, Python/httpx/Pydantic, Supabase/Postgres RPCs and RLS, Next.js/React/TypeScript, Zod, Vitest, pytest, Playwright, Vercel Functions/Cron.
 
@@ -17,8 +17,6 @@
 - [Strava API reference](https://developers.strava.com/docs/reference/)
 - [Strava webhooks](https://developers.strava.com/docs/webhooks/)
 - [Strava rate limits](https://developers.strava.com/docs/rate-limits/)
-- [Strava API Policy](https://www.strava.com/legal/api_policy)
-- [Strava API Agreement](https://www.strava.com/legal/api)
 - [Strava brand guidelines](https://developers.strava.com/guidelines/)
 
 ---
@@ -29,22 +27,20 @@
 - Access and refresh tokens are encrypted at rest, never returned to the browser, and refreshed safely before expiry.
 - `/profile` shows connected athlete, granted scopes, last successful sync, errors, **Sync now**, and disconnect controls.
 - Manual sync imports a bounded activity-summary window, paginates, updates changed activities, and remains idempotent under retries and overlapping requests.
-- Imported activities preserve Strava provenance and do not invent Intervals-only metrics such as TSS, intensity factor, or RPE.
+- Imported activities preserve Strava provenance.
 - Rate-limit usage is observed and 429 responses are bounded and actionable.
 - Webhooks handle activity create/update/delete and athlete deauthorization without exceeding Strava's response-time requirement.
 - Disconnect immediately blocks further reads, remotely revokes the Strava grant, and completes the deletion behavior required by the approved authorization.
-- Strava data cannot reach model input, model state, derived plans, compliance analytics, or other AI paths unless a distinct server-side authorization gate and athlete consent are both active.
-- The privacy policy and connection disclosure accurately describe collection, AI processing, subprocessors, retention, withdrawal, export, and deletion.
+- The privacy policy and connection disclosure describe collection, subprocessors, retention, withdrawal, export, and deletion.
 - Migrations, lint, type checks, unit/integration tests, Playwright, and a focused security/code review pass before rollout.
 
 ## Explicit Non-Goals for the First PR
 
 - Multi-athlete capacity or coach/team views.
 - Activity uploads or edits in Strava.
-- Activity streams, GPS/map data, routes, segments, photos, social data, or raw device files.
-- Scheduled polling. Webhooks plus user-triggered sync are sufficient.
+- Activity streams, GPS/map data, routes, segments, photos, or social data.
+- Scheduled polling or Webhooks. User-triggered sync are sufficient.
 - Cross-provider destructive deduplication between Intervals.icu and Strava.
-- Backfilling more history than the approved retention and API limits permit.
 - Using a static dashboard access token. Strava access tokens expire after approximately six hours; even Single Player Mode must use the refresh-token flow.
 
 ---
@@ -73,7 +69,7 @@
   - `<timestamp>_strava_activity_source_and_idempotency.sql`
   - `<timestamp>_strava_webhook_queue_and_lifecycle_rpcs.sql`
 
-### Modified files
+### Expected Modified files
 
 - `.env.example`
 - `.env.bootstrap.example`
@@ -96,45 +92,11 @@
 - `tests/web/coach-api.test.ts`
 - `tests/web/vercel-config.test.ts`
 - `vercel.json`
-
-Potential AI-boundary files, depending on the approved authorization:
-
 - `api/index.py` recent-activity and compliance endpoints
 - `lib/agent/coach-tools.ts`
 - `lib/agent/orchestrator.ts`
 - `lib/agent/supabase-agent-session.ts`
 - activity/planning provenance models and tests
-
----
-
-## Task 0: Authorization and Policy Gate
-
-**This task blocks every implementation task below.**
-
-- [ ] Obtain a written Strava authorization, contract amendment, or published policy revision covering this exact application and use case.
-- [ ] Record the authorization's effective date, version/reference, application client ID, permitted athlete capacity, and named product in an internal approval record. Do not commit confidential correspondence or credentials.
-- [ ] Have the product owner explicitly answer the following matrix:
-
-| Question                                                                                            | Required answer before enabling the related feature |
-| --------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| May Strava activity summaries be sent to OpenAI for live personalized coaching inference?           | Explicit yes                                        |
-| May they enter an LLM context window, working memory, or durable model state?                       | Explicit yes, with any limits documented            |
-| May Coach Arden combine Strava data with plans, profile data, recovery data, or Intervals.icu data? | Explicit yes                                        |
-| May Coach Arden compute compliance, matching, training load, or other derived analytics?            | Explicit yes                                        |
-| May raw and normalized summaries be stored for longer than seven days?                              | Exact permitted retention period                    |
-| May outputs and plans derived from Strava data remain after disconnect?                             | Explicit rule and deletion period                   |
-| May OpenAI, Supabase, Vercel, and Sentry process the allowed fields?                                | Explicit subprocessor coverage                      |
-| Are webhooks required and what deletion SLA applies?                                                | Exact operational requirement                       |
-| Which fields and scopes are permitted?                                                              | Explicit allowlist                                  |
-
-- [ ] Ask counsel/product owner to approve the user-facing consent, privacy, export, and deletion language.
-- [ ] Define an authorization version such as `strava-auth-2026-xx-xx` and expose it server-side as `STRAVA_AUTHORIZATION_VERSION`.
-- [ ] Keep `STRAVA_INTEGRATION_ENABLED=false` and `STRAVA_AI_PROCESSING_ENABLED=false` until the corresponding approval is recorded in each deployment environment.
-- [ ] If authorization permits import/display but not AI processing, implement the import path while permanently leaving the AI gate off.
-- [ ] If the approved terms retain a seven-day cache limit, set the sync maximum and purge job to seven days; do not use the 14/90-day Intervals defaults.
-- [ ] If the authorization does not cover this architecture, stop and reassess an official Strava MCP integration instead.
-
-**Exit criterion:** A reviewer can point to a non-secret approval record and map every enabled behavior to a permitted use.
 
 ---
 
@@ -190,28 +152,16 @@ STRAVA_TOKEN_ENCRYPTION_SECRET=
 STRAVA_WEBHOOK_VERIFY_TOKEN=
 STRAVA_AUTHORIZATION_VERSION=
 STRAVA_INTEGRATION_ENABLED=false
-STRAVA_AI_PROCESSING_ENABLED=false
 STRAVA_RETENTION_DAYS=
 ```
 
 - [ ] Treat client secret, token encryption secret, and webhook verification token as sensitive in `scripts/bootstrap/vercel_client.py`.
 - [ ] Add bootstrap settings, conditional Vercel provisioning, and masked configuration summaries.
 - [ ] Add `/api/strava/:path*` rewrite to `vercel.json` and update `tests/web/vercel-config.test.ts`.
-- [ ] Add a cron route only if the selected webhook queue processor requires Vercel Cron; protect it with `CRON_SECRET` or Vercel's cron authorization header.
 - [ ] Validate configuration combinations at service use time:
   - disabled integration returns a bounded 503;
   - enabled integration requires all OAuth/token settings and an authorization version;
-  - AI processing cannot be enabled when the integration is disabled;
-  - retention must be positive and no longer than the written authorization permits.
-- [ ] Do not add a static access-token development bypass. Test through OAuth mocks or a real local callback registered with Strava.
-
-**Focused verification:**
-
-```bash
-uv run pytest tests/python/test_bootstrap.py
-bun run test tests/web/vercel-config.test.ts
-uv run ruff check backend/config.py scripts/bootstrap/
-```
+- [ ] Test through OAuth mocks or a real local callback registered with Strava.
 
 **Logical commit:** `chore: configure gated Strava integration`
 
@@ -271,18 +221,12 @@ uv run ruff check backend/config.py scripts/bootstrap/
 ### Webhook queue
 
 - [ ] Create `strava_webhook_events` with an idempotency key derived from subscription/object/aspect/event time, minimal payload, status, attempts, and timestamps.
+- [ ] Investigate and recommend queue technology that aligns with our current (low usage, no cost) model of infrastructure, preferring already used vendors where they have a solution (e.g. Cloudflare, Supabase)
 - [ ] Do not retain processed webhook payloads longer than needed.
 - [ ] Add claim/complete/fail RPCs with leases so concurrent processors cannot duplicate work.
 
 - [ ] Update `docs/supabase-migration-history.md` in the same commit.
 - [ ] Add DB-marked tests for RLS/grants, atomic state consumption, concurrent connection replacement, refresh leasing/CAS, activity upsert preservation, webhook dedupe, and purge behavior.
-
-**Focused verification:**
-
-```bash
-bun run db:reset
-RUN_DB_TESTS=1 uv run pytest -m db tests/python/test_supabase_db.py
-```
 
 **Logical commit:** `feat: add Strava connection and sync schema`
 
@@ -305,19 +249,10 @@ RUN_DB_TESTS=1 uv run pytest -m db tests/python/test_supabase_db.py
   - scopes;
   - connected and last-sync timestamps;
   - authorization version;
-  - whether AI processing is enabled and consented;
   - no token, refresh generation, or ciphertext fields.
 - [ ] Implement repository methods for state creation/consumption, active connection read, atomic replacement, refresh leasing/rotation, disconnect state, purge, and webhook queue.
 - [ ] Parse PostgREST's single-composite RPC responses correctly; test dict, null, list, and scalar failure shapes.
 - [ ] Keep repository errors provider-specific and never include row payloads or ciphertext in messages.
-
-**Focused verification:**
-
-```bash
-uv run pytest tests/python/test_strava_repo.py
-uv run ruff check backend/models/strava.py backend/repos/strava_repo.py
-uv run ty check
-```
 
 **Logical commit:** `feat: persist Strava OAuth lifecycle`
 
@@ -352,7 +287,7 @@ uv run ty check
 - [ ] Validate the returned athlete and granted scopes. If the athlete omitted the required activity scope, do not persist the connection; redirect with a bounded scope error.
 - [ ] Encrypt both access and refresh tokens with a Strava-specific encryption secret.
 - [ ] Store the connection atomically, clear the state cookie, and redirect to `/profile?strava=connected`.
-- [ ] Never log codes, state values, token responses, athlete profile payloads, or ciphertext.
+- [ ] Never log codes, state values, token responses, or ciphertext.
 
 ### Refresh
 
@@ -422,7 +357,7 @@ uv run ruff format --check backend/services/strava.py tests/python/test_strava_o
 
 ### Mapping
 
-- [ ] Prefer `sport_type` and use a comprehensive Strava-to-canonical map for cycling, running, swimming, rowing, hiking, walking, strength, yoga, and general fallback.
+- [ ] Prefer `sport_type` and use a comprehensive Strava-to-canonical map for cycling, running, swimming, rowing, hiking, walking, strength, yoga, and general fallback. Consider adding additional types as approrpiate based on Strave types where they could be useful in the future.
 - [ ] Derive `activity_date` from `start_date_local`; derive absolute `started_at` only from `start_date`.
 - [ ] Map summary metrics without semantic invention:
   - moving time, falling back to elapsed time;
@@ -432,9 +367,12 @@ uv run ruff format --check backend/services/strava.py tests/python/test_strava_o
   - average watts;
   - `weighted_average_watts` to normalized-power field with provenance;
   - average cadence.
-- [ ] Leave TSS, intensity factor, RPE, zones, and notes unset unless they come from a separately approved and semantically valid source.
+  - TSS (calculated)
+  - Intensity factor (calculated)
+  - Zones (calculated)
+- [ ] Leave RPE, and notes unset unless they are semantically valid from this source or are sourced from a different semantically valid source.
 - [ ] Build `activity_summary` using the existing canonical helper.
-- [ ] Store only an allowlisted `strava_summary` provenance object, never the entire upstream response.
+- [ ] Store an allowlisted `strava_summary` provenance object.
 - [ ] Set `source="strava_sync"` and stable `source_file_key`.
 
 ### Persistence and matching
@@ -442,19 +380,12 @@ uv run ruff format --check backend/services/strava.py tests/python/test_strava_o
 - [ ] Return inserted/updated/unchanged/invalid counts.
 - [ ] Make overlapping syncs race-safe through the database upsert contract.
 - [ ] Preserve athlete-entered fields and existing planned-workout links on provider updates.
-- [ ] Run plan matching/compliance finalization only if the authorization explicitly allows those derived analytics and the AI/analytics gate is active.
-- [ ] If analytics are not authorized, import for allowed display only and exclude Strava activities from matching/compliance reads.
-- [ ] Do not attempt fuzzy destructive deduplication against Intervals.icu in v1. Document that connecting both sources can show duplicate real-world activities.
+- [ ] Run plan matching/compliance finalization.
+- [ ] Attempt fuzzy deduplication against Intervals.icu in v1. Use a 'closeness' factor for metadata and timing values to de-duplicate. When intervals.icu has a note it is from Strava and time range is aligned,
+      that's nearly 100% closeness.
+- [ ] Document that connecting both sources can show duplicate real-world activities.
 
-**Focused verification:**
-
-```bash
-uv run pytest tests/python/test_strava_sync.py tests/python/test_supabase_repo.py
-uv run ruff check backend/services/strava.py backend/repos/supabase_repo.py api/index.py
-uv run ty check
-```
-
-**Logical commit:** `feat: sync Strava activity summaries`
+**Logical commit:** `feat: sync Strava activity`
 
 ---
 
@@ -491,30 +422,23 @@ uv run ty check
 - [ ] Retry transient failures with capped exponential backoff; dead-letter after a bounded attempt count and alert.
 - [ ] Purge processed event payloads on the approved schedule.
 - [ ] Ensure manual sync and webhook processing use a shared rate-limit budget/safety reserve.
+- [ ] Investigate and recommend a queue based solution that aligns with our current (low usage, no cost) model of infrastructure, preferring already used vendors where they have a solution (e.g. Cloudflare, Supabase)
 
 ### Retention and reconciliation
 
 - [ ] Add a daily purge/reconciliation job if the authorization has a finite retention window.
 - [ ] Delete activities older than the permitted retention period and any prohibited derived data.
 - [ ] Re-fetch an overlap window to reflect privacy changes or missed webhook deliveries.
-- [ ] Ensure Strava deletions are reflected within the approved SLA.
-
-**Focused verification:**
-
-```bash
-uv run pytest tests/python/test_strava_webhooks.py tests/python/test_strava_sync.py
-RUN_DB_TESTS=1 uv run pytest -m db tests/python/test_supabase_db.py -k strava
-```
 
 **Logical commit:** `feat: process Strava lifecycle webhooks`
 
 ---
 
-## Task 8: Enforce AI and Analytics Boundaries
+## Task 8: do the needful for data
 
 **Files:** API activity reads, agent tool paths, durable session/provenance files as needed, tests, and `docs/COMPACTION_DESIGN.md` if durable-session behavior changes.
 
-- [ ] Add a single server-side source-policy function that determines whether `strava_sync` may be included for each purpose:
+- [ ] Ensure strava sync data is used for each purpose:
   - athlete calendar display;
   - compliance/matching analytics;
   - threshold recalibration;
@@ -522,11 +446,8 @@ RUN_DB_TESTS=1 uv run pytest -m db tests/python/test_supabase_db.py -k strava
   - specialist context;
   - durable model state;
   - logs/observability.
-- [ ] Make the default exclusion fail closed when settings, authorization version, connection consent, or data lineage are missing.
-- [ ] Do not rely on prompt instructions to exclude Strava data; filter at repository/API boundaries before model input is constructed.
-- [ ] Add tests proving `get_recent_activities`, compliance tools, threshold recalibration, and durable history omit Strava records while AI processing is disabled.
-- [ ] Add tests proving Strava records are included only when both the server authorization flag and athlete consent are present.
-- [ ] Add provenance to every allowed AI-derived artifact:
+- [ ] Add tests proving Strava records are included only when athlete consent is present.
+- [ ] Add provenance to the following artifacts:
   - tool-run source set;
   - assistant message metadata;
   - plan generation context;
@@ -534,16 +455,8 @@ RUN_DB_TESTS=1 uv run pytest -m db tests/python/test_supabase_db.py -k strava
   - model-state compaction metadata.
 - [ ] If changing `lib/agent/supabase-agent-session.ts`, `durable-compaction-session.ts`, `responses-item-shapes.ts`, or orchestrator behavior, update `docs/COMPACTION_DESIGN.md` in the same change.
 - [ ] Implement the approved disconnect deletion rule for derived artifacts. Prefer exact provenance; use conservative deletion when lineage is ambiguous.
-- [ ] Verify no raw Strava upstream payload is persisted in chat messages, model state, Sentry breadcrumbs, or specialist reports.
 
-**Focused verification:**
-
-```bash
-bun run test tests/web/agent-*.test.ts tests/web/real-durable-session.test.ts
-uv run pytest tests/python/test_compliance_api.py tests/python/test_recalibration_api.py -k strava
-```
-
-**Logical commit:** `feat: gate Strava data from AI processing`
+**Logical commit:** `feat: Strava data integrations`
 
 ---
 
@@ -551,7 +464,7 @@ uv run pytest tests/python/test_compliance_api.py tests/python/test_recalibratio
 
 **Files:** `lib/types.ts`, `lib/schemas.ts`, `lib/coach-api.ts`, `tests/web/coach-api.test.ts`.
 
-- [ ] Add `StravaConnectionStatus` with connected/disconnect-pending state, athlete identity, scopes, timestamps, authorization version, and AI-processing state.
+- [ ] Add `StravaConnectionStatus` with connected/disconnect-pending state, athlete identity, scopes, timestamps, authorization.
 - [ ] Add Zod schemas for status, authorize response, sync request, sync response, and disconnect/purge confirmation.
 - [ ] Keep sync day validation aligned exactly with the backend/authorization maximum.
 - [ ] Add browser helpers:
@@ -562,15 +475,6 @@ uv run pytest tests/python/test_compliance_api.py tests/python/test_recalibratio
   - optional `exportStravaData` if required by the authorization.
 - [ ] Use `authorizedFetch` for protected endpoints; webhook routes remain server-to-server only.
 - [ ] Test paths, methods, authorization headers, request bodies, valid parsing, malformed responses, and pre-fetch validation.
-
-**Focused verification:**
-
-```bash
-bun run test tests/web/coach-api.test.ts
-bun run typecheck
-```
-
-**Logical commit:** Include with the profile UI commit unless it is large enough to review independently.
 
 ---
 
@@ -583,9 +487,7 @@ bun run typecheck
 - [ ] Add a **Strava** section adjacent to Intervals.icu with:
   - approved disclosure of collected fields and purpose;
   - retention and deletion summary;
-  - AI-processing disclosure only if authorized;
   - link to privacy policy;
-  - explicit consent control if counsel requires it;
   - official unmodified **Connect with Strava** button asset;
   - connected athlete/scopes/last sync;
   - **Sync now** and **Disconnect** actions;
@@ -611,14 +513,6 @@ bun run typecheck
 - [ ] Intervals and Strava actions remain independent.
 - [ ] Profile connection sections remain available when metrics fail.
 
-**Focused verification:**
-
-```bash
-bun run test tests/web/profile-intervals.test.tsx tests/web/profile-strava.test.tsx
-bun run lint
-bun run typecheck
-```
-
 **Logical commit:** `feat: manage Strava sync from profile`
 
 ---
@@ -638,8 +532,7 @@ bun run typecheck
   - export/access request;
   - deletion request and confirmation;
   - Strava usage monitoring language if required.
-- [ ] Ensure generic AI-processing language does not accidentally claim broader Strava use than approved.
-- [ ] Add a user data access/export path if the approved policy requires one. Export only that user's allowed Strava records and never tokens/ciphertext.
+- [ ] Update user data access/export (.jsonl) path if the approved policy requires one to include in the export Strava user's allowed Strava records and never tokens/ciphertext.
 - [ ] Document support contact and deletion request procedure.
 - [ ] Add an operator runbook for:
   - registering callback domain/URL;
@@ -674,7 +567,6 @@ bun run typecheck
 - [ ] Provider updates preserve athlete-authored fields and plan links.
 - [ ] Webhook verification, malformed payload, duplicate delivery, unknown owner, create/update/delete, and deauthorization.
 - [ ] Purge removes every authorized category and leaves unrelated Intervals/manual data untouched.
-- [ ] AI-disabled tests prove source exclusion from every model-facing path.
 
 ### Database integration coverage
 
@@ -728,33 +620,19 @@ bun run test:ui
   - state is one-time and browser-bound;
   - refresh tokens rotate atomically;
   - all reads are user-scoped;
-  - feature gates fail closed;
   - disconnect blocks processing immediately;
   - deletion is complete and test-proven.
-- [ ] Perform a Strava contract review against the live documentation on the implementation date; do not rely solely on this plan's URLs or remembered behavior.
 - [ ] Review mapper semantics field by field; specifically reject fake TSS/IF/RPE and deprecated `type` precedence.
 - [ ] Review rate-limit request counts for worst-case initial sync and webhook bursts.
 - [ ] Review UI against the then-current Strava brand package.
-- [ ] Ask a second agent/reviewer to inspect the diff specifically for OAuth, token rotation, deletion, AI-source leakage, and migration safety.
+- [ ] Ask a second agent/reviewer to inspect the diff specifically for OAuth, token rotation, deletion, and migration safety.
 - [ ] Resolve every finding or document why it is not applicable before requesting non-draft review.
 
 ---
 
 ## Logical Commit Plan
 
-Keep tests with each implementation chunk. Suggested commits:
-
-1. `chore: configure gated Strava integration`
-2. `feat: add Strava connection and sync schema`
-3. `feat: persist Strava OAuth lifecycle`
-4. `feat: connect and refresh Strava OAuth`
-5. `feat: sync Strava activity summaries`
-6. `feat: process Strava lifecycle webhooks`
-7. `feat: gate Strava data from AI processing`
-8. `feat: manage Strava sync from profile`
-9. `docs: document Strava privacy and operations`
-10. `test: cover Strava end-to-end lifecycle` only for final cross-cutting tests that do not naturally belong in earlier commits.
-
+Keep tests with each implementation chunk.
 Do not create migration-only commits without updating `docs/supabase-migration-history.md`. Do not defer core behavior tests to the final test commit.
 
 ---
@@ -787,13 +665,11 @@ Do not create migration-only commits without updating `docs/supabase-migration-h
 - [ ] Inspect Supabase directly to confirm no plaintext token and no excluded upstream fields.
 - [ ] Inspect agent/tool traces to prove Strava source exclusion while AI processing is off.
 - [ ] Enable `STRAVA_INTEGRATION_ENABLED` in preview only.
-- [ ] Enable `STRAVA_AI_PROCESSING_ENABLED` separately only after authorization, consent, provenance, and deletion tests are approved.
 - [ ] Repeat callback/webhook registration and smoke tests for production.
 - [ ] Monitor 401/429 rates, refresh failures, webhook lag/dead letters, sync counts, and disconnect-pending records.
 
 ### Rollback
 
-- Turn `STRAVA_AI_PROCESSING_ENABLED=false` first to stop model use immediately.
 - Turn `STRAVA_INTEGRATION_ENABLED=false` to stop new connections and pulls while preserving the ability to process deauthorization/deletion webhooks.
 - Do not disable webhook deletion handling during rollback.
 - Revoke the Strava webhook subscription only after all active connections are revoked and required data is purged.
@@ -806,5 +682,4 @@ Do not create migration-only commits without updating `docs/supabase-migration-h
 - Intervals.icu provides a useful UI and endpoint pattern, but Strava is not a protocol-level copy. The critical differences are rotating refresh tokens, granted-scope verification, pagination, rate-limit headers, webhook lifecycle, remote revocation, update/delete semantics, and authorization restrictions on AI/retention.
 - Single Player Mode affects athlete capacity, not data-use permissions.
 - The safest first release imports summary fields only and avoids GPS/streams entirely.
-- Import/display authorization and AI-processing authorization must remain separate controls.
 - No implementation is complete until disconnect and webhook deauthorization demonstrably delete or retain every direct and derived data category exactly as the approved authorization requires.

@@ -45,6 +45,7 @@ describe("vercel routing", () => {
         { source: "/api/engine/:path*", destination: "/api/index.py" },
         { source: "/api/files/:path*", destination: "/api/index.py" },
         { source: "/api/intervals/:path*", destination: "/api/index.py" },
+        { source: "/api/strava/:path*", destination: "/api/index.py" },
         { source: "/api/chat/(.*)", destination: "/api/index.py" },
       ]),
     );
@@ -63,6 +64,8 @@ describe("vercel routing", () => {
     expect(rewrittenDestination("/api/intervals/callback")).toBe(
       "/api/index.py",
     );
+    expect(rewrittenDestination("/api/strava/authorize")).toBe("/api/index.py");
+    expect(rewrittenDestination("/api/strava/callback")).toBe("/api/index.py");
     expect(rewrittenDestination("/api/chat/thread")).toBe("/api/index.py");
     expect(rewrittenDestination("/api/chat/messages")).toBe("/api/index.py");
     expect(rewrittenDestination("/api/chat/attachments/presign")).toBe(

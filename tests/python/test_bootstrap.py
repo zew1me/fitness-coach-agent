@@ -843,6 +843,43 @@ def test_build_env_vars_sets_intervals_oauth_vars() -> None:
     assert env_vars["INTERVALS_TOKEN_ENCRYPTION_SECRET"] == "token-key-123"
 
 
+def test_build_env_vars_sets_strava_oauth_vars_and_enable_flag() -> None:
+    settings = _settings(
+        strava_integration_enabled=True,
+        strava_client_id="strava-123",
+        strava_client_secret="strava-secret",
+        strava_token_encryption_secret="strava-token-key",
+        strava_authorization_version="2026-07-21",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["STRAVA_CLIENT_ID"] == "strava-123"
+    assert env_vars["STRAVA_CLIENT_SECRET"] == "strava-secret"
+    assert env_vars["STRAVA_TOKEN_ENCRYPTION_SECRET"] == "strava-token-key"
+    assert env_vars["STRAVA_AUTHORIZATION_VERSION"] == "2026-07-21"
+    assert env_vars["STRAVA_INTEGRATION_ENABLED"] == "true"
+
+
+def test_build_env_vars_omits_strava_enable_flag_when_disabled() -> None:
+    # Fail-closed: an operator can stage the OAuth secrets without flipping the
+    # integration on, so the enable flag must not ship as a side effect.
+    settings = _settings(
+        strava_client_id="strava-123",
+        strava_client_secret="strava-secret",
+        strava_token_encryption_secret="strava-token-key",
+    )
+
+    env_vars = bootstrap_main._build_env_vars(
+        "prod", "", "jwt", _supabase_dict(), _r2_dict(), settings
+    )
+
+    assert env_vars["STRAVA_CLIENT_ID"] == "strava-123"
+    assert "STRAVA_INTEGRATION_ENABLED" not in env_vars
+
+
 def test_build_env_vars_writes_auth_token_with_only_the_public_dsn() -> None:
     # Source-map upload should be provisioned for a browser-only Sentry setup, not just
     # when the server DSN is present — guards the `or sentry_public_dsn` half of the gate.
