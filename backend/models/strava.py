@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field, field_validator
 # Strava marks a token stale within an hour of expiry; refresh at that threshold.
 STRAVA_REFRESH_THRESHOLD_SECONDS = 3600
 
-# The activity read scopes; at least one must be granted for the connection to be useful.
-STRAVA_ACTIVITY_READ_SCOPES = frozenset({"activity:read", "activity:read_all"})
+# Stream sync includes Only Me activities, so the full activity-read scope is required.
+STRAVA_REQUIRED_ACTIVITY_SCOPE = "activity:read_all"
 
 
 def normalize_strava_scopes(raw: str) -> list[str]:
@@ -31,7 +31,7 @@ def normalize_strava_scopes(raw: str) -> list[str]:
 
 
 def has_required_activity_scope(scopes: list[str]) -> bool:
-    return any(scope in STRAVA_ACTIVITY_READ_SCOPES for scope in scopes)
+    return STRAVA_REQUIRED_ACTIVITY_SCOPE in scopes
 
 
 class StravaAuthorizationResponse(BaseModel):

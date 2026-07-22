@@ -62,26 +62,32 @@ export default function PrivacyPage(): JSX.Element {
             athlete name, granted scopes, connection status, and encrypted
             access and refresh tokens. Tokens are encrypted at rest and are
             never returned to your browser. Through the Strava API (OAuth) we
-            import activity <em>summaries only</em>: sport type, start date,
-            moving and elapsed time, distance, elevation gain, average and
-            maximum heart rate, average and weighted-average power, and average
-            cadence. We do not collect GPS coordinates, maps or polylines,
-            routes, segments, photos, or social data, and we never request write
-            access.
+            import all of your activities, including activities marked Only Me.
+            We read activity summaries such as sport, start time, duration,
+            distance, elevation, heart rate, power, and cadence. When available,
+            we also temporarily process Strava&apos;s processed non-GPS streams
+            for time, heart rate, power, cadence, speed, and moving status to
+            calculate normalized power, training stress, intensity, and
+            time-in-zone percentages using your Coach Arden fitness profile and
+            sport thresholds. We store those calculated metrics and a record of
+            which streams were used, but not the raw stream samples. We do not
+            request GPS/location streams, maps or polylines, routes, segments,
+            photos, social data, or write access.
           </p>
           <p>
-            We use our hosting and storage subprocessors to import and store
-            these summaries for non-AI account features such as your training
-            calendar and Strava connection controls. Imported Strava data is
-            excluded from OpenAI and other AI processing: it is not exposed to
-            agent tools, specialist or delegation context, durable model state,
-            or AI-facing derived results such as recent-activity tool results,
-            compliance, training load, or threshold recalibration. Strava data
-            is never sold or displayed to other users. Disconnecting Strava from
-            your profile requests revocation of our access at Strava and, once
-            revocation succeeds, deletes the Strava activities we imported; we
-            confirm the deletion count on screen. To request export or deletion
-            of your Strava data, contact us at{" "}
+            We use our hosting and storage subprocessors to import summaries and
+            store our calculated training metrics for non-AI account features
+            such as your training calendar and Strava connection controls.
+            Imported Strava data is excluded from OpenAI and other AI
+            processing: it is not exposed to agent tools, specialist or
+            delegation context, durable model state, or AI-facing derived
+            results such as recent-activity tool results, compliance, training
+            load, or threshold recalibration. Strava data is never sold or
+            displayed to other users. Disconnecting Strava from your profile
+            requests revocation of our access at Strava and, once revocation
+            succeeds, deletes the Strava activities we imported; we confirm the
+            deletion count on screen. To request export or deletion of your
+            Strava data, contact us at{" "}
             <a href="mailto:privacy@coach.nigels.dev">
               privacy@coach.nigels.dev
             </a>

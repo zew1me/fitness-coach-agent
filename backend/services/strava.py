@@ -10,9 +10,12 @@ sync with ``docs/strava-integration-runbook.md``.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from itertools import pairwise
+from statistics import median
 from typing import Any, Protocol, cast
 from urllib.parse import urlencode
 
@@ -22,6 +25,9 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from backend.config import settings
+from backend.engine.tss import compute_normalized_power, compute_tss
+from backend.engine.zones import Zone, compute_zones
+from backend.models.athlete import AthleteProfile, SportThreshold
 from backend.models.strava import (
     STRAVA_REFRESH_THRESHOLD_SECONDS,
     StravaAuthorizationResponse,
@@ -60,9 +66,9 @@ STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 STRAVA_REVOKE_URL = "https://www.strava.com/oauth/revoke"
 STRAVA_API_BASE = "https://www.strava.com/api/v3"
-# Least-privileged read scope. `activity:read` covers everything but Only-Me
-# activities; escalate to `activity:read_all` only under explicit approval.
-STRAVA_DEFAULT_SCOPE = "read,activity:read"
+# Full read access is explicitly requested so the athlete can import their own
+# Only Me activities and their processed non-GPS streams.
+STRAVA_DEFAULT_SCOPE = "read,activity:read_all"
 STRAVA_STATE_TYPE = "strava_oauth_state"
 
 # Bound a manual sync so a single request can never walk the athlete's entire
@@ -70,6 +76,27 @@ STRAVA_STATE_TYPE = "strava_oauth_state"
 STRAVA_SYNC_MAX_DAYS = 90
 STRAVA_SYNC_PER_PAGE = 100
 STRAVA_SYNC_MAX_PAGES = 10
+# Preserve headroom for the paginated summary request and follow-up actions under
+# Strava's short-window read limit. Remaining activities use summary fallbacks.
+STRAVA_SYNC_MAX_STREAM_REQUESTS = 75
+STRAVA_STREAM_MAX_SAMPLES = 200_000
+STRAVA_STREAM_KEYS = (
+    "time",
+    "heartrate",
+    "cadence",
+    "watts",
+    "velocity_smooth",
+    "moving",
+)
+
+StravaStreamValue = int | float | bool
+StravaStreams = dict[str, list[StravaStreamValue]]
+_SENSOR_STREAM_BOUNDS = {
+    "watts": (0.0, 5_000.0),
+    "heartrate": (20.0, 250.0),
+    "cadence": (0.0, 250.0),
+    "velocity_smooth": (0.0, 50.0),
+}
 
 # Strava sport_type → canonical sport. Keys are normalized (casefold, no spaces
 # or underscores). Prefer sport_type over the deprecated `type` field.
@@ -297,6 +324,10 @@ class StravaOAuthService:
         connection = await run_in_threadpool(self._repository.get_active_connection, user_id)
         if connection is None:
             raise StravaNotConnectedError("Strava is not connected.")
+        if not has_required_activity_scope(connection.scopes):
+            raise StravaReconnectRequiredError(
+                "Reconnect Strava and grant access to all of your activities."
+            )
         access_token, connection = await self._ensure_fresh_token(connection)
         return StravaAuthContext(connection=connection, access_token=access_token)
 
@@ -394,6 +425,47 @@ class StravaOAuthService:
         if not isinstance(payload, list):
             raise StravaSyncError("Strava returned an invalid activities response.")
         return [item for item in payload if isinstance(item, dict)]
+
+    async def fetch_activity_streams(
+        self,
+        auth: StravaAuthContext,
+        activity_id: str,
+    ) -> StravaStreams:
+        """Fetch processed non-GPS streams; unavailable streams degrade to summaries."""
+        headers = {"Authorization": f"Bearer {auth.access_token}"}
+        try:
+            async with self._http_client_factory() as client:
+                response = await client.get(
+                    f"{STRAVA_API_BASE}/activities/{activity_id}/streams",
+                    params={
+                        "keys": ",".join(STRAVA_STREAM_KEYS),
+                        "key_by_type": "true",
+                    },
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            raise StravaSyncError("Strava activity streams could not be fetched.") from exc
+
+        self._log_rate_limit(response)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return {}
+        if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+            raise StravaRateLimitError(
+                "Strava rate limit reached. Try again after the next reset.",
+                retry_after_seconds=_seconds_to_next_quarter_hour(),
+            )
+        if response.status_code == httpx.codes.UNAUTHORIZED:
+            raise StravaReconnectRequiredError("Strava rejected the access token.")
+        if response.status_code == httpx.codes.FORBIDDEN:
+            raise StravaReconnectRequiredError(
+                "Reconnect Strava and grant access to all of your activities."
+            )
+        try:
+            response.raise_for_status()
+            payload: object = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise StravaSyncError("Strava returned invalid activity streams.") from exc
+        return _parse_streams(payload)
 
     # ── Disconnect / revocation ──────────────────────────────────
 
@@ -559,6 +631,363 @@ def _seconds_to_next_quarter_hour(now: datetime | None = None) -> int:
 # ── Activity mapping ─────────────────────────────────────────────
 
 
+def _parse_streams(payload: object) -> StravaStreams:
+    if not isinstance(payload, dict):
+        return {}
+    payload_by_key = cast(dict[str, object], payload)
+    streams: StravaStreams = {}
+    for key in STRAVA_STREAM_KEYS:
+        stream = payload_by_key.get(key)
+        if not isinstance(stream, dict):
+            continue
+        stream_by_key = cast(dict[str, object], stream)
+        data = stream_by_key.get("data")
+        if not isinstance(data, list) or len(data) > STRAVA_STREAM_MAX_SAMPLES:
+            continue
+        values: list[StravaStreamValue] = []
+        for value in cast(list[object], data):
+            is_moving_value = key == "moving" and isinstance(value, bool)
+            is_finite_number = (
+                key != "moving"
+                and not isinstance(value, bool)
+                and isinstance(value, int | float)
+                and math.isfinite(value)
+            )
+            if is_moving_value or is_finite_number:
+                values.append(cast(StravaStreamValue, value))
+        if values:
+            streams[key] = values
+    return streams
+
+
+def _numeric_stream(streams: StravaStreams, key: str) -> list[float]:
+    return [
+        float(value)
+        for value in streams.get(key, [])
+        if not isinstance(value, bool) and isinstance(value, int | float)
+    ]
+
+
+def _usable_sensor_stream(streams: StravaStreams, key: str) -> list[float]:
+    values = _numeric_stream(streams, key)
+    bounds = _SENSOR_STREAM_BOUNDS[key]
+    shaped = [min(max(value, bounds[0]), bounds[1]) for value in values]
+    return shaped if any(value > 0 for value in shaped) else []
+
+
+def _moving_values(values: list[float], streams: StravaStreams) -> list[float]:
+    moving = streams.get("moving", [])
+    return [
+        value
+        for index, value in enumerate(values)
+        if index >= len(moving) or moving[index] is not False
+    ]
+
+
+def _sample_weights(times: list[float], count: int) -> list[float]:
+    deltas = [times[index + 1] - times[index] for index in range(min(len(times) - 1, count - 1))]
+    positive = [delta for delta in deltas if delta > 0]
+    fallback = float(median(positive)) if positive else 1.0
+    return [
+        deltas[index] if index < len(deltas) and deltas[index] > 0 else fallback
+        for index in range(count)
+    ]
+
+
+def _zone_name(
+    value: float,
+    zones: list[Zone],
+    *,
+    low_field: str,
+    high_field: str,
+) -> str | None:
+    candidates: list[tuple[float, str]] = []
+    for zone in zones:
+        low = getattr(zone, low_field)
+        high = getattr(zone, high_field)
+        if low is None or high is None:
+            continue
+        lower, upper = sorted((low, high))
+        name = f"zone_{zone.number}"
+        if lower <= value <= upper:
+            return name
+        candidates.append((min(abs(value - lower), abs(value - upper)), name))
+    return min(candidates)[1] if candidates else None
+
+
+def _zone_distribution(
+    values: list[float],
+    streams: StravaStreams,
+    zones: list[Zone],
+    *,
+    low_field: str,
+    high_field: str,
+) -> dict[str, float] | None:
+    if not values or not zones:
+        return None
+    times = _numeric_stream(streams, "time")
+    weights = _sample_weights(times, len(values))
+    moving = streams.get("moving", [])
+    totals = {f"zone_{zone.number}": 0.0 for zone in zones}
+    total_weight = 0.0
+    for index, value in enumerate(values):
+        if index < len(moving) and moving[index] is False:
+            continue
+        selected = _zone_name(
+            value,
+            zones,
+            low_field=low_field,
+            high_field=high_field,
+        )
+        if selected is not None:
+            totals[selected] += weights[index]
+            total_weight += weights[index]
+    if total_weight <= 0:
+        return None
+    return {name: round(weight / total_weight * 100, 1) for name, weight in totals.items()}
+
+
+def _stream_sample_rate(streams: StravaStreams) -> int:
+    times = _numeric_stream(streams, "time")
+    positive = [later - earlier for earlier, later in pairwise(times) if later > earlier]
+    return max(1, round(median(positive))) if positive else 1
+
+
+@dataclass(frozen=True)
+class _StreamObservations:
+    power: list[float]
+    heart_rate: list[float]
+    pace: list[float]
+    normalized_power: int | None
+    average_power: int | None
+    average_heart_rate: int | None
+    average_pace: int | None
+    average_cadence: int | None
+
+
+@dataclass(frozen=True)
+class _LoadEstimate:
+    intensity_factor: float | None = None
+    tss: float | None = None
+    method: str | None = None
+
+
+def _stream_observations(
+    activity: Activity,
+    streams: StravaStreams,
+    duration: int,
+) -> _StreamObservations:
+    power = _usable_sensor_stream(streams, "watts")
+    heart_rate = _usable_sensor_stream(streams, "heartrate")
+    cadence = _usable_sensor_stream(streams, "cadence")
+    velocity = _usable_sensor_stream(streams, "velocity_smooth")
+    first_velocity = next((value for value in velocity if value > 0), None)
+    pace = (
+        [1000 / (value if value > 0 else first_velocity) for value in velocity]
+        if first_velocity
+        else []
+    )
+    moving_power = _moving_values(power, streams)
+    moving_heart_rate = _moving_values(heart_rate, streams)
+    moving_pace = _moving_values(pace, streams)
+    moving_cadence = _moving_values(cadence, streams)
+    normalized_power = activity.normalized_power_watts
+    if moving_power:
+        normalized_power = compute_normalized_power(
+            [round(value) for value in moving_power],
+            sample_rate_seconds=_stream_sample_rate(streams),
+        )
+    average_power = (
+        round(sum(moving_power) / len(moving_power)) if moving_power else activity.avg_power_watts
+    )
+    average_heart_rate = (
+        round(sum(moving_heart_rate) / len(moving_heart_rate))
+        if moving_heart_rate
+        else activity.avg_hr_bpm
+    )
+    average_pace = (
+        round(sum(moving_pace) / len(moving_pace)) if moving_pace else activity.avg_pace_sec_per_km
+    )
+    average_cadence = (
+        round(sum(moving_cadence) / len(moving_cadence))
+        if moving_cadence
+        else activity.avg_cadence_rpm
+    )
+    if (
+        average_pace is None
+        and activity.sport == "running"
+        and activity.distance_meters is not None
+        and activity.distance_meters > 0
+    ):
+        average_pace = round(duration / (activity.distance_meters / 1000))
+    return _StreamObservations(
+        power=power,
+        heart_rate=heart_rate,
+        pace=pace,
+        normalized_power=normalized_power,
+        average_power=average_power,
+        average_heart_rate=average_heart_rate,
+        average_pace=average_pace,
+        average_cadence=average_cadence,
+    )
+
+
+def _stream_zone_distribution(
+    activity: Activity,
+    profile: AthleteProfile,
+    threshold: SportThreshold | None,
+    streams: StravaStreams,
+    observations: _StreamObservations,
+) -> dict[str, float] | None:
+    ftp = threshold.lt2_power_watts if threshold else None
+    if observations.power and ftp:
+        zones = compute_zones(
+            "cycling",
+            ftp_watts=ftp,
+            lt1_power_watts=threshold.lt1_power_watts if threshold else None,
+        )
+        return _zone_distribution(
+            observations.power,
+            streams,
+            zones,
+            low_field="power_low",
+            high_field="power_high",
+        )
+    if activity.sport == "running" and observations.pace and threshold:
+        zones = compute_zones(
+            "running",
+            lt2_pace_sec_km=threshold.lt2_pace_sec_per_km,
+            lt1_pace_sec_km=threshold.lt1_pace_sec_per_km,
+        )
+        return _zone_distribution(
+            observations.pace,
+            streams,
+            zones,
+            low_field="pace_low_sec_km",
+            high_field="pace_high_sec_km",
+        )
+    if observations.heart_rate and profile.max_hr_bpm:
+        zones = compute_zones(
+            "general",
+            max_hr=profile.max_hr_bpm,
+            lt2_hr=threshold.lt2_hr_bpm if threshold else None,
+            lt1_hr=threshold.lt1_hr_bpm if threshold else None,
+        )
+        return _zone_distribution(
+            observations.heart_rate,
+            streams,
+            zones,
+            low_field="hr_low",
+            high_field="hr_high",
+        )
+    return None
+
+
+def _training_load_estimate(
+    activity: Activity,
+    profile: AthleteProfile,
+    threshold: SportThreshold | None,
+    observations: _StreamObservations,
+    duration: int,
+) -> _LoadEstimate:
+    ftp = threshold.lt2_power_watts if threshold else None
+    if observations.normalized_power is not None and ftp is not None and ftp > 0:
+        method = (
+            "athlete_threshold_power_stream" if observations.power else "athlete_threshold_power"
+        )
+        return _LoadEstimate(
+            intensity_factor=round(observations.normalized_power / ftp, 2),
+            tss=round(
+                compute_tss(
+                    duration,
+                    sport=activity.sport,
+                    normalized_power=observations.normalized_power,
+                    ftp=ftp,
+                ),
+                1,
+            ),
+            method=method,
+        )
+    threshold_pace = threshold.lt2_pace_sec_per_km if threshold else None
+    if activity.sport == "running" and observations.average_pace and threshold_pace:
+        method = "athlete_threshold_pace_stream" if observations.pace else "athlete_threshold_pace"
+        return _LoadEstimate(
+            intensity_factor=round(threshold_pace / observations.average_pace, 2),
+            tss=round(
+                compute_tss(
+                    duration,
+                    sport=activity.sport,
+                    avg_pace_sec_km=observations.average_pace,
+                    threshold_pace_sec_km=threshold_pace,
+                ),
+                1,
+            ),
+            method=method,
+        )
+    if observations.average_heart_rate and profile.resting_hr_bpm and profile.max_hr_bpm:
+        method = "athlete_heart_rate_stream" if observations.heart_rate else "athlete_heart_rate"
+        return _LoadEstimate(
+            tss=round(
+                compute_tss(
+                    duration,
+                    sport=activity.sport,
+                    avg_hr=observations.average_heart_rate,
+                    resting_hr=profile.resting_hr_bpm,
+                    max_hr=profile.max_hr_bpm,
+                    biological_sex=profile.biological_sex or "not_specified",
+                ),
+                1,
+            ),
+            method=method,
+        )
+    return _LoadEstimate()
+
+
+def estimate_strava_training_load(
+    activity: Activity,
+    *,
+    profile: AthleteProfile,
+    threshold: SportThreshold | None,
+    streams: StravaStreams | None = None,
+) -> Activity:
+    """Calculate athlete-specific load, retaining derived metrics but not raw streams."""
+    duration = activity.duration_seconds
+    if duration is None or duration <= 0:
+        return activity
+    streams = streams or {}
+    observations = _stream_observations(activity, streams, duration)
+    load = _training_load_estimate(activity, profile, threshold, observations, duration)
+    zone_distribution = _stream_zone_distribution(
+        activity,
+        profile,
+        threshold,
+        streams,
+        observations,
+    )
+    raw_extraction = dict(activity.raw_extraction or {})
+    if streams:
+        raw_extraction["strava_stream_derivation"] = {
+            "sample_count": max((len(values) for values in streams.values()), default=0),
+            "streams_used": sorted(streams),
+            "raw_samples_stored": False,
+        }
+    if load.method:
+        raw_extraction["training_load_estimate"] = {"method": load.method}
+    return activity.model_copy(
+        update={
+            "avg_hr_bpm": observations.average_heart_rate,
+            "avg_power_watts": observations.average_power,
+            "avg_pace_sec_per_km": observations.average_pace,
+            "avg_cadence_rpm": observations.average_cadence,
+            "normalized_power_watts": observations.normalized_power,
+            "intensity_factor": load.intensity_factor,
+            "tss": load.tss,
+            "zone_distribution": zone_distribution,
+            "raw_extraction": raw_extraction,
+        }
+    )
+
+
 def map_strava_activity(user_id: str, athlete_id: int, item: dict[str, Any]) -> Activity | None:
     raw_id = item.get("id")
     if isinstance(raw_id, bool) or not isinstance(raw_id, int | str):
@@ -583,8 +1012,8 @@ def map_strava_activity(user_id: str, athlete_id: int, item: dict[str, Any]) -> 
             avg_power_watts=_optional_int(item.get("average_watts")),
             normalized_power_watts=_optional_int(item.get("weighted_average_watts")),
             avg_cadence_rpm=_optional_int(item.get("average_cadence")),
-            # TSS/IF/zones require athlete thresholds Strava does not provide;
-            # leave unset rather than fabricate them.
+            # Athlete-specific load is estimated by the sync boundary after it
+            # loads the coaching profile and active sport thresholds.
             source="strava_sync",
             source_file_key=f"strava:{athlete_id}:{activity_id}",
             raw_extraction={"strava_summary": _provenance(item)},

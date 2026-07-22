@@ -40,18 +40,26 @@ and rate-limit/error behavior. Record any reversal here before changing code.
 ## Data contract
 
 - **Capacity:** one authorized athlete (Single Player Mode).
-- **Scope requested:** `read,activity:read` (least privilege). `activity:read_all`
-  is only used under explicit approval; write scopes are never requested.
-- **Imported fields (summary only):** Strava activity id + athlete id
-  (provenance), `sport_type` (deprecated `type` only as fallback),
-  `start_date` / `start_date_local`, moving/elapsed time, distance, elevation
-  gain, average/max HR, average watts, `weighted_average_watts` → normalized
-  power, average cadence, and optional name/device name for provenance.
-- **Explicitly excluded:** map/polyline, GPS coordinates, routes, segments,
-  photos, social counts, upload identifiers.
-- **Not fabricated:** TSS, intensity factor, and zones are left unset — Strava's
-  summary provides none and the athlete's thresholds are required to derive them
-  honestly.
+- **Scope requested:** `read,activity:read_all`, explicitly approved so the
+  athlete can import their own Only Me activities and processed streams. Write
+  scopes are never requested. Existing `activity:read` connections must
+  reconnect before syncing.
+- **Imported summary fields:** Strava activity id + athlete id (provenance),
+  `sport_type` (deprecated `type` only as fallback), start/moving/elapsed time,
+  distance, elevation gain, average/max HR, average and weighted-average power,
+  cadence, and optional name/device name for provenance.
+- **Processed streams:** request only time, heart rate, cadence, watts, smoothed
+  velocity, and moving status. Use them transiently to calculate our
+  own normalized power, TSS, intensity factor, and time-in-zone percentages.
+  Persist derived metrics plus stream names/sample count, not raw samples. A
+  manual sync fetches streams for at most 75 new activities, preserving
+  short-window rate-limit headroom; remaining activities use summary fallbacks.
+- **Explicitly excluded:** latitude/longitude streams, map/polyline, GPS
+  coordinates, routes, segments, photos, social counts, upload identifiers, and
+  the original upstream activity file (which Strava does not expose via API).
+- **Calculation fallback:** when a stream is unavailable, calculate from summary
+  observations plus the athlete's stored profile/thresholds when possible;
+  otherwise leave the derived metric unset rather than inventing it.
 - **Provider-owned vs athlete-owned:** provider writes only the imported summary
   metrics. Athlete notes, RPE, and fueling notes are not inferred. Strava
   imports never create planned-workout links (idempotent insert on

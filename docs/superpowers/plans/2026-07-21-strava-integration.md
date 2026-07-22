@@ -21,15 +21,16 @@ fuzzy/destructive Intervals.icu deduplication. Re-sync deduplicates only by
 Strava's stable provider key, so connecting both providers can show duplicate
 real-world activities.
 
-**Data semantics:** Strava summaries do not contain the athlete-specific
-threshold context required for TSS, intensity factor, or zones, so those fields
-remain unset.
+**Data semantics:** Strava provides observations, not the athlete-specific
+training model. Coach Arden combines processed non-GPS streams with the
+athlete's stored profile and thresholds to calculate and store its own
+normalized power, TSS, intensity factor, and time-in-zone percentages.
 
 **Goal:** Add a per-athlete Strava connection to `/profile` that follows the existing Intervals.icu interaction model—connect, status, disconnect, and **Sync now**—while implementing Strava-specific OAuth token rotation, activity pagination, rate-limit handling, webhook lifecycle, deletion, provenance, and AI-processing controls.
 
-**Architecture:** Add a provider-specific Strava service and repository alongside the Intervals.icu implementation, but do not copy its bearer-token lifecycle directly. Store encrypted access and refresh tokens, serialize refreshes with a database lease, import only relevant summary fields into canonical activities, update existing imports idempotently, enqueue webhook events for prompt processing, and make disconnect/deauthorization revoke access and purge affected data. Enable import and AI processing independently only when athlete consent cover them.
+**Architecture:** Add a provider-specific Strava service and repository alongside the Intervals.icu implementation, but do not copy its bearer-token lifecycle directly. Store encrypted access and refresh tokens, import relevant summary fields, transiently process allowlisted non-GPS streams into canonical derived metrics, update existing imports idempotently, and make disconnect/deauthorization revoke access and purge affected data. Keep Strava data outside AI processing.
 
-**Initial scope:** Activity summaries only and raw FIT files. Do not fetch activity streams, detailed activity maps, GPS coordinates, segments, routes, photos, or kudos. Do not request write scopes. Manual sync pulls a bounded recent window and webhooks maintain create/update/delete state after connection.
+**Initial scope:** Activity summaries plus processed time, heart-rate, cadence, watts, smoothed-velocity, and moving streams. Do not request latitude/longitude streams, detailed maps, GPS coordinates, segments, routes, photos, kudos, original files, or write scopes. Manual sync pulls a bounded recent window.
 
 **Tech stack:** FastAPI, Python/httpx/Pydantic, Supabase/Postgres RPCs and RLS, Next.js/React/TypeScript, Zod, Vitest, pytest, Playwright, Vercel Functions/Cron.
 
@@ -61,7 +62,7 @@ remain unset.
 
 - Multi-athlete capacity or coach/team views.
 - Activity uploads or edits in Strava.
-- Activity streams, GPS/map data, routes, segments, photos, or social data.
+- GPS/location streams, map data, routes, segments, photos, or social data.
 - Scheduled polling or Webhooks. User-triggered sync are sufficient.
 - Cross-provider destructive deduplication between Intervals.icu and Strava.
 - Using a static dashboard access token. Strava access tokens expire after approximately six hours; even Single Player Mode must use the refresh-token flow.
@@ -136,10 +137,7 @@ remain unset.
   - deletion behavior;
   - subprocessors;
   - webhook and rate-limit strategy.
-- [ ] Choose the least-privileged scope:
-  - prefer `activity:read` if Only Me activities are not required;
-  - use `activity:read_all` only if approved and required;
-  - never request `activity:write`, `profile:write`, or unrelated scopes in v1.
+- [ ] Request the approved `read,activity:read_all` scopes so athletes can import their own Only Me activities and processed streams; never request `activity:write`, `profile:write`, or unrelated scopes.
 - [ ] Define the exact normalized field allowlist:
   - Strava activity ID and athlete ID for provenance;
   - `sport_type` with deprecated `type` only as fallback;
@@ -150,7 +148,7 @@ remain unset.
   - average/weighted power;
   - average cadence;
   - optional activity name and device name only if approved.
-- [ ] Explicitly exclude map/polyline, coordinates, location, photos, social counts, segment efforts, and external upload identifiers.
+- [ ] Allowlist processed time, heart-rate, cadence, watts, smoothed-velocity, and moving streams. Explicitly exclude latitude/longitude streams, map/polyline, coordinates, location, photos, social counts, segment efforts, and external upload identifiers. Persist derived metrics and bounded derivation metadata, not raw stream samples.
 - [ ] Define provider-owned versus athlete-owned canonical fields. Provider updates must not overwrite athlete notes, fueling notes, local RPE, plan links, or other Coach Arden annotations.
 - [ ] Decide retention/deletion treatment for derived records before enabling AI:
   - if derived outputs may remain, record that authorization rule;
@@ -393,9 +391,7 @@ uv run ruff format --check backend/services/strava.py tests/python/test_strava_o
   - average watts;
   - `weighted_average_watts` to normalized-power field with provenance;
   - average cadence.
-- [ ] Leave TSS, intensity factor, and zones unset because Strava summary data
-      does not provide the athlete-specific threshold context required to
-      calculate them safely.
+- [ ] Calculate normalized power, TSS, intensity factor, and time-in-zone percentages from allowlisted processed streams plus the athlete's stored profile and active sport thresholds. Fall back to summary observations when streams are unavailable; leave only metrics with insufficient inputs unset.
 - [ ] Leave RPE and notes unset unless they are semantically valid from this
       source or are sourced from a different semantically valid source.
 - [ ] Build `activity_summary` using the existing canonical helper.
@@ -716,5 +712,5 @@ Do not create migration-only commits without updating `docs/supabase-migration-h
 
 - Intervals.icu provides a useful UI and endpoint pattern, but Strava is not a protocol-level copy. The critical differences are rotating refresh tokens, granted-scope verification, pagination, rate-limit headers, webhook lifecycle, remote revocation, update/delete semantics, and authorization restrictions on AI/retention.
 - Single Player Mode affects athlete capacity, not data-use permissions.
-- The safest first release imports summary fields only and avoids GPS/streams entirely.
+- Process only explicitly allowlisted non-GPS streams, retain derived metrics rather than raw samples, and keep location data outside the integration.
 - No implementation is complete until disconnect and webhook deauthorization demonstrably delete or retain every direct and derived data category exactly as the approved authorization requires.

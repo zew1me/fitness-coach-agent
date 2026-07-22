@@ -129,7 +129,7 @@ def _seed_connection(
             user_id="coach-user-1",
             strava_athlete_id=135168,
             strava_athlete_name="Nigel",
-            scopes=["read", "activity:read"],
+            scopes=["read", "activity:read_all"],
             access_token_ciphertext=cipher.encrypt("access-1"),
             refresh_token_ciphertext=cipher.encrypt(refresh),
             token_type="Bearer",
@@ -150,7 +150,7 @@ def test_authorization_url_has_form_params_and_signed_state() -> None:
     assert query["response_type"] == ["code"]
     assert query["client_id"] == ["strava-123"]
     assert query["redirect_uri"] == ["https://coach.nigels.dev/api/strava/callback"]
-    assert query["scope"] == ["read,activity:read"]
+    assert query["scope"] == ["read,activity:read_all"]
     assert service.validate_state(query["state"][0]).user_id == "coach-user-1"
 
 
@@ -237,7 +237,7 @@ async def test_exchange_stores_encrypted_access_and_refresh() -> None:
     state = service.create_state(user_id="coach-user-1")
 
     status = await service.exchange_code_for_connection(
-        code="strava-code", scope="read,activity:read", state=state
+        code="strava-code", scope="read,activity:read_all", state=state
     )
 
     assert token_bodies[0]["grant_type"] == ["authorization_code"]
@@ -271,8 +271,20 @@ async def test_exchange_rejects_missing_activity_scope() -> None:
     state = service.create_state(user_id="coach-user-1")
 
     with pytest.raises(StravaScopeError):
-        await service.exchange_code_for_connection(code="c", scope="read", state=state)
+        await service.exchange_code_for_connection(
+            code="c", scope="read,activity:read", state=state
+        )
     assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_auth_requires_reconnect_for_legacy_scope() -> None:
+    repo = InMemoryStravaRepository()
+    connection = _seed_connection(repo, expires_at=datetime.now(UTC) + timedelta(hours=5))
+    repo.rows[0] = connection.model_copy(update={"scopes": ["read", "activity:read"]})
+
+    with pytest.raises(StravaReconnectRequiredError, match="grant access to all"):
+        await _service(repo).resolve_auth("coach-user-1")
 
 
 @pytest.mark.asyncio

@@ -5,12 +5,15 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
+from backend.models.athlete import AthleteProfile, SportThreshold
 from backend.models.strava import StravaConnectionRecord
 from backend.services.strava import (
     StravaAuthContext,
     StravaOAuthService,
     StravaRateLimitError,
+    StravaStreams,
     StravaSyncError,
+    estimate_strava_training_load,
     map_strava_activity,
 )
 
@@ -57,12 +60,119 @@ def test_mapping_prefers_sport_type_and_maps_metrics() -> None:
     assert activity.source_file_key == "strava:135168:998877"
 
 
-def test_mapping_does_not_fabricate_tss_if_or_zones() -> None:
+def test_mapping_leaves_training_load_for_athlete_context_enrichment() -> None:
     activity = map_strava_activity("coach-user-1", _ATHLETE_ID, _summary())
     assert activity is not None
     assert activity.tss is None
     assert activity.intensity_factor is None
     assert activity.zone_distribution is None
+
+
+def test_training_load_uses_athlete_power_thresholds() -> None:
+    activity = map_strava_activity("coach-user-1", _ATHLETE_ID, _summary())
+    assert activity is not None
+
+    enriched = estimate_strava_training_load(
+        activity,
+        profile=AthleteProfile(user_id="coach-user-1"),
+        threshold=SportThreshold(
+            user_id="coach-user-1",
+            sport="cycling",
+            lt2_power_watts=250,
+        ),
+    )
+
+    assert enriched.intensity_factor == 0.94
+    assert enriched.tss == pytest.approx(88.4)
+    assert enriched.zone_distribution is None  # Summary data has no time-in-zone stream.
+    assert enriched.raw_extraction is not None
+    assert enriched.raw_extraction["training_load_estimate"] == {
+        "method": "athlete_threshold_power"
+    }
+
+
+def test_training_load_uses_streams_without_storing_raw_samples() -> None:
+    activity = map_strava_activity("coach-user-1", _ATHLETE_ID, _summary())
+    assert activity is not None
+    streams: StravaStreams = {
+        "time": [0, 1, 2, 3, 4, 5],
+        "watts": [200, 200, 200, 200, 200, 200],
+        "moving": [True, True, True, True, True, True],
+    }
+
+    enriched = estimate_strava_training_load(
+        activity,
+        profile=AthleteProfile(user_id="coach-user-1"),
+        threshold=SportThreshold(
+            user_id="coach-user-1",
+            sport="cycling",
+            lt1_power_watts=188,
+            lt2_power_watts=250,
+        ),
+        streams=streams,
+    )
+
+    assert enriched.normalized_power_watts == 200
+    assert enriched.intensity_factor == 0.8
+    assert enriched.tss == pytest.approx(64.0)
+    assert enriched.zone_distribution == {
+        "zone_1": 0.0,
+        "zone_2": 0.0,
+        "zone_3": 100.0,
+        "zone_4": 0.0,
+        "zone_5": 0.0,
+        "zone_6": 0.0,
+    }
+    assert enriched.raw_extraction is not None
+    assert enriched.raw_extraction["strava_stream_derivation"] == {
+        "sample_count": 6,
+        "streams_used": ["moving", "time", "watts"],
+        "raw_samples_stored": False,
+    }
+
+
+def test_all_zero_power_stream_does_not_replace_summary_power() -> None:
+    activity = map_strava_activity("coach-user-1", _ATHLETE_ID, _summary())
+    assert activity is not None
+
+    enriched = estimate_strava_training_load(
+        activity,
+        profile=AthleteProfile(user_id="coach-user-1"),
+        threshold=SportThreshold(
+            user_id="coach-user-1",
+            sport="cycling",
+            lt2_power_watts=250,
+        ),
+        streams={"time": [0, 1, 2], "watts": [0, 0, 0]},
+    )
+
+    assert enriched.normalized_power_watts == 235
+    assert enriched.intensity_factor == 0.94
+    assert enriched.tss == pytest.approx(88.4)
+
+
+def test_training_load_falls_back_to_athlete_heart_rate_profile() -> None:
+    activity = map_strava_activity(
+        "coach-user-1",
+        _ATHLETE_ID,
+        _summary(weighted_average_watts=None),
+    )
+    assert activity is not None
+
+    enriched = estimate_strava_training_load(
+        activity,
+        profile=AthleteProfile(
+            user_id="coach-user-1",
+            biological_sex="female",
+            resting_hr_bpm=50,
+            max_hr_bpm=190,
+        ),
+        threshold=None,
+    )
+
+    assert enriched.tss is not None
+    assert enriched.tss > 0
+    assert enriched.intensity_factor is None
 
 
 def test_mapping_provenance_excludes_gps_and_map() -> None:
@@ -132,6 +242,47 @@ async def test_fetch_paginates_until_short_page() -> None:
 
     assert pages == [1, 2]
     assert len(items) == 102
+
+
+@pytest.mark.asyncio
+async def test_fetch_activity_streams_requests_only_allowlisted_non_gps_data() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/api/v3/activities/{_ATHLETE_ID}/streams"
+        keys = set(request.url.params["keys"].split(","))
+        assert keys == {
+            "time",
+            "heartrate",
+            "cadence",
+            "watts",
+            "velocity_smooth",
+            "moving",
+        }
+        assert "latlng" not in keys
+        assert request.url.params["key_by_type"] == "true"
+        return httpx.Response(
+            200,
+            json={
+                "time": {"data": [0, 1, 2]},
+                "watts": {"data": [190, 210, 220]},
+                "moving": {"data": [True, True, False]},
+                "latlng": {"data": [[51.5, -0.1]]},
+            },
+        )
+
+    streams = await _service_with(handler).fetch_activity_streams(_auth(), str(_ATHLETE_ID))
+
+    assert streams == {
+        "time": [0, 1, 2],
+        "watts": [190, 210, 220],
+        "moving": [True, True, False],
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_activity_streams_tolerates_unavailable_streams() -> None:
+    service = _service_with(lambda _request: httpx.Response(404))
+
+    assert await service.fetch_activity_streams(_auth(), str(_ATHLETE_ID)) == {}
 
 
 @pytest.mark.asyncio

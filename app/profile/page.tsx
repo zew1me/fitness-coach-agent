@@ -311,9 +311,11 @@ function toStravaState(
 function StravaDisclosure(): JSX.Element {
   return (
     <p className={styles.connectionMeta}>
-      Imports activity summaries only (sport, time, distance, elevation, heart
-      rate, power, cadence) — never GPS, maps, or photos. Disconnecting revokes
-      Strava access and deletes imported Strava activities. See our{" "}
+      Reads all your activities, including Only Me activities, plus processed
+      non-GPS streams (time, heart rate, power, cadence, speed, and moving
+      status) to calculate training load and zones. We never request GPS, maps,
+      photos, social data, or write access. Disconnecting revokes Strava access
+      and deletes imported Strava activities. See our{" "}
       <Link href="/privacy">privacy policy</Link>.
     </p>
   );
@@ -545,7 +547,7 @@ export default function ProfilePage(): JSX.Element {
       setStravaNotice("Strava connected.");
     } else if (stravaResult === "scope_error") {
       setStravaError(
-        "Strava did not grant activity access. Reconnect and allow activity read.",
+        "Strava did not grant access to all activities. Reconnect and allow activity read access, including Only Me activities.",
       );
     } else if (stravaResult === "error") {
       setStravaError("Strava authorization was not completed.");

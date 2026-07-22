@@ -12,7 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Literal, cast
+from typing import Literal, TypeVar, cast
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -97,6 +97,8 @@ from backend.services.intervals import (
 )
 from backend.services.r2 import R2Service
 from backend.services.strava import (
+    STRAVA_SYNC_MAX_STREAM_REQUESTS,
+    StravaAuthContext,
     StravaConfigurationError,
     StravaNotConnectedError,
     StravaOAuthExchangeError,
@@ -106,6 +108,7 @@ from backend.services.strava import (
     StravaScopeError,
     StravaStateError,
     StravaSyncError,
+    estimate_strava_training_load,
     map_strava_activity,
 )
 
@@ -781,6 +784,9 @@ class StravaSyncRequest(BaseModel):
     days: int = Field(default=14, ge=1, le=90)
 
 
+_StravaResult = TypeVar("_StravaResult")
+
+
 def _strava_rate_limit_http_error(exc: StravaRateLimitError) -> HTTPException:
     headers = (
         {"Retry-After": str(exc.retry_after_seconds)}
@@ -788,6 +794,19 @@ def _strava_rate_limit_http_error(exc: StravaRateLimitError) -> HTTPException:
         else None
     )
     return HTTPException(status_code=429, detail=str(exc), headers=headers)
+
+
+async def _strava_api_call(awaitable: Awaitable[_StravaResult]) -> _StravaResult:
+    try:
+        return await awaitable
+    except (StravaNotConnectedError, StravaReconnectRequiredError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StravaRateLimitError as exc:
+        raise _strava_rate_limit_http_error(exc) from exc
+    except StravaSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (StravaConfigurationError, StravaRepositoryNotConfiguredError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/strava/sync")
@@ -800,19 +819,33 @@ async def strava_sync(
     # A small overlap on the low end lets a late-updated activity be repaired by
     # the idempotent upsert on the next sync.
     oldest = newest - timedelta(days=payload.days)
-    try:
-        auth = await strava_service.resolve_auth(user_id)
-        items = await strava_service.fetch_activities(auth, after=oldest, before=newest)
-    except (StravaNotConnectedError, StravaReconnectRequiredError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except StravaRateLimitError as exc:
-        raise _strava_rate_limit_http_error(exc) from exc
-    except StravaSyncError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except (StravaConfigurationError, StravaRepositoryNotConfiguredError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    auth = await _strava_api_call(strava_service.resolve_auth(user_id))
+    items = await _strava_api_call(
+        strava_service.fetch_activities(auth, after=oldest, before=newest)
+    )
 
-    result = await _import_strava_activities(user_id, auth.connection.strava_athlete_id, items)
+    try:
+        profile = await _activity_repo_call(
+            repo.get_athlete_profile(user_id),
+            detail="Failed to load athlete profile.",
+            log_message=f"get_athlete_profile failed for user_id={user_id}",
+        )
+    except RecordNotFoundError:
+        profile = _AthleteProfile(user_id=user_id)
+    thresholds = await _activity_repo_call(
+        repo.get_active_thresholds(user_id),
+        detail="Failed to load athlete thresholds.",
+        log_message=f"get_active_thresholds failed for user_id={user_id}",
+    )
+    result = await _strava_api_call(
+        _import_strava_activities(
+            user_id,
+            items,
+            auth=auth,
+            profile=profile,
+            thresholds=thresholds,
+        )
+    )
 
     try:
         await strava_service.record_sync(user_id)
@@ -824,7 +857,12 @@ async def strava_sync(
 
 
 async def _import_strava_activities(
-    user_id: str, athlete_id: int, items: list[dict[str, object]]
+    user_id: str,
+    items: list[dict[str, object]],
+    *,
+    auth: StravaAuthContext,
+    profile: _AthleteProfile,
+    thresholds: list[SportThreshold],
 ) -> dict[str, object]:
     existing_keys = await _activity_repo_call(
         repo.list_synced_strava_keys(user_id),
@@ -834,14 +872,33 @@ async def _import_strava_activities(
     synced_activities: list[object] = []
     skipped_duplicates = 0
     skipped_invalid = 0
+    stream_requests = 0
     for item in items:
-        activity = map_strava_activity(user_id, athlete_id, item)
+        activity = map_strava_activity(
+            user_id,
+            auth.connection.strava_athlete_id,
+            item,
+        )
         if activity is None:
             skipped_invalid += 1
             continue
         if activity.source_file_key in existing_keys:
             skipped_duplicates += 1
             continue
+        threshold = next(
+            (candidate for candidate in thresholds if candidate.sport == activity.sport),
+            None,
+        )
+        streams = {}
+        if stream_requests < STRAVA_SYNC_MAX_STREAM_REQUESTS:
+            streams = await strava_service.fetch_activity_streams(auth, str(item["id"]))
+            stream_requests += 1
+        activity = estimate_strava_training_load(
+            activity,
+            profile=profile,
+            threshold=threshold,
+            streams=streams,
+        )
         persisted_activity = await _activity_repo_call(
             repo.create_strava_activity(activity),
             detail="Failed to save activity.",

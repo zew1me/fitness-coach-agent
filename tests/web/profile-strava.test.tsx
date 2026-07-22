@@ -71,7 +71,9 @@ describe("ProfilePage Strava connection", () => {
 
     const section = await waitFor(stravaSection);
     expect(within(section).getByText(/Not connected/i)).toBeTruthy();
-    expect(within(section).getByText(/activity summaries only/i)).toBeTruthy();
+    expect(
+      within(section).getByText(/processed non-GPS streams/i),
+    ).toBeTruthy();
     expect(
       within(section).getByRole("button", { name: "Connect with Strava" }),
     ).toBeTruthy();
@@ -102,7 +104,7 @@ describe("ProfilePage Strava connection", () => {
       connected: true,
       strava_athlete_id: 135168,
       strava_athlete_name: "Nigel S",
-      scopes: ["read", "activity:read"],
+      scopes: ["read", "activity:read_all"],
       last_sync_at: "2026-07-21T07:00:00Z",
     });
 
@@ -111,7 +113,7 @@ describe("ProfilePage Strava connection", () => {
 
     expect(within(section).getByText(/Connected as Nigel S/i)).toBeTruthy();
     expect(within(section).getByText(/Athlete 135168/)).toBeTruthy();
-    expect(within(section).getByText(/read, activity:read/)).toBeTruthy();
+    expect(within(section).getByText(/read, activity:read_all/)).toBeTruthy();
     expect(within(section).getByText(/Last sync/i)).toBeTruthy();
   });
 
@@ -235,7 +237,7 @@ describe("ProfilePage Strava connection", () => {
     render(<ProfilePage />);
 
     expect(
-      await screen.findByText(/did not grant activity access/i),
+      await screen.findByText(/did not grant access to all activities/i),
     ).toBeTruthy();
     expect(window.location.search).toBe("");
   });
