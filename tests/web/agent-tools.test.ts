@@ -1069,6 +1069,35 @@ describe("coachToolDefinitions", () => {
     });
   });
 
+  it("fails closed before Strava-provenance tool data can reach durable state", async () => {
+    const canary = "STRAVA_TOOL_AI_CANARY_998877";
+    const { fetchImpl } = createRecordingFetch({
+      activities: [
+        {
+          athlete_notes: canary,
+          id: canary,
+          raw_extraction: { strava_summary: { name: canary } },
+          source: "strava_sync",
+        },
+      ],
+    });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const execution = (
+      tools["get_recent_activities"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ limit: 20 });
+
+    await expect(execution).rejects.toThrow(
+      "Engine returned data excluded from AI processing",
+    );
+  });
+
   it("forwards extra internal headers to engine tool calls", async () => {
     const requests: Array<{ headers: Headers; url: string }> = [];
     const fetchImpl = (

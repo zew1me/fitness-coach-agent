@@ -19,7 +19,7 @@ export default function PrivacyPage(): JSX.Element {
           Back to Coach Arden
         </Link>
         <h1>Privacy Policy</h1>
-        <p className={styles.updated}>Last updated July 21, 2026</p>
+        <p className={styles.updated}>Last updated July 22, 2026</p>
 
         <section>
           <h2>Overview</h2>
@@ -70,14 +70,18 @@ export default function PrivacyPage(): JSX.Element {
             access.
           </p>
           <p>
-            We use imported Strava activities to plan, adapt, and review
-            training for your account. Strava data is processed by the same
-            subprocessors listed below (hosting, storage, and, where you have
-            enabled it, AI processing) and is never sold or displayed to other
-            users. Disconnecting Strava from your profile immediately revokes
-            our access at Strava and deletes the Strava activities we imported;
-            we confirm the deletion count on screen. To request export or
-            deletion of your Strava data, contact us at{" "}
+            We use our hosting and storage subprocessors to import and store
+            these summaries for non-AI account features such as your training
+            calendar and Strava connection controls. Imported Strava data is
+            excluded from OpenAI and other AI processing: it is not exposed to
+            agent tools, specialist or delegation context, durable model state,
+            or AI-facing derived results such as recent-activity tool results,
+            compliance, training load, or threshold recalibration. Strava data
+            is never sold or displayed to other users. Disconnecting Strava from
+            your profile requests revocation of our access at Strava and, once
+            revocation succeeds, deletes the Strava activities we imported; we
+            confirm the deletion count on screen. To request export or deletion
+            of your Strava data, contact us at{" "}
             <a href="mailto:privacy@coach.nigels.dev">
               privacy@coach.nigels.dev
             </a>

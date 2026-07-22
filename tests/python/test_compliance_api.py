@@ -272,6 +272,50 @@ class TestGetComplianceSummary:
         assert body["totals"]["unconfirmed"] == 1
         assert body["totals"]["completed"] == 0
 
+    async def test_strava_canary_and_legacy_auto_match_are_excluded(self, monkeypatch) -> None:
+        canary = "STRAVA_COMPLIANCE_AI_CANARY_998877"
+        repo = ComplianceRepository(
+            plan=_plan(),
+            workouts=[
+                _workout(
+                    status="completed",
+                    actual_activity_id=canary,
+                    completion_source="auto_matched",
+                ),
+                _workout(
+                    id="workout-orphaned-match",
+                    workout_date=TODAY - timedelta(days=3),
+                    status="completed",
+                    actual_activity_id=None,
+                    completion_source="auto_matched",
+                ),
+            ],
+            activities=[
+                _activity(
+                    id=canary,
+                    planned_workout_id="workout-1",
+                    source="strava_sync",
+                    source_file_key=f"strava:{canary}",
+                    athlete_notes=canary,
+                    raw_extraction={"strava_summary": {"name": canary}},
+                )
+            ],
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post("/api/engine/get-compliance-summary", {})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["totals"]["completed"] == 0
+        assert body["totals"]["unconfirmed"] == 2
+        assert body["totals"]["unplanned_activities"] == 0
+        assert body["compliance_pct"] == 0.0
+        assert repo.workout_updates == []
+        assert repo.activity_updates == []
+        assert canary not in response.text
+        assert "strava_sync" not in response.text
+
 
 @pytest.mark.usefixtures("as_athlete")
 class TestUnplannedActivities:
@@ -444,6 +488,38 @@ class TestResolvePlanWorkout:
         assert response.status_code == 404
         assert repo.workout_updates == []
 
+    async def test_guessed_strava_activity_id_cannot_be_linked(self, monkeypatch) -> None:
+        canary = "STRAVA_RESOLVE_AI_CANARY_998877"
+        repo = ComplianceRepository(
+            plan=_plan(),
+            workouts=[_workout(id=WORKOUT_ID)],
+            activities=[
+                _activity(
+                    id=canary,
+                    source="strava_sync",
+                    athlete_notes=canary,
+                    raw_extraction={"strava_summary": {"name": canary}},
+                )
+            ],
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/resolve-plan-workout",
+            {
+                "plan_workout_id": WORKOUT_ID,
+                "outcome": "completed",
+                "activity_id": canary,
+                "source": "coach",
+            },
+        )
+
+        assert response.status_code == 404
+        assert repo.workout_updates == []
+        assert repo.activity_updates == []
+        assert canary not in response.text
+        assert "strava_sync" not in response.text
+
     async def test_invalid_outcome_rejected(self, monkeypatch) -> None:
         monkeypatch.setattr(api_index, "repo", ComplianceRepository(plan=_plan()))
         response = await _post(
@@ -554,6 +630,41 @@ class TestFindPlanWorkout:
         candidates = response.json()["candidates"]
         assert [c["plan_workout_id"] for c in candidates] == [WORKOUT_ID]
 
+    async def test_strava_auto_match_status_is_hidden_from_tool_result(self, monkeypatch) -> None:
+        canary = "STRAVA_FIND_WORKOUT_AI_CANARY_998877"
+        target = TODAY - timedelta(days=1)
+        repo = ComplianceRepository(
+            plan=_plan(),
+            workouts=[
+                _workout(
+                    id=WORKOUT_ID,
+                    workout_date=target,
+                    status="completed",
+                    actual_activity_id=canary,
+                    completion_source="auto_matched",
+                )
+            ],
+            activities=[
+                _activity(
+                    id=canary,
+                    source="strava_sync",
+                    athlete_notes=canary,
+                    raw_extraction={"strava_summary": {"name": canary}},
+                )
+            ],
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post(
+            "/api/engine/find-plan-workout",
+            {"workout_date": target.isoformat(), "sport": "cycling"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["candidates"][0]["status"] == "scheduled"
+        assert canary not in response.text
+        assert "strava_sync" not in response.text
+
     async def test_filters_by_sport(self, monkeypatch) -> None:
         target = TODAY - timedelta(days=1)
         repo = ComplianceRepository(
@@ -656,6 +767,26 @@ class TestWriteTimeMatchHook:
             )
         ]
         assert repo.activity_updates[-1].planned_workout_id == "workout-1"
+
+    async def test_strava_import_never_creates_ai_facing_plan_match(self, monkeypatch) -> None:
+        canary = "STRAVA_MATCH_AI_CANARY_998877"
+        activity = _activity(
+            id=canary,
+            source="strava_sync",
+            athlete_notes=canary,
+            raw_extraction={"strava_summary": {"name": canary}},
+        )
+        repo = ComplianceRepository(plan=_plan(), workouts=[_workout()], activities=[activity])
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        result = await api_index._finalize_persisted_activity(
+            "athlete-1", activity, calling_endpoint="strava_sync"
+        )
+
+        assert result["status"] == "saved"
+        assert "matched_plan_workout" not in result
+        assert repo.workout_updates == []
+        assert repo.activity_updates == []
 
     async def test_match_failure_does_not_fail_save(self, monkeypatch) -> None:
         from types import SimpleNamespace

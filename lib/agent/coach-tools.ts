@@ -15,6 +15,21 @@ export type CoachToolContext = {
 };
 
 const ENGINE_TIMEOUT_MS = 65_000;
+const AI_EXCLUDED_ACTIVITY_SOURCE = "strava_sync";
+
+function containsAiExcludedActivity(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(containsAiExcludedActivity);
+  }
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    record["source"] === AI_EXCLUDED_ACTIVITY_SOURCE ||
+    Object.values(record).some(containsAiExcludedActivity)
+  );
+}
 
 async function postEngine<TInput extends object>(
   context: CoachToolContext,
@@ -46,7 +61,15 @@ async function postEngine<TInput extends object>(
       );
     }
 
-    return await response.json();
+    const result: unknown = await response.json();
+    if (containsAiExcludedActivity(result)) {
+      // This is the final fail-closed boundary before a tool result is handed to
+      // OpenAI and appended to durable model state. The engine filters these
+      // records first; keep this guard so a future endpoint regression cannot
+      // silently poison agent, specialist, delegation, or session context.
+      throw new Error("Engine returned data excluded from AI processing");
+    }
+    return result;
   } finally {
     clearTimeout(timeoutId);
   }
