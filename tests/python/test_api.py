@@ -142,7 +142,15 @@ class EngineRepository:
     async def get_active_plan(self, user_id: str):
         return None
 
-    async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
+    async def list_activities(
+        self,
+        user_id: str,
+        *,
+        sport=None,
+        since=None,
+        limit: int = 50,
+        exclude_sources=None,
+    ):
         return []
 
     async def create_activity(self, activity: Activity) -> Activity:
@@ -164,6 +172,9 @@ class EngineRepository:
         return [
             w.model_copy(update={"id": f"workout-{i}"}) for i, w in enumerate(workouts, start=1)
         ]
+
+    async def get_activities_by_ids(self, user_id: str, activity_ids: list[str]) -> list[Activity]:
+        return [await self.get_activity(user_id, activity_id) for activity_id in activity_ids]
 
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         return Activity(
@@ -2185,7 +2196,15 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_get_recent_activities_returns_normalized_activity_list(monkeypatch) -> None:
     class ActivityRepository(EngineRepository):
-        async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
+        async def list_activities(
+            self,
+            user_id: str,
+            *,
+            sport=None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
+        ):
             assert user_id == "athlete-1"
             assert sport == "running"
             assert limit == 2
@@ -2225,6 +2244,205 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
     assert activities[0]["activity_date"] == "2026-04-10"
     assert activities[0]["distance_meters"] == 8000
     assert activities[0]["tss"] == 55
+
+
+@pytest.mark.asyncio
+async def test_ai_activity_helper_applies_limit_after_excluded_sources(monkeypatch) -> None:
+    class ActivityRepository:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.activities = [
+                Activity(
+                    id="strava-latest",
+                    user_id="athlete-1",
+                    sport="running",
+                    activity_date=datetime.fromisoformat("2026-04-12T00:00:00+00:00").date(),
+                    source="strava_sync",
+                ),
+                *[
+                    Activity(
+                        id=f"manual-{index}",
+                        user_id="athlete-1",
+                        sport="running",
+                        activity_date=datetime.fromisoformat(
+                            f"2026-04-{11 - index:02d}T00:00:00+00:00"
+                        ).date(),
+                        source="manual",
+                    )
+                    for index in range(1, 5)
+                ],
+            ]
+
+        async def list_activities(
+            self,
+            user_id: str,
+            *,
+            sport: str | None = None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
+        ) -> list[Activity]:
+            self.calls.append(
+                {
+                    "user_id": user_id,
+                    "sport": sport,
+                    "since": since,
+                    "limit": limit,
+                    "exclude_sources": exclude_sources,
+                }
+            )
+            activities = [
+                activity
+                for activity in self.activities
+                if not exclude_sources or activity.source not in exclude_sources
+            ]
+            return activities[:limit]
+
+    repository = ActivityRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    without_since = await api_index._list_activities_for_ai("athlete-1", sport="running", limit=3)
+    with_since = await api_index._list_activities_for_ai(
+        "athlete-1",
+        sport="running",
+        since=datetime.fromisoformat("2026-04-01T00:00:00+00:00").date(),
+        limit=3,
+    )
+
+    assert [activity.id for activity in without_since] == ["manual-1", "manual-2", "manual-3"]
+    assert [activity.id for activity in with_since] == ["manual-1", "manual-2", "manual-3"]
+    assert len(repository.calls) == 2
+    assert all(call["limit"] == 3 for call in repository.calls)
+    assert all(call["exclude_sources"] == {"strava_sync"} for call in repository.calls)
+
+
+@pytest.mark.asyncio
+async def test_recent_activities_ai_boundary_drops_strava_canary(monkeypatch) -> None:
+    canary = "STRAVA_RECENT_AI_CANARY_998877"
+
+    class ActivityRepository(EngineRepository):
+        async def list_activities(
+            self,
+            user_id: str,
+            *,
+            sport=None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
+        ):
+            return [
+                Activity(
+                    id=canary,
+                    user_id=user_id,
+                    sport="running",
+                    activity_date=datetime.fromisoformat("2026-04-11T00:00:00+00:00").date(),
+                    duration_seconds=3600,
+                    athlete_notes=canary,
+                    source="strava_sync",
+                    source_file_key=f"strava:{canary}",
+                    raw_extraction={"strava_summary": {"name": canary}},
+                ),
+                Activity(
+                    id="manual-activity",
+                    user_id=user_id,
+                    sport="running",
+                    activity_date=datetime.fromisoformat("2026-04-10T00:00:00+00:00").date(),
+                    duration_seconds=2700,
+                    source="manual",
+                ),
+            ]
+
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/get-recent-activities",
+            json={"limit": 20, "sport": "running"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [activity["id"] for activity in response.json()["activities"]] == ["manual-activity"]
+    assert canary not in response.text
+    assert "strava_sync" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_recompute_load_excludes_strava_from_ai_context_derivative(monkeypatch) -> None:
+    canary = "STRAVA_LOAD_AI_CANARY_998877"
+    today = datetime.today().date()
+
+    class LoadRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.snapshots: list[dict[str, Any]] = []
+
+        async def list_activities(
+            self,
+            user_id: str,
+            *,
+            sport=None,
+            since=None,
+            limit: int = 50,
+            exclude_sources=None,
+        ) -> list[Activity]:
+            return [
+                Activity(
+                    id=canary,
+                    user_id=user_id,
+                    sport="cycling",
+                    activity_date=today,
+                    tss=9999,
+                    source="strava_sync",
+                    athlete_notes=canary,
+                ),
+                Activity(
+                    id="manual-load-activity",
+                    user_id=user_id,
+                    sport="cycling",
+                    activity_date=today,
+                    tss=10,
+                    source="manual",
+                ),
+            ]
+
+        async def get_latest_load(self, user_id: str, sport=None):
+            return None
+
+        async def upsert_load_snapshots(
+            self, user_id: str, snapshots: list[dict], sport=None
+        ) -> None:
+            self.snapshots = snapshots
+
+    repository = LoadRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/recompute-load",
+            json={"since": today.isoformat(), "sport": None},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert repository.snapshots[0]["daily_tss"] == 10
+    assert canary not in response.text
+    assert "strava_sync" not in response.text
 
 
 @pytest.mark.asyncio
@@ -3202,6 +3420,62 @@ async def test_save_activity_from_text_updates_existing_activity(monkeypatch) ->
     assert body["activity"]["activity_summary"]["subjective"]["overdid_it_flag"] is True
     assert repository.updated_activity is not None
     assert repository.updated_activity.source == "fit_upload"
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_cannot_open_strava_activity(monkeypatch) -> None:
+    from backend.services import activity_text
+
+    canary = "STRAVA_ACTIVITY_UPDATE_AI_CANARY_998877"
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_called = False
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            return Activity(
+                id=activity_id,
+                user_id=user_id,
+                sport="cycling",
+                activity_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+                source="strava_sync",
+                athlete_notes=canary,
+                raw_extraction={"strava_summary": {"name": canary}},
+            )
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.update_called = True
+            return activity
+
+    async def unexpected_merge(*_args, **_kwargs):
+        raise AssertionError("Strava activity reached OpenAI-backed text merge")
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "merge_activity_text_update", unexpected_merge)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": canary, "text": "Add private notes."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 404
+    assert repository.update_called is False
+    assert canary not in response.text
+    assert "strava_sync" not in response.text
 
 
 @pytest.mark.asyncio

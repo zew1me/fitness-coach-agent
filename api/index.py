@@ -66,6 +66,7 @@ from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
+from backend.repos.strava_repo import StravaRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
@@ -95,12 +96,25 @@ from backend.services.intervals import (
     map_intervals_activity,
 )
 from backend.services.r2 import R2Service
+from backend.services.strava import (
+    StravaConfigurationError,
+    StravaNotConnectedError,
+    StravaOAuthExchangeError,
+    StravaOAuthService,
+    StravaRateLimitError,
+    StravaReconnectRequiredError,
+    StravaScopeError,
+    StravaStateError,
+    StravaSyncError,
+    map_strava_activity,
+)
 
 ActivityPersistenceEndpoint = Literal[
     "process_uploaded_file",
     "save_activity_from_text",
     "process_uploaded_zip",
     "intervals_sync",
+    "strava_sync",
 ]
 
 configure_logging(debug=settings.app_env == "development")
@@ -234,10 +248,112 @@ auth_service = AuthService()
 chat_service = ChatService()
 goal_service = GoalService()
 intervals_service = IntervalsOAuthService()
+strava_service = StravaOAuthService()
 repo = SupabaseRepository()
 r2_service = R2Service()
 
 RECOVERY_WEEK_AGE_BREAKPOINT = 40
+
+# Strava's API agreement for this integration excludes imported activity data
+# from AI processing. Keep that policy at the engine boundary: calendar/profile
+# reads continue to use the unfiltered repository methods, while every activity
+# read reachable by an agent tool goes through the helpers below.
+_AI_EXCLUDED_ACTIVITY_SOURCES = frozenset({"strava_sync"})
+
+
+def _is_activity_visible_to_ai(activity: Activity) -> bool:
+    return activity.source not in _AI_EXCLUDED_ACTIVITY_SOURCES
+
+
+def _filter_activities_for_ai(activities: list[Activity]) -> list[Activity]:
+    """Fail closed if a repository returns an AI-excluded activity source."""
+    return [activity for activity in activities if _is_activity_visible_to_ai(activity)]
+
+
+async def _list_activities_for_ai(
+    user_id: str,
+    *,
+    sport: str | None = None,
+    since: date | None = None,
+    limit: int = 50,
+) -> list[Activity]:
+    activities = (
+        await repo.list_activities(
+            user_id,
+            sport=sport,
+            limit=limit,
+            exclude_sources=_AI_EXCLUDED_ACTIVITY_SOURCES,
+        )
+        if since is None
+        else await repo.list_activities(
+            user_id,
+            sport=sport,
+            since=since,
+            limit=limit,
+            exclude_sources=_AI_EXCLUDED_ACTIVITY_SOURCES,
+        )
+    )
+    return _filter_activities_for_ai(activities)
+
+
+async def _list_activities_between_for_ai(
+    user_id: str, *, start: date, end: date
+) -> list[Activity]:
+    activities = await repo.list_activities_between(user_id, start=start, end=end)
+    return _filter_activities_for_ai(activities)
+
+
+async def _get_activity_for_ai(user_id: str, activity_id: str) -> Activity:
+    activity = await repo.get_activity(user_id, activity_id)
+    if not _is_activity_visible_to_ai(activity):
+        # Match the ordinary not-found contract so an agent cannot use guessed
+        # identifiers to probe whether an excluded provider activity exists.
+        raise RecordNotFoundError("Activity not found.")
+    return activity
+
+
+async def _sanitize_plan_workouts_for_ai(
+    user_id: str, workouts: list[PlanWorkout]
+) -> list[PlanWorkout]:
+    """Remove Strava-linked state before plan-workout data reaches an agent.
+
+    New Strava imports are never auto-matched (see
+    ``_try_match_activity_to_plan``). This read-time guard also neutralizes any
+    Strava-linked completion persisted before that boundary existed, plus an
+    orphaned auto-match whose deleted activity can no longer prove provenance.
+    """
+    activity_ids = sorted(
+        {
+            workout.actual_activity_id
+            for workout in workouts
+            if workout.actual_activity_id is not None
+        }
+    )
+    activities = await repo.get_activities_by_ids(user_id, activity_ids)
+    excluded_ids = {
+        activity.id
+        for activity in activities
+        if activity.id is not None and not _is_activity_visible_to_ai(activity)
+    }
+
+    sanitized: list[PlanWorkout] = []
+    for workout in workouts:
+        orphaned_auto_match = (
+            workout.completion_source == "auto_matched" and workout.actual_activity_id is None
+        )
+        if workout.actual_activity_id not in excluded_ids and not orphaned_auto_match:
+            sanitized.append(workout)
+            continue
+        sanitized.append(
+            workout.model_copy(
+                update={
+                    "actual_activity_id": None,
+                    "completion_source": None,
+                    "status": "scheduled",
+                }
+            )
+        )
+    return sanitized
 
 
 def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
@@ -563,6 +679,180 @@ async def intervals_sync(  # noqa: C901
             user_id,
             persisted_activity,
             calling_endpoint="intervals_sync",
+        )
+        synced_activities.append(persisted["activity"])
+        if activity.source_file_key is not None:
+            existing_keys.add(activity.source_file_key)
+
+    return {
+        "synced": len(synced_activities),
+        "skipped_duplicates": skipped_duplicates,
+        "skipped_invalid": skipped_invalid,
+        "activities": synced_activities,
+    }
+
+
+# ── Strava ───────────────────────────────────────────────────────
+
+
+@app.post("/api/strava/authorize")
+async def strava_authorize(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        response = strava_service.build_authorization_url(user_context.user_id)
+    except StravaConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response.model_dump(mode="json")
+
+
+@app.get("/api/strava/callback")
+async def strava_callback(
+    code: str | None = None,
+    error: str | None = None,
+    scope: str | None = None,
+    state: str | None = None,
+) -> RedirectResponse:
+    profile_base_url = f"{settings.base_url.rstrip('/')}/profile"
+    profile_error_url = f"{profile_base_url}?strava=error"
+    if error is not None:
+        logger.info("strava callback denied error=%s", error)
+        return RedirectResponse(profile_error_url, status_code=302)
+    if not code or not state:
+        logger.warning("strava callback missing required parameters")
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    try:
+        await strava_service.exchange_code_for_connection(code=code, scope=scope, state=state)
+    except StravaScopeError:
+        logger.warning("strava callback missing required scope")
+        return RedirectResponse(f"{profile_base_url}?strava=scope_error", status_code=302)
+    except (
+        StravaConfigurationError,
+        StravaOAuthExchangeError,
+        StravaRepositoryNotConfiguredError,
+        StravaStateError,
+    ) as exc:
+        logger.warning("strava callback failed error_type=%s", type(exc).__name__)
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    logger.info("strava callback completed")
+    return RedirectResponse(f"{profile_base_url}?strava=connected", status_code=302)
+
+
+@app.get("/api/strava/status")
+async def strava_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = await strava_service.get_status(user_context.user_id)
+    except StravaConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StravaRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
+
+
+@app.delete("/api/strava/connection")
+async def strava_disconnect(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    try:
+        result = await strava_service.disconnect(user_id)
+    except StravaConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StravaRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    deleted_activities = 0
+    if result.remote_revoked:
+        deleted_activities = await _activity_repo_call(
+            repo.delete_strava_activities(user_id),
+            detail="Failed to purge Strava activities.",
+            log_message=f"delete_strava_activities failed for user_id={user_id}",
+        )
+    payload = result.status.model_dump(mode="json")
+    payload["deleted_activities"] = deleted_activities
+    return payload
+
+
+class StravaSyncRequest(BaseModel):
+    days: int = Field(default=14, ge=1, le=90)
+
+
+def _strava_rate_limit_http_error(exc: StravaRateLimitError) -> HTTPException:
+    headers = (
+        {"Retry-After": str(exc.retry_after_seconds)}
+        if exc.retry_after_seconds is not None
+        else None
+    )
+    return HTTPException(status_code=429, detail=str(exc), headers=headers)
+
+
+@app.post("/api/strava/sync")
+async def strava_sync(
+    payload: StravaSyncRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    newest = datetime.now(UTC)
+    # A small overlap on the low end lets a late-updated activity be repaired by
+    # the idempotent upsert on the next sync.
+    oldest = newest - timedelta(days=payload.days)
+    try:
+        auth = await strava_service.resolve_auth(user_id)
+        items = await strava_service.fetch_activities(auth, after=oldest, before=newest)
+    except (StravaNotConnectedError, StravaReconnectRequiredError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StravaRateLimitError as exc:
+        raise _strava_rate_limit_http_error(exc) from exc
+    except StravaSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (StravaConfigurationError, StravaRepositoryNotConfiguredError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    result = await _import_strava_activities(user_id, auth.connection.strava_athlete_id, items)
+
+    try:
+        await strava_service.record_sync(user_id)
+    except (StravaRepositoryNotConfiguredError, httpx.HTTPError) as exc:
+        # Non-fatal: the activities imported fine even if the timestamp update failed.
+        logger.warning("touch_strava_last_sync failed error_type=%s", type(exc).__name__)
+
+    return result
+
+
+async def _import_strava_activities(
+    user_id: str, athlete_id: int, items: list[dict[str, object]]
+) -> dict[str, object]:
+    existing_keys = await _activity_repo_call(
+        repo.list_synced_strava_keys(user_id),
+        detail="Failed to load synced Strava activities.",
+        log_message=f"list_synced_strava_keys failed for user_id={user_id}",
+    )
+    synced_activities: list[object] = []
+    skipped_duplicates = 0
+    skipped_invalid = 0
+    for item in items:
+        activity = map_strava_activity(user_id, athlete_id, item)
+        if activity is None:
+            skipped_invalid += 1
+            continue
+        if activity.source_file_key in existing_keys:
+            skipped_duplicates += 1
+            continue
+        persisted_activity = await _activity_repo_call(
+            repo.create_strava_activity(activity),
+            detail="Failed to save activity.",
+            log_message=f"create_strava_activity failed for user_id={user_id}",
+        )
+        if persisted_activity is None:
+            # An overlapping sync inserted it after the initial key lookup.
+            skipped_duplicates += 1
+            continue
+        persisted = await _finalize_persisted_activity(
+            user_id, persisted_activity, calling_endpoint="strava_sync"
         )
         synced_activities.append(persisted["activity"])
         if activity.source_file_key is not None:
@@ -1141,7 +1431,7 @@ async def recalibrate_thresholds_endpoint(
     activities_by_sport = {}
     for sport in ESTIMABLE_SPORTS:
         activities_by_sport[sport] = await _activity_repo_call(
-            repo.list_activities(user_id, sport=sport, since=since, limit=200),
+            _list_activities_for_ai(user_id, sport=sport, since=since, limit=200),
             detail="Failed to load activities.",
             log_message=f"list_activities failed for user_id={user_id} sport={sport}",
         )
@@ -1367,7 +1657,7 @@ async def recompute_load_endpoint(
 
     user_id = user_context.user_id
     since = payload.since or date.today()
-    activities = await repo.list_activities(user_id, sport=payload.sport, since=since, limit=500)
+    activities = await _list_activities_for_ai(user_id, sport=payload.sport, since=since, limit=500)
     logger.debug(
         "recompute_load user_id=%s sport=%s since=%s activities=%d",
         user_id,
@@ -2032,7 +2322,7 @@ async def get_recent_activities(
     payload: GetRecentActivitiesRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    activities = await repo.list_activities(
+    activities = await _list_activities_for_ai(
         user_context.user_id,
         sport=payload.sport,
         limit=min(max(payload.limit, 1), 100),
@@ -2073,7 +2363,7 @@ async def _update_activity_from_text(
 
     try:
         existing = await _activity_repo_call(
-            repo.get_activity(user_id, activity_id),
+            _get_activity_for_ai(user_id, activity_id),
             detail="Failed to load activity.",
             log_message=f"get_activity failed for user_id={user_id} activity_id={activity_id}",
         )
@@ -2728,9 +3018,19 @@ async def _try_match_activity_to_plan(user_id: str, activity: Activity) -> dict[
     """Write-time glue: opportunistically match a just-saved activity.
 
     Best-effort by design — a matching failure must never fail the save that
-    triggered it, so errors are logged and swallowed.
+    triggered it, so errors are logged and swallowed. AI-excluded provider
+    activities are deliberately not matched because the resulting completed
+    workout would itself be an AI-facing derivative of that provider data.
     """
     from backend.services.compliance import MATCH_MAX_DAY_OFFSET, match_activities_to_workouts
+
+    if not _is_activity_visible_to_ai(activity):
+        logger.info(
+            "activity excluded from AI-facing plan match user_id=%s source=%s",
+            user_id,
+            activity.source,
+        )
+        return None
 
     try:
         window = timedelta(days=MATCH_MAX_DAY_OFFSET)
@@ -2787,11 +3087,12 @@ async def get_compliance_summary(
         match_margin = timedelta(days=MATCH_MAX_DAY_OFFSET)
         planned, activities = await asyncio.gather(
             repo.list_plan_workouts_between(user_id, start=start, end=today + match_margin),
-            repo.list_activities_between(
+            _list_activities_between_for_ai(
                 user_id, start=start - match_margin, end=today + match_margin
             ),
         )
 
+        planned = await _sanitize_plan_workouts_for_ai(user_id, planned)
         matches = match_activities_to_workouts(planned, activities, today=today)
         persisted_matches = []
         for match in matches:
@@ -2876,6 +3177,7 @@ async def find_plan_workout(
             start=payload.workout_date - window,
             end=payload.workout_date + window,
         )
+        workouts = await _sanitize_plan_workouts_for_ai(user_id, workouts)
     except RepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
@@ -2931,7 +3233,7 @@ async def _apply_workout_resolution(
     user_id: str, workout: PlanWorkout, payload: ResolvePlanWorkoutRequest
 ) -> PlanWorkout:
     if payload.outcome == "completed" and payload.activity_id:
-        await repo.get_activity(user_id, payload.activity_id)
+        await _get_activity_for_ai(user_id, payload.activity_id)
     return await repo.resolve_plan_workout_atomic(
         user_id=user_id,
         workout_id=workout.id or payload.plan_workout_id,

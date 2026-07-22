@@ -46,6 +46,28 @@ export type IntervalsSyncResponse = {
   synced: number;
 };
 
+export type StravaConnectionStatus = {
+  connected: boolean;
+  disconnect_pending?: boolean | undefined;
+  connected_at?: string | null | undefined;
+  last_sync_at?: string | null | undefined;
+  strava_athlete_id?: number | null | undefined;
+  strava_athlete_name?: string | null | undefined;
+  scopes: string[];
+  authorization_version?: string | null | undefined;
+};
+
+export type StravaSyncResponse = {
+  activities: Record<string, unknown>[];
+  skipped_duplicates: number;
+  skipped_invalid: number;
+  synced: number;
+};
+
+export type StravaDisconnectResponse = StravaConnectionStatus & {
+  deleted_activities: number;
+};
+
 export type AthleteProfile = {
   coaching_state: string;
   dietary_restrictions?: string[];

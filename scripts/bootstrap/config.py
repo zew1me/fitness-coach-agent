@@ -60,6 +60,11 @@ class BootstrapSettings(BaseSettings):
     intervals_client_id: str = ""
     intervals_client_secret: str = ""
     intervals_token_encryption_secret: str = ""
+    strava_integration_enabled: bool = False
+    strava_client_id: str = ""
+    strava_client_secret: str = ""
+    strava_token_encryption_secret: str = ""
+    strava_authorization_version: str = ""
 
     # Sentry observability. Two distinct DSNs (separate Sentry Client Keys):
     #   sentry_dsn        — server/edge/python (SENTRY_DSN); treated as a secret.

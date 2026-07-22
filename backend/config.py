@@ -1,8 +1,8 @@
 import math
 import os
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Model families that support OpenAI's `reasoning` parameter on the Responses API.
@@ -42,6 +42,23 @@ class Settings(BaseSettings):
     intervals_token_encryption_secret: str = ""
     intervals_dev_api_key: str = ""
     intervals_dev_athlete_id: str = ""
+    # Strava OAuth. Access tokens expire ~6h, so even local development uses the
+    # refresh-token flow (there is deliberately no static dev token bypass).
+    strava_integration_enabled: bool = False
+    strava_client_id: str = ""
+    strava_client_secret: str = ""
+    strava_token_encryption_secret: str = ""
+    # Coarse label for the authorization the athlete consented under. Surfaced in
+    # status so a reviewer can confirm which consent version a connection carries.
+    strava_authorization_version: str = ""
+
+    @model_validator(mode="after")
+    def validate_oauth_jwt_secret(self) -> Self:
+        if self.strava_integration_enabled and self.app_jwt_secret.strip() == "replace-me":
+            raise ValueError(
+                "APP_JWT_SECRET must not use the placeholder value when Strava is enabled"
+            )
+        return self
 
     @field_validator("openai_activity_text_model")
     @classmethod

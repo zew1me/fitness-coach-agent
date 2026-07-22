@@ -119,6 +119,40 @@ async def test_calendar_returns_planned_and_recorded_in_range(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_calendar_keeps_strava_activity_for_non_ai_display(monkeypatch) -> None:
+    canary = "STRAVA_CALENDAR_NON_AI_CANARY_998877"
+
+    class StravaCalendarRepository(CalendarRepository):
+        async def list_activities_between(
+            self, user_id: str, *, start: date, end: date
+        ) -> list[Activity]:
+            self.activity_calls.append((user_id, start, end))
+            return [
+                Activity(
+                    id=canary,
+                    user_id=user_id,
+                    sport="cycling",
+                    activity_date=date(2026, 6, 20),
+                    duration_seconds=3600,
+                    source="strava_sync",
+                    athlete_notes=canary,
+                )
+            ]
+
+    monkeypatch.setattr(api_index, "repo", StravaCalendarRepository())
+    api_index.app.dependency_overrides[api_index.require_user_context] = _user_context
+
+    try:
+        status, body = await _get_calendar("start=2026-06-01&end=2026-06-30")
+    finally:
+        api_index.app.dependency_overrides.clear()
+
+    assert status == 200
+    assert body["activities"][0]["id"] == canary
+    assert body["activities"][0]["source"] == "strava_sync"
+
+
+@pytest.mark.asyncio
 async def test_calendar_rejects_inverted_range(monkeypatch) -> None:
     monkeypatch.setattr(api_index, "repo", CalendarRepository())
     api_index.app.dependency_overrides[api_index.require_user_context] = _user_context

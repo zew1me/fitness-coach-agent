@@ -25,6 +25,21 @@ from backend.models.intervals import (
 )
 from backend.models.training import Activity
 from backend.repos.intervals_repo import IntervalsRepository
+from backend.services.activity_parse import (
+    first_positive_int as _first_positive_int,
+)
+from backend.services.activity_parse import (
+    optional_date as _optional_date,
+)
+from backend.services.activity_parse import (
+    optional_datetime as _optional_datetime,
+)
+from backend.services.activity_parse import (
+    optional_float as _optional_float,
+)
+from backend.services.activity_parse import (
+    optional_int as _optional_int,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +48,6 @@ INTERVALS_TOKEN_URL = "https://intervals.icu/api/oauth/token"
 INTERVALS_API_BASE = "https://intervals.icu/api/v1"
 INTERVALS_DEFAULT_SCOPE = "ACTIVITY:READ,WELLNESS:READ,CALENDAR:READ"
 INTERVALS_STATE_TYPE = "intervals_oauth_state"
-_ISO_DATE_LENGTH = 10
 
 _INTERVALS_SPORT_MAP = {
     "ride": "cycling",
@@ -387,43 +401,3 @@ def _parse_activity_dates(item: dict[str, Any]) -> tuple[date | None, datetime |
     activity_date = _optional_date(local_value) or _optional_date(absolute_value)
     started_at = _optional_datetime(absolute_value)
     return activity_date, started_at
-
-
-def _optional_date(value: object) -> date | None:
-    if not isinstance(value, str) or len(value) < _ISO_DATE_LENGTH:
-        return None
-    try:
-        return date.fromisoformat(value[:_ISO_DATE_LENGTH])
-    except ValueError:
-        return None
-
-
-def _optional_datetime(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _optional_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float | str):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_int(value: object) -> int | None:
-    number = _optional_float(value)
-    return round(number) if number is not None else None
-
-
-def _first_positive_int(*values: object) -> int | None:
-    for value in values:
-        number = _optional_int(value)
-        if number is not None and number > 0:
-            return number
-    return None
