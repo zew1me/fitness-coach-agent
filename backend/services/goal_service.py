@@ -56,12 +56,10 @@ class GoalService:
                 "course_profile" not in payload.model_fields_set or payload.course_profile is None
             )
             goal_dict = _payload_fields(payload)
-            if merge_profile_notes and goal_id:
-                existing_goal = await repo.get_goal(goal_id, user_id)
-                goal_dict["course_profile"] = {
-                    **(existing_goal.course_profile or {}),
-                    "notes": payload.course_profile_notes,
-                }
+            if merge_profile_notes:
+                return await self._update_goal_with_course_profile_notes(
+                    repo, goal_id or "", user_id, goal_dict, payload.course_profile_notes or ""
+                )
             # Explicit null remains a no-op for every partial update field.
             goal_dict = {key: value for key, value in goal_dict.items() if value is not None}
             if not goal_dict:
@@ -79,3 +77,17 @@ class GoalService:
         if status := status_map.get(action):
             return await repo.update_goal(goal_id or "", user_id, {"status": status})
         raise UnknownGoalActionError(f"Unknown action: {action}")
+
+    async def _update_goal_with_course_profile_notes(
+        self,
+        repo: SupabaseRepository,
+        goal_id: str,
+        user_id: str,
+        goal_dict: dict[str, object],
+        notes: str,
+    ) -> Goal:
+        goal_dict.pop("course_profile", None)
+        goal_dict = {key: value for key, value in goal_dict.items() if value is not None}
+        if goal_dict:
+            await repo.update_goal(goal_id, user_id, goal_dict)
+        return await repo.update_goal_course_profile_notes(goal_id, user_id, notes)

@@ -20,6 +20,7 @@
 - `20260714120000_remove_lingering_superseded_plan_workouts.sql` — one-time cleanup of lingering future scheduled workouts on non-active plans (pre-#312)
 - `20260715035133_atomic_recalibration_candidate_decision.sql` — service-role RPC for atomic candidate decisions and threshold replacement
 - `20260719000000_replace_intervals_connection_atomic.sql` — service-role RPC for atomic Intervals.icu connection replacement
+- `20260721000000_update_goal_course_profile_notes_atomic.sql` — service-role RPC for atomic course-profile note merging
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the

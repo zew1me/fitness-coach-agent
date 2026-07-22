@@ -2690,26 +2690,22 @@ async def test_update_goals_update_omits_null_fields_and_normalizes_alias(monkey
 async def test_update_goals_update_merges_notes_when_profile_is_null(monkeypatch) -> None:
     class GoalRepository(EngineRepository):
         def __init__(self) -> None:
-            self.get_call: tuple[str, str] | None = None
-            self.update_call: tuple[str, str, dict[str, object]] | None = None
+            self.notes_call: tuple[str, str, str] | None = None
 
-        async def get_goal(self, goal_id: str, user_id: str) -> Goal:
-            self.get_call = (goal_id, user_id)
+        async def update_goal_course_profile_notes(
+            self, goal_id: str, user_id: str, notes: str
+        ) -> Goal:
+            self.notes_call = (goal_id, user_id, notes)
             return Goal(
                 id=goal_id,
                 user_id=user_id,
                 goal_type="event",
                 title="Hill climb race",
-                course_profile={"terrain": "trail", "aid_stations": 3},
-            )
-
-        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
-            self.update_call = (goal_id, user_id, updates)
-            return Goal(
-                id=goal_id,
-                user_id=user_id,
-                goal_type="event",
-                title="Hill climb race",
+                course_profile={
+                    "aid_stations": 3,
+                    "notes": notes,
+                    "terrain": "trail",
+                },
             )
 
     repository = GoalRepository()
@@ -2741,18 +2737,7 @@ async def test_update_goals_update_merges_notes_when_profile_is_null(monkeypatch
         restore_override()
 
     assert response.status_code == 200
-    assert repository.get_call == ("goal-1", "athlete-1")
-    assert repository.update_call == (
-        "goal-1",
-        "athlete-1",
-        {
-            "course_profile": {
-                "aid_stations": 3,
-                "notes": "Steep final mile.",
-                "terrain": "trail",
-            }
-        },
-    )
+    assert repository.notes_call == ("goal-1", "athlete-1", "Steep final mile.")
 
 
 @pytest.mark.asyncio

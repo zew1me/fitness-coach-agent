@@ -34,7 +34,7 @@ import api.index as api_index
 from backend.models.athlete import AthleteProfile, SportThreshold, ThresholdRecalibrationCandidate
 from backend.models.auth import UserContext
 from backend.models.intervals import IntervalsConnectionCreate
-from backend.models.training import TrainingPlan
+from backend.models.training import Goal, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepository
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
 
@@ -159,6 +159,36 @@ async def test_new_profile_row_has_null_specialization_pct_not_default_80(
     assert profile.specialization_pct is None, (
         "New rows must have NULL specialization_pct, not the old DEFAULT 80"
     )
+
+
+@pytest.mark.asyncio
+async def test_update_goal_course_profile_notes_merges_without_losing_sibling_keys(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Concurrent notes writes retain the latest value and every existing profile key."""
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, coaching_state="onboarding")
+    )
+    goal = await repo.create_goal(
+        Goal(
+            user_id=unique_user,
+            goal_type="event",
+            title="Hill climb race",
+            course_profile={"aid_stations": 3, "terrain": "trail"},
+        )
+    )
+    assert goal.id is not None
+
+    await asyncio.gather(
+        repo.update_goal_course_profile_notes(goal.id, unique_user, "First note."),
+        repo.update_goal_course_profile_notes(goal.id, unique_user, "Second note."),
+    )
+
+    updated = await repo.get_goal(goal.id, unique_user)
+    assert updated.course_profile is not None
+    assert updated.course_profile["aid_stations"] == 3
+    assert updated.course_profile["terrain"] == "trail"
+    assert updated.course_profile["notes"] in {"First note.", "Second note."}
 
 
 @pytest.mark.asyncio
