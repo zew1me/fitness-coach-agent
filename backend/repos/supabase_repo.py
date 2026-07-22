@@ -459,6 +459,36 @@ class SupabaseRepository:
         rows = response.data or []
         return Activity.model_validate(rows[0]) if rows else None
 
+    async def create_strava_activity(self, activity: Activity) -> Activity | None:
+        """Insert a Strava activity, returning ``None`` when it was already synced."""
+        client = self._require_client()
+        payload = _activity_payload(activity)
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = (
+            client.table("activities")
+            .upsert(
+                payload,
+                on_conflict="user_id,strava_source_file_key",
+                ignore_duplicates=True,
+            )
+            .execute()
+        )
+        rows = response.data or []
+        return Activity.model_validate(rows[0]) if rows else None
+
+    async def delete_strava_activities(self, user_id: str) -> int:
+        """Purge all Strava-sourced activities for a user; returns the row count."""
+        client = self._require_client()
+        response = (
+            client.table("activities")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("source", "strava_sync")
+            .execute()
+        )
+        return len(response.data or [])
+
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         client = self._require_client()
         response = (
@@ -536,6 +566,32 @@ class SupabaseRepository:
                 .select("source_file_key")
                 .eq("user_id", user_id)
                 .eq("source", "intervals_sync")
+                .order("source_file_key")
+                .limit(page_size)
+            )
+            if last_key is not None:
+                query = query.gt("source_file_key", last_key)
+            response = query.execute()
+            rows = response.data or []
+            page_keys = [
+                key for row in rows if isinstance((key := row.get("source_file_key")), str) and key
+            ]
+            keys.update(page_keys)
+            if len(rows) < page_size or not page_keys:
+                return keys
+            last_key = page_keys[-1]
+
+    async def list_synced_strava_keys(self, user_id: str) -> set[str]:
+        client = self._require_client()
+        keys: set[str] = set()
+        last_key: str | None = None
+        page_size = 1000
+        while True:
+            query = (
+                client.table("activities")
+                .select("source_file_key")
+                .eq("user_id", user_id)
+                .eq("source", "strava_sync")
                 .order("source_file_key")
                 .limit(page_size)
             )

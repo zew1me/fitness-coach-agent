@@ -66,6 +66,7 @@ from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
+from backend.repos.strava_repo import StravaRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
@@ -95,12 +96,25 @@ from backend.services.intervals import (
     map_intervals_activity,
 )
 from backend.services.r2 import R2Service
+from backend.services.strava import (
+    StravaConfigurationError,
+    StravaNotConnectedError,
+    StravaOAuthExchangeError,
+    StravaOAuthService,
+    StravaRateLimitError,
+    StravaReconnectRequiredError,
+    StravaScopeError,
+    StravaStateError,
+    StravaSyncError,
+    map_strava_activity,
+)
 
 ActivityPersistenceEndpoint = Literal[
     "process_uploaded_file",
     "save_activity_from_text",
     "process_uploaded_zip",
     "intervals_sync",
+    "strava_sync",
 ]
 
 configure_logging(debug=settings.app_env == "development")
@@ -234,6 +248,7 @@ auth_service = AuthService()
 chat_service = ChatService()
 goal_service = GoalService()
 intervals_service = IntervalsOAuthService()
+strava_service = StravaOAuthService()
 repo = SupabaseRepository()
 r2_service = R2Service()
 
@@ -563,6 +578,180 @@ async def intervals_sync(  # noqa: C901
             user_id,
             persisted_activity,
             calling_endpoint="intervals_sync",
+        )
+        synced_activities.append(persisted["activity"])
+        if activity.source_file_key is not None:
+            existing_keys.add(activity.source_file_key)
+
+    return {
+        "synced": len(synced_activities),
+        "skipped_duplicates": skipped_duplicates,
+        "skipped_invalid": skipped_invalid,
+        "activities": synced_activities,
+    }
+
+
+# ── Strava ───────────────────────────────────────────────────────
+
+
+@app.post("/api/strava/authorize")
+async def strava_authorize(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        response = strava_service.build_authorization_url(user_context.user_id)
+    except StravaConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response.model_dump(mode="json")
+
+
+@app.get("/api/strava/callback")
+async def strava_callback(
+    code: str | None = None,
+    error: str | None = None,
+    scope: str | None = None,
+    state: str | None = None,
+) -> RedirectResponse:
+    profile_base_url = f"{settings.base_url.rstrip('/')}/profile"
+    profile_error_url = f"{profile_base_url}?strava=error"
+    if error is not None:
+        logger.info("strava callback denied error=%s", error)
+        return RedirectResponse(profile_error_url, status_code=302)
+    if not code or not state:
+        logger.warning("strava callback missing required parameters")
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    try:
+        await strava_service.exchange_code_for_connection(code=code, scope=scope, state=state)
+    except StravaScopeError:
+        logger.warning("strava callback missing required scope")
+        return RedirectResponse(f"{profile_base_url}?strava=scope_error", status_code=302)
+    except (
+        StravaConfigurationError,
+        StravaOAuthExchangeError,
+        StravaRepositoryNotConfiguredError,
+        StravaStateError,
+    ) as exc:
+        logger.warning("strava callback failed error_type=%s", type(exc).__name__)
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    logger.info("strava callback completed")
+    return RedirectResponse(f"{profile_base_url}?strava=connected", status_code=302)
+
+
+@app.get("/api/strava/status")
+async def strava_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = strava_service.get_status(user_context.user_id)
+    except StravaConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StravaRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
+
+
+@app.delete("/api/strava/connection")
+async def strava_disconnect(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    try:
+        result = await strava_service.disconnect(user_id)
+    except StravaConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except StravaRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    deleted_activities = 0
+    if result.remote_revoked:
+        deleted_activities = await _activity_repo_call(
+            repo.delete_strava_activities(user_id),
+            detail="Failed to purge Strava activities.",
+            log_message=f"delete_strava_activities failed for user_id={user_id}",
+        )
+    payload = result.status.model_dump(mode="json")
+    payload["deleted_activities"] = deleted_activities
+    return payload
+
+
+class StravaSyncRequest(BaseModel):
+    days: int = Field(default=14, ge=1, le=90)
+
+
+def _strava_rate_limit_http_error(exc: StravaRateLimitError) -> HTTPException:
+    headers = (
+        {"Retry-After": str(exc.retry_after_seconds)}
+        if exc.retry_after_seconds is not None
+        else None
+    )
+    return HTTPException(status_code=429, detail=str(exc), headers=headers)
+
+
+@app.post("/api/strava/sync")
+async def strava_sync(
+    payload: StravaSyncRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    newest = datetime.now(UTC)
+    # A small overlap on the low end lets a late-updated activity be repaired by
+    # the idempotent upsert on the next sync.
+    oldest = newest - timedelta(days=payload.days)
+    try:
+        auth = await strava_service.resolve_auth(user_id)
+        items = await strava_service.fetch_activities(auth, after=oldest, before=newest)
+    except (StravaNotConnectedError, StravaReconnectRequiredError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StravaRateLimitError as exc:
+        raise _strava_rate_limit_http_error(exc) from exc
+    except StravaSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (StravaConfigurationError, StravaRepositoryNotConfiguredError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    result = await _import_strava_activities(user_id, auth.connection.strava_athlete_id, items)
+
+    try:
+        strava_service.record_sync(user_id)
+    except (StravaRepositoryNotConfiguredError, httpx.HTTPError) as exc:
+        # Non-fatal: the activities imported fine even if the timestamp update failed.
+        logger.warning("touch_strava_last_sync failed error_type=%s", type(exc).__name__)
+
+    return result
+
+
+async def _import_strava_activities(
+    user_id: str, athlete_id: int, items: list[dict[str, object]]
+) -> dict[str, object]:
+    existing_keys = await _activity_repo_call(
+        repo.list_synced_strava_keys(user_id),
+        detail="Failed to load synced Strava activities.",
+        log_message=f"list_synced_strava_keys failed for user_id={user_id}",
+    )
+    synced_activities: list[object] = []
+    skipped_duplicates = 0
+    skipped_invalid = 0
+    for item in items:
+        activity = map_strava_activity(user_id, athlete_id, item)
+        if activity is None:
+            skipped_invalid += 1
+            continue
+        if activity.source_file_key in existing_keys:
+            skipped_duplicates += 1
+            continue
+        persisted_activity = await _activity_repo_call(
+            repo.create_strava_activity(activity),
+            detail="Failed to save activity.",
+            log_message=f"create_strava_activity failed for user_id={user_id}",
+        )
+        if persisted_activity is None:
+            # An overlapping sync inserted it after the initial key lookup.
+            skipped_duplicates += 1
+            continue
+        persisted = await _finalize_persisted_activity(
+            user_id, persisted_activity, calling_endpoint="strava_sync"
         )
         synced_activities.append(persisted["activity"])
         if activity.source_file_key is not None:
