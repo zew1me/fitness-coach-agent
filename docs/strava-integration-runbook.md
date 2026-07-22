@@ -62,15 +62,18 @@ and rate-limit/error behavior. Record any reversal here before changing code.
 
 ## Configuration (fail-closed)
 
-The integration returns `503` until `STRAVA_INTEGRATION_ENABLED=true` **and** all
-three OAuth settings are populated:
+The integration returns `503` until the enable flag and all three required
+credentials are configured: `STRAVA_INTEGRATION_ENABLED=true`,
+`STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, and
+`STRAVA_TOKEN_ENCRYPTION_SECRET`. `STRAVA_AUTHORIZATION_VERSION` is optional;
+when set, it is a coarse consent label surfaced in status.
 
-```
-STRAVA_INTEGRATION_ENABLED=false   # flip to true only after the rest are set
+```dotenv
+STRAVA_INTEGRATION_ENABLED=false   # flip true after credentials are set
 STRAVA_CLIENT_ID=
 STRAVA_CLIENT_SECRET=
 STRAVA_TOKEN_ENCRYPTION_SECRET=    # must differ from the Intervals secret
-STRAVA_AUTHORIZATION_VERSION=      # coarse consent label surfaced in status
+STRAVA_AUTHORIZATION_VERSION=      # optional consent label surfaced in status
 ```
 
 Access, refresh, and encryption secrets are marked sensitive in the Vercel
@@ -78,11 +81,13 @@ bootstrap (`SENSITIVE_ENV_KEYS`).
 
 ## Registering the callback
 
-Register `<base_url>/api/strava/callback` as the Authorization Callback Domain in
-the Strava API application. For local development that is
-`http://localhost:3000/api/strava/callback`. Strava access tokens expire ~6h, so
-even local development uses the real OAuth + refresh flow — there is no static dev
-token bypass.
+Register only the base host/domain (for example, `coach.example.com`) as the
+Authorization Callback Domain in the Strava API application—do not include a
+scheme or path. The OAuth redirect URI sent by this app is separately
+`<base_url>/api/strava/callback`; for local development, use callback host
+`localhost` and redirect URI `http://localhost:3000/api/strava/callback`. Strava
+access tokens expire ~6h, so local development uses the real OAuth + refresh
+flow — there is no static dev token bypass.
 
 ## Token rotation
 

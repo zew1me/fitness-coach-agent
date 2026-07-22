@@ -565,5 +565,7 @@ upserted on `strava:{athlete_id}:{activity_id}`) without constraining other
 import sources.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
-locally). Additive migrations; no backfill required. Apply both before deploying
-application code that calls the new RPCs.
+locally). Additive migrations; no backfill required. Apply both Strava
+migrations before deploying Strava application code. Only
+`20260721030000_strava_connections.sql` creates the new RPCs; this migration
+updates the activities constraint, generated key, and uniqueness contract.
