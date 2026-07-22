@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from uuid import UUID, uuid4
 
 from postgrest.exceptions import APIError as PostgRESTAPIError
@@ -40,6 +40,14 @@ class RecordNotFoundError(LookupError):
 _DROP_FIELD = object()
 SUMMARY_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_NAME = "activity_summary_v1"
+
+SyncedActivityConflict = Literal[
+    "user_id,intervals_source_file_key",
+    "user_id,strava_source_file_key",
+]
+SyncedActivitySource = Literal["intervals_sync", "strava_sync"]
+_INTERVALS_ACTIVITY_CONFLICT: SyncedActivityConflict = "user_id,intervals_source_file_key"
+_STRAVA_ACTIVITY_CONFLICT: SyncedActivityConflict = "user_id,strava_source_file_key"
 
 # After a deploy/migration, PostgREST briefly serves a stale schema cache and rejects
 # requests with PGRST205 ("Could not find the table ... in the schema cache") even
@@ -441,41 +449,37 @@ class SupabaseRepository:
             raise RuntimeError("Supabase did not return the inserted activity row.")
         return Activity.model_validate(rows[0])
 
-    async def create_intervals_activity(self, activity: Activity) -> Activity | None:
-        """Insert an Intervals activity, returning ``None`` when it was already synced."""
+    async def _create_synced_activity(
+        self,
+        activity: Activity,
+        *,
+        on_conflict: SyncedActivityConflict,
+    ) -> Activity | None:
         client = self._require_client()
         payload = _activity_payload(activity)
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = (
             client.table("activities")
-            .upsert(
-                payload,
-                on_conflict="user_id,intervals_source_file_key",
-                ignore_duplicates=True,
-            )
+            .upsert(payload, on_conflict=on_conflict, ignore_duplicates=True)
             .execute()
         )
         rows = response.data or []
         return Activity.model_validate(rows[0]) if rows else None
 
+    async def create_intervals_activity(self, activity: Activity) -> Activity | None:
+        """Insert an Intervals activity, returning ``None`` when it was already synced."""
+        return await self._create_synced_activity(
+            activity,
+            on_conflict=_INTERVALS_ACTIVITY_CONFLICT,
+        )
+
     async def create_strava_activity(self, activity: Activity) -> Activity | None:
         """Insert a Strava activity, returning ``None`` when it was already synced."""
-        client = self._require_client()
-        payload = _activity_payload(activity)
-        if not payload.get("id"):
-            payload["id"] = str(uuid4())
-        response = (
-            client.table("activities")
-            .upsert(
-                payload,
-                on_conflict="user_id,strava_source_file_key",
-                ignore_duplicates=True,
-            )
-            .execute()
+        return await self._create_synced_activity(
+            activity,
+            on_conflict=_STRAVA_ACTIVITY_CONFLICT,
         )
-        rows = response.data or []
-        return Activity.model_validate(rows[0]) if rows else None
 
     async def delete_strava_activities(self, user_id: str) -> int:
         """Purge all Strava-sourced activities for a user; returns the row count."""
@@ -555,7 +559,12 @@ class SupabaseRepository:
         )
         return [Activity.model_validate(r) for r in (response.data or [])]
 
-    async def list_synced_intervals_keys(self, user_id: str) -> set[str]:
+    async def _list_synced_keys(
+        self,
+        user_id: str,
+        *,
+        source: SyncedActivitySource,
+    ) -> set[str]:
         client = self._require_client()
         keys: set[str] = set()
         last_key: str | None = None
@@ -565,7 +574,7 @@ class SupabaseRepository:
                 client.table("activities")
                 .select("source_file_key")
                 .eq("user_id", user_id)
-                .eq("source", "intervals_sync")
+                .eq("source", source)
                 .order("source_file_key")
                 .limit(page_size)
             )
@@ -581,31 +590,11 @@ class SupabaseRepository:
                 return keys
             last_key = page_keys[-1]
 
+    async def list_synced_intervals_keys(self, user_id: str) -> set[str]:
+        return await self._list_synced_keys(user_id, source="intervals_sync")
+
     async def list_synced_strava_keys(self, user_id: str) -> set[str]:
-        client = self._require_client()
-        keys: set[str] = set()
-        last_key: str | None = None
-        page_size = 1000
-        while True:
-            query = (
-                client.table("activities")
-                .select("source_file_key")
-                .eq("user_id", user_id)
-                .eq("source", "strava_sync")
-                .order("source_file_key")
-                .limit(page_size)
-            )
-            if last_key is not None:
-                query = query.gt("source_file_key", last_key)
-            response = query.execute()
-            rows = response.data or []
-            page_keys = [
-                key for row in rows if isinstance((key := row.get("source_file_key")), str) and key
-            ]
-            keys.update(page_keys)
-            if len(rows) < page_size or not page_keys:
-                return keys
-            last_key = page_keys[-1]
+        return await self._list_synced_keys(user_id, source="strava_sync")
 
     # ── Daily Load Snapshots ──────────────────────────────────
 

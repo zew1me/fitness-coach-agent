@@ -28,6 +28,7 @@ const coachApiMocks = vi.hoisted(() => ({
 vi.mock("../../lib/coach-api", () => coachApiMocks);
 
 import ProfilePage from "../../app/profile/page";
+import { ProviderConnectionSection } from "../../components/profile/provider-connection-section";
 
 const EMPTY_METRICS = {
   best_times: [],
@@ -193,6 +194,35 @@ describe("ProfilePage Intervals.icu connection", () => {
     await waitFor(() => {
       expect((syncButton as HTMLButtonElement).disabled).toBe(false);
     });
+  });
+
+  it("uses the provider name in a pending-disconnect notice", () => {
+    render(
+      <ProviderConnectionSection
+        action={null}
+        connectLabel="Connect Intervals.icu"
+        connectingLabel="Connecting..."
+        error={null}
+        notice={null}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onSync={vi.fn()}
+        state={{
+          athleteLabel: "Nigel",
+          connected: true,
+          disconnectPending: true,
+          metaLines: [],
+        }}
+        title="Intervals.icu"
+      />,
+    );
+
+    expect(
+      screen.getByText(/Intervals\.icu access could not be revoked yet/i),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/Strava access could not be revoked yet/i),
+    ).toBeNull();
   });
 
   it("shows the callback success notice when Intervals redirects back", async () => {

@@ -221,7 +221,11 @@ describe("ProfilePage Strava connection", () => {
     // The connection stays visible with a pending notice (both the action error
     // and the panel's own pending paragraph reference the deferred revocation).
     expect(
-      (await within(section).findAllByText(/could not be revoked yet/i)).length,
+      (
+        await within(section).findAllByText(
+          /Strava access could not be revoked yet/i,
+        )
+      ).length,
     ).toBeGreaterThan(0);
   });
 
