@@ -1,5 +1,7 @@
 """Service-level tests for Strava OAuth, rotating-token refresh, and revocation."""
 
+import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
@@ -160,7 +162,8 @@ def test_authorization_url_raises_when_integration_disabled(
         _service().build_authorization_url(user_id="coach-user-1")
 
 
-def test_status_reports_disconnected_when_integration_disabled(
+@pytest.mark.asyncio
+async def test_status_reports_disconnected_when_integration_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Flag-off is the landing posture: status must read as a clean "not
@@ -172,8 +175,30 @@ def test_status_reports_disconnected_when_integration_disabled(
             raise AssertionError("must not touch the repo while disabled")
 
     service = StravaOAuthService(repository=ExplodingRepo())  # type: ignore[arg-type]
-    status = service.get_status("coach-user-1")
+    status = await service.get_status("coach-user-1")
     assert status.connected is False
+
+
+@pytest.mark.asyncio
+async def test_status_offloads_synchronous_repository_read() -> None:
+    class SlowRepository(InMemoryStravaRepository):
+        def get_active_connection(self, user_id: str) -> StravaConnectionRecord | None:
+            time.sleep(0.08)
+            return super().get_active_connection(user_id)
+
+    service = _service(SlowRepository())
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    heartbeat_elapsed: list[float] = []
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_elapsed.append(loop.time() - started)
+
+    status, _ = await asyncio.gather(service.get_status("coach-user-1"), heartbeat())
+
+    assert status.connected is False
+    assert heartbeat_elapsed[0] < 0.04
 
 
 def test_state_validation_rejects_expired() -> None:

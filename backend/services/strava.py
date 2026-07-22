@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 import httpx
 import jwt
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from backend.config import settings
 from backend.models.strava import (
@@ -258,7 +259,8 @@ class StravaOAuthService:
         if not has_required_activity_scope(scopes):
             raise StravaScopeError("Strava activity read scope was not granted.")
         cipher = self._cipher()
-        connection = self._repository.replace_connection(
+        connection = await run_in_threadpool(
+            self._repository.replace_connection,
             StravaConnectionCreate(
                 user_id=state_context.user_id,
                 strava_athlete_id=token.athlete.id,
@@ -269,29 +271,30 @@ class StravaOAuthService:
                 token_type=token.token_type,
                 expires_at=token.expires_at_datetime,
                 authorization_version=settings.strava_authorization_version or None,
-            )
+            ),
         )
         logger.info("strava connection stored scopes=%s", scopes)
         return self._status_from_record(connection)
 
     # ── Status / auth resolution ─────────────────────────────────
 
-    def get_status(self, user_id: str) -> StravaConnectionStatus:
+    async def get_status(self, user_id: str) -> StravaConnectionStatus:
         # Status is a read-only probe: when the integration is disabled or
         # unconfigured, report "not connected" rather than raising, so the
         # profile renders a clean Connect affordance instead of an error banner
         # (mirrors Intervals' unconfigured behavior). Action endpoints still 503.
         if not self._is_enabled():
             return StravaConnectionStatus(connected=False)
-        return self._status_from_record(self._repository.get_active_connection(user_id))
+        connection = await run_in_threadpool(self._repository.get_active_connection, user_id)
+        return self._status_from_record(connection)
 
-    def record_sync(self, user_id: str) -> None:
+    async def record_sync(self, user_id: str) -> None:
         """Best-effort stamp of the last successful sync on the active connection."""
-        self._repository.touch_last_sync(user_id)
+        await run_in_threadpool(self._repository.touch_last_sync, user_id)
 
     async def resolve_auth(self, user_id: str) -> StravaAuthContext:
         self._require_enabled()
-        connection = self._repository.get_active_connection(user_id)
+        connection = await run_in_threadpool(self._repository.get_active_connection, user_id)
         if connection is None:
             raise StravaNotConnectedError("Strava is not connected.")
         access_token, connection = await self._ensure_fresh_token(connection)
@@ -313,7 +316,8 @@ class StravaOAuthService:
             token_type=refreshed.token_type,
             expires_at=refreshed.expires_at_datetime,
         )
-        rotated = self._repository.rotate_tokens(
+        rotated = await run_in_threadpool(
+            self._repository.rotate_tokens,
             connection_id=connection.id,
             expected_expires_at=connection.expires_at,
             rotation=rotation,
@@ -323,7 +327,9 @@ class StravaOAuthService:
 
         # A concurrent refresh already rotated the token; reload and use theirs so
         # we never race a stale-token write against a newer one.
-        reloaded = self._repository.get_active_connection(connection.user_id)
+        reloaded = await run_in_threadpool(
+            self._repository.get_active_connection, connection.user_id
+        )
         if reloaded is None:
             raise StravaReconnectRequiredError("Strava connection is no longer active.")
         return cipher.decrypt(reloaded.access_token_ciphertext), reloaded
@@ -393,7 +399,7 @@ class StravaOAuthService:
 
     async def disconnect(self, user_id: str) -> StravaDisconnectResult:
         self._require_enabled()
-        connection = self._repository.get_active_connection(user_id)
+        connection = await run_in_threadpool(self._repository.get_active_connection, user_id)
         if connection is None:
             return StravaDisconnectResult(
                 status=StravaConnectionStatus(connected=False), remote_revoked=True
@@ -411,7 +417,7 @@ class StravaOAuthService:
                 remote_revoked=False,
             )
 
-        self._repository.revoke_active_connection(user_id)
+        await run_in_threadpool(self._repository.revoke_active_connection, user_id)
         return StravaDisconnectResult(
             status=StravaConnectionStatus(connected=False), remote_revoked=True
         )

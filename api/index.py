@@ -644,7 +644,7 @@ async def strava_status(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        status = strava_service.get_status(user_context.user_id)
+        status = await strava_service.get_status(user_context.user_id)
     except StravaConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except StravaRepositoryNotConfiguredError as exc:
@@ -714,7 +714,7 @@ async def strava_sync(
     result = await _import_strava_activities(user_id, auth.connection.strava_athlete_id, items)
 
     try:
-        strava_service.record_sync(user_id)
+        await strava_service.record_sync(user_id)
     except (StravaRepositoryNotConfiguredError, httpx.HTTPError) as exc:
         # Non-fatal: the activities imported fine even if the timestamp update failed.
         logger.warning("touch_strava_last_sync failed error_type=%s", type(exc).__name__)
