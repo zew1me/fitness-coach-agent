@@ -25,7 +25,7 @@ but it is a poor fit for this service:
   rotated tokens, and compare-and-swaps them in shared persistence so concurrent
   serverless invocations cannot overwrite a newer refresh;
 - this release uses only four small HTTP surfaces (authorize, token,
-  deauthorize, and paginated activity summaries), with application-specific
+  revoke, and paginated activity summaries), with application-specific
   response validation, retry semantics, provenance allowlisting, and HTTP error
   contracts that a wrapper would not replace; and
 - adopting it would add `requests`, `arrow`, and `pint` to the production graph
@@ -99,11 +99,12 @@ token bypass.
 
 `DELETE /api/strava/connection`:
 
-1. Decrypts the access token and calls `POST https://www.strava.com/oauth/deauthorize`.
-   A `200` or `401` (already revoked at Strava) is treated as success.
-2. On a retryable upstream failure, credentials are retained and the endpoint
-   returns `disconnect_pending: true` with reads still blocked; the athlete can
-   retry.
+1. Decrypts the access token and calls `POST https://www.strava.com/oauth/revoke`
+   with HTTP Basic application credentials and a form-encoded `token`. Only a
+   `200` response is treated as success.
+2. On an upstream failure (including `401`), credentials are retained and the
+   endpoint returns `disconnect_pending: true` with reads still blocked; the
+   athlete can retry.
 3. On success, the connection row is revoked and all `source='strava_sync'`
    activities are purged. The response includes `deleted_activities`, shown to
    the athlete as written confirmation.
