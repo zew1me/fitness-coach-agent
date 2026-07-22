@@ -1,12 +1,7 @@
-from datetime import date
-from typing import get_args
-
 from pydantic import ValidationError
 
-from backend.models.training import Goal, GoalType
+from backend.models.training import Goal, GoalCreatePayload, GoalUpdatePayload
 from backend.repos.supabase_repo import SupabaseRepository
-
-ALLOWED_GOAL_TYPES = frozenset(get_args(GoalType))
 
 
 class InvalidGoalPayloadError(ValueError):
@@ -19,55 +14,17 @@ class UnknownGoalActionError(ValueError):
     pass
 
 
-def _normalize_goal_fields(
-    d: dict[str, object],
-    *,
-    existing_course_profile: dict[str, object] | None = None,
-) -> dict[str, object]:
-    result = dict(d)
-    goal_type = result.get("goal_type")
-    if goal_type == "race":
-        result["goal_type"] = "event"
-        goal_type = "event"
-    if goal_type is not None and goal_type not in ALLOWED_GOAL_TYPES:
-        raise InvalidGoalPayloadError(
-            [
-                {
-                    "loc": ("goal", "goal_type"),
-                    "msg": (f"goal_type must be one of: {', '.join(sorted(ALLOWED_GOAL_TYPES))}."),
-                    "type": "literal_error",
-                }
-            ]
-        )
-    if "course_profile_notes" in result and "course_profile" not in result:
-        notes = result.pop("course_profile_notes")
-        if notes is not None:
-            result["course_profile"] = {
-                **(existing_course_profile or {}),
-                "notes": notes,
-            }
-    target_date = result.get("target_date")
-    if isinstance(target_date, str):
-        try:
-            date.fromisoformat(target_date)
-        except ValueError as exc:
-            raise InvalidGoalPayloadError(
-                [
-                    {
-                        "loc": ("goal", "target_date"),
-                        "msg": "target_date must be an ISO date (YYYY-MM-DD).",
-                        "type": "value_error.date",
-                    }
-                ]
-            ) from exc
-    return result
-
-
-def _sanitize_goal_update_fields(fields: dict[str, object]) -> dict[str, object]:
-    result = dict(fields)
-    for immutable_field in ("id", "user_id", "created_at", "updated_at"):
-        result.pop(immutable_field, None)
-    return result
+def _payload_fields(payload: GoalCreatePayload | GoalUpdatePayload) -> dict[str, object]:
+    # exclude_unset uses Pydantic's model_fields_set to retain omitted-vs-null semantics.
+    fields = payload.model_dump(mode="json", exclude_unset=True)
+    notes = fields.pop("course_profile_notes", None)
+    course_profile = fields.get("course_profile")
+    if notes is not None:
+        if isinstance(course_profile, dict):
+            fields["course_profile"] = {**course_profile, "notes": notes}
+        elif "course_profile" not in fields:
+            fields["course_profile"] = {"notes": notes}
+    return fields
 
 
 class GoalService:
@@ -81,23 +38,29 @@ class GoalService:
         repo: SupabaseRepository,
     ) -> Goal:
         if action == "create":
-            goal_dict = _normalize_goal_fields(goal)
-            goal_dict.update({"user_id": user_id, "status": "active"})
             try:
+                payload = GoalCreatePayload.model_validate(goal)
+                goal_dict = _payload_fields(payload)
+                goal_dict.update({"user_id": user_id, "status": "active"})
                 validated_goal = Goal.model_validate(goal_dict)
             except ValidationError as exc:
                 raise InvalidGoalPayloadError(exc.errors()) from exc
             return await repo.create_goal(validated_goal)
         if action == "update":
-            existing_course_profile = None
-            if goal.get("course_profile_notes") is not None and goal_id:
-                existing_goal = await repo.get_goal(goal_id, user_id)
-                existing_course_profile = existing_goal.course_profile
-            goal_dict = _normalize_goal_fields(
-                goal,
-                existing_course_profile=existing_course_profile,
+            try:
+                payload = GoalUpdatePayload.model_validate(goal)
+            except ValidationError as exc:
+                raise InvalidGoalPayloadError(exc.errors()) from exc
+
+            merge_profile_notes = payload.course_profile_notes is not None and (
+                "course_profile" not in payload.model_fields_set or payload.course_profile is None
             )
-            goal_dict = _sanitize_goal_update_fields(goal_dict)
+            goal_dict = _payload_fields(payload)
+            if merge_profile_notes:
+                return await self._update_goal_with_course_profile_notes(
+                    repo, goal_id or "", user_id, goal_dict, payload.course_profile_notes or ""
+                )
+            # Explicit null remains a no-op for every partial update field.
             goal_dict = {key: value for key, value in goal_dict.items() if value is not None}
             if not goal_dict:
                 raise InvalidGoalPayloadError(
@@ -114,3 +77,17 @@ class GoalService:
         if status := status_map.get(action):
             return await repo.update_goal(goal_id or "", user_id, {"status": status})
         raise UnknownGoalActionError(f"Unknown action: {action}")
+
+    async def _update_goal_with_course_profile_notes(
+        self,
+        repo: SupabaseRepository,
+        goal_id: str,
+        user_id: str,
+        goal_dict: dict[str, object],
+        notes: str,
+    ) -> Goal:
+        goal_dict.pop("course_profile", None)
+        goal_dict = {key: value for key, value in goal_dict.items() if value is not None}
+        if goal_dict:
+            await repo.update_goal(goal_id, user_id, goal_dict)
+        return await repo.update_goal_course_profile_notes(goal_id, user_id, notes)
