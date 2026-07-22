@@ -310,28 +310,34 @@ async def test_refresh_rejection_marks_reconnect_required() -> None:
 async def test_disconnect_revokes_remote_and_local() -> None:
     repo = InMemoryStravaRepository()
     _seed_connection(repo, expires_at=datetime.now(UTC) + timedelta(hours=5))
-    deauth_calls: list[str] = []
+    revoke_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        deauth_calls.append(str(request.url))
-        return httpx.Response(200, json={"access_token": "access-1"})
+        revoke_requests.append(request)
+        return httpx.Response(200)
 
     service = _service(repo, transport=httpx.MockTransport(handler))
     result = await service.disconnect("coach-user-1")
 
     assert result.remote_revoked is True
     assert result.status.connected is False
-    assert deauth_calls and deauth_calls[0].endswith("/oauth/deauthorize")
+    assert revoke_requests and str(revoke_requests[0].url).endswith("/oauth/revoke")
+    assert revoke_requests[0].headers["authorization"] == "Basic c3RyYXZhLTEyMzpzdHJhdmEtc2VjcmV0"
+    assert revoke_requests[0].headers["content-type"] == "application/x-www-form-urlencoded"
+    assert parse_qs(revoke_requests[0].content.decode()) == {"token": ["access-1"]}
     assert repo.get_active_connection("coach-user-1") is None
 
 
 @pytest.mark.asyncio
-async def test_disconnect_pending_when_remote_revocation_fails() -> None:
+@pytest.mark.parametrize(
+    "status_code", [httpx.codes.UNAUTHORIZED, httpx.codes.INTERNAL_SERVER_ERROR]
+)
+async def test_disconnect_pending_when_remote_revocation_fails(status_code: int) -> None:
     repo = InMemoryStravaRepository()
     _seed_connection(repo, expires_at=datetime.now(UTC) + timedelta(hours=5))
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, text="boom")
+        return httpx.Response(status_code)
 
     service = _service(repo, transport=httpx.MockTransport(handler))
     result = await service.disconnect("coach-user-1")

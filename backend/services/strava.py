@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 STRAVA_AUTHORIZE_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-STRAVA_DEAUTHORIZE_URL = "https://www.strava.com/oauth/deauthorize"
+STRAVA_REVOKE_URL = "https://www.strava.com/oauth/revoke"
 STRAVA_API_BASE = "https://www.strava.com/api/v3"
 # Least-privileged read scope. `activity:read` covers everything but Only-Me
 # activities; escalate to `activity:read_all` only under explicit approval.
@@ -401,7 +401,7 @@ class StravaOAuthService:
 
         access_token = self._cipher().decrypt(connection.access_token_ciphertext)
         try:
-            await self._deauthorize(access_token)
+            await self._revoke(access_token)
         except StravaSyncError:
             # Retryable upstream failure: keep credentials so a retry can revoke,
             # but block reads by leaving the connection marked pending.
@@ -463,16 +463,17 @@ class StravaOAuthService:
             except (httpx.HTTPError, ValidationError, ValueError) as exc:
                 raise StravaSyncError("Strava token refresh failed.") from exc
 
-    async def _deauthorize(self, access_token: str) -> None:
+    async def _revoke(self, access_token: str) -> None:
         async with self._http_client_factory() as client:
             try:
                 response = await client.post(
-                    STRAVA_DEAUTHORIZE_URL, data={"access_token": access_token}
+                    STRAVA_REVOKE_URL,
+                    auth=httpx.BasicAuth(self._client_id(), settings.strava_client_secret),
+                    data={"token": access_token},
                 )
             except httpx.HTTPError as exc:
                 raise StravaSyncError("Strava revocation failed.") from exc
-            # 401 means the grant is already gone at Strava — treat as success.
-            if response.status_code in (httpx.codes.OK, httpx.codes.UNAUTHORIZED):
+            if response.status_code == httpx.codes.OK:
                 return
             raise StravaSyncError("Strava revocation failed.")
 
