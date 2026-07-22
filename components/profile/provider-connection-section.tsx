@@ -3,8 +3,8 @@ import type { JSX, ReactNode } from "react";
 import styles from "../../app/profile/profile.module.css";
 
 // One presentational panel shared by the Intervals.icu and Strava connection
-// sections so their markup stays in lock-step (and copy-paste detection stays
-// quiet). Each provider owns its own state/handlers; this component only renders.
+// sections so their markup stays in sync. Each provider owns its own state/handlers;
+// this component only renders.
 
 export type ProviderConnectionState = {
   athleteLabel: string;
