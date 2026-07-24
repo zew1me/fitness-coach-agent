@@ -182,7 +182,9 @@ function NutritionSection({
   profile: AthleteProfile | null;
 }): JSX.Element | null {
   if (profile === null) return null;
-  const restrictions = profile.dietary_restrictions ?? [];
+  const restrictions = (profile.dietary_restrictions ?? [])
+    .map((restriction) => restriction.trim())
+    .filter((restriction) => restriction !== "");
   const notes = profile.nutrition_notes?.trim() ?? "";
   // Nutrition onboarding is optional and skippable, so most athletes have
   // nothing here — render the section only when there is context to show.

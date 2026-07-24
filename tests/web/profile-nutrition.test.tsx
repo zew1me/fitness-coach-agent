@@ -120,4 +120,37 @@ describe("ProfilePage nutrition section", () => {
     });
     expect(screen.queryByRole("heading", { name: "Nutrition" })).toBeNull();
   });
+
+  it("hides the section when restrictions are whitespace-only and no notes", async () => {
+    mockProfile({
+      ...BASE_PROFILE,
+      dietary_restrictions: ["   "],
+      nutrition_notes: null,
+    });
+
+    render(<ProfilePage />);
+
+    await waitFor(() => {
+      expect(coachApiMocks.loadAthleteSummary).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Loading profile…")).toBeNull();
+    });
+    expect(screen.queryByRole("heading", { name: "Nutrition" })).toBeNull();
+  });
+
+  it("trims whitespace around dietary restrictions when rendering", async () => {
+    mockProfile({
+      ...BASE_PROFILE,
+      dietary_restrictions: ["  vegetarian  ", "gluten-free"],
+      nutrition_notes: null,
+    });
+
+    render(<ProfilePage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Nutrition" })).toBeTruthy();
+    });
+    expect(screen.getByText("vegetarian, gluten-free")).toBeTruthy();
+  });
 });
