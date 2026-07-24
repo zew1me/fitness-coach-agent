@@ -10,9 +10,9 @@ import {
   confirmSportThreshold,
   disconnectIntervals,
   fetchBrowserToken,
+  loadAthleteSummary,
   loadFitnessMetrics,
   loadIntervalsStatus,
-  loadProfile,
   startIntervalsAuthorization,
   syncIntervals,
 } from "../../lib/coach-api";
@@ -182,7 +182,9 @@ function NutritionSection({
   profile: AthleteProfile | null;
 }): JSX.Element | null {
   if (profile === null) return null;
-  const restrictions = profile.dietary_restrictions ?? [];
+  const restrictions = (profile.dietary_restrictions ?? [])
+    .map((restriction) => restriction.trim())
+    .filter((restriction) => restriction !== "");
   const notes = profile.nutrition_notes?.trim() ?? "";
   // Nutrition onboarding is optional and skippable, so most athletes have
   // nothing here — render the section only when there is context to show.
@@ -565,10 +567,8 @@ export default function ProfilePage(): JSX.Element {
         if (isCancelled()) return;
         setUserId(token.user_id);
 
-        const [nextMetrics, nextProfile] = await Promise.all([
-          loadFitnessMetrics(token.user_id),
-          loadProfile(token.user_id),
-        ]);
+        const { profile: nextProfile, fitnessMetrics: nextMetrics } =
+          await loadAthleteSummary(token.user_id);
         if (!isCancelled()) {
           setMetrics(nextMetrics);
           setProfile(nextProfile);
