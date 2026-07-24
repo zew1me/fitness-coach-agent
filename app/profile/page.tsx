@@ -10,9 +10,9 @@ import {
   confirmSportThreshold,
   disconnectIntervals,
   fetchBrowserToken,
+  loadAthleteSummary,
   loadFitnessMetrics,
   loadIntervalsStatus,
-  loadProfile,
   startIntervalsAuthorization,
   syncIntervals,
 } from "../../lib/coach-api";
@@ -565,10 +565,8 @@ export default function ProfilePage(): JSX.Element {
         if (isCancelled()) return;
         setUserId(token.user_id);
 
-        const [nextMetrics, nextProfile] = await Promise.all([
-          loadFitnessMetrics(token.user_id),
-          loadProfile(token.user_id),
-        ]);
+        const { profile: nextProfile, fitnessMetrics: nextMetrics } =
+          await loadAthleteSummary(token.user_id);
         if (!isCancelled()) {
           setMetrics(nextMetrics);
           setProfile(nextProfile);
