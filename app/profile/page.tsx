@@ -12,10 +12,12 @@ import {
   fetchBrowserToken,
   loadFitnessMetrics,
   loadIntervalsStatus,
+  loadProfile,
   startIntervalsAuthorization,
   syncIntervals,
 } from "../../lib/coach-api";
 import type {
+  AthleteProfile,
   BestTime,
   FitnessMetrics,
   IntervalsConnectionStatus,
@@ -168,6 +170,42 @@ function BestTimesSection({
       {times.map((bt) => (
         <BestTimeRow bt={bt} key={bt.distance_label} />
       ))}
+    </section>
+  );
+}
+
+// ── Nutrition ─────────────────────────────────────────────────
+
+function NutritionSection({
+  profile,
+}: {
+  profile: AthleteProfile | null;
+}): JSX.Element | null {
+  if (profile === null) return null;
+  const restrictions = profile.dietary_restrictions ?? [];
+  const notes = profile.nutrition_notes?.trim() ?? "";
+  // Nutrition onboarding is optional and skippable, so most athletes have
+  // nothing here — render the section only when there is context to show.
+  if (restrictions.length === 0 && notes === "") return null;
+  return (
+    <section className={styles.section}>
+      <h2 className={styles.sectionTitle}>Nutrition</h2>
+      {restrictions.length > 0 && (
+        <div className={styles.metricRow}>
+          <div className={styles.metricLabel}>Dietary restrictions</div>
+          <div className={styles.metricValue}>
+            <span>{restrictions.join(", ")}</span>
+          </div>
+        </div>
+      )}
+      {notes !== "" && (
+        <div className={styles.metricRow}>
+          <div className={styles.metricLabel}>Notes</div>
+          <div className={styles.metricValue}>
+            <span>{notes}</span>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -423,6 +461,7 @@ type LoadedViewProps = {
   confirming: ConfirmKey | null;
   metrics: FitnessMetrics;
   onConfirm: ConfirmFn;
+  profile: AthleteProfile | null;
   userId: string;
 };
 
@@ -430,6 +469,7 @@ function LoadedView({
   metrics,
   onConfirm,
   confirming,
+  profile,
   userId,
 }: LoadedViewProps): JSX.Element {
   const isConfirming = (key: ConfirmKey): boolean => confirming === key;
@@ -478,6 +518,7 @@ function LoadedView({
         userId={userId}
       />
       <BestTimesSection times={metrics.best_times} />
+      <NutritionSection profile={profile} />
     </>
   );
 }
@@ -486,6 +527,7 @@ function LoadedView({
 
 export default function ProfilePage(): JSX.Element {
   const [metrics, setMetrics] = useState<FitnessMetrics | null>(null);
+  const [profile, setProfile] = useState<AthleteProfile | null>(null);
   const [userId, setUserId] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<ConfirmKey | null>(null);
@@ -523,9 +565,13 @@ export default function ProfilePage(): JSX.Element {
         if (isCancelled()) return;
         setUserId(token.user_id);
 
-        const nextMetrics = await loadFitnessMetrics(token.user_id);
+        const [nextMetrics, nextProfile] = await Promise.all([
+          loadFitnessMetrics(token.user_id),
+          loadProfile(token.user_id),
+        ]);
         if (!isCancelled()) {
           setMetrics(nextMetrics);
+          setProfile(nextProfile);
         }
       } catch (err: unknown) {
         if (!isCancelled()) {
@@ -682,6 +728,7 @@ export default function ProfilePage(): JSX.Element {
             confirming={confirming}
             metrics={metrics}
             onConfirm={confirm}
+            profile={profile}
             userId={userId}
           />
         )}
