@@ -7,6 +7,8 @@
  *   - GET  /api/chat/thread                → an empty thread (override per-spec)
  *   - GET  /api/chat/model-state/lease     → no active turn lease
  *   - GET  /api/engine/get-athlete-summary → a minimal onboarding profile
+ *   - GET  /api/intervals/status           → not connected
+ *   - GET  /api/strava/status              → not connected
  *   - POST /api/chat/attachments/presign   → a presign that points at example.com
  *   - PUT  https://example.com/upload      → 200 (hermetic upload sink)
  *
@@ -72,6 +74,26 @@ export async function mockAuthenticatedSession(page: Page): Promise<void> {
           primary_sports: [],
         },
       }),
+    }),
+  );
+
+  // The profile page fetches both provider statuses on first paint. Without
+  // these, the requests fall through to the dev server (no PYTHON_API_URL in
+  // CI), and every provider panel sits on "Loading connection status..." for
+  // as long as dev-mode route resolution takes on a cold runner.
+  await page.route("**/api/intervals/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ connected: false, scopes: [] }),
+    }),
+  );
+
+  await page.route("**/api/strava/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ connected: false, scopes: [] }),
     }),
   );
 
