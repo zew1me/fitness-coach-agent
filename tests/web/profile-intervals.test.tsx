@@ -17,6 +17,7 @@ const coachApiMocks = vi.hoisted(() => ({
   fetchBrowserToken: vi.fn(),
   loadFitnessMetrics: vi.fn(),
   loadIntervalsStatus: vi.fn(),
+  loadProfile: vi.fn(),
   startIntervalsAuthorization: vi.fn(),
   syncIntervals: vi.fn(),
 }));
@@ -41,6 +42,11 @@ beforeEach(() => {
     user_id: "coach-user-1",
   });
   coachApiMocks.loadFitnessMetrics.mockResolvedValue(EMPTY_METRICS);
+  coachApiMocks.loadProfile.mockResolvedValue({
+    coaching_state: "active",
+    primary_sports: ["cycling"],
+    user_id: "coach-user-1",
+  });
   coachApiMocks.loadIntervalsStatus.mockResolvedValue({
     connected: false,
     scopes: [],
