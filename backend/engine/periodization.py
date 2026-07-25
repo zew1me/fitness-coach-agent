@@ -82,6 +82,10 @@ class PhasePlan:
     z1_z2_pct: int
     max_hiit_per_week: int
     description: str
+    # Optional per-phase fueling guidance (issue #53). Empty by default so
+    # skeletons built without nutrition context — and plans persisted before this
+    # field existed — round-trip unchanged.
+    nutrition_focus: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -93,6 +97,7 @@ class PhasePlan:
             "z1_z2_pct": self.z1_z2_pct,
             "max_hiit_per_week": self.max_hiit_per_week,
             "description": self.description,
+            "nutrition_focus": self.nutrition_focus,
         }
 
 
