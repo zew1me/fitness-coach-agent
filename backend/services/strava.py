@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
-from statistics import median
+from statistics import median, pvariance
 from typing import Any, Protocol, cast
 from urllib.parse import urlencode
 
@@ -80,6 +80,8 @@ STRAVA_SYNC_MAX_PAGES = 10
 # Strava's short-window read limit. Remaining activities use summary fallbacks.
 STRAVA_SYNC_MAX_STREAM_REQUESTS = 75
 STRAVA_STREAM_MAX_SAMPLES = 200_000
+STRAVA_STREAM_TOKEN_WINDOW_SECONDS = 30
+STRAVA_STREAM_TOKEN_MAX_WINDOWS = 480
 STRAVA_STREAM_KEYS = (
     "time",
     "heartrate",
@@ -684,6 +686,122 @@ def _moving_values(values: list[float], streams: StravaStreams) -> list[float]:
     ]
 
 
+def _percentile(sorted_values: list[float], fraction: float) -> float:
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * fraction
+    lower_index = math.floor(position)
+    upper_index = math.ceil(position)
+    lower = sorted_values[lower_index]
+    upper = sorted_values[upper_index]
+    return lower + (upper - lower) * (position - lower_index)
+
+
+def _window_statistics(values: list[float]) -> dict[str, int | float]:
+    ordered = sorted(values)
+    mean = sum(ordered) / len(ordered)
+    return {
+        "count": len(ordered),
+        "mean": round(mean, 3),
+        "median": round(float(median(ordered)), 3),
+        "p0": round(ordered[0], 3),
+        "p75": round(_percentile(ordered, 0.75), 3),
+        "p90": round(_percentile(ordered, 0.90), 3),
+        "p100": round(ordered[-1], 3),
+        "variance": round(pvariance(ordered, mu=mean), 3),
+    }
+
+
+def _token_window_seconds(times: list[float]) -> int:
+    duration = max(times, default=0.0)
+    minimum = STRAVA_STREAM_TOKEN_WINDOW_SECONDS
+    if duration <= minimum * STRAVA_STREAM_TOKEN_MAX_WINDOWS:
+        return minimum
+    multiplier = math.ceil(duration / (minimum * STRAVA_STREAM_TOKEN_MAX_WINDOWS))
+    return minimum * multiplier
+
+
+def _collect_token_buckets(
+    streams: StravaStreams,
+    times: list[float],
+    window_seconds: int,
+    metric_values: dict[str, list[float]],
+) -> tuple[dict[int, dict[str, list[float]]], dict[int, float]]:
+    moving = streams.get("moving", [])
+    bucket_values: dict[int, dict[str, list[float]]] = {}
+    bucket_moving_seconds: dict[int, float] = {}
+    weights = _sample_weights(times, len(times))
+    for index, relative_time in enumerate(times):
+        if index < len(moving) and moving[index] is False:
+            continue
+        bucket = min(
+            int(relative_time // window_seconds),
+            STRAVA_STREAM_TOKEN_MAX_WINDOWS - 1,
+        )
+        bucket_moving_seconds[bucket] = bucket_moving_seconds.get(bucket, 0.0) + weights[index]
+        metrics = bucket_values.setdefault(bucket, {})
+        for key, values in metric_values.items():
+            if index < len(values):
+                metrics.setdefault(key, []).append(values[index])
+    return bucket_values, bucket_moving_seconds
+
+
+def _render_token_windows(
+    bucket_values: dict[int, dict[str, list[float]]],
+    bucket_moving_seconds: dict[int, float],
+    window_seconds: int,
+) -> list[dict[str, object]]:
+    windows: list[dict[str, object]] = []
+    for bucket in sorted(bucket_values):
+        metrics = {
+            key: _window_statistics(values)
+            for key, values in bucket_values[bucket].items()
+            if values
+        }
+        if metrics:
+            windows.append(
+                {
+                    "start_s": bucket * window_seconds,
+                    "end_s": (bucket + 1) * window_seconds,
+                    "moving_s": round(bucket_moving_seconds.get(bucket, 0.0), 3),
+                    "metrics": metrics,
+                }
+            )
+    return windows
+
+
+def build_strava_stream_tokens(streams: StravaStreams) -> dict[str, object] | None:
+    """Create bounded, relative-time statistical windows without retaining raw samples."""
+    times = _numeric_stream(streams, "time")
+    if not times:
+        return None
+    window_seconds = _token_window_seconds(times)
+    metric_values = {
+        key: _usable_sensor_stream(streams, key)
+        for key in ("heartrate", "watts", "cadence", "velocity_smooth")
+    }
+    bucket_values, bucket_moving_seconds = _collect_token_buckets(
+        streams,
+        times,
+        window_seconds,
+        metric_values,
+    )
+    windows = _render_token_windows(
+        bucket_values,
+        bucket_moving_seconds,
+        window_seconds,
+    )
+    if not windows:
+        return None
+    return {
+        "schema": "strava_stream_tokens_v1",
+        "window_seconds": window_seconds,
+        "window_count": len(windows),
+        "metrics": sorted(key for key, values in metric_values.items() if values),
+        "windows": windows,
+    }
+
+
 def _sample_weights(times: list[float], count: int) -> list[float]:
     deltas = [times[index + 1] - times[index] for index in range(min(len(times) - 1, count - 1))]
     positive = [delta for delta in deltas if delta > 0]
@@ -971,6 +1089,9 @@ def estimate_strava_training_load(
             "streams_used": sorted(streams),
             "raw_samples_stored": False,
         }
+        stream_tokens = build_strava_stream_tokens(streams)
+        if stream_tokens is not None:
+            raw_extraction["strava_stream_tokens"] = stream_tokens
     if load.method:
         raw_extraction["training_load_estimate"] = {"method": load.method}
     return activity.model_copy(

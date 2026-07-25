@@ -313,9 +313,10 @@ function StravaDisclosure(): JSX.Element {
     <p className={styles.connectionMeta}>
       Reads all your activities, including Only Me activities, plus processed
       non-GPS streams (time, heart rate, power, cadence, speed, and moving
-      status) to calculate training load and zones. We never request GPS, maps,
-      photos, social data, or write access. Disconnecting revokes Strava access
-      and deletes imported Strava activities. See our{" "}
+      status) to calculate training load and zones and retain compact
+      relative-time statistical windows. We never request GPS, maps, photos,
+      social data, or write access. Disconnecting revokes Strava access and
+      deletes imported Strava activities. See our{" "}
       <Link href="/privacy">privacy policy</Link>.
     </p>
   );

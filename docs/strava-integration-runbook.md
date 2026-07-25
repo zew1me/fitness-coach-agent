@@ -51,9 +51,12 @@ and rate-limit/error behavior. Record any reversal here before changing code.
 - **Processed streams:** request only time, heart rate, cadence, watts, smoothed
   velocity, and moving status. Use them transiently to calculate our
   own normalized power, TSS, intensity factor, and time-in-zone percentages.
-  Persist derived metrics plus stream names/sample count, not raw samples. A
-  manual sync fetches streams for at most 75 new activities, preserving
-  short-window rate-limit headroom; remaining activities use summary fallbacks.
+  Persist derived metrics plus bounded relative-time statistical windows (count,
+  mean, median, p0, p75, p90, p100, and variance), not original second-by-second
+  samples or absolute timestamps. Windows default to 30 seconds and adapt up to
+  a maximum of 480 per activity. A manual sync fetches streams for at most 75
+  new activities, preserving short-window rate-limit headroom; remaining
+  activities use summary fallbacks.
 - **Explicitly excluded:** latitude/longitude streams, map/polyline, GPS
   coordinates, routes, segments, photos, social counts, upload identifiers, and
   the original upstream activity file (which Strava does not expose via API).

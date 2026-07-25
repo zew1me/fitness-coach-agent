@@ -28,7 +28,7 @@ normalized power, TSS, intensity factor, and time-in-zone percentages.
 
 **Goal:** Add a per-athlete Strava connection to `/profile` that follows the existing Intervals.icu interaction model—connect, status, disconnect, and **Sync now**—while implementing Strava-specific OAuth token rotation, activity pagination, rate-limit handling, webhook lifecycle, deletion, provenance, and AI-processing controls.
 
-**Architecture:** Add a provider-specific Strava service and repository alongside the Intervals.icu implementation, but do not copy its bearer-token lifecycle directly. Store encrypted access and refresh tokens, import relevant summary fields, transiently process allowlisted non-GPS streams into canonical derived metrics, update existing imports idempotently, and make disconnect/deauthorization revoke access and purge affected data. Keep Strava data outside AI processing.
+**Architecture:** Add a provider-specific Strava service and repository alongside the Intervals.icu implementation, but do not copy its bearer-token lifecycle directly. Store encrypted access and refresh tokens, import relevant summary fields, process allowlisted non-GPS streams into canonical derived metrics and bounded relative-time statistical windows, update existing imports idempotently, and make disconnect/deauthorization revoke access and purge affected data. Keep Strava data outside AI processing.
 
 **Initial scope:** Activity summaries plus processed time, heart-rate, cadence, watts, smoothed-velocity, and moving streams. Do not request latitude/longitude streams, detailed maps, GPS coordinates, segments, routes, photos, kudos, original files, or write scopes. Manual sync pulls a bounded recent window.
 
@@ -148,7 +148,7 @@ normalized power, TSS, intensity factor, and time-in-zone percentages.
   - average/weighted power;
   - average cadence;
   - optional activity name and device name only if approved.
-- [ ] Allowlist processed time, heart-rate, cadence, watts, smoothed-velocity, and moving streams. Explicitly exclude latitude/longitude streams, map/polyline, coordinates, location, photos, social counts, segment efforts, and external upload identifiers. Persist derived metrics and bounded derivation metadata, not raw stream samples.
+- [ ] Allowlist processed time, heart-rate, cadence, watts, smoothed-velocity, and moving streams. Explicitly exclude latitude/longitude streams, map/polyline, coordinates, location, photos, social counts, segment efforts, and external upload identifiers. Persist derived metrics and at most 480 relative-time statistical windows containing count, mean, median, p0, p75, p90, p100, and variance; do not persist original second-by-second samples or absolute timestamps.
 - [ ] Define provider-owned versus athlete-owned canonical fields. Provider updates must not overwrite athlete notes, fueling notes, local RPE, plan links, or other Coach Arden annotations.
 - [ ] Decide retention/deletion treatment for derived records before enabling AI:
   - if derived outputs may remain, record that authorization rule;
@@ -712,5 +712,5 @@ Do not create migration-only commits without updating `docs/supabase-migration-h
 
 - Intervals.icu provides a useful UI and endpoint pattern, but Strava is not a protocol-level copy. The critical differences are rotating refresh tokens, granted-scope verification, pagination, rate-limit headers, webhook lifecycle, remote revocation, update/delete semantics, and authorization restrictions on AI/retention.
 - Single Player Mode affects athlete capacity, not data-use permissions.
-- Process only explicitly allowlisted non-GPS streams, retain derived metrics rather than raw samples, and keep location data outside the integration.
+- Process only explicitly allowlisted non-GPS streams, retain derived metrics and bounded statistical windows rather than original samples, and keep location data outside the integration.
 - No implementation is complete until disconnect and webhook deauthorization demonstrably delete or retain every direct and derived data category exactly as the approved authorization requires.

@@ -69,10 +69,14 @@ export default function PrivacyPage(): JSX.Element {
             for time, heart rate, power, cadence, speed, and moving status to
             calculate normalized power, training stress, intensity, and
             time-in-zone percentages using your Coach Arden fitness profile and
-            sport thresholds. We store those calculated metrics and a record of
-            which streams were used, but not the raw stream samples. We do not
-            request GPS/location streams, maps or polylines, routes, segments,
-            photos, social data, or write access.
+            sport thresholds. We store those calculated metrics and a bounded
+            statistical representation of the streams in relative-time windows.
+            Each retained window can contain sample count, mean, median,
+            minimum, 75th percentile, 90th percentile, maximum, and variance for
+            available heart-rate, power, cadence, and speed data. We do not
+            store the original second-by-second samples or absolute stream
+            timestamps. We do not request GPS/location streams, maps or
+            polylines, routes, segments, photos, social data, or write access.
           </p>
           <p>
             We use our hosting and storage subprocessors to import summaries and

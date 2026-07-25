@@ -129,6 +129,29 @@ def test_training_load_uses_streams_without_storing_raw_samples() -> None:
         "streams_used": ["moving", "time", "watts"],
         "raw_samples_stored": False,
     }
+    tokens = enriched.raw_extraction["strava_stream_tokens"]
+    assert tokens["schema"] == "strava_stream_tokens_v1"
+    assert tokens["window_seconds"] == 30
+    assert tokens["window_count"] == 1
+    assert tokens["windows"] == [
+        {
+            "start_s": 0,
+            "end_s": 30,
+            "moving_s": 6.0,
+            "metrics": {
+                "watts": {
+                    "count": 6,
+                    "mean": 200.0,
+                    "median": 200.0,
+                    "p0": 200.0,
+                    "p75": 200.0,
+                    "p90": 200.0,
+                    "p100": 200.0,
+                    "variance": 0.0,
+                }
+            },
+        }
+    ]
 
 
 def test_all_zero_power_stream_does_not_replace_summary_power() -> None:
