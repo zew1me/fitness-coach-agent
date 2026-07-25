@@ -118,6 +118,101 @@ async def test_calendar_returns_planned_and_recorded_in_range(monkeypatch) -> No
     assert workout["status"] == "scheduled"
 
 
+class NutritionFocusRepository:
+    """Active plan carrying phase-level nutrition_focus, plus a completed workout
+    from a superseded plan that survives active-plan scoping (issue #53)."""
+
+    async def get_active_plan(self, user_id: str) -> TrainingPlan | None:
+        return TrainingPlan(
+            id="plan-active",
+            user_id=user_id,
+            title="Active plan",
+            plan_type="full_cycle",
+            status="active",
+            start_date=date(2026, 5, 1),
+            end_date=date(2026, 8, 31),
+            phases=[
+                {"start_week": 1, "end_week": 2, "focus": "base", "nutrition_focus": "Base fuel."},
+                {
+                    "start_week": 3,
+                    "end_week": 3,
+                    "focus": "recovery",
+                    "nutrition_focus": "Recovery fuel.",
+                },
+            ],
+        )
+
+    async def list_activities_between(
+        self, user_id: str, *, start: date, end: date
+    ) -> list[Activity]:
+        return []
+
+    async def list_plan_workouts_between(
+        self, user_id: str, *, start: date, end: date
+    ) -> list[PlanWorkout]:
+        return [
+            # Active-plan workouts in week 2 (base) and week 3 (recovery).
+            PlanWorkout(
+                id="w-base",
+                plan_id="plan-active",
+                user_id=user_id,
+                workout_date=date(2026, 7, 15),
+                day_of_week=2,
+                week_number=2,
+                sport="cycling",
+                title="Endurance",
+                workout_type="endurance",
+                status="scheduled",
+            ),
+            PlanWorkout(
+                id="w-recovery",
+                plan_id="plan-active",
+                user_id=user_id,
+                workout_date=date(2026, 7, 22),
+                day_of_week=2,
+                week_number=3,
+                sport="cycling",
+                title="Recovery spin",
+                workout_type="recovery",
+                status="scheduled",
+            ),
+            # Completed workout from a superseded plan — survives scoping, but must
+            # not be stamped with the active plan's focus.
+            PlanWorkout(
+                id="w-old",
+                plan_id="plan-superseded",
+                user_id=user_id,
+                workout_date=date(2026, 6, 1),
+                day_of_week=0,
+                week_number=2,
+                sport="cycling",
+                title="Old session",
+                workout_type="endurance",
+                status="completed",
+                actual_activity_id="act-9",
+            ),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_calendar_stamps_active_plan_workouts_with_week_nutrition_focus(monkeypatch) -> None:
+    monkeypatch.setattr(api_index, "repo", NutritionFocusRepository())
+    api_index.app.dependency_overrides[api_index.require_user_context] = _user_context
+
+    try:
+        status, body = await _get_calendar("start=2026-05-22&end=2026-08-14")
+    finally:
+        api_index.app.dependency_overrides.clear()
+
+    assert status == 200
+    by_id = {w["id"]: w for w in body["planned_workouts"]}
+    # Week 2 → base phase focus; week 3 → recovery phase focus.
+    assert by_id["w-base"]["nutrition_focus"] == "Base fuel."
+    assert by_id["w-recovery"]["nutrition_focus"] == "Recovery fuel."
+    # A superseded plan's surviving workout is never stamped with active-plan focus.
+    assert "nutrition_focus" not in by_id["w-old"]
+
+
 @pytest.mark.asyncio
 async def test_calendar_rejects_inverted_range(monkeypatch) -> None:
     monkeypatch.setattr(api_index, "repo", CalendarRepository())

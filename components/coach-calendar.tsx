@@ -69,6 +69,24 @@ function definedNumber(value: number | null | undefined): value is number {
   return value !== null && value !== undefined;
 }
 
+/**
+ * The active plan's per-week fueling focus (issue #53). Every planned workout in
+ * a plan-week carries the same string, so the first non-empty one represents the
+ * week; returns "" when no active-plan workout in the week has a focus.
+ */
+function weekNutritionFocus(
+  week: string[],
+  byDay: Map<string, CalendarDayItems>,
+): string {
+  for (const dayIso of week) {
+    for (const workout of byDay.get(dayIso)?.planned ?? []) {
+      const focus = workout.nutrition_focus?.trim();
+      if (focus) return focus;
+    }
+  }
+  return "";
+}
+
 function plannedWorkoutPills(
   workout: CalendarPlannedWorkout,
   status: string,
@@ -320,10 +338,17 @@ function CalendarBody({
         const startsNewMonth =
           previousMonday === undefined ||
           monthLabel(previousMonday) !== monthLabel(monday);
+        const nutritionFocus = weekNutritionFocus(week, byDay);
         return (
           <div key={monday}>
             {startsNewMonth ? (
               <h2 className={styles.monthRow}>{monthLabel(monday)}</h2>
+            ) : null}
+            {nutritionFocus !== "" ? (
+              <p className={styles.weekNutrition}>
+                <span className={styles.weekNutritionLabel}>Fuel</span>
+                <span>{nutritionFocus}</span>
+              </p>
             ) : null}
             <div className={styles.weekRow}>
               {week.map((dayIso) => (
