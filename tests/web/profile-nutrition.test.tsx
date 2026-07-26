@@ -9,9 +9,9 @@ const coachApiMocks = vi.hoisted(() => ({
   confirmSportThreshold: vi.fn(),
   disconnectIntervals: vi.fn(),
   fetchBrowserToken: vi.fn(),
+  loadAthleteSummary: vi.fn(),
   loadFitnessMetrics: vi.fn(),
   loadIntervalsStatus: vi.fn(),
-  loadProfile: vi.fn(),
   startIntervalsAuthorization: vi.fn(),
   syncIntervals: vi.fn(),
 }));
@@ -42,11 +42,22 @@ beforeEach(() => {
     user_id: "coach-user-1",
   });
   coachApiMocks.loadFitnessMetrics.mockResolvedValue(EMPTY_METRICS);
+  coachApiMocks.loadAthleteSummary.mockResolvedValue({
+    fitnessMetrics: EMPTY_METRICS,
+    profile: BASE_PROFILE,
+  });
   coachApiMocks.loadIntervalsStatus.mockResolvedValue({
     connected: false,
     scopes: [],
   });
 });
+
+function mockProfile(profile: Record<string, unknown>): void {
+  coachApiMocks.loadAthleteSummary.mockResolvedValue({
+    fitnessMetrics: EMPTY_METRICS,
+    profile,
+  });
+}
 
 afterEach(() => {
   cleanup();
@@ -56,7 +67,7 @@ afterEach(() => {
 
 describe("ProfilePage nutrition section", () => {
   it("renders dietary restrictions and notes when present", async () => {
-    coachApiMocks.loadProfile.mockResolvedValue({
+    mockProfile({
       ...BASE_PROFILE,
       dietary_restrictions: ["vegetarian", "gluten-free"],
       nutrition_notes: "Fuels with 60g carbs/hr on long rides.",
@@ -74,7 +85,7 @@ describe("ProfilePage nutrition section", () => {
   });
 
   it("hides the section when no nutrition context is captured", async () => {
-    coachApiMocks.loadProfile.mockResolvedValue({
+    mockProfile({
       ...BASE_PROFILE,
       dietary_restrictions: [],
       nutrition_notes: null,
@@ -84,7 +95,7 @@ describe("ProfilePage nutrition section", () => {
 
     // Wait for the loaded view (personal-bests logic runs once metrics resolve).
     await waitFor(() => {
-      expect(coachApiMocks.loadProfile).toHaveBeenCalled();
+      expect(coachApiMocks.loadAthleteSummary).toHaveBeenCalled();
     });
     await waitFor(() => {
       expect(screen.queryByText("Loading profile…")).toBeNull();
@@ -93,7 +104,7 @@ describe("ProfilePage nutrition section", () => {
   });
 
   it("hides the section when notes are whitespace-only and no restrictions", async () => {
-    coachApiMocks.loadProfile.mockResolvedValue({
+    mockProfile({
       ...BASE_PROFILE,
       dietary_restrictions: [],
       nutrition_notes: "   ",
@@ -102,11 +113,44 @@ describe("ProfilePage nutrition section", () => {
     render(<ProfilePage />);
 
     await waitFor(() => {
-      expect(coachApiMocks.loadProfile).toHaveBeenCalled();
+      expect(coachApiMocks.loadAthleteSummary).toHaveBeenCalled();
     });
     await waitFor(() => {
       expect(screen.queryByText("Loading profile…")).toBeNull();
     });
     expect(screen.queryByRole("heading", { name: "Nutrition" })).toBeNull();
+  });
+
+  it("hides the section when restrictions are whitespace-only and no notes", async () => {
+    mockProfile({
+      ...BASE_PROFILE,
+      dietary_restrictions: ["   "],
+      nutrition_notes: null,
+    });
+
+    render(<ProfilePage />);
+
+    await waitFor(() => {
+      expect(coachApiMocks.loadAthleteSummary).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Loading profile…")).toBeNull();
+    });
+    expect(screen.queryByRole("heading", { name: "Nutrition" })).toBeNull();
+  });
+
+  it("trims whitespace around dietary restrictions when rendering", async () => {
+    mockProfile({
+      ...BASE_PROFILE,
+      dietary_restrictions: ["  vegetarian  ", "gluten-free"],
+      nutrition_notes: null,
+    });
+
+    render(<ProfilePage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Nutrition" })).toBeTruthy();
+    });
+    expect(screen.getByText("vegetarian, gluten-free")).toBeTruthy();
   });
 });

@@ -52,6 +52,28 @@ async function postEngine<TInput extends object>(
   }
 }
 
+async function safePostEngine<TInput extends object>(
+  context: CoachToolContext,
+  path: string,
+  input: TInput,
+): Promise<unknown> {
+  try {
+    return await postEngine(context, path, input);
+  } catch {
+    // Deliberately cause-neutral: this catch also covers timeouts and auth
+    // failures, so it must not assert why the upload failed. It must also not
+    // instruct a retry — every coach tool is disabled for the rest of the turn
+    // once one has run (see the isEnabled gate in createAgentCoachTools), so a
+    // retry is structurally impossible and only burns turns against maxTurns.
+    return {
+      status: "error",
+      detail:
+        "This upload could not be processed. Do not retry it in this turn; " +
+        "tell the athlete which file did not load.",
+    };
+  }
+}
+
 async function getAthleteSummary(
   context: CoachToolContext,
 ): Promise<Record<string, unknown>> {
@@ -227,7 +249,7 @@ function processUploadedFile(
   }
 
   if (isZipUpload(resolvedContentType, filename) && objectKey !== null) {
-    return postEngine(context, "/api/engine/process-uploaded-zip", {
+    return safePostEngine(context, "/api/engine/process-uploaded-zip", {
       content_type: resolvedContentType,
       filename,
       object_key: objectKey,
@@ -236,14 +258,12 @@ function processUploadedFile(
   }
 
   if (isValidActivityUpload(resolvedContentType, filename, objectKey)) {
-    const payload = {
+    return safePostEngine(context, "/api/engine/process-uploaded-file", {
       content_type: resolvedContentType,
       filename,
       object_key: objectKey,
       public_url: publicUrl,
-    };
-
-    return postEngine(context, "/api/engine/process-uploaded-file", payload);
+    });
   }
 
   return null;

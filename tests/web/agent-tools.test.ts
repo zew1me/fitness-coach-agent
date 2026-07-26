@@ -1114,4 +1114,70 @@ describe("coachToolDefinitions", () => {
       "preview-bypass",
     );
   });
+
+  it("returns an error result instead of throwing when the engine rejects a .fit upload", async () => {
+    const fetchImpl = (): Promise<Response> =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            detail:
+              "Could not resolve the file reference in storage. Do not retry this file; report it to the athlete.",
+          }),
+          { status: 404 },
+        ),
+      );
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/vnd.garmin.fit",
+      filename: "ride.fit",
+      object_key: "users/athlete-1/chat-attachment/2026/07/06/ride.fit",
+      public_url: "https://cdn.example.com/ride.fit",
+    });
+
+    expect(result).toEqual({
+      detail: expect.stringContaining("could not be processed"),
+      status: "error",
+    });
+    // Every coach tool is disabled for the rest of the turn once one has run,
+    // so an affirmative retry instruction is unfollowable and strands the model
+    // on its remaining turns until maxTurns throws (Sentry 7633993901).
+    const detail = (result as { detail: string }).detail;
+    expect(detail).toContain("Do not retry");
+    expect(detail).not.toMatch(/retry (with|using)/i);
+  });
+
+  it("returns an error result instead of throwing when the engine rejects a .zip upload", async () => {
+    const fetchImpl = (): Promise<Response> =>
+      Promise.resolve(new Response("Internal Server Error", { status: 500 }));
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/zip",
+      filename: "rides.zip",
+      object_key: "users/athlete-1/chat-attachment/2026/07/06/rides.zip",
+      public_url: "https://cdn.example.com/rides.zip",
+    });
+
+    expect(result).toEqual({
+      detail: expect.stringContaining("could not be processed"),
+      status: "error",
+    });
+  });
 });
