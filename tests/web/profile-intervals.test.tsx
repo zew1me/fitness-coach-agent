@@ -16,6 +16,7 @@ const coachApiMocks = vi.hoisted(() => ({
   disconnectIntervals: vi.fn(),
   disconnectStrava: vi.fn(),
   fetchBrowserToken: vi.fn(),
+  loadAthleteSummary: vi.fn(),
   loadFitnessMetrics: vi.fn(),
   loadIntervalsStatus: vi.fn(),
   loadStravaStatus: vi.fn(),
@@ -46,6 +47,14 @@ beforeEach(() => {
     user_id: "coach-user-1",
   });
   coachApiMocks.loadFitnessMetrics.mockResolvedValue(EMPTY_METRICS);
+  coachApiMocks.loadAthleteSummary.mockResolvedValue({
+    fitnessMetrics: EMPTY_METRICS,
+    profile: {
+      coaching_state: "active",
+      primary_sports: ["cycling"],
+      user_id: "coach-user-1",
+    },
+  });
   coachApiMocks.loadIntervalsStatus.mockResolvedValue({
     connected: false,
     scopes: [],
@@ -79,7 +88,7 @@ describe("ProfilePage Intervals.icu connection", () => {
   });
 
   it("shows a status card when profile loading fails", async () => {
-    coachApiMocks.loadFitnessMetrics.mockRejectedValueOnce(
+    coachApiMocks.loadAthleteSummary.mockRejectedValueOnce(
       new Error("Fitness service unavailable."),
     );
 

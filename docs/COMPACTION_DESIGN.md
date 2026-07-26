@@ -139,6 +139,9 @@ Safety guard: if `responses.compact` returns an empty array the method **throws*
 rather than replacing durable context with nothing. This prevents a model error
 or API glitch from silently erasing the conversation.
 
+Compaction defaults to `gpt-5.6-luna`, the cost-sensitive GPT-5.6 tier, unless
+the session supplies an explicit model override.
+
 **`previous_response_id` is never sent to `responses.compact`.** This session's
 `input` (built by `buildCompactionInput` from the Supabase-stored `items`) is
 always the complete, authoritative history — this app doesn't rely on
