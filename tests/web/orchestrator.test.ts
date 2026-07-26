@@ -67,8 +67,13 @@ const orchestratorMocks = vi.hoisted(() => {
     run = agentsRun;
   }
 
+  // Mirrors the real export so `instanceof` narrowing in the orchestrator's
+  // max-turns catch behaves the same way here as it does in production.
+  class MaxTurnsExceededError extends Error {}
+
   return {
     Agent,
+    MaxTurnsExceededError,
     Runner,
     agentConfigs,
     agentsRun,
@@ -82,6 +87,7 @@ const orchestratorMocks = vi.hoisted(() => {
 
 vi.mock("@openai/agents", () => ({
   Agent: orchestratorMocks.Agent,
+  MaxTurnsExceededError: orchestratorMocks.MaxTurnsExceededError,
   MCPServerStreamableHttp: class MCPServerStreamableHttp {},
   Runner: orchestratorMocks.Runner,
   tool: vi.fn((definition: Record<string, unknown>) => ({
@@ -734,6 +740,84 @@ describe("streamCoachTurn", () => {
         }),
       ]),
     );
+  });
+
+  it("reports completed tool work instead of the error message when max turns is exceeded", async () => {
+    // Sentry 7633993901: 12 process_uploaded_file calls ran and 11 succeeded,
+    // then the runner threw MaxTurnsExceededError. The throw skipped both the
+    // acknowledgement follow-up and the deterministic fallback, so the athlete
+    // saw "Coach is unavailable" and every processed file was discarded.
+    const maxTurns = new orchestratorMocks.MaxTurnsExceededError(
+      "Max turns (4) exceeded",
+    );
+    orchestratorMocks.agentsRun.mockImplementationOnce(() =>
+      Promise.resolve({
+        // The SDK surfaces a max-turns failure through `completed`; the event
+        // stream itself ends normally, having already emitted the tool calls.
+        completed: Promise.reject(maxTurns),
+        finalOutput: "",
+        output: [{ role: "assistant", content: "processed 11 files" }],
+        state: { usage: undefined },
+        *[Symbol.asyncIterator](): Generator<AgentEvent, void, unknown> {
+          // no further events: the run died before producing assistant text
+        },
+      }),
+    );
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+    });
+
+    await response.text();
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    const body = JSON.parse(String(persistCall?.[1]?.body)) as {
+      parts: Array<Record<string, unknown>>;
+    };
+    const text = body.parts
+      .filter((part) => part["type"] === "text")
+      .map((part) => String(part["text"]))
+      .join(" ");
+
+    expect(text).not.toContain("Coach is unavailable");
+    expect(text.length).toBeGreaterThan(0);
+  });
+
+  it("still propagates non-max-turns errors from the lead run", async () => {
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(new Error("rate limit"));
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+    });
+
+    await response.text();
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain("Coach is unavailable");
   });
 
   it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {
