@@ -98,14 +98,14 @@ liveDescribe("real OpenAI durable-session continuity", () => {
       latestUserTurn: latest,
       coachingMemory: [],
       athleteContext: athleteContextFixture,
-      model: "gpt-5.4-mini",
+      model: "gpt-5.6-luna",
     });
     expect(plan.delegations.length).toBeLessThanOrEqual(2);
     expect(plan.delegations.map((item) => item.role)).toContain("recovery");
 
     const lead = new Agent({
       name: "Continuity verifier",
-      model: "gpt-5.4-mini",
+      model: "gpt-5.6-luna",
       instructions: `Answer the latest turn using the durable context and this delegation plan: ${JSON.stringify(plan)}. Explicitly name the relevant prior issue.`,
     });
     const result = await run(lead, [...reloaded, ...latest], { maxTurns: 1 });

@@ -48,7 +48,7 @@ describe("DurableCompactionSession", () => {
     expect(client.responses.compact).toHaveBeenCalledWith(
       expect.objectContaining({
         input: [userItem("old")],
-        model: "gpt-5.4-mini",
+        model: "gpt-5.6-luna",
       }),
     );
     expect(underlying.replaceAll).toHaveBeenCalledWith(

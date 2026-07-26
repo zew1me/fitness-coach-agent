@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import { coachToolDefinitions } from "../../lib/agent/tools";
 
-const MODEL = "gpt-5-mini-2025-08-07";
+const MODEL = "gpt-5.6-luna";
 
 const PING_INPUT = [
   {
