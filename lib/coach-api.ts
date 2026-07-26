@@ -193,12 +193,24 @@ async function authorizedFetch<T>(
   return readJson<T>(response);
 }
 
-export async function loadProfile(
+type AthleteSummaryResponse = {
+  profile: AthleteProfile;
+  fitness_metrics: FitnessMetrics;
+};
+
+type AthleteSummary = {
+  profile: AthleteProfile;
+  fitnessMetrics: FitnessMetrics;
+};
+
+// `/api/engine/get-athlete-summary` returns both the profile and the fitness
+// metrics in one payload. Callers that need both (e.g. the profile page) should
+// use this loader so the endpoint is hit once instead of twice.
+export async function loadAthleteSummary(
   userId: string,
   fetchImpl: FetchLike = fetch,
-): Promise<AthleteProfile> {
-  type SummaryResponse = { profile: AthleteProfile };
-  const summary = await authorizedFetch<SummaryResponse>(
+): Promise<AthleteSummary> {
+  const summary = await authorizedFetch<AthleteSummaryResponse>(
     "/api/engine/get-athlete-summary",
     {
       method: "POST",
@@ -206,6 +218,14 @@ export async function loadProfile(
     },
     fetchImpl,
   );
+  return { profile: summary.profile, fitnessMetrics: summary.fitness_metrics };
+}
+
+export async function loadProfile(
+  userId: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<AthleteProfile> {
+  const summary = await loadAthleteSummary(userId, fetchImpl);
   return summary.profile;
 }
 
@@ -213,16 +233,8 @@ export async function loadFitnessMetrics(
   userId: string,
   fetchImpl: FetchLike = fetch,
 ): Promise<FitnessMetrics> {
-  type SummaryResponse = { fitness_metrics: FitnessMetrics };
-  const summary = await authorizedFetch<SummaryResponse>(
-    "/api/engine/get-athlete-summary",
-    {
-      method: "POST",
-      body: JSON.stringify({ user_id: userId }),
-    },
-    fetchImpl,
-  );
-  return summary.fitness_metrics;
+  const summary = await loadAthleteSummary(userId, fetchImpl);
+  return summary.fitnessMetrics;
 }
 
 export async function loadIntervalsStatus(
