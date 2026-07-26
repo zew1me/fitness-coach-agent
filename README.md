@@ -17,6 +17,7 @@ ChatGPT-first endurance coaching app scaffold with:
 - `backend/`: Python domain, services, and repository glue
 - `tests/web/`: TypeScript tests
 - `tests/python/`: Python tests
+- `scripts/`: local development and personal-data tools
 
 ## Tooling
 
@@ -49,6 +50,12 @@ uv run ty check
 uv run vulture
 uv run pytest
 ```
+
+## Local personal-data tools
+
+Local Garmin FIT downloads can be copied to Google Drive or another rclone remote with the
+non-destructive backup adapter. See [`docs/local-data-backup.md`](docs/local-data-backup.md) for
+rclone setup, configuration, dry-run, and backup commands.
 
 ## R2 Uploads
 
