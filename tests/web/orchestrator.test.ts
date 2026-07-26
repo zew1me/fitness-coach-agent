@@ -750,16 +750,23 @@ describe("streamCoachTurn", () => {
     const maxTurns = new orchestratorMocks.MaxTurnsExceededError(
       "Max turns (4) exceeded",
     );
+    // Mirrors StreamedRunResult._raiseError (@openai/agents-core result.js:252):
+    // it errors the readable controller *and* rejects `completed`, then attaches
+    // its own catch so the rejection is already observed. Reproducing all three
+    // matters — the orchestrator swallows the iterator throw and never awaits
+    // `completed`, so an unguarded rejection here would be unhandled. It isn't,
+    // because the SDK guards it at the source.
+    const completed = Promise.reject(maxTurns);
+    completed.catch(() => {});
     orchestratorMocks.agentsRun.mockImplementationOnce(() =>
       Promise.resolve({
-        // The SDK surfaces a max-turns failure through `completed`; the event
-        // stream itself ends normally, having already emitted the tool calls.
-        completed: Promise.reject(maxTurns),
+        completed,
         finalOutput: "",
         output: [{ role: "assistant", content: "processed 11 files" }],
         state: { usage: undefined },
+        // eslint-disable-next-line require-yield
         *[Symbol.asyncIterator](): Generator<AgentEvent, void, unknown> {
-          // no further events: the run died before producing assistant text
+          throw maxTurns;
         },
       }),
     );
