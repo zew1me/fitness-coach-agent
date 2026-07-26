@@ -8,6 +8,7 @@ Run with::
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import re
@@ -136,6 +137,13 @@ def _should_skip_existing(target: Path, *, overwrite: bool) -> bool:
     return True
 
 
+def _mkdir_private(path: Path) -> None:
+    """Create path and any missing parent directories, securing each newly created one to 0700."""
+    for part in (*reversed(path.parents), path):
+        with contextlib.suppress(FileExistsError):
+            part.mkdir(mode=0o700)
+
+
 def _write_private_atomic(path: Path, payload: bytes) -> None:
     """Atomically write a private file in its destination directory."""
     temporary_path: Path | None = None
@@ -163,7 +171,7 @@ def download_fit_activities(
     overwrite: bool = False,
 ) -> DownloadSummary:
     """Download all available activities in an inclusive date window."""
-    output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _mkdir_private(output_dir)
     if not output_dir.is_dir():
         raise ValueError(f"output path is not a directory: {output_dir}")
 
@@ -234,7 +242,7 @@ def authenticate(*, token_store: Path, email: str | None) -> Garmin:
         password=password,
         prompt_mfa=lambda: typer.prompt("Garmin MFA code").strip(),
     )
-    token_store.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _mkdir_private(token_store)
     try:
         client.login(str(token_store))
     finally:

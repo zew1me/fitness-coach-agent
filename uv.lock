@@ -345,12 +345,11 @@ garmin = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "garminconnect" },
+    { name = "exercise-training-plan-gpt", extra = ["garmin"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
     { name = "ty" },
-    { name = "typer" },
     { name = "vulture" },
 ]
 
@@ -377,12 +376,11 @@ provides-extras = ["garmin"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "garminconnect", specifier = ">=0.3.6,<0.4.0" },
+    { name = "exercise-training-plan-gpt", extras = ["garmin"] },
     { name = "pytest", specifier = ">=8.3.5,<9.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.25.3,<0.26.0" },
     { name = "ruff", specifier = ">=0.11.0,<0.12.0" },
     { name = "ty", specifier = ">=0.0.1a4" },
-    { name = "typer", specifier = ">=0.16.0,<1.0.0" },
     { name = "vulture", specifier = ">=2.14,<3.0" },
 ]
 
