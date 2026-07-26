@@ -89,7 +89,17 @@ def test_validate_vision_model_rejects_non_reasoning_models(model_name: str) -> 
 
 @pytest.mark.parametrize(
     "model_name",
-    ["o1", "o1-mini", "o3", "o3-mini", "o4-mini", "gpt-5", "gpt-5-mini", "gpt-5.4-mini"],
+    [
+        "o1",
+        "o1-mini",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5.4-mini",
+        "gpt-5.6-luna",
+    ],
 )
 def test_validate_vision_model_accepts_reasoning_models(model_name: str) -> None:
     s = Settings(openai_vision_model=model_name)
@@ -110,7 +120,16 @@ def test_validate_activity_text_model_rejects_empty(model_name: str) -> None:
 
 @pytest.mark.parametrize(
     "model_name",
-    ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "davinci", "gpt-5.4-mini", "o4-mini"],
+    [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "davinci",
+        "gpt-5.4-mini",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "o4-mini",
+    ],
 )
 def test_validate_activity_text_model_accepts_any_non_empty_model(model_name: str) -> None:
     s = Settings(openai_activity_text_model=model_name)
