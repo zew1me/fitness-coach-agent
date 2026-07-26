@@ -35,7 +35,7 @@ import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
 import { coachToolDefinitions } from "../../lib/agent/tools";
 import { athleteContextFixture } from "../web/agent-fixtures";
 
-const MODEL = "gpt-5-mini-2025-08-07";
+const MODEL = "gpt-5.6-luna";
 
 const MINIMAL_USER_INPUT = [
   {
@@ -417,7 +417,7 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
   }, 60_000);
 
   it("compacts a real reasoning-model run's history, including provider-attached metadata, without a 400", async () => {
-    // gpt-5.4-mini (the production compaction model) is a reasoning model, so
+    // gpt-5.6-luna (the production compaction model) is a reasoning model, so
     // a real tool-using turn against it produces reasoning items and
     // function_call/function_call_output items that the SDK stamps with its
     // own providerData — this is the actual shape stored in

@@ -74,7 +74,7 @@ export type StreamCoachTurnOptions = StreamCoachTurnBaseOptions &
   );
 
 const MAX_COACH_STEPS = 4;
-const MODEL = "gpt-5.4-mini";
+const MODEL = "gpt-5.6-luna";
 const LAZY_SEED_TOKEN_BUDGET = 200_000;
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 export const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;

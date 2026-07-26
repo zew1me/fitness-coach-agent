@@ -241,7 +241,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     const trigger: CompactionTrigger = args.force === true ? "forced" : "auto";
     const compacted = await this.client.responses.compact({
       ...toOpenAICompactOptions(args),
-      model: this.options.model ?? "gpt-5.4-mini",
+      model: this.options.model ?? "gpt-5.6-luna",
       input: buildCompactionInput(items, (item) =>
         this.prepareHistoryItemForModelInput(item),
       ),

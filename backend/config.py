@@ -17,7 +17,7 @@ _REASONING_CAPABLE_MODEL_PREFIXES: frozenset[str] = frozenset(
         "o1",  # o1, o1-mini, o1-preview — and newer o1 variants
         "o3",  # o3, o3-mini — and newer o3 variants
         "o4",  # o4-mini — and newer o4 variants
-        "gpt-5",  # gpt-5, gpt-5-mini, gpt-5.4-mini — and newer gpt-5 variants
+        "gpt-5",  # gpt-5, gpt-5-mini, gpt-5.6-luna — and newer gpt-5 variants
     }
 )
 
@@ -27,9 +27,9 @@ class Settings(BaseSettings):
     app_base_url: str = ""  # leave blank on Vercel preview; set explicitly for production
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None
-    openai_activity_text_model: str = "gpt-5.5"
+    openai_activity_text_model: str = "gpt-5.6-sol"
     openai_activity_text_timeout_seconds: float = 60.0
-    openai_vision_model: str = "gpt-5.4-mini"
+    openai_vision_model: str = "gpt-5.6-luna"
     openai_vision_timeout_seconds: float = 45.0
     # gpt-5.x vision is a reasoning model: reasoning draws down the output budget, so keep
     # this generous — a truncated response is invalid even under strict structured outputs.
