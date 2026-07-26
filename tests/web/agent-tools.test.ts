@@ -1121,7 +1121,7 @@ describe("coachToolDefinitions", () => {
         new Response(
           JSON.stringify({
             detail:
-              "Could not resolve the file reference in storage. Retry with the exact public_url from the upload confirmation.",
+              "Could not resolve the file reference in storage. Do not retry this file; report it to the athlete.",
           }),
           { status: 404 },
         ),
@@ -1144,9 +1144,15 @@ describe("coachToolDefinitions", () => {
     });
 
     expect(result).toEqual({
-      detail: expect.stringContaining("Could not resolve the file reference"),
+      detail: expect.stringContaining("could not be processed"),
       status: "error",
     });
+    // Every coach tool is disabled for the rest of the turn once one has run,
+    // so an affirmative retry instruction is unfollowable and strands the model
+    // on its remaining turns until maxTurns throws (Sentry 7633993901).
+    const detail = (result as { detail: string }).detail;
+    expect(detail).toContain("Do not retry");
+    expect(detail).not.toMatch(/retry (with|using)/i);
   });
 
   it("returns an error result instead of throwing when the engine rejects a .zip upload", async () => {
@@ -1170,7 +1176,7 @@ describe("coachToolDefinitions", () => {
     });
 
     expect(result).toEqual({
-      detail: expect.stringContaining("Could not resolve the file reference"),
+      detail: expect.stringContaining("could not be processed"),
       status: "error",
     });
   });

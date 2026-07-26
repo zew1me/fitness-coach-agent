@@ -4341,7 +4341,12 @@ async def test_process_uploaded_file_returns_404_on_no_such_key(
         )
 
     assert response.status_code == 404
-    assert "Could not resolve the file reference" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "Could not resolve the file reference" in detail
+    # Must steer the coach away from retrying: its tools are all disabled for
+    # the rest of the turn once one has run, so a retry is unfollowable and
+    # strands the model until maxTurns throws (Sentry 7633993901).
+    assert "Do not retry" in detail
 
 
 @pytest.mark.asyncio
@@ -4379,4 +4384,9 @@ async def test_process_uploaded_zip_returns_404_on_no_such_key(
         )
 
     assert response.status_code == 404
-    assert "Could not resolve the file reference" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "Could not resolve the file reference" in detail
+    # Must steer the coach away from retrying: its tools are all disabled for
+    # the rest of the turn once one has run, so a retry is unfollowable and
+    # strands the model until maxTurns throws (Sentry 7633993901).
+    assert "Do not retry" in detail

@@ -60,11 +60,16 @@ async function safePostEngine<TInput extends object>(
   try {
     return await postEngine(context, path, input);
   } catch {
+    // Deliberately cause-neutral: this catch also covers timeouts and auth
+    // failures, so it must not assert why the upload failed. It must also not
+    // instruct a retry — every coach tool is disabled for the rest of the turn
+    // once one has run (see the isEnabled gate in createAgentCoachTools), so a
+    // retry is structurally impossible and only burns turns against maxTurns.
     return {
       status: "error",
       detail:
-        "Could not resolve the file reference in storage. " +
-        "Retry with the exact public_url from the upload confirmation.",
+        "This upload could not be processed. Do not retry it in this turn; " +
+        "tell the athlete which file did not load.",
     };
   }
 }

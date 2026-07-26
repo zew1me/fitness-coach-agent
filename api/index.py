@@ -242,9 +242,12 @@ async def _handle_s3_client_error(
         return JSONResponse(
             status_code=HTTPStatus.NOT_FOUND,
             content={
+                # No retry instruction: the caller's coach tools are all disabled
+                # for the remainder of the turn once one has run, so advising a
+                # retry only strands the model against its turn limit.
                 "detail": (
                     "Could not resolve the file reference in storage. "
-                    "Retry with the exact public_url from the upload confirmation."
+                    "Do not retry this file; report it to the athlete."
                 ),
             },
         )
