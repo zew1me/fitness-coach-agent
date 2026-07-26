@@ -16,6 +16,7 @@ from typing import Literal, cast
 from urllib.parse import urlencode
 from uuid import UUID
 
+import botocore.exceptions
 import httpx
 import sentry_sdk
 from fastapi import (
@@ -228,6 +229,33 @@ async def _handle_postgrest_error(request: Request, exc: PostgRESTAPIError) -> J
         # Client fault (bad input / conflict): expected, not an incident — log at info.
         logger.info("PostgREST client-fault path=%s code=%s -> %s", safe_path, code, status)
     return JSONResponse(status_code=status, content={"detail": _POSTGREST_STATUS_DETAIL[status]})
+
+
+@app.exception_handler(botocore.exceptions.ClientError)
+async def _handle_s3_client_error(
+    request: Request, exc: botocore.exceptions.ClientError
+) -> JSONResponse:
+    error_code = exc.response.get("Error", {}).get("Code", "")
+    safe_path = request.url.path.encode("unicode_escape").decode("ascii")
+    if error_code == "NoSuchKey":
+        logger.warning("R2 NoSuchKey path=%s", safe_path, exc_info=exc)
+        return JSONResponse(
+            status_code=HTTPStatus.NOT_FOUND,
+            content={
+                # No retry instruction: the caller's coach tools are all disabled
+                # for the remainder of the turn once one has run, so advising a
+                # retry only strands the model against its turn limit.
+                "detail": (
+                    "Could not resolve the file reference in storage. "
+                    "Do not retry this file; report it to the athlete."
+                ),
+            },
+        )
+    logger.error("R2 ClientError path=%s code=%s", safe_path, error_code, exc_info=exc)
+    return JSONResponse(
+        status_code=HTTPStatus.BAD_GATEWAY,
+        content={"detail": "File storage is temporarily unavailable."},
+    )
 
 
 auth_service = AuthService()

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Literal, TypedDict, cast
 
+import botocore.exceptions
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient, HTTPError
@@ -4296,3 +4297,96 @@ async def test_chat_turn_lease_acquire_and_release(model_state_chat_service_fixt
     assert renewed.json()["lease_expires_at"] == "2026-07-10T00:00:00Z"
     assert released.status_code == 200
     assert released.json()["lease_id"] is None
+
+
+def _make_no_such_key_error() -> botocore.exceptions.ClientError:
+    return botocore.exceptions.ClientError(
+        {"Error": {"Code": "NoSuchKey", "Message": "The specified key does not exist."}},
+        "GetObject",
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_file_returns_404_on_no_such_key(
+    auth_service_fixture, monkeypatch
+) -> None:
+    async def mock_download_raises(*, user_id: str, object_key: str) -> bytes:
+        raise _make_no_such_key_error()
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_raises)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        set_cookie = session_response.headers["set-cookie"]
+        cookie_value = set_cookie.split("coach_browser_session=")[1].split(";")[0]
+        token_body = (
+            await client.post(
+                "/api/oauth/browser-token",
+                cookies={"coach_browser_session": cookie_value},
+            )
+        ).json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/vnd.garmin.fit",
+                "filename": "ride.fit",
+                "object_key": "users/athlete-1/chat-attachment/2024/01/01/ride.fit",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "Could not resolve the file reference" in detail
+    # Must steer the coach away from retrying: its tools are all disabled for
+    # the rest of the turn once one has run, so a retry is unfollowable and
+    # strands the model until maxTurns throws (Sentry 7633993901).
+    assert "Do not retry" in detail
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_returns_404_on_no_such_key(
+    auth_service_fixture, monkeypatch
+) -> None:
+    async def mock_download_raises(*, user_id: str, object_key: str) -> bytes:
+        raise _make_no_such_key_error()
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_raises)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        set_cookie = session_response.headers["set-cookie"]
+        cookie_value = set_cookie.split("coach_browser_session=")[1].split(";")[0]
+        token_body = (
+            await client.post(
+                "/api/oauth/browser-token",
+                cookies={"coach_browser_session": cookie_value},
+            )
+        ).json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-zip",
+            json={
+                "content_type": "application/zip",
+                "filename": "rides.zip",
+                "object_key": "users/athlete-1/chat-attachment/2024/01/01/rides.zip",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "Could not resolve the file reference" in detail
+    # Must steer the coach away from retrying: its tools are all disabled for
+    # the rest of the turn once one has run, so a retry is unfollowable and
+    # strands the model until maxTurns throws (Sentry 7633993901).
+    assert "Do not retry" in detail
