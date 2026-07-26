@@ -1,4 +1,4 @@
-# Local Garmin Connect FIT downloader
+# Local Garmin Connect data downloader
 
 The Garmin sidecar is a **local, personal-use workaround** built on
 [`cyberjunky/python-garminconnect`](https://github.com/cyberjunky/python-garminconnect). It is
@@ -6,8 +6,9 @@ separate from the planned first-party Garmin integration in GitHub issue #339. G
 not a supported public API, and Garmin can change or block these login/download flows at any time.
 Treat authentication failures as recoverable sync outages.
 
-The current implementation is local-only. It does not upload activities or Garmin tokens to the
-fitness coach server. Server upload is tracked separately under issue #388.
+The current implementation is local-only. It downloads activity FIT files and daily sleep JSON. It
+does not upload Garmin data or tokens to the fitness coach server. Server upload is tracked
+separately under issue #388.
 
 ## Install
 
@@ -48,7 +49,25 @@ discarded after login, and never written by this project. Renewable tokens are t
 authentication material persisted; the CLI restricts the token directory to mode `0700` and the
 token file to `0600` where the operating system supports POSIX permissions.
 
-Use a different private token directory if needed:
+## Download sleep data
+
+Garmin exposes sleep through a daily endpoint rather than one range endpoint, so the CLI makes one
+request for each date in the inclusive window and preserves each complete response as
+`YYYY-MM-DD.json`:
+
+```bash
+uv run --extra garmin python -m scripts.garmin_connect sleep \
+  2026-07-01 2026-07-07 \
+  --output-dir downloads/garmin-sleep
+```
+
+Garmin assigns overnight sleep to a calendar date in its response; the filename is the date passed
+to Garmin. Existing files are skipped unless `--overwrite` is supplied. Start with a short window
+to avoid unnecessary requests or rate limiting. Sleep JSON is sensitive health data and should not
+be committed or placed in a shared directory.
+
+Both commands reuse the same authentication tokens. Use a different private token directory if
+needed:
 
 ```bash
 uv run --extra garmin python -m scripts.garmin_connect download \

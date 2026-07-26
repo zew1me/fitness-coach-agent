@@ -1,4 +1,4 @@
-"""Local Garmin Connect activity downloader.
+"""Local Garmin Connect activity and sleep data downloader.
 
 Run with::
 
@@ -9,12 +9,13 @@ Run with::
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Protocol
 
@@ -27,7 +28,7 @@ from garminconnect import (
 )
 
 app = typer.Typer(
-    help="Download original Garmin Connect activities to local FIT files.",
+    help="Download Garmin Connect activity FIT files and sleep data locally.",
     no_args_is_help=True,
 )
 _TOKEN_FILENAME = "garmin_tokens.json"
@@ -37,7 +38,7 @@ _FIT_HEADER_SIZES = {12, 14}
 
 
 class GarminActivityClient(Protocol):
-    """Narrow subset of python-garminconnect used by the downloader."""
+    """Narrow activity subset of python-garminconnect used by the downloader."""
 
     def get_activities_by_date(
         self,
@@ -50,6 +51,12 @@ class GarminActivityClient(Protocol):
     def download_activity(self, activity_id: str, dl_fmt: Any = ...) -> bytes: ...
 
 
+class GarminSleepClient(Protocol):
+    """Narrow sleep subset of python-garminconnect used by the downloader."""
+
+    def get_sleep_data(self, cdate: str) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class ActivityFailure:
     """One activity that could not be downloaded or materialized."""
@@ -60,11 +67,28 @@ class ActivityFailure:
 
 @dataclass
 class DownloadSummary:
-    """Aggregate result for one date-window download."""
+    """Aggregate result for one activity date-window download."""
 
     downloaded: list[Path] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
     failures: list[ActivityFailure] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SleepFailure:
+    """One Garmin calendar date whose sleep response could not be saved."""
+
+    sleep_date: date
+    message: str
+
+
+@dataclass
+class SleepDownloadSummary:
+    """Aggregate result for one sleep date-window download."""
+
+    downloaded: list[Path] = field(default_factory=list)
+    skipped: list[Path] = field(default_factory=list)
+    failures: list[SleepFailure] = field(default_factory=list)
 
 
 def parse_date_window(start: str, end: str) -> tuple[date, date]:
@@ -184,6 +208,12 @@ def download_fit_activities(
             payload = fit_payload_from_original(original)
             _write_private_atomic(target, payload)
             summary.downloaded.append(target)
+        except (
+            GarminConnectAuthenticationError,
+            GarminConnectConnectionError,
+            GarminConnectTooManyRequestsError,
+        ):
+            raise
         except Exception as exc:
             raw_id = activity.get("activityId")
             summary.failures.append(
@@ -192,6 +222,48 @@ def download_fit_activities(
                     message=str(exc),
                 )
             )
+
+    return summary
+
+
+def _inclusive_dates(start: date, end: date) -> list[date]:
+    return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+
+
+def download_sleep_data(
+    client: GarminSleepClient,
+    *,
+    start: date,
+    end: date,
+    output_dir: Path,
+    overwrite: bool = False,
+) -> SleepDownloadSummary:
+    """Download Garmin's lossless daily sleep JSON for an inclusive date window."""
+    output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not output_dir.is_dir():
+        raise ValueError(f"output path is not a directory: {output_dir}")
+
+    summary = SleepDownloadSummary()
+    for sleep_date in _inclusive_dates(start, end):
+        target = output_dir / f"{sleep_date.isoformat()}.json"
+        try:
+            if _should_skip_existing(target, overwrite=overwrite):
+                summary.skipped.append(target)
+                continue
+
+            response = client.get_sleep_data(sleep_date.isoformat())
+            payload = json.dumps(response, ensure_ascii=False, indent=2, sort_keys=True).encode()
+            _write_private_atomic(target, payload + b"\n")
+            summary.downloaded.append(target)
+        except (
+            GarminConnectAuthenticationError,
+            GarminConnectConnectionError,
+            GarminConnectTooManyRequestsError,
+        ):
+            # Stop the range immediately rather than amplifying an outage or rate limit.
+            raise
+        except Exception as exc:
+            summary.failures.append(SleepFailure(sleep_date=sleep_date, message=str(exc)))
 
     return summary
 
@@ -325,6 +397,82 @@ def download(
         typer.echo(f"downloaded {path}")
     for failure in summary.failures:
         typer.secho(f"failed {failure.activity_id}: {failure.message}", fg="red", err=True)
+
+    typer.echo(
+        f"Summary: {len(summary.downloaded)} downloaded, "
+        f"{len(summary.skipped)} skipped, {len(summary.failures)} failed."
+    )
+    if summary.failures:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def sleep(
+    start: Annotated[str, typer.Argument(help="Inclusive start date (YYYY-MM-DD).")],
+    end: Annotated[str, typer.Argument(help="Inclusive end date (YYYY-MM-DD).")],
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            "-o",
+            help="Directory for YYYY-MM-DD.json sleep responses.",
+        ),
+    ] = Path("downloads/garmin-sleep"),
+    token_store: Annotated[
+        Path,
+        typer.Option(
+            "--token-store",
+            help="Private python-garminconnect token directory.",
+        ),
+    ] = Path("~/.garminconnect"),
+    email: Annotated[
+        str | None,
+        typer.Option(
+            "--email",
+            envvar="GARMIN_EMAIL",
+            help="Garmin email. Passwords are always entered through a hidden prompt.",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite",
+            help="Replace existing daily sleep JSON files.",
+        ),
+    ] = False,
+) -> None:
+    """Download daily sleep JSON responses in an inclusive date window."""
+    try:
+        start_date, end_date = parse_date_window(start, end)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    try:
+        client = authenticate(token_store=token_store, email=email)
+        summary = download_sleep_data(
+            client,
+            start=start_date,
+            end=end_date,
+            output_dir=output_dir.expanduser(),
+            overwrite=overwrite,
+        )
+    except (
+        GarminConnectAuthenticationError,
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+        OSError,
+        ValueError,
+    ) as exc:
+        message = _setup_error_message(exc)
+        typer.secho(message, fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+
+    for path in summary.downloaded:
+        typer.echo(f"downloaded {path}")
+    for failure in summary.failures:
+        typer.secho(
+            f"failed {failure.sleep_date.isoformat()}: {failure.message}", fg="red", err=True
+        )
 
     typer.echo(
         f"Summary: {len(summary.downloaded)} downloaded, "

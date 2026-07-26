@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import stat
 import zipfile
 from datetime import date
@@ -24,6 +25,19 @@ def _original_archive(*entries: tuple[str, bytes]) -> bytes:
         for name, payload in entries:
             archive.writestr(name, payload)
     return output.getvalue()
+
+
+class FakeSleepClient:
+    def __init__(self, responses: dict[str, dict[str, Any] | Exception]) -> None:
+        self.responses = responses
+        self.calls: list[str] = []
+
+    def get_sleep_data(self, cdate: str) -> dict[str, Any]:
+        self.calls.append(cdate)
+        response = self.responses[cdate]
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class FakeGarminClient:
@@ -173,6 +187,73 @@ def test_download_fit_activities_rejects_unsafe_activity_id_and_continues(
     assert "invalid or missing" in summary.failures[0].message
 
 
+def test_download_sleep_data_is_inclusive_idempotent_private_and_partial_failure_safe(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "2026-07-01.json"
+    existing.write_text('{"existing": true}\n')
+    client = FakeSleepClient(
+        {
+            "2026-07-02": {"dailySleepDTO": {"sleepTimeSeconds": 28_800}},
+            "2026-07-03": ValueError("sleep unavailable"),
+        }
+    )
+
+    summary = garmin_connect.download_sleep_data(
+        client,
+        start=date(2026, 7, 1),
+        end=date(2026, 7, 3),
+        output_dir=tmp_path,
+    )
+
+    assert client.calls == ["2026-07-02", "2026-07-03"]
+    assert summary.skipped == [existing]
+    assert summary.downloaded == [tmp_path / "2026-07-02.json"]
+    assert [(failure.sleep_date, failure.message) for failure in summary.failures] == [
+        (date(2026, 7, 3), "sleep unavailable")
+    ]
+    assert json.loads((tmp_path / "2026-07-02.json").read_text()) == {
+        "dailySleepDTO": {"sleepTimeSeconds": 28_800}
+    }
+    assert stat.S_IMODE((tmp_path / "2026-07-02.json").stat().st_mode) == 0o600
+
+
+def test_download_sleep_data_stops_range_on_connection_failure(tmp_path: Path) -> None:
+    client = FakeSleepClient(
+        {
+            "2026-07-01": GarminConnectConnectionError("Garmin unavailable"),
+            "2026-07-02": {"shouldNot": "be requested"},
+        }
+    )
+
+    with pytest.raises(GarminConnectConnectionError, match="unavailable"):
+        garmin_connect.download_sleep_data(
+            client,
+            start=date(2026, 7, 1),
+            end=date(2026, 7, 2),
+            output_dir=tmp_path,
+        )
+
+    assert client.calls == ["2026-07-01"]
+
+
+def test_download_sleep_data_overwrites_only_when_requested(tmp_path: Path) -> None:
+    target = tmp_path / "2026-07-01.json"
+    target.write_text('{"old": true}\n')
+    client = FakeSleepClient({"2026-07-01": {"new": True}})
+
+    summary = garmin_connect.download_sleep_data(
+        client,
+        start=date(2026, 7, 1),
+        end=date(2026, 7, 1),
+        output_dir=tmp_path,
+        overwrite=True,
+    )
+
+    assert summary.downloaded == [target]
+    assert json.loads(target.read_text()) == {"new": True}
+
+
 def test_authenticate_prompts_hidden_password_then_discards_it_and_secures_tokens(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -255,6 +336,34 @@ def test_cli_reports_partial_failure_with_nonzero_exit(
     assert result.exit_code == 1
     assert f"downloaded {downloaded}" in result.output
     assert "failed 303: corrupt archive" in result.output
+    assert "Summary: 1 downloaded, 1 skipped, 1 failed." in result.output
+
+
+def test_sleep_cli_reports_partial_failure_with_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    downloaded = tmp_path / "2026-07-01.json"
+    skipped = tmp_path / "2026-07-02.json"
+
+    monkeypatch.setattr(garmin_connect, "authenticate", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        garmin_connect,
+        "download_sleep_data",
+        lambda *_args, **_kwargs: garmin_connect.SleepDownloadSummary(
+            downloaded=[downloaded],
+            skipped=[skipped],
+            failures=[garmin_connect.SleepFailure(date(2026, 7, 3), "sleep unavailable")],
+        ),
+    )
+
+    result = CliRunner().invoke(
+        garmin_connect.app,
+        ["sleep", "2026-07-01", "2026-07-03", "--output-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code == 1
+    assert f"downloaded {downloaded}" in result.output
+    assert "failed 2026-07-03: sleep unavailable" in result.output
     assert "Summary: 1 downloaded, 1 skipped, 1 failed." in result.output
 
 
