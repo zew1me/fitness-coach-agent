@@ -20,8 +20,15 @@ dependencies = [
   "uvicorn>=0.34.0,<0.35.0",
 ]
 
+[project.optional-dependencies]
+garmin = [
+    "garminconnect>=0.3.6,<0.4.0",
+    "typer>=0.16.0,<1.0.0",
+]
+
 [dependency-groups]
 dev = [
+  "exercise-training-plan-gpt[garmin]",
   "pytest>=8.3.5,<9.0.0",
   "pytest-asyncio>=0.25.3,<0.26.0",
   "ruff>=0.11.0,<0.12.0",
@@ -53,6 +60,8 @@ select = [
   "W"
 ]
 ignore = [
+  # API and repository errors intentionally carry context-specific messages at each raise site;
+  # dedicated exception classes for every message would add indirection without reuse.
   "TRY003"
 ]
 
@@ -60,8 +69,14 @@ ignore = [
 max-complexity = 8
 
 [tool.ruff.lint.per-file-ignores]
+# FastAPI uses Depends() and File() calls in parameter defaults to declare request injection.
 "api/**/*.py" = ["B008"]
+# Each parameter is a user-facing Typer argument or option, so keeping the command signature flat
+# is clearer than wrapping its six CLI inputs in an internal configuration object.
+"scripts/garmin_connect.py" = ["PLR0913"]
+# Vercel requires this bracketed route filename and its sole import exists to export the ASGI app.
 "api/[...route].py" = ["F401", "N999"]
+# Pytest assertions, literal expected values, and explicit fixture/helper inputs are clearest in tests.
 "tests/python/**/*.py" = [
   "PLR2004",
   "PLR0913",
@@ -78,7 +93,10 @@ include = ["api", "backend", "scripts", "tests/python"]
 [tool.vulture]
 paths = ["api", "backend", "scripts", "tests/python"]
 min_confidence = 80
-ignore_names = ["cls"]
+# `activitytype` and `dl_fmt` retain python-garminconnect's keyword names so Garmin satisfies our
+# Protocol and keyword calls type-check; Vulture sees only their stub declarations. `cls` is the
+# conventional receiver name for class-level validators.
+ignore_names = ["activitytype", "cls", "dl_fmt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

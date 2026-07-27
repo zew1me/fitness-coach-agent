@@ -50,6 +50,18 @@ uv run vulture
 uv run pytest
 ```
 
+### Local Garmin FIT downloader
+
+An optional, local-only Typer CLI downloads original Garmin Connect activities by inclusive date
+window. It stores renewable Garmin tokens but never stores the user's password. See
+[`docs/garmin-sidecar.md`](docs/garmin-sidecar.md) for setup, security constraints, and live testing.
+
+```bash
+uv sync --extra garmin
+uv run --extra garmin python -m scripts.garmin_connect download \
+  2026-07-01 2026-07-31 --output-dir downloads/garmin-fit
+```
+
 ## R2 Uploads
 
 `POST /api/files/presign-upload` now returns a presigned `PUT` URL plus the final object key and
