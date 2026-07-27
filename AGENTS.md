@@ -242,6 +242,7 @@ You MUST pass hooks all of the time!
 
 - TypeScript strict mode; ESLint zero-warnings policy
 - Python: Ruff linting + formatting, 100-char line length, `ty` for type checking, `vulture` for dead-code detection
+- Every tool suppression or ignore (including config entries and inline directives) must have a nearby, easy-to-understand comment explaining why the rule does not apply; do not merely restate the rule
 - Zod schemas in `lib/schemas.ts` for all API validation boundaries
 - All Python async handlers use `async def`
 - Bearer token auth: clients pass `Authorization: Bearer <jwt>`; server validates via `require_user_context()`
