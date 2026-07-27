@@ -758,18 +758,43 @@ describe("streamCoachTurn", () => {
     // because the SDK guards it at the source.
     const completed = Promise.reject(maxTurns);
     completed.catch(() => {});
+    const leadOutput = [{ role: "assistant", content: "processed 11 files" }];
     orchestratorMocks.agentsRun.mockImplementationOnce(() =>
       Promise.resolve({
         completed,
         finalOutput: "",
-        output: [{ role: "assistant", content: "processed 11 files" }],
+        output: leadOutput,
         state: { usage: undefined },
-        // eslint-disable-next-line require-yield
         *[Symbol.asyncIterator](): Generator<AgentEvent, void, unknown> {
+          // A tool ran to completion before the runner hit the turn limit —
+          // this is what makes `ranTool` true and routes the salvage through
+          // the acknowledgement follow-up rather than the generic fallback.
+          yield {
+            type: "run_item_stream_event",
+            name: "tool_called",
+            item: {
+              rawItem: {
+                callId: "call-1",
+                name: "process_uploaded_file",
+                arguments: "{}",
+              },
+            },
+          } as unknown as AgentEvent;
           throw maxTurns;
         },
       }),
     );
+    // The acknowledgement follow-up is the second `run` call; it summarises the
+    // lead's completed tool work.
+    orchestratorMocks.runEventSequences.push([
+      {
+        type: "raw_model_stream_event",
+        data: {
+          type: "output_text_delta",
+          delta: "I processed 11 files from your upload.",
+        },
+      } as unknown as AgentEvent,
+    ]);
     const fetchMock = vi.fn(() =>
       Promise.resolve(new Response("{}", { status: 200 })),
     );
@@ -799,7 +824,14 @@ describe("streamCoachTurn", () => {
       .join(" ");
 
     expect(text).not.toContain("Coach is unavailable");
-    expect(text.length).toBeGreaterThan(0);
+    expect(text).toContain("I processed 11 files from your upload.");
+    // The follow-up must be handed the lead's completed output so the salvaged
+    // tool work is what gets summarised.
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
+    const followupCall = (
+      orchestratorMocks.agentsRun.mock.calls as unknown as unknown[][]
+    )[1];
+    expect(followupCall?.[1]).toEqual(leadOutput);
   });
 
   it("still propagates non-max-turns errors from the lead run", async () => {
