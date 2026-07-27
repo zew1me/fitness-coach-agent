@@ -1,25 +1,25 @@
-"""Back up a local personal-data directory through rclone.
-
-Run with::
-
-    uv run python -m scripts.self_data_backup backup --profile garmin-gdrive
-"""
+"""Back up configured local personal-data directories through rclone."""
 
 from __future__ import annotations
 
-import argparse
 import re
 import shutil
 import subprocess
-import sys
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+
+import typer
 
 _DEFAULT_CONFIG = Path("~/.config/fitness-coach-agent/backups.toml")
 _REMOTE_DESTINATION_RE = re.compile(r"^[^/:\s]+:.+$")
+
+app = typer.Typer(
+    help="Back up local personal data through rclone.",
+    no_args_is_help=True,
+)
 
 
 class BackupConfigError(ValueError):
@@ -80,8 +80,7 @@ def load_config(path: Path) -> BackupConfig:
     except tomllib.TOMLDecodeError as exc:
         raise BackupConfigError(f"invalid TOML in {expanded_path}: {exc}") from exc
 
-    version = raw.get("version")
-    if version != 1:
+    if raw.get("version") != 1:
         raise BackupConfigError("config version must be 1")
 
     raw_rclone = _table(raw.get("rclone", {}), "rclone")
@@ -185,48 +184,56 @@ def run_backup(
     return result.returncode
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Back up local personal data through rclone.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    backup = subparsers.add_parser(
-        "backup", help="Copy a configured local directory to an rclone remote."
-    )
-    backup.add_argument(
-        "--config",
-        type=Path,
-        default=_DEFAULT_CONFIG,
-        help=f"TOML configuration path (default: {_DEFAULT_CONFIG}).",
-    )
-    backup.add_argument("--profile", required=True, help="Profile name from the configuration.")
-    backup.add_argument(
-        "--source",
-        type=Path,
-        help="Override the profile source directory for this run.",
-    )
-    backup.add_argument(
-        "--dry-run", action="store_true", help="Ask rclone to report changes without copying."
-    )
-    backup.add_argument("--verbose", action="store_true", help="Enable rclone verbose output.")
-    return parser
+@app.callback()
+def cli() -> None:
+    """Manage local personal-data backups."""
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+@app.command()
+def backup(
+    profile: Annotated[
+        str,
+        typer.Option("--profile", help="Profile name from the configuration."),
+    ],
+    config_path: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            help=f"TOML configuration path (default: {_DEFAULT_CONFIG}).",
+        ),
+    ] = _DEFAULT_CONFIG,
+    source: Annotated[
+        Path | None,
+        typer.Option("--source", help="Override the profile source directory for this run."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report changes without copying."),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Enable rclone verbose output."),
+    ] = False,
+) -> None:
+    """Copy a configured local directory to an rclone remote."""
     try:
-        config = load_config(args.config)
-        return run_backup(
+        config = load_config(config_path)
+        exit_code = run_backup(
             config=config,
-            profile_name=args.profile,
+            profile_name=profile,
             options=BackupOptions(
-                source_override=args.source,
-                dry_run=args.dry_run,
-                verbose=args.verbose,
+                source_override=source,
+                dry_run=dry_run,
+                verbose=verbose,
             ),
         )
     except BackupConfigError as exc:
-        print(f"Backup configuration error: {exc}", file=sys.stderr)
-        return 2
+        typer.echo(f"Backup configuration error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if exit_code:
+        raise typer.Exit(code=exit_code)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def main() -> None:
+    """Run the Typer application."""
+    app()

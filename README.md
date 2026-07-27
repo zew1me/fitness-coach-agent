@@ -17,7 +17,8 @@ ChatGPT-first endurance coaching app scaffold with:
 - `backend/`: Python domain, services, and repository glue
 - `tests/web/`: TypeScript tests
 - `tests/python/`: Python tests
-- `scripts/`: local development and personal-data tools
+- `scripts/`: one-shot repository and development automation
+- `tools/`: installable local CLI packages in the uv workspace
 
 ## Tooling
 

@@ -25,7 +25,7 @@ Copy and edit the example backup configuration:
 
 ```bash
 mkdir -p ~/.config/fitness-coach-agent
-cp config/self-data-backup.example.toml ~/.config/fitness-coach-agent/backups.toml
+cp tools/self-data-backup/config.example.toml ~/.config/fitness-coach-agent/backups.toml
 ```
 
 The checked-in example expects Garmin downloads in `downloads/garmin-fit` and stores the contents
@@ -37,7 +37,7 @@ where the command runs. `~` is supported in source, rclone config, and CLI overr
 Preview the copy first:
 
 ```bash
-uv run python -m scripts.self_data_backup backup \
+uv run --package fitness-coach-self-data-backup self-data-backup backup \
   --profile garmin-gdrive \
   --dry-run --verbose
 ```
@@ -45,13 +45,14 @@ uv run python -m scripts.self_data_backup backup \
 Then run it without `--dry-run`:
 
 ```bash
-uv run python -m scripts.self_data_backup backup --profile garmin-gdrive
+uv run --package fitness-coach-self-data-backup self-data-backup backup \
+  --profile garmin-gdrive
 ```
 
 To back up a Garmin downloader output folder other than the configured default:
 
 ```bash
-uv run python -m scripts.self_data_backup backup \
+uv run --package fitness-coach-self-data-backup self-data-backup backup \
   --profile garmin-gdrive \
   --source /Volumes/private-activities/garmin
 ```

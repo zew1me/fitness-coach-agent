@@ -22,12 +22,19 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "fitness-coach-self-data-backup",
   "pytest>=8.3.5,<9.0.0",
   "pytest-asyncio>=0.25.3,<0.26.0",
   "ruff>=0.11.0,<0.12.0",
   "ty>=0.0.1a4",
   "vulture>=2.14,<3.0",
 ]
+
+[tool.uv.sources]
+fitness-coach-self-data-backup = { workspace = true }
+
+[tool.uv.workspace]
+members = ["tools/*"]
 
 [tool.ruff]
 line-length = 100
@@ -73,15 +80,15 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.ty.src]
-include = ["api", "backend", "scripts", "tests/python"]
+include = ["api", "backend", "scripts", "tests/python", "tools"]
 
 [tool.vulture]
-paths = ["api", "backend", "scripts", "tests/python"]
+paths = ["api", "backend", "scripts", "tests/python", "tools"]
 min_confidence = 80
 ignore_names = ["cls"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/python"]
+testpaths = ["tests/python", "tools/*/tests"]
 asyncio_mode = "auto"
 # Live OpenAI and DB integration tests are opt-in, excluded from the default run.
 addopts = "-m 'not db and not oai'"

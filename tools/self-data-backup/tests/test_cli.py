@@ -4,18 +4,21 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
-from scripts.self_data_backup import (
+from fitness_coach_self_data_backup.cli import (
     BackupConfig,
     BackupConfigError,
     BackupOptions,
     BackupProfile,
     RcloneSettings,
+    app,
     build_rclone_command,
     load_config,
-    main,
     run_backup,
 )
+from typer.testing import CliRunner
+
+cli_runner = CliRunner()
+_CONFIG_ERROR_EXIT_CODE = 2
 
 
 def _write_config(path: Path, source: Path, *, destination: str = "gdrive:backups/garmin") -> None:
@@ -103,7 +106,6 @@ def test_build_rclone_command_uses_copy_and_requested_flags(tmp_path: Path) -> N
 def test_run_backup_invokes_rclone_with_source_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    configured_source = tmp_path / "configured"
     override_source = tmp_path / "override"
     override_source.mkdir()
     config = BackupConfig(
@@ -111,7 +113,7 @@ def test_run_backup_invokes_rclone_with_source_override(
         profiles={
             "garmin": BackupProfile(
                 name="garmin",
-                source=configured_source,
+                source=tmp_path / "configured",
                 destination="gdrive:fitness/garmin",
             )
         },
@@ -122,7 +124,9 @@ def test_run_backup_invokes_rclone_with_source_override(
         calls.append(command)
         return subprocess.CompletedProcess(command, 0)
 
-    monkeypatch.setattr("scripts.self_data_backup.shutil.which", lambda _: "/usr/bin/rclone")
+    monkeypatch.setattr(
+        "fitness_coach_self_data_backup.cli.shutil.which", lambda _: "/usr/bin/rclone"
+    )
 
     exit_code = run_backup(
         config=config,
@@ -160,13 +164,24 @@ def test_run_backup_rejects_missing_source(tmp_path: Path) -> None:
         run_backup(config=config, profile_name="garmin")
 
 
-def test_main_reports_unknown_profile(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_typer_cli_reports_unknown_profile(tmp_path: Path) -> None:
     source = tmp_path / "garmin-fit"
     source.mkdir()
     config_path = tmp_path / "backups.toml"
     _write_config(config_path, source)
 
-    exit_code = main(["backup", "--config", str(config_path), "--profile", "not-configured"])
+    result = cli_runner.invoke(
+        app,
+        ["backup", "--config", str(config_path), "--profile", "not-configured"],
+    )
 
-    assert exit_code == 2
-    assert "unknown backup profile 'not-configured'" in capsys.readouterr().err
+    assert result.exit_code == _CONFIG_ERROR_EXIT_CODE
+    assert "unknown backup profile 'not-configured'" in result.output
+
+
+def test_typer_cli_exposes_backup_help() -> None:
+    result = cli_runner.invoke(app, ["backup", "--help"])
+
+    assert result.exit_code == 0
+    assert "--profile" in result.output
+    assert "--dry-run" in result.output
