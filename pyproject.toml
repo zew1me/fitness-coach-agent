@@ -87,6 +87,8 @@ include = ["api", "backend", "scripts", "tests/python"]
 [tool.vulture]
 paths = ["api", "backend", "scripts", "tests/python"]
 min_confidence = 80
+# Protocol parameter names mirror python-garminconnect's public method signatures;
+# Vulture sees only their declarations and otherwise reports them as unused.
 ignore_names = ["activitytype", "cls", "dl_fmt"]
 
 [tool.pytest.ini_options]
