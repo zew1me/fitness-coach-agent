@@ -835,7 +835,24 @@ describe("streamCoachTurn", () => {
   });
 
   it("still propagates non-max-turns errors from the lead run", async () => {
-    orchestratorMocks.agentsRun.mockRejectedValueOnce(new Error("rate limit"));
+    // The error has to surface from the streamed result, not from `run` itself:
+    // only that path reaches the try/catch that swallows MaxTurnsExceededError,
+    // so this is what proves every other error is still rethrown.
+    const generic = new Error("rate limit");
+    const completed = Promise.reject(generic);
+    completed.catch(() => {});
+    orchestratorMocks.agentsRun.mockImplementationOnce(() =>
+      Promise.resolve({
+        completed,
+        finalOutput: "",
+        output: [],
+        state: { usage: undefined },
+        // eslint-disable-next-line require-yield
+        *[Symbol.asyncIterator](): Generator<AgentEvent, void, unknown> {
+          throw generic;
+        },
+      }),
+    );
     const fetchMock = vi.fn(() =>
       Promise.resolve(new Response("{}", { status: 200 })),
     );
