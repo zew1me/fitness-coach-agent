@@ -317,6 +317,7 @@ async def test_call_vision_uses_model_max_tokens_and_high_detail(
     assert isinstance(result, screenshot_analyzer.ActivityExtraction)
     assert result.sport == "running"
     assert captured["client_kwargs"]["timeout"] == 17.0
+    assert captured["client_kwargs"]["max_retries"] == 4
     parse_kwargs = captured["parse_kwargs"]
     assert parse_kwargs["model"] == "vision-model"
     assert parse_kwargs["max_output_tokens"] == 7777

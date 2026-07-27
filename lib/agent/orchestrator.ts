@@ -40,6 +40,16 @@ import {
   type ChatTurnLeaseState,
 } from "./lease-client";
 import { nonImageFilePart, selectMessagesForModel } from "./message-context";
+import { modelCircuitBreaker } from "./model-circuit-breaker";
+import {
+  buildModelSettings,
+  captureRateLimit,
+  getRetryAfterMs,
+  isRateLimitError,
+  MODEL_TIERS,
+  resolveSpecialistTier,
+  type ModelTier,
+} from "./model-tiers";
 import {
   type DelegationPlan,
   type SpecialistReport,
@@ -74,7 +84,6 @@ export type StreamCoachTurnOptions = StreamCoachTurnBaseOptions &
   );
 
 const MAX_COACH_STEPS = 4;
-const MODEL = "gpt-5.6-luna";
 const LAZY_SEED_TOKEN_BUDGET = 200_000;
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 export const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;
@@ -535,6 +544,9 @@ export function streamCoachTurn({
           error instanceof Error ? error : new Error("chat turn lease lost"),
         );
       };
+      const admittedProbes = new Set<
+        ReturnType<typeof modelCircuitBreaker.pickTier>
+      >();
       let stopLeaseRenewal: (() => Promise<void>) | undefined =
         acquiredLease === undefined
           ? undefined
@@ -581,6 +593,16 @@ export function streamCoachTurn({
             traceGroupId = prepared.traceGroupId;
           }
         }
+        const startingAdmission = modelCircuitBreaker.pickTier(MODEL_TIERS);
+        const startingTier = startingAdmission.tier;
+        const startingTierIndex = MODEL_TIERS.indexOf(startingTier);
+        if (startingAdmission.probeGeneration !== undefined) {
+          admittedProbes.add(startingAdmission);
+        }
+        const traceMetadata = {
+          fallbackModels: MODEL_TIERS.map((tier) => tier.model),
+          startingModel: startingTier.model,
+        };
         await Sentry.startSpan(
           {
             name: "fitness-coach-turn",
@@ -589,7 +611,12 @@ export function streamCoachTurn({
             op: "gen_ai.invoke_agent",
             attributes: {
               "gen_ai.system": "openai",
-              "gen_ai.request.model": MODEL,
+              "gen_ai.request.model": startingTier.model,
+              "gen_ai.request.reasoning_effort": String(startingTier.effort),
+              "coach.model_tier": startingTierIndex + 1,
+              "coach.breaker_state": modelCircuitBreaker.snapshot(
+                startingTier.model,
+              ).state,
               "user.id": context.profile.user_id,
             },
           },
@@ -600,6 +627,30 @@ export function streamCoachTurn({
               // eslint-disable-next-line complexity
               async () => {
                 let delegationPlan: DelegationPlan = { delegations: [] };
+                const turnRateLimits = new Map<
+                  string,
+                  { error: unknown; retryAfterMs?: number; tier: ModelTier }
+                >();
+                const breakerRecordedModels = new Set<string>();
+                const noteTurnRateLimit = (
+                  tier: ModelTier,
+                  error: unknown,
+                ): void => {
+                  const retryAfterMs = getRetryAfterMs(error);
+                  const existing = turnRateLimits.get(tier.model);
+                  if (
+                    existing &&
+                    (existing.retryAfterMs ?? 0) >= (retryAfterMs ?? 0)
+                  ) {
+                    return;
+                  }
+                  turnRateLimits.set(tier.model, {
+                    tier,
+                    error,
+                    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+                  });
+                };
+                const specialistTier = resolveSpecialistTier(startingTier);
                 const coachingMemory = underlyingSession
                   ? await underlyingSession.getCoachingMemory()
                   : [];
@@ -611,12 +662,21 @@ export function streamCoachTurn({
                     latestUserTurn: toAgentInputItems(selectedMessages),
                     coachingMemory,
                     athleteContext: context,
-                    model: MODEL,
+                    tier: specialistTier,
                   });
                 } catch (error) {
-                  Sentry.captureException(error, {
-                    tags: { subsystem: "delegation-planner" },
-                  });
+                  if (isRateLimitError(error)) {
+                    noteTurnRateLimit(specialistTier, error);
+                    captureRateLimit({
+                      tier: specialistTier,
+                      outcome: "exhausted",
+                      error,
+                    });
+                  } else {
+                    Sentry.captureException(error, {
+                      tags: { subsystem: "delegation-planner" },
+                    });
+                  }
                   Sentry.logger.warn(
                     "coach: delegation failed; continuing lead-only",
                   );
@@ -631,10 +691,11 @@ export function streamCoachTurn({
                   reports = await runSpecialists({
                     messages: selectedMessages,
                     messagesAreModelSelected: true,
-                    model: MODEL,
+                    tier: specialistTier,
                     roles: delegationPlan.delegations.map((item) => item.role),
                     delegations: delegationPlan.delegations,
                     coachingMemory,
+                    onRateLimit: noteTurnRateLimit,
                     slices: buildContextSlices(context),
                   });
                 } catch (error) {
@@ -645,110 +706,292 @@ export function streamCoachTurn({
                     "coach: specialist run failed; continuing lead-only",
                   );
                 }
+                const durableFallbackBaseline = underlyingSession
+                  ? await underlyingSession.getItems()
+                  : undefined;
                 const tavilyServer = createTavilyServer(tavilyMcpUrl);
-                if (tavilyServer !== null) await tavilyServer.connect();
 
                 try {
-                  const lead = new Agent<CoachAgentRunContext>({
-                    name: "Lead coach",
-                    instructions: buildLeadCoachPrompt(
-                      context,
-                      reports,
-                      oldestDueFollowUp(coachingMemory)?.statement,
-                    ),
-                    model: MODEL,
-                    mcpServers: tavilyServer === null ? [] : [tavilyServer],
-                    tools: createAgentCoachTools({
-                      accessToken,
-                      baseUrl,
-                      ...(extraHeaders ? { extraHeaders } : {}),
-                      ...(underlyingSession
-                        ? { modelSession: underlyingSession }
-                        : {}),
-                    }),
-                  });
-                  lead.on("agent_tool_start", (activeContext) => {
-                    activeContext.context.toolCalled = true;
-                  });
-
-                  const runner = new Runner({
-                    traceIncludeSensitiveData: true,
-                    tracingDisabled: false,
-                    workflowName: "fitness-coach-turn",
-                  });
-                  const result = await runner.run(
-                    lead,
-                    toAgentInputItems(selectedMessages),
-                    {
-                      context: runContext,
-                      maxTurns: MAX_COACH_STEPS,
-                      signal: effectiveSignal,
-                      ...(durableSession ? { session: durableSession } : {}),
-                      stream: true,
-                    },
-                  );
-
-                  for await (const event of result) {
-                    writeAgentStreamEvent(event, writer, textState);
-                  }
-                  await result.completed;
-                  recordStageUsage("lead", result.state.usage);
-
-                  const ranTool =
-                    runContext.toolCalled ||
-                    textState.lastToolName !== undefined;
-                  if (ranTool && !textState.textStarted && !isTurnAborted()) {
+                  if (tavilyServer !== null) await tavilyServer.connect();
+                  let admission = startingAdmission;
+                  let tier: ModelTier = startingTier;
+                  let tierIndex = startingTierIndex;
+                  for (;;) {
+                    const attemptProgress = { eventStarted: false };
                     try {
-                      const acknowledgement = new Agent<CoachAgentRunContext>({
-                        name: "Coach acknowledgement",
-                        instructions: ACKNOWLEDGEMENT_PROMPT,
-                        model: MODEL,
-                        mcpServers: [],
-                        tools: [],
-                      });
-                      const followup = await runner.run(
-                        acknowledgement,
-                        result.output,
+                      await withTrace(
+                        "fitness-coach-tier-attempt",
+                        // A tier attempt deliberately keeps streaming, tool acknowledgement,
+                        // telemetry, and deterministic degradation in one trace boundary.
+                        // eslint-disable-next-line complexity
+                        async () => {
+                          const lead = new Agent<CoachAgentRunContext>({
+                            name: "Lead coach",
+                            instructions: buildLeadCoachPrompt(
+                              context,
+                              reports,
+                              oldestDueFollowUp(coachingMemory)?.statement,
+                            ),
+                            model: tier.model,
+                            modelSettings: buildModelSettings(tier),
+                            mcpServers:
+                              tavilyServer === null ? [] : [tavilyServer],
+                            tools: createAgentCoachTools({
+                              accessToken,
+                              baseUrl,
+                              ...(extraHeaders ? { extraHeaders } : {}),
+                              ...(underlyingSession
+                                ? { modelSession: underlyingSession }
+                                : {}),
+                            }),
+                          });
+                          lead.on("agent_tool_start", (activeContext) => {
+                            activeContext.context.toolCalled = true;
+                          });
+
+                          const runner = new Runner({
+                            traceIncludeSensitiveData: true,
+                            tracingDisabled: false,
+                            workflowName: "fitness-coach-turn",
+                          });
+                          const result = await runner.run(
+                            lead,
+                            toAgentInputItems(selectedMessages),
+                            {
+                              context: runContext,
+                              maxTurns: MAX_COACH_STEPS,
+                              signal: effectiveSignal,
+                              ...(durableSession
+                                ? { session: durableSession }
+                                : {}),
+                              stream: true,
+                            },
+                          );
+
+                          for await (const event of result) {
+                            attemptProgress.eventStarted = true;
+                            writeAgentStreamEvent(event, writer, textState);
+                          }
+                          await result.completed;
+                          recordStageUsage("lead", result.state.usage);
+
+                          const ranTool =
+                            runContext.toolCalled ||
+                            textState.lastToolName !== undefined;
+                          if (
+                            ranTool &&
+                            !textState.textStarted &&
+                            !isTurnAborted()
+                          ) {
+                            try {
+                              const acknowledgement =
+                                new Agent<CoachAgentRunContext>({
+                                  name: "Coach acknowledgement",
+                                  instructions: ACKNOWLEDGEMENT_PROMPT,
+                                  model: tier.model,
+                                  modelSettings: buildModelSettings(tier),
+                                  mcpServers: [],
+                                  tools: [],
+                                });
+                              const followup = await runner.run(
+                                acknowledgement,
+                                result.output,
+                                {
+                                  context: runContext,
+                                  maxTurns: 2,
+                                  signal: effectiveSignal,
+                                  stream: true,
+                                },
+                              );
+                              for await (const event of followup) {
+                                writeAgentStreamEvent(event, writer, textState);
+                              }
+                              await followup.completed;
+                              recordStageUsage(
+                                "lead-followup",
+                                followup.state.usage,
+                              );
+                            } catch (error) {
+                              if (!isTurnAborted()) {
+                                if (isRateLimitError(error)) {
+                                  noteTurnRateLimit(tier, error);
+                                  if (!breakerRecordedModels.has(tier.model)) {
+                                    modelCircuitBreaker.recordFailure(
+                                      admission,
+                                      getRetryAfterMs(error),
+                                    );
+                                    breakerRecordedModels.add(tier.model);
+                                  }
+                                  captureRateLimit({
+                                    tier,
+                                    outcome: "exhausted",
+                                    error,
+                                    textStarted: textState.textStarted,
+                                  });
+                                } else {
+                                  Sentry.captureException(error, {
+                                    tags: { subsystem: "coach-followup" },
+                                  });
+                                }
+                                Sentry.logger.warn(
+                                  "coach: acknowledgement follow-up failed; using deterministic fallback",
+                                );
+                              }
+                            }
+                          }
+
+                          if (!textState.textStarted && !isTurnAborted()) {
+                            writeDeterministicText(
+                              writer,
+                              textState,
+                              ranTool
+                                ? buildToolAcknowledgement(
+                                    textState.lastToolName,
+                                  )
+                                : EMPTY_MODEL_RESPONSE,
+                            );
+                          }
+                        },
                         {
-                          context: runContext,
-                          maxTurns: 2,
-                          signal: effectiveSignal,
-                          stream: true,
+                          groupId: traceGroupId,
+                          metadata: { model: tier.model },
                         },
                       );
-                      for await (const event of followup) {
-                        writeAgentStreamEvent(event, writer, textState);
+                      if (isTurnAborted()) {
+                        modelCircuitBreaker.releaseProbe(admission);
+                        throw effectiveSignal.reason instanceof Error
+                          ? effectiveSignal.reason
+                          : new Error("chat turn aborted");
                       }
-                      await followup.completed;
-                      recordStageUsage("lead-followup", followup.state.usage);
+                      const auxiliaryRateLimit = turnRateLimits.get(tier.model);
+                      if (
+                        auxiliaryRateLimit &&
+                        !breakerRecordedModels.has(tier.model)
+                      ) {
+                        modelCircuitBreaker.recordFailure(
+                          admission,
+                          auxiliaryRateLimit.retryAfterMs,
+                        );
+                        breakerRecordedModels.add(tier.model);
+                      } else if (!auxiliaryRateLimit) {
+                        modelCircuitBreaker.recordSuccess(admission);
+                      }
+                      break;
                     } catch (error) {
-                      if (!isTurnAborted()) {
-                        Sentry.captureException(error, {
-                          tags: { subsystem: "coach-followup" },
+                      if (!isRateLimitError(error)) {
+                        modelCircuitBreaker.releaseProbe(admission);
+                        throw error;
+                      }
+
+                      const retryAfterMs = getRetryAfterMs(error);
+                      noteTurnRateLimit(tier, error);
+                      if (!breakerRecordedModels.has(tier.model)) {
+                        modelCircuitBreaker.recordFailure(
+                          admission,
+                          retryAfterMs,
+                        );
+                        breakerRecordedModels.add(tier.model);
+                      }
+                      if (
+                        !textState.textStarted &&
+                        (runContext.toolCalled ||
+                          textState.lastToolName !== undefined) &&
+                        !isTurnAborted()
+                      ) {
+                        captureRateLimit({
+                          tier,
+                          outcome: "exhausted",
+                          error,
+                          textStarted: false,
                         });
-                        Sentry.logger.warn(
-                          "coach: acknowledgement follow-up failed; using deterministic fallback",
+                        writeDeterministicText(
+                          writer,
+                          textState,
+                          buildToolAcknowledgement(textState.lastToolName),
+                        );
+                        break;
+                      }
+                      const canFallback =
+                        !attemptProgress.eventStarted &&
+                        !textState.textStarted &&
+                        !runContext.toolCalled &&
+                        textState.lastToolName === undefined &&
+                        !isTurnAborted() &&
+                        tierIndex + 1 < MODEL_TIERS.length;
+                      if (!canFallback) {
+                        captureRateLimit({
+                          tier,
+                          outcome: "exhausted",
+                          error,
+                          textStarted: textState.textStarted,
+                        });
+                        throw error;
+                      }
+
+                      if (durableFallbackBaseline && underlyingSession) {
+                        await underlyingSession.replaceAll(
+                          durableFallbackBaseline,
+                          { trigger: "model-tier-fallback-rollback" },
                         );
                       }
+                      const failedTierIndex = tierIndex;
+                      const nextAdmission = modelCircuitBreaker.pickTier(
+                        MODEL_TIERS.slice(tierIndex + 1),
+                      );
+                      const nextTier = nextAdmission.tier;
+                      captureRateLimit({
+                        tier,
+                        outcome: "falling_back",
+                        error,
+                        fallbackModel: nextTier.model,
+                        textStarted: textState.textStarted,
+                      });
+                      admission = nextAdmission;
+                      tier = nextTier;
+                      tierIndex = MODEL_TIERS.indexOf(nextTier);
+                      if (admission.probeGeneration !== undefined) {
+                        admittedProbes.add(admission);
+                      }
+                      Sentry.getActiveSpan()?.setAttribute(
+                        "gen_ai.request.model",
+                        tier.model,
+                      );
+                      Sentry.getActiveSpan()?.setAttribute(
+                        "gen_ai.request.reasoning_effort",
+                        String(tier.effort),
+                      );
+                      Sentry.getActiveSpan()?.setAttribute(
+                        "coach.model_tier",
+                        tierIndex + 1,
+                      );
+                      Sentry.getActiveSpan()?.setAttribute(
+                        "coach.breaker_state",
+                        modelCircuitBreaker.snapshot(tier.model).state,
+                      );
+                      Sentry.logger.warn(
+                        `coach: tier ${failedTierIndex + 1} rate-limited; falling back to ${tier.model}`,
+                      );
                     }
                   }
-
-                  if (!textState.textStarted && !isTurnAborted()) {
-                    writeDeterministicText(
-                      writer,
-                      textState,
-                      ranTool
-                        ? buildToolAcknowledgement(textState.lastToolName)
-                        : EMPTY_MODEL_RESPONSE,
-                    );
-                  }
                 } finally {
+                  for (const rateLimit of turnRateLimits.values()) {
+                    if (breakerRecordedModels.has(rateLimit.tier.model)) {
+                      continue;
+                    }
+                    modelCircuitBreaker.recordFailure(
+                      rateLimit.tier.model === startingTier.model
+                        ? startingAdmission
+                        : { tier: rateLimit.tier },
+                      rateLimit.retryAfterMs,
+                    );
+                    breakerRecordedModels.add(rateLimit.tier.model);
+                  }
                   if (tavilyServer !== null) await tavilyServer.close();
                 }
               },
               {
                 groupId: traceGroupId,
-                metadata: { model: MODEL },
+                metadata: traceMetadata,
               },
             ),
         );
@@ -785,6 +1028,9 @@ export function streamCoachTurn({
           message.replace(/key=[^&\s]+/g, "key=***"),
         );
       } finally {
+        for (const admission of admittedProbes) {
+          modelCircuitBreaker.releaseProbe(admission);
+        }
         await stopLeaseRenewal?.();
         // If we lost the lease, we no longer own it — attempting to release
         // it would just fail with another 409 that only adds Sentry noise.

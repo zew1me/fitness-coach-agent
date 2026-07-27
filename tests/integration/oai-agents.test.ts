@@ -27,6 +27,10 @@ import { z } from "zod";
 
 import { DurableCompactionSession } from "../../lib/agent/durable-compaction-session";
 import {
+  MODEL_SUPPORTED_EFFORTS,
+  REASONING_EFFORT_LADDER,
+} from "../../lib/agent/model-tiers";
+import {
   type SpecialistReport,
   specialistReportSchema,
   specialistReportWireSchema,
@@ -208,7 +212,48 @@ class InMemoryCompactionSession implements SessionHistoryRewriteAwareSession {
   }
 }
 
+const SUPPORTED_MODEL_EFFORT_PAIRS = Object.entries(
+  MODEL_SUPPORTED_EFFORTS,
+).flatMap(([model, efforts]) =>
+  REASONING_EFFORT_LADDER.filter((effort) => efforts.has(effort)).map(
+    (effort) => ({ effort, model }),
+  ),
+);
+
 describe("OpenAI Agents SDK — Responses API integration", () => {
+  it.each(SUPPORTED_MODEL_EFFORT_PAIRS)(
+    "accepts documented reasoning compatibility: $model / $effort",
+    async ({ effort, model }) => {
+      const agent = new Agent({
+        name: "Reasoning compatibility probe",
+        instructions: "Reply with exactly OK.",
+        model,
+        modelSettings: {
+          reasoning: { effort },
+          text: { verbosity: "low" },
+        },
+      });
+      const result = await run(agent, MINIMAL_USER_INPUT, { maxTurns: 1 });
+      expect(result.finalOutput).toEqual(expect.any(String));
+    },
+    60_000,
+  );
+
+  it("rejects max reasoning effort on gpt-5.4-mini", async () => {
+    const client = new OpenAI();
+    await expect(
+      client.responses.create({
+        model: "gpt-5.4-mini",
+        input: "Reply with exactly OK.",
+        reasoning: {
+          // The OpenAI API documents `max`, but openai@6.44.0 does not yet
+          // expose it in this SDK type. This live negative probe verifies the
+          // model-specific rejection that the production allowlist prevents.
+          effort: "max" as "xhigh",
+        },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  }, 60_000);
   it("accepts the specialist structured-output schema without a 400", async () => {
     const agent = new Agent({
       name: "Intake specialist",

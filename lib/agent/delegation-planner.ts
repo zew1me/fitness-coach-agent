@@ -1,5 +1,6 @@
 import { Agent, run, type AgentInputItem } from "@openai/agents";
 
+import { buildModelSettings, type ModelTier } from "./model-tiers";
 import {
   delegationPlanSchema,
   type DelegationPlan,
@@ -21,11 +22,12 @@ export async function planSpecialistDelegation(options: {
   latestUserTurn: AgentInputItem[];
   coachingMemory: Array<Record<string, unknown>>;
   athleteContext: AthleteContextBundle;
-  model: string;
+  tier: ModelTier;
 }): Promise<DelegationPlan> {
   const planner = new Agent({
     name: "Lead coach delegation planner",
-    model: options.model,
+    model: options.tier.model,
+    modelSettings: buildModelSettings(options.tier),
     outputType: delegationPlanSchema,
     instructions: [
       "Select zero, one, or two specialists needed for this athlete turn.",

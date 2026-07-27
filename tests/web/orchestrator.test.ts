@@ -1,6 +1,7 @@
 import type { UIMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { modelCircuitBreaker } from "../../lib/agent/model-circuit-breaker";
 import {
   CHAT_TURN_LEASE_RENEW_INTERVAL_MS,
   streamCoachTurn,
@@ -23,6 +24,16 @@ type CoachToolForTest = {
   }) => boolean;
   name: string;
 };
+
+const sentryMocks = vi.hoisted(() => ({
+  captureException: vi.fn(),
+  captureMessage: vi.fn(),
+  getActiveSpan: vi.fn(() => ({ setAttribute: vi.fn() })),
+  logger: { error: vi.fn(), info: vi.fn(), warn: vi.fn() },
+  startSpan: vi.fn((_options: unknown, callback: () => Promise<unknown>) =>
+    callback(),
+  ),
+}));
 
 const orchestratorMocks = vi.hoisted(() => {
   const agentConfigs: Array<Record<string, unknown>> = [];
@@ -80,6 +91,8 @@ const orchestratorMocks = vi.hoisted(() => {
   };
 });
 
+vi.mock("@sentry/nextjs", () => sentryMocks);
+
 vi.mock("@openai/agents", () => ({
   Agent: orchestratorMocks.Agent,
   MCPServerStreamableHttp: class MCPServerStreamableHttp {},
@@ -102,6 +115,10 @@ vi.mock("ai", async (importOriginal) => {
     streamText: orchestratorMocks.streamText,
   };
 });
+
+vi.mock("../../lib/agent/delegation-planner", () => ({
+  planSpecialistDelegation: vi.fn(() => Promise.resolve({ delegations: [] })),
+}));
 
 vi.mock("../../lib/agent/context-slices", () => ({
   buildContextSlices: vi.fn(() => ({})),
@@ -126,6 +143,13 @@ vi.mock("../../lib/agent/system-prompt", () => ({
 }));
 
 const originalFetch = globalThis.fetch;
+
+function rateLimitError(): Error & { status: number; headers: Headers } {
+  return Object.assign(new Error("rate limit"), {
+    status: 429,
+    headers: new Headers({ "Retry-After": "0" }),
+  });
+}
 
 function messages(): UIMessage[] {
   return [
@@ -210,6 +234,7 @@ beforeEach(() => {
   globalThis.fetch = vi.fn(() =>
     Promise.resolve(new Response("{}", { status: 200 })),
   ) as unknown as typeof fetch;
+  modelCircuitBreaker.reset();
   vi.clearAllMocks();
 });
 
@@ -734,6 +759,362 @@ describe("streamCoachTurn", () => {
         }),
       ]),
     );
+    expect(sentryMocks.captureMessage).not.toHaveBeenCalled();
+    expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to tier two when a 429 occurs before streaming", async () => {
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError());
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    await expect(response.text()).resolves.toContain("Keep tomorrow easy.");
+    const leadModels = orchestratorMocks.agentConfigs
+      .filter((config) => config["name"] === "Lead coach")
+      .map((config) => config["model"]);
+    expect(leadModels).toEqual(["gpt-5.6-luna", "gpt-5.4-mini"]);
+    expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(
+      "fitness-coach-tier-attempt",
+      expect.any(Function),
+      expect.objectContaining({ metadata: { model: "gpt-5.4-mini" } }),
+    );
+    expect(sentryMocks.captureMessage).toHaveBeenCalledWith(
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({ outcome: "falling_back" }),
+        extra: expect.objectContaining({ fallbackModel: "gpt-5.4-mini" }),
+      }),
+    );
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
+  });
+
+  it("does not replay the turn when a 429 occurs after text starts", async () => {
+    orchestratorMocks.agentsRun.mockResolvedValueOnce({
+      completed: Promise.resolve(),
+      finalOutput: null,
+      output: [],
+      state: { usage: undefined },
+      async *[Symbol.asyncIterator]() {
+        await Promise.resolve();
+        yield {
+          type: "raw_model_stream_event",
+          data: { type: "output_text_delta", delta: "Partial response." },
+        };
+        throw rateLimitError();
+      },
+    } as never);
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    const text = await response.text();
+
+    expect(text.match(/Partial response\./g)).toHaveLength(1);
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a deterministic acknowledgement instead of replaying after a post-tool 429", async () => {
+    orchestratorMocks.agentsRun.mockResolvedValueOnce({
+      completed: Promise.resolve(),
+      finalOutput: null,
+      output: [],
+      state: { usage: undefined },
+      async *[Symbol.asyncIterator]() {
+        await Promise.resolve();
+        yield {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "update_athlete_profile",
+              arguments: "{}",
+            },
+          },
+        };
+        yield {
+          type: "run_item_stream_event",
+          name: "tool_output",
+          item: {
+            rawItem: {
+              type: "function_call_result",
+              callId: "call-1",
+              name: "update_athlete_profile",
+            },
+            output: { updated: true },
+          },
+        };
+        throw rateLimitError();
+      },
+    } as never);
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    const text = await response.text();
+
+    expect(text).toContain("Thanks, I'll keep track of that information.");
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
+  });
+
+  it("records an acknowledgement 429 without closing the model circuit", async () => {
+    orchestratorMocks.runEventSequences.push([
+      {
+        type: "run_item_stream_event",
+        name: "tool_called",
+        item: {
+          rawItem: {
+            type: "function_call",
+            callId: "call-1",
+            name: "update_athlete_profile",
+            arguments: "{}",
+          },
+        },
+      },
+      {
+        type: "run_item_stream_event",
+        name: "tool_output",
+        item: {
+          rawItem: {
+            type: "function_call_result",
+            callId: "call-1",
+            name: "update_athlete_profile",
+          },
+          output: { updated: true },
+        },
+      },
+    ]);
+    orchestratorMocks.agentsRun.mockReset();
+    orchestratorMocks.agentsRun
+      .mockResolvedValueOnce({
+        completed: Promise.resolve(),
+        finalOutput: null,
+        output: [{ role: "assistant", content: "tool result" }],
+        state: { usage: undefined },
+        async *[Symbol.asyncIterator]() {
+          await Promise.resolve();
+          for (const event of orchestratorMocks.runEventSequences.shift() ??
+            []) {
+            yield event;
+          }
+        },
+      } as never)
+      .mockRejectedValueOnce(rateLimitError());
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    await response.text();
+
+    expect(modelCircuitBreaker.snapshot("gpt-5.6-luna")).toMatchObject({
+      consecutiveFailures: 1,
+      state: "closed",
+    });
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
+    expect(sentryMocks.captureMessage).toHaveBeenCalledWith(
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({ outcome: "exhausted" }),
+      }),
+    );
+  });
+
+  it("counts parallel auxiliary 429s once for the model turn", async () => {
+    vi.mocked(runSpecialists).mockImplementationOnce((options) => {
+      options.onRateLimit?.(options.tier, rateLimitError());
+      options.onRateLimit?.(options.tier, rateLimitError());
+      return Promise.resolve([]);
+    });
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    await response.text();
+
+    expect(modelCircuitBreaker.snapshot("gpt-5.6-luna")).toMatchObject({
+      consecutiveFailures: 1,
+      state: "closed",
+    });
+  });
+
+  it("starts on tier two while the tier-one circuit is open", async () => {
+    for (let turn = 0; turn < 3; turn += 1) {
+      modelCircuitBreaker.recordFailure({
+        tier: {
+          model: "gpt-5.6-luna",
+          effort: "medium",
+          verbosity: "low",
+        },
+      });
+    }
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    await response.text();
+
+    const lead = orchestratorMocks.agentConfigs.find(
+      (config) => config["name"] === "Lead coach",
+    );
+    expect(lead?.["model"]).toBe("gpt-5.4-mini");
+    expect(sentryMocks.startSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          "gen_ai.request.model": "gpt-5.4-mini",
+          "coach.model_tier": 2,
+        }),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it("captures one exception only after every model tier is exhausted", async () => {
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError());
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError());
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError());
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    await response.text();
+
+    expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureMessage).toHaveBeenCalledTimes(3);
+    expect(sentryMocks.captureMessage).toHaveBeenLastCalledWith(
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({ outcome: "exhausted" }),
+      }),
+    );
+  });
+
+  it("rolls back a failed durable attempt before persisting the fallback input", async () => {
+    let state = {
+      thread_id: "thread-1",
+      version: 1,
+      items: [] as unknown[],
+      coaching_memory: [],
+      compaction_metadata: {},
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://localhost/api/chat/model-state/lease") {
+        if (init?.method === "POST") {
+          return Promise.resolve(
+            new Response(JSON.stringify(state), { status: 200 }),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      if (url === "http://localhost/api/chat/model-state") {
+        if (init?.method === "PUT") {
+          const body = JSON.parse(String(init.body)) as { items: unknown[] };
+          state = { ...state, items: body.items, version: state.version + 1 };
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify(state), { status: 200 }),
+        );
+      }
+      if (url === "http://localhost/api/chat/messages?limit=100") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ messages: [], next_cursor: null }), {
+            status: 200,
+          }),
+        );
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    type RunOptions = {
+      session?: { addItems: (items: unknown[]) => Promise<void> };
+    };
+    orchestratorMocks.agentsRun
+      .mockImplementationOnce((async (
+        _agent: unknown,
+        input: unknown[],
+        options: RunOptions,
+      ) => {
+        await options.session?.addItems([input[0]]);
+        throw rateLimitError();
+      }) as never)
+      .mockImplementationOnce((async (
+        _agent: unknown,
+        input: unknown[],
+        options: RunOptions,
+      ) => {
+        await options.session?.addItems([input[0]]);
+        return {
+          completed: Promise.resolve(),
+          finalOutput: "Keep tomorrow easy.",
+          output: [],
+          state: { usage: undefined },
+          async *[Symbol.asyncIterator](): AsyncGenerator<
+            AgentEvent,
+            void,
+            unknown
+          > {
+            await Promise.resolve();
+            yield {
+              type: "raw_model_stream_event",
+              data: {
+                type: "output_text_delta",
+                delta: "Keep tomorrow easy.",
+              },
+            };
+          },
+        };
+      }) as never);
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      useDurableSession: true,
+    });
+    await response.text();
+
+    expect(state.items).toHaveLength(1);
+    const putBodies = fetchMock.mock.calls
+      .filter(
+        ([url, init]) =>
+          String(url) === "http://localhost/api/chat/model-state" &&
+          init?.method === "PUT",
+      )
+      .map(
+        ([, init]) => JSON.parse(String(init?.body)) as { items: unknown[] },
+      );
+    expect(putBodies.map((body) => body.items.length)).toEqual([1, 0, 1]);
   });
 
   it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {

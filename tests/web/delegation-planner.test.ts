@@ -42,7 +42,7 @@ describe("planSpecialistDelegation", () => {
         metrics: {},
         profile: { user_id: "athlete-1", primary_sports: [] },
       } as never,
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
     });
 
     const instructions = String(

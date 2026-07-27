@@ -5,6 +5,12 @@ import type { UIMessage } from "ai";
 import { toAgentInputItems } from "./agent-input";
 import { selectMessagesForModel } from "./message-context";
 import {
+  buildModelSettings,
+  captureRateLimit,
+  isRateLimitError,
+  type ModelTier,
+} from "./model-tiers";
+import {
   type ContextSlices,
   type InternalSpecialistRole,
   type SpecialistReport,
@@ -26,11 +32,12 @@ const SPECIALIST_ORDER: InternalSpecialistRole[] = [
 type RunSpecialistsOptions = {
   messagesAreModelSelected?: boolean;
   messages: UIMessage[];
-  model: string;
+  tier: ModelTier;
   roles: InternalSpecialistRole[];
   slices: ContextSlices;
   delegations?: SpecialistDelegation[];
   coachingMemory?: Array<Record<string, unknown>>;
+  onRateLimit?: (tier: ModelTier, error: unknown) => void;
 };
 
 function orderRoles(roles: InternalSpecialistRole[]): InternalSpecialistRole[] {
@@ -40,7 +47,8 @@ function orderRoles(roles: InternalSpecialistRole[]): InternalSpecialistRole[] {
 
 type RunSingleSpecialistOptions = {
   delegation: SpecialistDelegation | undefined;
-  model: string;
+  tier: ModelTier;
+  onRateLimit: ((tier: ModelTier, error: unknown) => void) | undefined;
   relevantMemory: Array<Record<string, unknown>>;
   role: InternalSpecialistRole;
   selectedMessages: UIMessage[];
@@ -53,10 +61,14 @@ type RunSingleSpecialistOptions = {
 // returning null instead of a report. Agent construction (prompt building)
 // happens outside the try: a bug there is a programming error, not a
 // per-specialist runtime failure, and should propagate rather than be
-// silently reclassified as "specialist skipped."
+// silently reclassified as "specialist skipped." Validation repair and the
+// dedicated rate-limit telemetry branch make these distinct failure paths
+// intentionally explicit in this one per-specialist boundary.
+// eslint-disable-next-line complexity
 async function runSingleSpecialist({
   delegation,
-  model,
+  tier,
+  onRateLimit,
   relevantMemory,
   role,
   selectedMessages,
@@ -70,7 +82,8 @@ async function runSingleSpecialist({
       formatDataBlock("delegation", delegation ?? {}),
       formatDataBlock("relevantMemory", relevantMemory),
     ].join("\n\n"),
-    model,
+    model: tier.model,
+    modelSettings: buildModelSettings(tier),
     // Structural-only schema: full semantic validation (and per-item
     // repair) happens afterward via repairSpecialistReport, since the SDK
     // throws on outputType refinement failures the moment finalOutput is
@@ -118,9 +131,14 @@ async function runSingleSpecialist({
     }
     return report;
   } catch (error) {
-    Sentry.captureException(error, {
-      tags: { role, subsystem: "specialists" },
-    });
+    if (isRateLimitError(error)) {
+      captureRateLimit({ tier, outcome: "exhausted", error });
+      onRateLimit?.(tier, error);
+    } else {
+      Sentry.captureException(error, {
+        tags: { role, subsystem: "specialists" },
+      });
+    }
     Sentry.logger.warn(`coach: ${role} specialist failed; skipping`);
     return null;
   }
@@ -129,11 +147,12 @@ async function runSingleSpecialist({
 export async function runSpecialists({
   messagesAreModelSelected = false,
   messages,
-  model,
+  tier,
   roles,
   slices,
   delegations,
   coachingMemory = [],
+  onRateLimit,
 }: RunSpecialistsOptions): Promise<SpecialistReport[]> {
   const selectedMessages = messagesAreModelSelected
     ? messages
@@ -157,7 +176,8 @@ export async function runSpecialists({
       );
       return runSingleSpecialist({
         delegation,
-        model,
+        tier,
+        onRateLimit,
         relevantMemory,
         role,
         selectedMessages,

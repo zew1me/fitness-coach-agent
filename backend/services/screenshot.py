@@ -307,6 +307,7 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
     try:
         async with AsyncOpenAI(
             api_key=settings.openai_api_key,
+            max_retries=settings.openai_max_retries,
             timeout=settings.openai_vision_timeout_seconds,
         ) as client:
             logger.debug("openai vision call start model=%s", settings.openai_vision_model)

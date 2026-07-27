@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -22,6 +24,10 @@ logger = logging.getLogger(__name__)
 SUMMARY_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_NAME = "activity_summary_v1"
 RESPONSES_API_URL = "https://api.openai.com/v1/responses"
+_ACTIVITY_TEXT_MAX_ATTEMPTS = 3
+_MAX_RETRY_DELAY_SECONDS = 8.0
+_RATE_LIMIT_STATUS = 429
+_SERVER_ERROR_STATUS = 500
 
 Extractor = Callable[[str], Awaitable["ActivityTextExtraction"]]
 
@@ -101,6 +107,23 @@ class ActivityTextBuildResult:
     raw_extraction: dict[str, Any]
 
 
+def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                delay = (retry_at - datetime.now(UTC)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                delay = 0.5 * (2 ** (attempt - 1))
+        return max(delay, 0.0)
+    return min(0.5 * (2 ** (attempt - 1)), _MAX_RETRY_DELAY_SECONDS)
+
+
 async def extract_activity_text(text: str) -> ActivityTextExtraction:
     """Use OpenAI structured outputs and web search to extract activity text."""
     if not settings.openai_api_key:
@@ -111,42 +134,59 @@ async def extract_activity_text(text: str) -> ActivityTextExtraction:
         async with httpx.AsyncClient(
             timeout=settings.openai_activity_text_timeout_seconds
         ) as client:
-            response = await client.post(
-                RESPONSES_API_URL,
-                headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.openai_activity_text_model,
-                    "input": [
-                        {
-                            "role": "system",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": _activity_text_extraction_instructions(),
-                                }
-                            ],
-                        },
-                        {
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": text}],
-                        },
-                    ],
-                    "tools": [{"type": "web_search"}],
-                    "text": {
-                        "format": {
-                            "type": "json_schema",
-                            "name": "activity_text_extraction",
-                            "strict": False,
-                            "schema": schema,
-                        }
+            for attempt in range(1, _ACTIVITY_TEXT_MAX_ATTEMPTS + 1):
+                response = await client.post(
+                    RESPONSES_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {settings.openai_api_key}",
+                        "Content-Type": "application/json",
                     },
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
+                    json={
+                        "model": settings.openai_activity_text_model,
+                        "input": [
+                            {
+                                "role": "system",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": _activity_text_extraction_instructions(),
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": text}],
+                            },
+                        ],
+                        "tools": [{"type": "web_search"}],
+                        "text": {
+                            "format": {
+                                "type": "json_schema",
+                                "name": "activity_text_extraction",
+                                "strict": False,
+                                "schema": schema,
+                            }
+                        },
+                    },
+                )
+                retryable = (
+                    response.status_code == _RATE_LIMIT_STATUS
+                    or response.status_code >= _SERVER_ERROR_STATUS
+                )
+                if retryable and attempt < _ACTIVITY_TEXT_MAX_ATTEMPTS:
+                    delay = _retry_delay_seconds(response, attempt)
+                    logger.warning(
+                        "OpenAI activity text extraction transient failure; "
+                        "status=%s attempt=%s retrying_in=%.3fs",
+                        response.status_code,
+                        attempt,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+                break
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("OpenAI activity text extraction failed", exc_info=True)
         raise ActivityTextExtractionUnavailable(

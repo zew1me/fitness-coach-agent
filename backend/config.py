@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     app_base_url: str = ""  # leave blank on Vercel preview; set explicitly for production
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None
+    openai_max_retries: int = 4
     openai_activity_text_model: str = "gpt-5.6-sol"
     openai_activity_text_timeout_seconds: float = 60.0
     openai_vision_model: str = "gpt-5.6-luna"
@@ -80,6 +81,13 @@ class Settings(BaseSettings):
     def validate_vision_max_output_tokens(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("openai_vision_max_output_tokens must be a positive integer")
+        return v
+
+    @field_validator("openai_max_retries")
+    @classmethod
+    def validate_openai_max_retries(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("openai_max_retries must be a non-negative integer")
         return v
 
     @field_validator("openai_vision_reasoning_effort", mode="before")
