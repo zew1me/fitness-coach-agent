@@ -693,9 +693,7 @@ export function streamCoachTurn({
                   // the runner loop *after* this turn's tool calls have already
                   // succeeded, so letting it escape skips both the
                   // acknowledgement follow-up and the deterministic fallback
-                  // below and discards completed work. In the reported incident
-                  // (Sentry 7633993901) 12 process_uploaded_file calls ran, 11
-                  // succeeded, and the athlete still saw "Coach is unavailable".
+                  // below and discards completed work. 
                   // Swallow it here and fall through so those results are
                   // reported. Every other error still propagates.
                   try {
