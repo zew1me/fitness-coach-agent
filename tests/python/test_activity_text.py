@@ -472,6 +472,66 @@ async def test_extract_activity_text_retries_429_then_succeeds(
 
 
 @pytest.mark.asyncio
+async def test_extract_activity_text_retries_connection_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped connection is as transient as a 503 and fails fast, so it retries."""
+    from backend.services import activity_text
+
+    monkeypatch.setattr(activity_text.settings, "openai_api_key", "test-key")
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(
+            200,
+            json={"output_text": '{"sport":"running"}'},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(activity_text.httpx, "AsyncClient", lambda **_kwargs: client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(activity_text.asyncio, "sleep", sleep)
+
+    result = await extract_activity_text("Easy run")
+
+    assert result.sport == "running"
+    assert attempts == 2
+    sleep.assert_awaited_once_with(0.5)
+
+
+@pytest.mark.asyncio
+async def test_extract_activity_text_does_not_retry_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout already consumed the full request budget; retrying would multiply it."""
+    from backend.services import activity_text
+
+    monkeypatch.setattr(activity_text.settings, "openai_api_key", "test-key")
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(activity_text.httpx, "AsyncClient", lambda **_kwargs: client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(activity_text.asyncio, "sleep", sleep)
+
+    with pytest.raises(ActivityTextExtractionUnavailable):
+        await extract_activity_text("Easy run")
+
+    assert attempts == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_extract_activity_text_exhausts_bounded_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

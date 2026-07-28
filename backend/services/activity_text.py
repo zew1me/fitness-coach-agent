@@ -29,6 +29,17 @@ _MAX_RETRY_DELAY_SECONDS = 8.0
 _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
 
+# Transport failures worth another attempt: they fail fast, so retrying costs little
+# and matches how a 503 response is already treated. httpx.TimeoutException is
+# deliberately excluded — it only surfaces after the full request timeout, so retrying
+# it would multiply worst-case latency inside a single serverless request.
+_RETRYABLE_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
+)
+
 Extractor = Callable[[str], Awaitable["ActivityTextExtraction"]]
 
 
@@ -133,6 +144,90 @@ def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
     return min(max(delay, 0.0), _MAX_RETRY_DELAY_SECONDS)
 
 
+def _extraction_request_body(text: str, schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": settings.openai_activity_text_model,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": _activity_text_extraction_instructions(),
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        ],
+        "tools": [{"type": "web_search"}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "activity_text_extraction",
+                "strict": False,
+                "schema": schema,
+            }
+        },
+    }
+
+
+async def _post_with_retries(
+    client: httpx.AsyncClient, text: str, schema: dict[str, Any]
+) -> dict[str, Any]:
+    """POST the extraction request, retrying transient failures a bounded number of times.
+
+    Retries both transient responses (429/5xx) and connection-level transport errors;
+    the caller turns anything still failing into ActivityTextExtractionUnavailable.
+    """
+    for attempt in range(1, _ACTIVITY_TEXT_MAX_ATTEMPTS + 1):
+        last_attempt = attempt >= _ACTIVITY_TEXT_MAX_ATTEMPTS
+        try:
+            response = await client.post(
+                RESPONSES_API_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=_extraction_request_body(text, schema),
+            )
+        except _RETRYABLE_TRANSPORT_ERRORS as exc:
+            if last_attempt:
+                raise
+            delay = min(0.5 * (2 ** (attempt - 1)), _MAX_RETRY_DELAY_SECONDS)
+            logger.warning(
+                "OpenAI activity text extraction transport failure; "
+                "error=%s attempt=%s retrying_in=%.3fs",
+                type(exc).__name__,
+                attempt,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            continue
+
+        retryable = (
+            response.status_code == _RATE_LIMIT_STATUS
+            or response.status_code >= _SERVER_ERROR_STATUS
+        )
+        if retryable and not last_attempt:
+            delay = _retry_delay_seconds(response, attempt)
+            logger.warning(
+                "OpenAI activity text extraction transient failure; "
+                "status=%s attempt=%s retrying_in=%.3fs",
+                response.status_code,
+                attempt,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            continue
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
+        return payload
+    raise ActivityTextExtractionUnavailable("OpenAI activity text extraction unavailable.")
+
+
 async def extract_activity_text(text: str) -> ActivityTextExtraction:
     """Use OpenAI structured outputs and web search to extract activity text."""
     if not settings.openai_api_key:
@@ -143,59 +238,7 @@ async def extract_activity_text(text: str) -> ActivityTextExtraction:
         async with httpx.AsyncClient(
             timeout=settings.openai_activity_text_timeout_seconds
         ) as client:
-            for attempt in range(1, _ACTIVITY_TEXT_MAX_ATTEMPTS + 1):
-                response = await client.post(
-                    RESPONSES_API_URL,
-                    headers={
-                        "Authorization": f"Bearer {settings.openai_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": settings.openai_activity_text_model,
-                        "input": [
-                            {
-                                "role": "system",
-                                "content": [
-                                    {
-                                        "type": "input_text",
-                                        "text": _activity_text_extraction_instructions(),
-                                    }
-                                ],
-                            },
-                            {
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": text}],
-                            },
-                        ],
-                        "tools": [{"type": "web_search"}],
-                        "text": {
-                            "format": {
-                                "type": "json_schema",
-                                "name": "activity_text_extraction",
-                                "strict": False,
-                                "schema": schema,
-                            }
-                        },
-                    },
-                )
-                retryable = (
-                    response.status_code == _RATE_LIMIT_STATUS
-                    or response.status_code >= _SERVER_ERROR_STATUS
-                )
-                if retryable and attempt < _ACTIVITY_TEXT_MAX_ATTEMPTS:
-                    delay = _retry_delay_seconds(response, attempt)
-                    logger.warning(
-                        "OpenAI activity text extraction transient failure; "
-                        "status=%s attempt=%s retrying_in=%.3fs",
-                        response.status_code,
-                        attempt,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                response.raise_for_status()
-                payload = response.json()
-                break
+            payload = await _post_with_retries(client, text, schema)
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("OpenAI activity text extraction failed", exc_info=True)
         raise ActivityTextExtractionUnavailable(
