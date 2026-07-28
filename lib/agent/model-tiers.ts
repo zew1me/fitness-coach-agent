@@ -181,12 +181,16 @@ export function resolveSpecialistTier(effectiveTier: ModelTier): ModelTier {
   };
 }
 
-function tierIndex(tier: ModelTier): number {
-  const index = resolveModelTiers().findIndex(
+// Ladder position for telemetry, matched against the same frozen MODEL_TIERS the
+// orchestrator runs. A tier that is not on the ladder — a specialist tier, or an
+// env misconfiguration — is reported as "unranked" rather than silently tagged as
+// tier 1, which made rate limits look like they hit the lead model.
+function tierLabel(tier: ModelTier): string {
+  const index = MODEL_TIERS.findIndex(
     (candidate) =>
       candidate.model === tier.model && candidate.effort === tier.effort,
   );
-  return index < 0 ? 0 : index;
+  return index < 0 ? "unranked" : String(index + 1);
 }
 
 export function captureRateLimit(options: {
@@ -206,7 +210,7 @@ export function captureRateLimit(options: {
       provider: "openai",
       model: options.tier.model,
       reasoning_effort: String(options.tier.effort),
-      model_tier: String(tierIndex(options.tier) + 1),
+      model_tier: tierLabel(options.tier),
       breaker_state: modelCircuitBreaker.snapshot(options.tier.model).state,
       outcome: options.outcome,
     },

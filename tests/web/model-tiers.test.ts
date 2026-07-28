@@ -7,8 +7,11 @@ vi.mock("@sentry/nextjs", () => sentryMocks);
 
 import {
   buildModelSettings,
+  captureRateLimit,
   clampEffort,
   MODEL_SUPPORTED_EFFORTS,
+  MODEL_TIERS,
+  type ModelTier,
   parseEffort,
   REASONING_EFFORT_LADDER,
   resolveModelTiers,
@@ -115,6 +118,32 @@ describe("model tier compatibility", () => {
       retry: true,
       delayMs: 8_000,
     });
+  });
+
+  it("tags an off-ladder tier as unranked rather than tier 1", () => {
+    captureRateLimit({
+      tier: { model: "gpt-5.6-sol", effort: "medium", verbosity: "low" },
+      outcome: "exhausted",
+    });
+    captureRateLimit({
+      tier: MODEL_TIERS[0] as ModelTier,
+      outcome: "exhausted",
+    });
+
+    expect(sentryMocks.captureMessage).toHaveBeenNthCalledWith(
+      1,
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({ model_tier: "unranked" }),
+      }),
+    );
+    expect(sentryMocks.captureMessage).toHaveBeenNthCalledWith(
+      2,
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({ model_tier: "1" }),
+      }),
+    );
   });
 
   it("normalizes valid env strings and rejects max and typos", () => {
