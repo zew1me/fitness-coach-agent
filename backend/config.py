@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     openai_activity_text_timeout_seconds: float = 60.0
     openai_vision_model: str = "gpt-5.6-luna"
     openai_vision_timeout_seconds: float = 45.0
+    # Ceiling on one _call_vision, retries included. openai_max_retries applies per
+    # request, so retries alone could hold a serverless request for minutes; a
+    # screenshot is best-effort, so give up and return "no data" instead.
+    openai_vision_total_timeout_seconds: float = 90.0
     # gpt-5.x vision is a reasoning model: reasoning draws down the output budget, so keep
     # this generous — a truncated response is invalid even under strict structured outputs.
     openai_vision_max_output_tokens: int = 8000
@@ -69,7 +73,11 @@ class Settings(BaseSettings):
             )
         return stripped
 
-    @field_validator("openai_activity_text_timeout_seconds", "openai_vision_timeout_seconds")
+    @field_validator(
+        "openai_activity_text_timeout_seconds",
+        "openai_vision_timeout_seconds",
+        "openai_vision_total_timeout_seconds",
+    )
     @classmethod
     def validate_openai_timeout(cls, v: float) -> float:
         if not math.isfinite(v) or v <= 0:

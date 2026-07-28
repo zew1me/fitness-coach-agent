@@ -11,6 +11,7 @@ matching our schema rather than free-form text we have to parse defensively.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, TypeVar
 
@@ -297,19 +298,26 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
     """Call the OpenAI vision model with an image and a strict response schema.
 
     Returns a validated `schema` instance, or `None` when the call cannot produce one
-    (no API key, transport/API error, a failed/cancelled/incomplete response, or no
-    parsed output such as a refusal or content filter). Callers treat `None` as
-    "unknown / no data" so a single screenshot never breaks the turn.
+    (no API key, transport/API error, a timeout, a failed/cancelled/incomplete
+    response, or no parsed output such as a refusal or content filter). Callers treat
+    `None` as "unknown / no data" so a single screenshot never breaks the turn.
+
+    `openai_vision_timeout_seconds` bounds a single attempt, but the SDK retries
+    internally, so the enclosing `openai_vision_total_timeout_seconds` guard is what
+    stops a stalled vision call from consuming the whole serverless request budget.
     """
     if not settings.openai_api_key:
         return None
 
     try:
-        async with AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            max_retries=settings.openai_max_retries,
-            timeout=settings.openai_vision_timeout_seconds,
-        ) as client:
+        async with (
+            asyncio.timeout(settings.openai_vision_total_timeout_seconds),
+            AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                max_retries=settings.openai_max_retries,
+                timeout=settings.openai_vision_timeout_seconds,
+            ) as client,
+        ):
             logger.debug("openai vision call start model=%s", settings.openai_vision_model)
             response = await client.responses.parse(
                 model=settings.openai_vision_model,
@@ -330,6 +338,13 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
                 max_output_tokens=settings.openai_vision_max_output_tokens,
                 reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
             )
+    except TimeoutError:
+        logger.warning(
+            "screenshot vision call exceeded its total budget type=%s budget=%ss",
+            schema.__name__,
+            settings.openai_vision_total_timeout_seconds,
+        )
+        return None
     except OpenAIError as error:
         status_code = getattr(error, "status_code", None)
         if _is_reasoning_model_mismatch(error):

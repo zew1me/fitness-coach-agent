@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import struct
@@ -324,6 +325,47 @@ async def test_call_vision_uses_model_max_tokens_and_high_detail(
     assert parse_kwargs["reasoning"]["effort"] == "low"
     assert parse_kwargs["text_format"] is screenshot_analyzer.ActivityExtraction
     assert parse_kwargs["input"][0]["content"][1]["detail"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_call_vision_gives_up_when_total_budget_is_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stalled vision call must fail fast, not burn the serverless request budget.
+
+    The per-request timeout does not bound the SDK's internal retries, so this asserts
+    the enclosing total-budget guard degrades to "no data" like every other failure.
+    """
+
+    class HangingResponses:
+        async def parse(self, **_kwargs: Any) -> Any:
+            await asyncio.sleep(30)
+            raise AssertionError("the total-budget guard should have fired first")
+
+    class HangingAsyncOpenAI:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.responses = HangingResponses()
+
+        async def __aenter__(self) -> "HangingAsyncOpenAI":
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_total_timeout_seconds", 0.01)
+    monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", HangingAsyncOpenAI)
+
+    with caplog.at_level(logging.WARNING, logger=screenshot_analyzer.logger.name):
+        result = await screenshot_analyzer._call_vision(
+            "Extract fields",
+            "https://example.com/image.png",
+            screenshot_analyzer.ActivityExtraction,
+        )
+
+    assert result is None
+    assert "exceeded its total budget" in caplog.text
 
 
 @pytest.mark.asyncio
