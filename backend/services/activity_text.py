@@ -108,6 +108,14 @@ class ActivityTextBuildResult:
 
 
 def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before the next attempt, capped at _MAX_RETRY_DELAY_SECONDS.
+
+    A provider Retry-After is a hint, not an instruction we can afford: this runs
+    inside a serverless request, so holding it open for the minutes OpenAI may ask
+    for is worse than failing back to the caller, which degrades gracefully. The
+    cap means a retry can fire before the provider's window closes and burn an
+    attempt on a near-certain 429 — accepted deliberately.
+    """
     retry_after = response.headers.get("Retry-After")
     if retry_after is not None:
         try:
@@ -120,8 +128,9 @@ def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
                 delay = (retry_at - datetime.now(UTC)).total_seconds()
             except (TypeError, ValueError, OverflowError):
                 delay = 0.5 * (2 ** (attempt - 1))
-        return max(delay, 0.0)
-    return min(0.5 * (2 ** (attempt - 1)), _MAX_RETRY_DELAY_SECONDS)
+    else:
+        delay = 0.5 * (2 ** (attempt - 1))
+    return min(max(delay, 0.0), _MAX_RETRY_DELAY_SECONDS)
 
 
 async def extract_activity_text(text: str) -> ActivityTextExtraction:

@@ -467,7 +467,8 @@ async def test_extract_activity_text_retries_429_then_succeeds(
 
     assert result.sport == "running"
     assert attempts == 2
-    sleep.assert_awaited_once_with(30.0)
+    # Retry-After: 30 is capped — a serverless request must not be held that long.
+    sleep.assert_awaited_once_with(8.0)
 
 
 @pytest.mark.asyncio
