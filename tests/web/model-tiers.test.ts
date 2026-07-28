@@ -24,8 +24,25 @@ afterEach(() => {
 });
 
 describe("model tier compatibility", () => {
-  it("only resolves model and effort combinations in the allowlist", () => {
-    for (const tier of resolveModelTiers()) {
+  it("resolves the documented ladder order with supported efforts", () => {
+    // Stub to empty rather than reading ambient config: `?.trim() || default` treats
+    // "" as unset, so this asserts the shipped defaults regardless of the CI env.
+    for (const name of [
+      "OPENAI_LEAD_MODEL",
+      "OPENAI_FALLBACK_MODEL_2",
+      "OPENAI_FALLBACK_MODEL_3",
+    ]) {
+      vi.stubEnv(name, "");
+    }
+
+    const tiers = resolveModelTiers();
+
+    expect(tiers.map((tier) => tier.model)).toEqual([
+      "gpt-5.6-luna",
+      "gpt-5.4-mini",
+      "gpt-5.6-terra",
+    ]);
+    for (const tier of tiers) {
       expect(MODEL_SUPPORTED_EFFORTS[tier.model]?.has(tier.effort)).toBe(true);
     }
   });
