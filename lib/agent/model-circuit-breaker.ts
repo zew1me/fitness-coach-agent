@@ -140,8 +140,20 @@ export function createModelCircuitBreaker(
       entry.until = now() + entry.windowMs;
     },
 
+    // Telemetry-only read: never allocates an entry, so tagging a Sentry event
+    // for a model the breaker has never admitted (a specialist tier, say) does
+    // not grow the map.
     snapshot(model: string): BreakerSnapshot {
-      const entry = entryFor(model);
+      const entry = entries.get(model);
+      if (!entry) {
+        return {
+          consecutiveFailures: 0,
+          probeInFlight: false,
+          state: "closed",
+          until: 0,
+          windowMs: MIN_COOLDOWN_MS,
+        };
+      }
       return {
         consecutiveFailures: entry.consecutiveFailures,
         probeInFlight: entry.probeInFlight,
