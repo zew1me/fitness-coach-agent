@@ -222,6 +222,13 @@ export function captureRateLimit(options: {
   });
 }
 
+// The SDK only applies `backoff.maxDelayMs` to its own computed exponential delay;
+// an explicit `delayMs` on a RetryDecision is awaited verbatim (see
+// waitForRetryDelay in @openai/agents-core/runner/modelRetry). A provider
+// Retry-After of minutes would therefore stall the whole serverless request, so
+// the 429 policy clamps to this same ceiling.
+const MAX_RETRY_DELAY_MS = 8_000;
+
 export function buildModelSettings(tier: ModelTier): ModelSettings {
   return {
     reasoning: { effort: tier.effort },
@@ -230,7 +237,7 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
       maxRetries: 2,
       backoff: {
         initialDelayMs: 500,
-        maxDelayMs: 8_000,
+        maxDelayMs: MAX_RETRY_DELAY_MS,
         multiplier: 2,
         jitter: true,
       },
@@ -249,7 +256,7 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
             ? { retry: true, reason: `429 attempt ${attempt}` }
             : {
                 retry: true,
-                delayMs: normalized.retryAfterMs,
+                delayMs: Math.min(normalized.retryAfterMs, MAX_RETRY_DELAY_MS),
                 reason: `429 attempt ${attempt}`,
               };
         }

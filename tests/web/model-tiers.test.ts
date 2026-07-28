@@ -1,3 +1,4 @@
+import type { RetryDecision } from "@openai/agents";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const sentryMocks = vi.hoisted(() => ({ captureMessage: vi.fn() }));
@@ -80,6 +81,40 @@ describe("model tier compatibility", () => {
         tags: expect.objectContaining({ outcome: "retrying" }),
       }),
     );
+  });
+
+  it("clamps a provider Retry-After to the backoff ceiling", async () => {
+    const settings = buildModelSettings({
+      model: "gpt-5.6-luna",
+      effort: "medium",
+      verbosity: "low",
+    });
+    const decisionFor = async (
+      retryAfterMs: number,
+    ): Promise<RetryDecision | undefined> =>
+      settings.retry?.policy?.({
+        attempt: 1,
+        error: Object.assign(new Error("rate limit"), { status: 429 }),
+        maxRetries: 2,
+        normalized: {
+          isAbort: false,
+          isNetworkError: false,
+          statusCode: 429,
+          retryAfterMs,
+        },
+        stream: true,
+      });
+
+    // Under the ceiling the provider's hint is honored verbatim...
+    expect(await decisionFor(1_500)).toMatchObject({
+      retry: true,
+      delayMs: 1_500,
+    });
+    // ...but a multi-minute Retry-After must not stall the serverless request.
+    expect(await decisionFor(300_000)).toMatchObject({
+      retry: true,
+      delayMs: 8_000,
+    });
   });
 
   it("normalizes valid env strings and rejects max and typos", () => {
