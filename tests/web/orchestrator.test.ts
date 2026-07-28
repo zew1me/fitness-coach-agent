@@ -67,8 +67,13 @@ const orchestratorMocks = vi.hoisted(() => {
     run = agentsRun;
   }
 
+  // Mirrors the real export so `instanceof` narrowing in the orchestrator's
+  // max-turns catch behaves the same way here as it does in production.
+  class MaxTurnsExceededError extends Error {}
+
   return {
     Agent,
+    MaxTurnsExceededError,
     Runner,
     agentConfigs,
     agentsRun,
@@ -82,6 +87,7 @@ const orchestratorMocks = vi.hoisted(() => {
 
 vi.mock("@openai/agents", () => ({
   Agent: orchestratorMocks.Agent,
+  MaxTurnsExceededError: orchestratorMocks.MaxTurnsExceededError,
   MCPServerStreamableHttp: class MCPServerStreamableHttp {},
   Runner: orchestratorMocks.Runner,
   tool: vi.fn((definition: Record<string, unknown>) => ({
@@ -734,6 +740,140 @@ describe("streamCoachTurn", () => {
         }),
       ]),
     );
+  });
+
+  it("reports completed tool work instead of the error message when max turns is exceeded", async () => {
+    // Sentry 7633993901: 12 process_uploaded_file calls ran and 11 succeeded,
+    // then the runner threw MaxTurnsExceededError. The throw skipped both the
+    // acknowledgement follow-up and the deterministic fallback, so the athlete
+    // saw "Coach is unavailable" and every processed file was discarded.
+    const maxTurns = new orchestratorMocks.MaxTurnsExceededError(
+      "Max turns (4) exceeded",
+    );
+    // Mirrors StreamedRunResult._raiseError (@openai/agents-core result.js:252):
+    // it errors the readable controller *and* rejects `completed`, then attaches
+    // its own catch so the rejection is already observed. Reproducing all three
+    // matters — the orchestrator swallows the iterator throw and never awaits
+    // `completed`, so an unguarded rejection here would be unhandled. It isn't,
+    // because the SDK guards it at the source.
+    const completed = Promise.reject(maxTurns);
+    completed.catch(() => {});
+    const leadOutput = [{ role: "assistant", content: "processed 11 files" }];
+    orchestratorMocks.agentsRun.mockImplementationOnce(() =>
+      Promise.resolve({
+        completed,
+        finalOutput: "",
+        output: leadOutput,
+        state: { usage: undefined },
+        *[Symbol.asyncIterator](): Generator<AgentEvent, void, unknown> {
+          // A tool ran to completion before the runner hit the turn limit —
+          // this is what makes `ranTool` true and routes the salvage through
+          // the acknowledgement follow-up rather than the generic fallback.
+          yield {
+            type: "run_item_stream_event",
+            name: "tool_called",
+            item: {
+              rawItem: {
+                callId: "call-1",
+                name: "process_uploaded_file",
+                arguments: "{}",
+              },
+            },
+          } as unknown as AgentEvent;
+          throw maxTurns;
+        },
+      }),
+    );
+    // The acknowledgement follow-up is the second `run` call; it summarises the
+    // lead's completed tool work.
+    orchestratorMocks.runEventSequences.push([
+      {
+        type: "raw_model_stream_event",
+        data: {
+          type: "output_text_delta",
+          delta: "I processed 11 files from your upload.",
+        },
+      } as unknown as AgentEvent,
+    ]);
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+    });
+
+    await response.text();
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    const body = JSON.parse(String(persistCall?.[1]?.body)) as {
+      parts: Array<Record<string, unknown>>;
+    };
+    const text = body.parts
+      .filter((part) => part["type"] === "text")
+      .map((part) => String(part["text"]))
+      .join(" ");
+
+    expect(text).not.toContain("Coach is unavailable");
+    expect(text).toContain("I processed 11 files from your upload.");
+    // The follow-up must be handed the lead's completed output so the salvaged
+    // tool work is what gets summarised.
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
+    const followupCall = (
+      orchestratorMocks.agentsRun.mock.calls as unknown as unknown[][]
+    )[1];
+    expect(followupCall?.[1]).toEqual(leadOutput);
+  });
+
+  it("still propagates non-max-turns errors from the lead run", async () => {
+    // The error has to surface from the streamed result, not from `run` itself:
+    // only that path reaches the try/catch that swallows MaxTurnsExceededError,
+    // so this is what proves every other error is still rethrown.
+    const generic = new Error("rate limit");
+    const completed = Promise.reject(generic);
+    completed.catch(() => {});
+    orchestratorMocks.agentsRun.mockImplementationOnce(() =>
+      Promise.resolve({
+        completed,
+        finalOutput: "",
+        output: [],
+        state: { usage: undefined },
+        // eslint-disable-next-line require-yield
+        *[Symbol.asyncIterator](): Generator<AgentEvent, void, unknown> {
+          throw generic;
+        },
+      }),
+    );
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+    });
+
+    await response.text();
+
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(String(persistCall?.[1]?.body)).toContain("Coach is unavailable");
   });
 
   it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {
