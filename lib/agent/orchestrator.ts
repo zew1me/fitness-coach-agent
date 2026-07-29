@@ -1,5 +1,6 @@
 import {
   Agent,
+  MaxTurnsExceededError,
   MCPServerStreamableHttp,
   Runner,
   withTrace,
@@ -768,11 +769,30 @@ export function streamCoachTurn({
                             },
                           );
 
-                          for await (const event of result) {
-                            attemptProgress.eventStarted = true;
-                            writeAgentStreamEvent(event, writer, textState);
+                          // The runner throws MaxTurnsExceededError only after
+                          // this turn's tool calls have completed. Preserve that
+                          // completed work by falling through to the
+                          // acknowledgement/deterministic response below.
+                          try {
+                            for await (const event of result) {
+                              attemptProgress.eventStarted = true;
+                              writeAgentStreamEvent(event, writer, textState);
+                            }
+                            await result.completed;
+                          } catch (error) {
+                            if (!(error instanceof MaxTurnsExceededError)) {
+                              throw error;
+                            }
+                            if (!isTurnAborted()) {
+                              Sentry.captureException(error, {
+                                tags: { subsystem: "coach-max-turns" },
+                              });
+                              Sentry.logger.warn(
+                                "coach: max turns exceeded; salvaging completed tool work",
+                                { max_turns: MAX_COACH_STEPS },
+                              );
+                            }
                           }
-                          await result.completed;
                           recordStageUsage("lead", result.state.usage);
 
                           const ranTool =
