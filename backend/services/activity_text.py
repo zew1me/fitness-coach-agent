@@ -118,6 +118,10 @@ class ActivityTextBuildResult:
     raw_extraction: dict[str, Any]
 
 
+def _exponential_backoff_seconds(attempt: int) -> float:
+    return 0.5 * (2 ** (attempt - 1))
+
+
 def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
     """Seconds to wait before the next attempt, capped at _MAX_RETRY_DELAY_SECONDS.
 
@@ -138,9 +142,9 @@ def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
                     retry_at = retry_at.replace(tzinfo=UTC)
                 delay = (retry_at - datetime.now(UTC)).total_seconds()
             except (TypeError, ValueError, OverflowError):
-                delay = 0.5 * (2 ** (attempt - 1))
+                delay = _exponential_backoff_seconds(attempt)
     else:
-        delay = 0.5 * (2 ** (attempt - 1))
+        delay = _exponential_backoff_seconds(attempt)
     return min(max(delay, 0.0), _MAX_RETRY_DELAY_SECONDS)
 
 
@@ -196,7 +200,7 @@ async def _post_with_retries(
         except _RETRYABLE_TRANSPORT_ERRORS as exc:
             if last_attempt:
                 raise
-            delay = min(0.5 * (2 ** (attempt - 1)), _MAX_RETRY_DELAY_SECONDS)
+            delay = min(_exponential_backoff_seconds(attempt), _MAX_RETRY_DELAY_SECONDS)
             logger.warning(
                 "OpenAI activity text extraction transport failure; "
                 "error=%s attempt=%s retrying_in=%.3fs",
