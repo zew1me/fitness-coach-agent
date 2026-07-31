@@ -14,7 +14,7 @@ from typing import Annotated, Any
 import typer
 
 _DEFAULT_CONFIG = Path("~/.config/fitness-coach-agent/backups.toml")
-_REMOTE_DESTINATION_RE = re.compile(r"^[^/:\s]+:.+$")
+_REMOTE_DESTINATION_RE = re.compile(r"^(?!-)[^/:\s]+:.+$")
 
 app = typer.Typer(
     help="Back up local personal data through rclone.",

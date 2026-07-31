@@ -65,6 +65,10 @@ def test_load_config_reads_rclone_and_profile(tmp_path: Path) -> None:
             "must be an rclone remote path",
         ),
         (
+            'version = 1\n[profiles.garmin]\nsource = "data"\ndestination = "-config:path"\n',
+            "must be an rclone remote path",
+        ),
+        (
             'version = 1\n[profiles.garmin]\nsource = "data"\n'
             'destination = "gdrive:data"\nchecksum = "yes"\n',
             "checksum must be a boolean",
