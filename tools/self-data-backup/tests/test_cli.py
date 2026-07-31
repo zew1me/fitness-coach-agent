@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 cli_runner = CliRunner()
 _CONFIG_ERROR_EXIT_CODE = 2
+_RCLONE_FAILURE_EXIT_CODE = 23
 
 
 def _write_config(path: Path, source: Path, *, destination: str = "gdrive:backups/garmin") -> None:
@@ -153,6 +154,57 @@ def test_run_backup_invokes_rclone_with_source_override(
             "--dry-run",
         ]
     ]
+
+
+def test_run_backup_returns_rclone_failure_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "garmin-fit"
+    source.mkdir()
+    config = BackupConfig(
+        rclone=RcloneSettings(),
+        profiles={
+            "garmin": BackupProfile(
+                name="garmin",
+                source=source,
+                destination="gdrive:fitness/garmin",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "fitness_coach_self_data_backup.cli.shutil.which", lambda _: "/usr/bin/rclone"
+    )
+
+    def runner(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, _RCLONE_FAILURE_EXIT_CODE)
+
+    assert (
+        run_backup(config=config, profile_name="garmin", runner=runner) == _RCLONE_FAILURE_EXIT_CODE
+    )
+
+
+def test_run_backup_wraps_execution_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "garmin-fit"
+    source.mkdir()
+    config = BackupConfig(
+        rclone=RcloneSettings(),
+        profiles={
+            "garmin": BackupProfile(
+                name="garmin",
+                source=source,
+                destination="gdrive:fitness/garmin",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "fitness_coach_self_data_backup.cli.shutil.which", lambda _: "/usr/bin/rclone"
+    )
+
+    def runner(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise PermissionError("permission denied")
+
+    with pytest.raises(BackupConfigError, match="unable to execute rclone: permission denied"):
+        run_backup(config=config, profile_name="garmin", runner=runner)
 
 
 def test_run_backup_rejects_missing_source(tmp_path: Path) -> None:

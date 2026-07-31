@@ -185,7 +185,10 @@ def run_backup(
         dry_run=options.dry_run,
         verbose=options.verbose,
     )
-    result = runner(command, check=False, text=True)
+    try:
+        result = runner(command, check=False, text=True)
+    except OSError as exc:
+        raise BackupConfigError(f"unable to execute rclone: {exc}") from exc
     return result.returncode
 
 
