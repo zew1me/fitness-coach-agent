@@ -69,16 +69,21 @@ def _non_empty_string(value: Any, name: str) -> str:
     return value
 
 
+def _read_toml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as config_file:
+            return tomllib.load(config_file)
+    except FileNotFoundError as exc:
+        raise BackupConfigError(f"config file does not exist: {path}") from exc
+    except OSError as exc:
+        raise BackupConfigError(f"cannot read config file {path}: {exc}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise BackupConfigError(f"invalid TOML in {path}: {exc}") from exc
+
+
 def load_config(path: Path) -> BackupConfig:
     """Load and validate an rclone backup configuration."""
-    expanded_path = path.expanduser()
-    try:
-        with expanded_path.open("rb") as config_file:
-            raw = tomllib.load(config_file)
-    except FileNotFoundError as exc:
-        raise BackupConfigError(f"config file does not exist: {expanded_path}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise BackupConfigError(f"invalid TOML in {expanded_path}: {exc}") from exc
+    raw = _read_toml(path.expanduser())
 
     if raw.get("version") != 1:
         raise BackupConfigError("config version must be 1")

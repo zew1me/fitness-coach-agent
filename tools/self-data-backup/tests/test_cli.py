@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -23,16 +24,16 @@ _CONFIG_ERROR_EXIT_CODE = 2
 
 def _write_config(path: Path, source: Path, *, destination: str = "gdrive:backups/garmin") -> None:
     path.write_text(
-        f'''version = 1
+        f"""version = 1
 
 [rclone]
 binary = "rclone"
 
 [profiles.garmin]
-source = "{source}"
-destination = "{destination}"
+source = {json.dumps(str(source))}
+destination = {json.dumps(destination)}
 checksum = true
-''',
+""",
         encoding="utf-8",
     )
 
@@ -74,6 +75,11 @@ def test_load_config_rejects_invalid_values(tmp_path: Path, config_text: str, me
 
     with pytest.raises(BackupConfigError, match=message):
         load_config(config_path)
+
+
+def test_load_config_wraps_other_read_errors(tmp_path: Path) -> None:
+    with pytest.raises(BackupConfigError, match="cannot read config file"):
+        load_config(tmp_path)
 
 
 def test_build_rclone_command_uses_copy_and_requested_flags(tmp_path: Path) -> None:

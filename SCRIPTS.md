@@ -58,10 +58,10 @@ entry point. Register it in the root workspace:
 members = ["tools/*"]
 ```
 
-If root-level pytest, Ruff, ty, or vulture checks cover the tool, wire the workspace package into the
-root development group through `[tool.uv.sources]` and include its source/tests in the relevant tool
-configuration. Regenerate `uv.lock` in the same change. CI and local hooks must exercise the tool;
-do not create an untested workspace island.
+If root-level pytest, Ruff, ty, or vulture checks cover the tool, declare its distribution in the
+root development dependency group, map that dependency to the workspace through `[tool.uv.sources]`,
+and include its source/tests in the relevant tool configuration. Regenerate `uv.lock` in the same
+change. CI and local hooks must exercise the tool; do not create an untested workspace island.
 
 Run a workspace command from the repository root with:
 

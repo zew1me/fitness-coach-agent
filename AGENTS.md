@@ -32,6 +32,7 @@ uv run pytest tools/self-data-backup/tests/  # single workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
+uv run ty check                      # type checking
 uv run vulture                       # dead-code detection
 ```
 
