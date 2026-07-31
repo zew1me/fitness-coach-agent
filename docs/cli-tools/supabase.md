@@ -1,6 +1,6 @@
 # Supabase CLI
 
-Use `supabase` for the local Supabase stack, migrations, database checks, and explicitly requested
+Use `supabase` for the Supabase stack, migrations, database checks, and explicitly requested
 hosted-project operations. This repository's local configuration is `supabase/config.toml`.
 Development, preview, and production are separate projects; never infer that a linked remote is the
 intended target.
@@ -63,6 +63,5 @@ supabase migration list --linked
 - Treat `db push`, `migration repair`, remote SQL writes, secrets changes, branch deletion, and
   project configuration changes as shared-state mutations. Confirm the target and intent first.
 - Never run `db reset` against a hosted database.
-- Never expose access tokens, database URLs, service-role keys, or command output containing them.
-- A pull request should normally contain migration files; applying them to preview or production is
-  a separate, explicitly requested operation.
+- A pull request should normally contain migration files; do not apply them to preview or production
+  without explicit interactive review with the user.
