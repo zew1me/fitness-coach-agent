@@ -122,6 +122,26 @@ vi.mock("ai", async (importOriginal) => {
   };
 });
 
+// `DurableCompactionSession` builds its OpenAI client eagerly in the
+// constructor, and the real `new OpenAI()` throws when OPENAI_API_KEY is unset.
+// The orchestrator constructs that session without injecting a client, so
+// without this stub every `useDurableSession: true` test dies inside
+// prepareDurableSession and silently asserts against the stream's error path
+// instead of the behaviour under test — green on a developer machine with a key
+// exported, red on CI. Stubbing the module keeps the dependency explicit and
+// local to this file rather than relying on an ambient environment variable.
+vi.mock("openai", () => ({
+  default: class OpenAIStub {
+    responses = {
+      compact: (): never => {
+        throw new Error(
+          "orchestrator tests must not reach live OpenAI compaction",
+        );
+      },
+    };
+  },
+}));
+
 vi.mock("../../lib/agent/delegation-planner", () => ({
   planSpecialistDelegation: vi.fn(() => Promise.resolve({ delegations: [] })),
 }));
