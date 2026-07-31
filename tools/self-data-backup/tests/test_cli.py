@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from click.utils import strip_ansi
 from fitness_coach_self_data_backup.cli import (
     BackupConfig,
     BackupConfigError,
@@ -186,8 +187,9 @@ def test_typer_cli_reports_unknown_profile(tmp_path: Path) -> None:
 
 
 def test_typer_cli_exposes_backup_help() -> None:
-    result = cli_runner.invoke(app, ["backup", "--help"])
+    result = cli_runner.invoke(app, ["backup", "--help"], color=True)
+    help_output = strip_ansi(result.output)
 
     assert result.exit_code == 0
-    assert "--profile" in result.output
-    assert "--dry-run" in result.output
+    assert "--profile" in help_output
+    assert "--dry-run" in help_output
