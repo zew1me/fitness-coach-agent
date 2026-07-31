@@ -40,16 +40,14 @@ vercel env run -- <command>
 vercel env pull .env.local
 ```
 
-`vercel env pull` writes secrets to disk. Keep the destination ignored, never display its contents,
-and never commit it. Adding, updating, or removing a variable changes shared cloud state: verify the
-target environment and obtain confirmation before doing so.
+`vercel env pull` writes secrets to disk. Keep the destination ignored  and never commit it. Adding,
+updating, or removing a variable changes shared cloud state: verify the target environment and obtain 
+interactive confirmation from the user before doing so.
 
 ## Deployments and safety
 
-- `vercel deploy` creates an externally visible deployment. Run it only when deployment is part of
-  the request, and report the resulting URL.
+- `vercel deploy` creates an externally visible deployment. Do not run this, deployment is through CI.
 - Treat `--prod`, `promote`, `rollback`, `redeploy`, aliases, domains, and project settings as
-  production-affecting operations. Confirm the target and intent first.
+  production-affecting operations. Do not use these without interactive approval from the user.
 - Confirm before `vercel remove` or any other destructive command.
-- Do not pass tokens on the command line or include authentication output in logs or documentation.
 - Prefer Git-driven preview and production deployments when the task only asks for a pull request.
