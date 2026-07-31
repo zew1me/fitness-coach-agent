@@ -1258,6 +1258,7 @@ describe("streamCoachTurn", () => {
         finalOutput: "",
         output: [],
         state: { usage: undefined },
+        // This test intentionally throws before the iterator can yield any values.
         // eslint-disable-next-line require-yield
         *[Symbol.asyncIterator](): Generator<AgentEvent, void, unknown> {
           throw generic;
