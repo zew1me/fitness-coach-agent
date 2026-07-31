@@ -15,9 +15,9 @@ sentry <group> <command> --help
 ```
 
 Do not pre-authenticate routinely. Run the intended read command first; if authentication is needed,
-the CLI will report it. Never print or store the token.
+the CLI will report it.
 
-## Investigation workflow
+## Investigation workflow examples
 
 ```sh
 sentry issue list --query 'is:unresolved' --limit 10 \
@@ -34,10 +34,6 @@ sentry log list --period 1h --limit 100 --json
 - Bound searches with `--period`, `--limit`, and a Sentry `--query` filter.
 - Use `--json --fields ...` to keep output small and machine-readable.
 - Use `--fresh` only when cached discovery or results are unsuitable.
-- `-w`/`--web` opens a resource in the browser when a dashboard view is useful.
-
-For an issue, inspect the issue and latest event before using `sentry issue explain` or
-`sentry issue plan`; AI analysis supplements rather than replaces the underlying evidence.
 
 ## API and schema fallback
 
@@ -46,7 +42,7 @@ sentry schema <resource>
 sentry api <endpoint> --json
 ```
 
-Use `sentry schema` to discover endpoints and `sentry api` only when no dedicated command exposes
+Use `sentry schema` to discover endpoints and `sentry api` when no dedicated command exposes
 the required data. Keep responses bounded and select fields where supported.
 
 ## Mutations and safety
