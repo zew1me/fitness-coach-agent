@@ -38,7 +38,27 @@ _RETRYABLE_TRANSPORT_ERRORS = (
     httpx.RemoteProtocolError,
     httpx.WriteError,
 )
-_ACTIVITY_TEXT_RETRY = Retry(
+
+
+class _ObservedRetry(Retry):
+    async def asleep(self, response: httpx.Response | Exception) -> None:
+        # Sentry's logging integration records these as logs, not noisy error issues.
+        if isinstance(response, httpx.Response):
+            logger.warning(
+                "OpenAI activity text extraction transient failure; status=%s attempt=%s",
+                response.status_code,
+                self.attempts_made,
+            )
+        else:
+            logger.warning(
+                "OpenAI activity text extraction transport failure; error=%s attempt=%s",
+                type(response).__name__,
+                self.attempts_made,
+            )
+        await super().asleep(response)
+
+
+_ACTIVITY_TEXT_RETRY = _ObservedRetry(
     total=_ACTIVITY_TEXT_MAX_RETRIES,
     allowed_methods={"POST"},
     status_forcelist={_RATE_LIMIT_STATUS, *range(_SERVER_ERROR_STATUS, 600)},

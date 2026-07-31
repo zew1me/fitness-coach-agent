@@ -473,6 +473,7 @@ async def test_extract_activity_text_retries_429_then_succeeds(
     assert attempts == 2
     # Retry-After: 30 is capped — a serverless request must not be held that long.
     sleep.assert_awaited_once_with(8.0)
+    assert "status=429 attempt=1" in caplog.text
     assert "status=200 retries=1" in caplog.text
 
 
