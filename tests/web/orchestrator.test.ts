@@ -241,7 +241,13 @@ beforeEach(() => {
     Promise.resolve(new Response("{}", { status: 200 })),
   ) as unknown as typeof fetch;
   modelCircuitBreaker.reset();
-  vi.clearAllMocks();
+  // Reset, not clear: `mockClear` leaves queued `mockImplementationOnce`
+  // entries in place, so a test that fails before consuming its queue hands
+  // its leftovers to the next test's lead run and turns one regression into a
+  // cascade of misleading failures. Vitest's `mockReset` restores the
+  // implementation originally passed to `vi.fn(impl)` (unlike Jest's), so the
+  // default runner/Sentry stubs survive while the once-queues drain.
+  vi.resetAllMocks();
 });
 
 afterEach(() => {
@@ -1110,7 +1116,17 @@ describe("streamCoachTurn", () => {
     });
     await response.text();
 
-    expect(state.items).toHaveLength(1);
+    // TEMPORARY (remove once the linux-only failure is diagnosed): this test
+    // passes on darwin and fails on CI, so the assertion message carries the
+    // evidence needed to tell the two candidate root causes apart — how many
+    // lead runs happened, and which requests the session actually issued.
+    const diagnostics = JSON.stringify({
+      runCalls: orchestratorMocks.agentsRun.mock.calls.length,
+      requests: fetchMock.mock.calls.map(
+        ([url, init]) => `${init?.method ?? "GET"} ${String(url)}`,
+      ),
+    });
+    expect(state.items, diagnostics).toHaveLength(1);
     const putBodies = fetchMock.mock.calls
       .filter(
         ([url, init]) =>
