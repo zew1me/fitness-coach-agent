@@ -1,9 +1,8 @@
 # Local personal-data backup with rclone
 
 The repository includes a small local-only adapter that copies a personal-data directory to an
-[rclone](https://rclone.org/) remote. Its initial use case is backing up the FIT directory produced
-by the local Garmin Connect downloader from PR #394, but profiles can point at any local directory
-and any rclone remote.
+[rclone](https://rclone.org/) remote. Its initial use case is backing up the data produced by the 
+local Garmin Connect downloader.
 
 The adapter deliberately uses `rclone copy`, not `rclone sync`: files absent locally are **not**
 deleted from the backup. It invokes the installed rclone binary and does not handle Google
