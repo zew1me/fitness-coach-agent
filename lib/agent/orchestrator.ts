@@ -693,7 +693,7 @@ export function streamCoachTurn({
                   // the runner loop *after* this turn's tool calls have already
                   // succeeded, so letting it escape skips both the
                   // acknowledgement follow-up and the deterministic fallback
-                  // below and discards completed work. 
+                  // below and discards completed work.
                   // Swallow it here and fall through so those results are
                   // reported. Every other error still propagates.
                   try {

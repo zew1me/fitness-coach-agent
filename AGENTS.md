@@ -25,14 +25,23 @@ bun run typecheck  # tsc + Next.js typegen
 bun run test     # Vitest unit tests (tests/web/)
 bun run check    # lint + typecheck + test
 
-# Python backend
-uv run pytest tests/python/          # all Python tests
-uv run pytest tests/python/test_api.py  # single test file
+# Python backend and uv workspace tools
+uv run pytest                         # all Python and workspace-tool tests
+uv run pytest tests/python/test_api.py  # single application test file
+uv run pytest tools/self-data-backup/tests/  # single workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
+uv run ty check                      # type checking
 uv run vulture                       # dead-code detection
 ```
+
+## Scripts and local tools
+
+Before adding or expanding repository automation, read [SCRIPTS.md](SCRIPTS.md). Keep narrow,
+one-shot repository glue in `scripts/`; build durable, configurable, dependency-owning, or
+user-facing Python CLIs as Typer packages under `tools/` in the uv workspace. Update the shared
+lockfile and root checks whenever a workspace tool is added.
 
 ## Architecture
 
@@ -178,8 +187,8 @@ See `.env.example`. Required:
 ## Tests
 
 - Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
-- Python tests: `tests/python/` — pytest with `asyncio_mode = "auto"`
-- Python test config: `conftest.py` for fixtures
+- Python tests: `tests/python/` plus co-located `tools/*/tests/` workspace-tool tests — pytest with `asyncio_mode = "auto"`
+- Python test config: `conftest.py` for application fixtures; workspace tools should keep tool-specific fixtures local
 
 ## Local hooks (lefthook)
 
