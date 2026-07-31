@@ -68,10 +68,6 @@ execution, bounded output, and machine-readable output when supported. Use this 
 2. Run `<tool> --help`, then the command group's or exact command's `--help`.
 3. Consult upstream documentation only if the brief and installed CLI help are insufficient.
 
-Never print or commit credentials. Before changing shared cloud state, verify the account,
-organization, project, and environment; obtain confirmation for destructive, production-affecting,
-or billing-affecting operations.
-
 ## Architecture
 
 ### Runtimes
