@@ -43,6 +43,31 @@ one-shot repository glue in `scripts/`; build durable, configurable, dependency-
 user-facing Python CLIs as Typer packages under `tools/` in the uv workspace. Update the shared
 lockfile and root checks whenever a workspace tool is added.
 
+## External Service CLI Tools
+
+Use these CLIs when they match the task. Verify availability before use:
+
+```sh
+command -v <tool>
+```
+
+| Tool       | Use it for                                                                 | Progressive-disclosure brief                               |
+| ---------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `vercel`   | Deployments, runtime logs, project settings, and environment variables     | [`docs/cli-tools/vercel.md`](docs/cli-tools/vercel.md)     |
+| `supabase` | Local services, migrations, database checks, and hosted project operations | [`docs/cli-tools/supabase.md`](docs/cli-tools/supabase.md) |
+| `sentry`   | Issues, events, traces, logs, releases, and Sentry API access              | [`docs/cli-tools/sentry.md`](docs/cli-tools/sentry.md)     |
+
+Do not load every brief preemptively. Select the relevant tool, then read its brief before an
+unfamiliar, destructive, externally visible, or organization-specific operation. The catalog and
+loading order live in [`docs/cli-tools/README.md`](docs/cli-tools/README.md).
+
+Prefer repository-defined commands over hand-built equivalents, deterministic non-interactive
+execution, bounded output, and machine-readable output when supported. Use this discovery order:
+
+1. Read the tool's project brief.
+2. Run `<tool> --help`, then the command group's or exact command's `--help`.
+3. Consult upstream documentation only if the brief and installed CLI help are insufficient.
+
 ## Architecture
 
 ### Runtimes
@@ -196,6 +221,7 @@ See `.env.example`. Required:
 
 - Changing the compaction/durable-session subsystem (`lib/agent/responses-item-shapes.ts`, `lib/agent/supabase-agent-session.ts`, `lib/agent/durable-compaction-session.ts`, `lib/agent/orchestrator.ts`) → update `docs/COMPACTION_DESIGN.md` in the same change.
 - Adding/changing a Supabase migration → update `docs/supabase-migration-history.md` (see the Database section above).
+- `docs/cli-tools/` contains progressive-disclosure briefs for external service CLIs; keep the relevant brief current when project-specific CLI workflows or safety constraints change.
 - `docs/github-issues/` is an archive of point-in-time issue proposals, not a living doc — don't update it as code changes.
 
 ## Tests
