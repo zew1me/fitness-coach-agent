@@ -1116,17 +1116,11 @@ describe("streamCoachTurn", () => {
     });
     await response.text();
 
-    // TEMPORARY (remove once the linux-only failure is diagnosed): this test
-    // passes on darwin and fails on CI, so the assertion message carries the
-    // evidence needed to tell the two candidate root causes apart — how many
-    // lead runs happened, and which requests the session actually issued.
-    const diagnostics = JSON.stringify({
-      runCalls: orchestratorMocks.agentsRun.mock.calls.length,
-      requests: fetchMock.mock.calls.map(
-        ([url, init]) => `${init?.method ?? "GET"} ${String(url)}`,
-      ),
-    });
-    expect(state.items, diagnostics).toHaveLength(1);
+    // The durable session must actually have been built for this assertion to
+    // mean anything; without it the run is stateless and every count below is
+    // trivially zero.
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
+    expect(state.items).toHaveLength(1);
     const putBodies = fetchMock.mock.calls
       .filter(
         ([url, init]) =>
