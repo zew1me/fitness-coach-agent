@@ -70,6 +70,37 @@ describe("model tier compatibility", () => {
     );
   });
 
+  it("uses the configured OpenAI retry count for agent SDK calls", () => {
+    vi.stubEnv("OPENAI_MAX_RETRIES", "6");
+
+    const settings = buildModelSettings({
+      model: "gpt-5.6-luna",
+      effort: "medium",
+      verbosity: "low",
+    });
+
+    expect(settings.retry?.maxRetries).toBe(6);
+  });
+
+  it.each(["", "-1", "1.5", "not-a-number"])(
+    "falls back to four retries for invalid configuration %j",
+    (configured) => {
+      vi.stubEnv("OPENAI_MAX_RETRIES", configured);
+
+      const settings = buildModelSettings({
+        model: "gpt-5.6-luna",
+        effort: "medium",
+        verbosity: "low",
+      });
+
+      expect(settings.retry?.maxRetries).toBe(4);
+      expect(sentryMocks.captureMessage).toHaveBeenCalledWith(
+        "Invalid OpenAI max retries",
+        expect.objectContaining({ level: "warning" }),
+      );
+    },
+  );
+
   it("counts every retryable 429 attempt without capturing an exception", async () => {
     const settings = buildModelSettings({
       model: "gpt-5.6-luna",

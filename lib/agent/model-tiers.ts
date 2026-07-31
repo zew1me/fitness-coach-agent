@@ -231,14 +231,34 @@ export function captureRateLimit(options: {
 // waitForRetryDelay in @openai/agents-core/runner/modelRetry). A provider
 // Retry-After of minutes would therefore stall the whole serverless request, so
 // the 429 policy clamps to this same ceiling.
+const DEFAULT_OPENAI_MAX_RETRIES = 4;
 const MAX_RETRY_DELAY_MS = 8_000;
+
+function resolveMaxRetries(): number {
+  const raw = process.env["OPENAI_MAX_RETRIES"];
+  if (raw === undefined) return DEFAULT_OPENAI_MAX_RETRIES;
+
+  const configured = Number(raw);
+  if (
+    raw.trim() !== "" &&
+    Number.isSafeInteger(configured) &&
+    configured >= 0
+  ) {
+    return configured;
+  }
+  captureInvalidConfiguration("Invalid OpenAI max retries", {
+    configuredMaxRetries: raw,
+    fallback: DEFAULT_OPENAI_MAX_RETRIES,
+  });
+  return DEFAULT_OPENAI_MAX_RETRIES;
+}
 
 export function buildModelSettings(tier: ModelTier): ModelSettings {
   return {
     reasoning: { effort: tier.effort },
     text: { verbosity: tier.verbosity },
     retry: {
-      maxRetries: 2,
+      maxRetries: resolveMaxRetries(),
       backoff: {
         initialDelayMs: 500,
         maxDelayMs: MAX_RETRY_DELAY_MS,
