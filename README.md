@@ -17,6 +17,8 @@ ChatGPT-first endurance coaching app scaffold with:
 - `backend/`: Python domain, services, and repository glue
 - `tests/web/`: TypeScript tests
 - `tests/python/`: Python tests
+- `scripts/`: one-shot repository and development automation
+- `tools/`: installable local CLI packages in the uv workspace
 
 ## Tooling
 
@@ -50,7 +52,9 @@ uv run vulture
 uv run pytest
 ```
 
-### Local Garmin FIT downloader
+## Local personal-data tools
+
+### Garmin FIT downloader
 
 An optional, local-only Typer CLI downloads original Garmin Connect activities by inclusive date
 window. It stores renewable Garmin tokens but never stores the user's password. See
@@ -61,6 +65,12 @@ uv sync --extra garmin
 uv run --extra garmin python -m scripts.garmin_connect download \
   2026-07-01 2026-07-31 --output-dir downloads/garmin-fit
 ```
+
+### Personal-data backup
+
+Local Garmin FIT downloads can be copied to Google Drive or another rclone remote with the
+non-destructive backup adapter. See [`docs/local-data-backup.md`](docs/local-data-backup.md) for
+rclone setup, configuration, dry-run, and backup commands.
 
 ## R2 Uploads
 

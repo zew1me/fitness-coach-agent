@@ -2,6 +2,12 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 
+[manifest]
+members = [
+    "exercise-training-plan-gpt",
+    "fitness-coach-self-data-backup",
+]
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -346,6 +352,7 @@ garmin = [
 [package.dev-dependencies]
 dev = [
     { name = "exercise-training-plan-gpt", extra = ["garmin"] },
+    { name = "fitness-coach-self-data-backup" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -377,6 +384,7 @@ provides-extras = ["garmin"]
 [package.metadata.requires-dev]
 dev = [
     { name = "exercise-training-plan-gpt", extras = ["garmin"] },
+    { name = "fitness-coach-self-data-backup", editable = "tools/self-data-backup" },
     { name = "pytest", specifier = ">=8.3.5,<9.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.25.3,<0.26.0" },
     { name = "ruff", specifier = ">=0.11.0,<0.12.0" },
@@ -399,6 +407,17 @@ wheels = [
 ]
 
 [[package]]
+name = "fitness-coach-self-data-backup"
+version = "0.1.0"
+source = { editable = "tools/self-data-backup" }
+dependencies = [
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "typer", specifier = ">=0.16.0,<1.0.0" }]
+
+[[package]]
 name = "fitparse"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -406,16 +425,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/61/ed/5637fe96c56d55dfa
 
 [[package]]
 name = "garminconnect"
-version = "0.3.6"
+version = "0.3.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "curl-cffi" },
     { name = "requests" },
     { name = "ua-generator" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/24/29/f8e3609f22693020dec65d6285adf12daac459461a09e59dffe12ec7fc08/garminconnect-0.3.6.tar.gz", hash = "sha256:6f90aa282976f7dff880cf53ef4f3ea0d63701fd2a1488c628a66a2a027c2143", size = 61911, upload-time = "2026-06-14T08:05:37.349Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/27/db7310cbd274c3ac675fcc7e5cc7c2795221714fbd1234ac4bccf195def2/garminconnect-0.3.8.tar.gz", hash = "sha256:dee547f8f51f43e89fb683d3ae80b9641b9b4655c8c21053747499bb89c4491d", size = 91081, upload-time = "2026-07-30T07:05:31.729Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/f9/6d69eb2eab9f62ed7e415a606c5ef63e19f27e561d15d7ac7d651997cfad/garminconnect-0.3.6-py3-none-any.whl", hash = "sha256:e05782ab90e63cb9c023407899e2d12dd18132316fd84394ebecd393809d4ffe", size = 57555, upload-time = "2026-06-14T08:05:36.027Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/e6/1d6a14f53271ec36e5364dc46febbd3fac2f4233edc3c8c0ccddd058c742/garminconnect-0.3.8-py3-none-any.whl", hash = "sha256:53cf30fac34ea8305a0a66816a1b9f7634fa5fd98cc184d56306ef9278ebff0e", size = 85307, upload-time = "2026-07-30T07:05:30.281Z" },
 ]
 
 [[package]]

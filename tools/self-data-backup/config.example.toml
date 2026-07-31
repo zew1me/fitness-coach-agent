@@ -1,0 +1,15 @@
+# Copy this file to ~/.config/fitness-coach-agent/backups.toml and customize it.
+version = 1
+
+[rclone]
+binary = "rclone"
+# Optional when rclone's default config location is used.
+# config = "~/.config/rclone/rclone.conf"
+
+[profiles.garmin-gdrive]
+# Relative paths are resolved from the directory where the command is run.
+source = "downloads/garmin-fit"
+# `gdrive` is the remote name created by `rclone config`.
+destination = "gdrive:fitness-coach-agent/garmin-fit"
+# Compare content hashes when the remote supports them rather than trusting timestamps.
+checksum = true
