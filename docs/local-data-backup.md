@@ -3,7 +3,7 @@
 The repository includes a small local-only adapter that copies a personal-data directory to an
 [rclone](https://rclone.org/) remote. Its initial use case is backing up data produced by the
 [local Garmin Connect downloader](garmin-sidecar.md), but profiles can point at any local directory
-and any rclone remote.
+and an rclone destination whose remote name contains no whitespace and does not begin with `-`.
 
 The adapter deliberately uses `rclone copy`, not `rclone sync`: files absent locally are **not**
 deleted from the backup. It invokes the installed rclone binary and does not handle Google
