@@ -1070,6 +1070,7 @@ describe("streamCoachTurn", () => {
     await expect(response.text()).resolves.toContain(
       "Please try again in about 5 minutes.",
     );
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(3);
   });
 
   it("rolls back a failed durable attempt before persisting the fallback input", async () => {
