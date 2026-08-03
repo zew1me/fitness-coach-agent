@@ -178,8 +178,10 @@ a per-environment data migration.
       └─ hard limit 260 000: if compaction fails, throw (turn aborted)
       └─ soft limit 220 000: log Sentry warning, continue with uncompacted context
 5. Agent runs     →  SDK appends items via addItems() during the turn
-      └─ lead model retries transient errors, then falls back to the next model tier
-         only if no response text has streamed
+      └─ lead model honors provider retry delays up to 8 seconds, then falls back
+         to the next model tier only if no response text has streamed
+      └─ longer provider delays skip the in-request retry; if every tier is exhausted,
+         the athlete-visible error reports the provider's approximate wait time
 6. After the turn, auto-compaction runs if thresholds are hit
 7. Release lease  →  DELETE /api/chat/model-state/lease  (always in finally)
 ```

@@ -92,6 +92,20 @@ const ACKNOWLEDGEMENT_PROMPT =
   "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
 const EMPTY_MODEL_RESPONSE = "Hey, can you remind me of where we are at?";
 
+function rateLimitStreamErrorMessage(error: unknown, fallback: string): string {
+  if (!isRateLimitError(error)) return fallback;
+  const retryAfterMs = getRetryAfterMs(error);
+  if (retryAfterMs === undefined || retryAfterMs <= 0) return fallback;
+
+  const seconds = Math.max(1, Math.ceil(retryAfterMs / 1_000));
+  const minutes = Math.ceil(seconds / 60);
+  const wait =
+    seconds < 60
+      ? `${seconds} second${seconds === 1 ? "" : "s"}`
+      : `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  return `Coach is rate-limited right now. Please try again in about ${wait}.`;
+}
+
 type PrepareDurableSessionOptions = {
   accessToken: string;
   baseUrl: string;
@@ -1027,11 +1041,15 @@ export function streamCoachTurn({
           writer.write({ type: "abort", reason: "request aborted" });
           return;
         }
+        const userErrorMessage = rateLimitStreamErrorMessage(
+          error,
+          streamErrorMessage,
+        );
         if (!textState.textStarted) {
-          writeDeterministicText(writer, textState, streamErrorMessage);
+          writeDeterministicText(writer, textState, userErrorMessage);
         }
         finishAgentText(writer, textState);
-        writer.write({ type: "error", errorText: streamErrorMessage });
+        writer.write({ type: "error", errorText: userErrorMessage });
         writer.write({ type: "finish-step" });
         writer.write({ type: "finish", finishReason: "error" });
         // The lease-lost case already reported to Sentry from onLeaseLost;

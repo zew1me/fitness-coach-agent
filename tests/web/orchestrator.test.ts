@@ -98,17 +98,21 @@ const orchestratorMocks = vi.hoisted(() => {
 
 vi.mock("@sentry/nextjs", () => sentryMocks);
 
-vi.mock("@openai/agents", () => ({
-  Agent: orchestratorMocks.Agent,
-  MaxTurnsExceededError: orchestratorMocks.MaxTurnsExceededError,
-  MCPServerStreamableHttp: class MCPServerStreamableHttp {},
-  Runner: orchestratorMocks.Runner,
-  tool: vi.fn((definition: Record<string, unknown>) => ({
-    ...definition,
-    type: "function",
-  })),
-  withTrace: orchestratorMocks.withTrace,
-}));
+vi.mock("@openai/agents", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@openai/agents")>();
+  return {
+    ...actual,
+    Agent: orchestratorMocks.Agent,
+    MaxTurnsExceededError: orchestratorMocks.MaxTurnsExceededError,
+    MCPServerStreamableHttp: class MCPServerStreamableHttp {},
+    Runner: orchestratorMocks.Runner,
+    tool: vi.fn((definition: Record<string, unknown>) => ({
+      ...definition,
+      type: "function",
+    })),
+    withTrace: orchestratorMocks.withTrace,
+  };
+});
 
 vi.mock("ai", async (importOriginal) => {
   const actual = await importOriginal<typeof import("ai")>();
@@ -170,10 +174,12 @@ vi.mock("../../lib/agent/system-prompt", () => ({
 
 const originalFetch = globalThis.fetch;
 
-function rateLimitError(): Error & { status: number; headers: Headers } {
+function rateLimitError(
+  retryAfter = "0",
+): Error & { status: number; headers: Headers } {
   return Object.assign(new Error("rate limit"), {
     status: 429,
-    headers: new Headers({ "Retry-After": "0" }),
+    headers: new Headers({ "Retry-After": retryAfter }),
   });
 }
 
@@ -1043,6 +1049,23 @@ describe("streamCoachTurn", () => {
       expect.objectContaining({
         tags: expect.objectContaining({ outcome: "exhausted" }),
       }),
+    );
+  });
+
+  it("tells the athlete how long to wait when the fallback ladder is exhausted", async () => {
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError("300"));
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError("300"));
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError("300"));
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+
+    await expect(response.text()).resolves.toContain(
+      "Please try again in about 5 minutes.",
     );
   });
 
