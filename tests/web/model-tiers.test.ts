@@ -156,37 +156,80 @@ describe("model tier compatibility", () => {
     );
   });
 
-  it("clamps a provider Retry-After to the backoff ceiling", async () => {
+  it("preserves an explicit provider replay-safety veto", async () => {
+    const settings = buildModelSettings({
+      model: "gpt-5.6-luna",
+      effort: "medium",
+      verbosity: "low",
+    });
+
+    const decision = await settings.retry?.policy?.({
+      attempt: 1,
+      error: Object.assign(new Error("response event already issued"), {
+        status: 429,
+      }),
+      maxRetries: 2,
+      normalized: {
+        isAbort: false,
+        isNetworkError: false,
+        statusCode: 429,
+      },
+      providerAdvice: {
+        suggested: false,
+        replaySafety: "unsafe",
+        reason: "response event already issued",
+      },
+      stream: true,
+    });
+
+    expect(decision).toMatchObject({
+      retry: false,
+      reason: "response event already issued",
+    });
+    expect(sentryMocks.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it("honors bounded provider delays for rate limits and transient errors", async () => {
     const settings = buildModelSettings({
       model: "gpt-5.6-luna",
       effort: "medium",
       verbosity: "low",
     });
     const decisionFor = async (
-      retryAfterMs: number,
+      statusCode: 429 | 503,
+      retryAfterMs?: number,
     ): Promise<RetryDecision | undefined> =>
       settings.retry?.policy?.({
         attempt: 1,
-        error: Object.assign(new Error("rate limit"), { status: 429 }),
+        error: Object.assign(new Error("transient error"), {
+          status: statusCode,
+        }),
         maxRetries: 2,
         normalized: {
           isAbort: false,
           isNetworkError: false,
-          statusCode: 429,
-          retryAfterMs,
+          statusCode,
+          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
         },
         stream: true,
       });
 
-    // Under the ceiling the provider's hint is honored verbatim...
-    expect(await decisionFor(1_500)).toMatchObject({
+    expect(await decisionFor(429, 1_500)).toMatchObject({
       retry: true,
       delayMs: 1_500,
     });
-    // ...but a multi-minute Retry-After must not stall the serverless request.
-    expect(await decisionFor(300_000)).toMatchObject({
+    expect(await decisionFor(503, 2_500)).toMatchObject({
       retry: true,
-      delayMs: 8_000,
+      delayMs: 2_500,
+    });
+    expect(await decisionFor(503)).toMatchObject({
+      retry: true,
+      reason: "transient attempt 1",
+    });
+    // A multi-minute Retry-After must fall through to the model ladder rather
+    // than stall the serverless request or retry before the provider's window.
+    expect(await decisionFor(429, 300_000)).toMatchObject({
+      retry: false,
     });
   });
 

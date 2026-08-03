@@ -1,7 +1,9 @@
-import type {
-  ModelSettings,
-  ModelRetryNormalizedError,
-  RetryDecision,
+import {
+  retryPolicies,
+  type ModelSettings,
+  type ModelRetryNormalizedError,
+  type RetryDecision,
+  type RetryPolicy,
 } from "@openai/agents";
 import * as Sentry from "@sentry/nextjs";
 
@@ -228,11 +230,39 @@ export function captureRateLimit(options: {
 
 // The SDK only applies `backoff.maxDelayMs` to its own computed exponential delay;
 // an explicit `delayMs` on a RetryDecision is awaited verbatim (see
-// waitForRetryDelay in @openai/agents-core/runner/modelRetry). A provider
-// Retry-After of minutes would therefore stall the whole serverless request, so
-// the 429 policy clamps to this same ceiling.
+// waitForRetryDelay in @openai/agents-core/runner/modelRetry). Provider delays
+// within this ceiling are honored; longer delays decline the in-request retry so
+// the orchestrator can fall through to the next model tier instead of stalling.
 const DEFAULT_OPENAI_MAX_RETRIES = 4;
 const MAX_RETRY_DELAY_MS = 8_000;
+
+const providerSuggestedPolicy = retryPolicies.providerSuggested();
+
+function retryTransient(
+  normalized: ModelRetryNormalizedError,
+  reason: string,
+): RetryDecision {
+  if (normalized.retryAfterMs === undefined) return { retry: true, reason };
+  if (normalized.retryAfterMs > MAX_RETRY_DELAY_MS) {
+    return {
+      retry: false,
+      reason: `${reason}; provider delay exceeds the in-request retry budget`,
+    };
+  }
+  return { retry: true, delayMs: normalized.retryAfterMs, reason };
+}
+
+const providerSuggestedWithinRetryBudget: RetryPolicy = async (context) => {
+  const decision = await providerSuggestedPolicy(context);
+  if (
+    context.providerAdvice?.suggested === true &&
+    context.normalized.retryAfterMs !== undefined &&
+    context.normalized.retryAfterMs > MAX_RETRY_DELAY_MS
+  ) {
+    return false;
+  }
+  return decision;
+};
 
 function resolveMaxRetries(): number {
   const raw = process.env["OPENAI_MAX_RETRIES"];
@@ -254,6 +284,33 @@ function resolveMaxRetries(): number {
 }
 
 export function buildModelSettings(tier: ModelTier): ModelSettings {
+  const transientPolicy: RetryPolicy = ({
+    normalized,
+    error,
+    attempt,
+    maxRetries,
+  }) => {
+    if (normalized.isAbort) return false;
+    if (normalized.statusCode === 429) {
+      const decision = retryTransient(normalized, `429 attempt ${attempt}`);
+      if (typeof decision === "object" && decision.retry) {
+        captureRateLimit({
+          tier,
+          outcome: "retrying",
+          error,
+          normalized,
+          attempt,
+          maxRetries,
+        });
+      }
+      return decision;
+    }
+    if (normalized.statusCode === 503 || normalized.isNetworkError) {
+      return retryTransient(normalized, `transient attempt ${attempt}`);
+    }
+    return false;
+  };
+
   return {
     reasoning: { effort: clampEffort(tier.model, tier.effort) },
     text: { verbosity: tier.verbosity },
@@ -265,30 +322,10 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
         multiplier: 2,
         jitter: true,
       },
-      policy: ({ normalized, error, attempt, maxRetries }): RetryDecision => {
-        if (normalized.isAbort) return false;
-        if (normalized.statusCode === 429) {
-          captureRateLimit({
-            tier,
-            outcome: "retrying",
-            error,
-            normalized,
-            attempt,
-            maxRetries,
-          });
-          return normalized.retryAfterMs === undefined
-            ? { retry: true, reason: `429 attempt ${attempt}` }
-            : {
-                retry: true,
-                delayMs: Math.min(normalized.retryAfterMs, MAX_RETRY_DELAY_MS),
-                reason: `429 attempt ${attempt}`,
-              };
-        }
-        if (normalized.statusCode === 503 || normalized.isNetworkError) {
-          return { retry: true, reason: `transient attempt ${attempt}` };
-        }
-        return false;
-      },
+      policy: retryPolicies.any(
+        providerSuggestedWithinRetryBudget,
+        transientPolicy,
+      ),
     },
   };
 }
