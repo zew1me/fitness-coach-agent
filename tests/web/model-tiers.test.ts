@@ -231,6 +231,27 @@ describe("model tier compatibility", () => {
     expect(await decisionFor(429, 300_000)).toMatchObject({
       retry: false,
     });
+    expect(
+      await settings.retry?.policy?.({
+        attempt: 1,
+        error: Object.assign(new Error("provider suggests retry"), {
+          status: 429,
+        }),
+        maxRetries: 2,
+        normalized: {
+          isAbort: false,
+          isNetworkError: false,
+          statusCode: 429,
+          retryAfterMs: 300_000,
+        },
+        providerAdvice: {
+          suggested: true,
+          replaySafety: "safe",
+          retryAfterMs: 300_000,
+        },
+        stream: true,
+      }),
+    ).toMatchObject({ retry: false });
   });
 
   it("tags an off-ladder tier as unranked rather than tier 1", () => {

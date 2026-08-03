@@ -253,15 +253,13 @@ function retryTransient(
 }
 
 const providerSuggestedWithinRetryBudget: RetryPolicy = async (context) => {
-  const decision = await providerSuggestedPolicy(context);
   if (
-    context.providerAdvice?.suggested === true &&
     context.normalized.retryAfterMs !== undefined &&
     context.normalized.retryAfterMs > MAX_RETRY_DELAY_MS
   ) {
     return false;
   }
-  return decision;
+  return providerSuggestedPolicy(context);
 };
 
 function resolveMaxRetries(): number {
