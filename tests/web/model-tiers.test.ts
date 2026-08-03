@@ -92,6 +92,18 @@ describe("model tier compatibility", () => {
     expect(settings.retry?.maxRetries).toBe(6);
   });
 
+  it("allows zero configured retries", () => {
+    vi.stubEnv("OPENAI_MAX_RETRIES", "0");
+
+    const settings = buildModelSettings({
+      model: "gpt-5.6-luna",
+      effort: "medium",
+      verbosity: "low",
+    });
+
+    expect(settings.retry?.maxRetries).toBe(0);
+  });
+
   it.each(["", "-1", "1.5", "not-a-number"])(
     "falls back to four retries for invalid configuration %j",
     (configured) => {
