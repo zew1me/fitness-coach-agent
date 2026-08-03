@@ -42,10 +42,10 @@ const agentsMocks = vi.hoisted(() => {
   return { Agent, constructedAgents, roleName, run };
 });
 
-vi.mock("@openai/agents", () => ({
-  Agent: agentsMocks.Agent,
-  run: agentsMocks.run,
-}));
+vi.mock("@openai/agents", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@openai/agents")>();
+  return { ...actual, Agent: agentsMocks.Agent, run: agentsMocks.run };
+});
 
 beforeEach(() => {
   agentsMocks.constructedAgents.length = 0;

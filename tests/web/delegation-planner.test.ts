@@ -20,10 +20,10 @@ const agentsMocks = vi.hoisted(() => {
   return { Agent, constructedAgents, run };
 });
 
-vi.mock("@openai/agents", () => ({
-  Agent: agentsMocks.Agent,
-  run: agentsMocks.run,
-}));
+vi.mock("@openai/agents", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@openai/agents")>();
+  return { ...actual, Agent: agentsMocks.Agent, run: agentsMocks.run };
+});
 
 describe("planSpecialistDelegation", () => {
   it("embeds context values in escaped data-only prompt sections", async () => {
