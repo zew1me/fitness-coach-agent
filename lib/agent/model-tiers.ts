@@ -255,7 +255,7 @@ function resolveMaxRetries(): number {
 
 export function buildModelSettings(tier: ModelTier): ModelSettings {
   return {
-    reasoning: { effort: tier.effort },
+    reasoning: { effort: clampEffort(tier.model, tier.effort) },
     text: { verbosity: tier.verbosity },
     retry: {
       maxRetries: resolveMaxRetries(),

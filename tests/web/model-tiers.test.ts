@@ -70,6 +70,16 @@ describe("model tier compatibility", () => {
     );
   });
 
+  it("clamps unsupported effort from direct model-settings callers", () => {
+    const settings = buildModelSettings({
+      model: "gpt-5.6-luna",
+      effort: "minimal",
+      verbosity: "low",
+    });
+
+    expect(settings.reasoning?.effort).toBe("none");
+  });
+
   it("uses the configured OpenAI retry count for agent SDK calls", () => {
     vi.stubEnv("OPENAI_MAX_RETRIES", "6");
 
