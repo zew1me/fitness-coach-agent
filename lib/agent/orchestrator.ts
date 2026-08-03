@@ -157,6 +157,15 @@ function buildToolAcknowledgement(toolName: string | undefined): string {
   );
 }
 
+function buildRateLimitedToolAcknowledgement(
+  toolName: string | undefined,
+  error: unknown,
+): string {
+  const acknowledgement = buildToolAcknowledgement(toolName);
+  const waitMessage = rateLimitStreamErrorMessage(error, "");
+  return waitMessage ? `${acknowledgement} ${waitMessage}` : acknowledgement;
+}
+
 function writeDeterministicText(
   writer: UIMessageStreamWriter,
   state: StreamTextState,
@@ -812,6 +821,7 @@ export function streamCoachTurn({
                           const ranTool =
                             runContext.toolCalled ||
                             textState.lastToolName !== undefined;
+                          let acknowledgementError: unknown;
                           if (
                             ranTool &&
                             !textState.textStarted &&
@@ -846,6 +856,7 @@ export function streamCoachTurn({
                                 followup.state.usage,
                               );
                             } catch (error) {
+                              acknowledgementError = error;
                               if (!isTurnAborted()) {
                                 if (isRateLimitError(error)) {
                                   noteTurnRateLimit(tier, error);
@@ -879,8 +890,9 @@ export function streamCoachTurn({
                               writer,
                               textState,
                               ranTool
-                                ? buildToolAcknowledgement(
+                                ? buildRateLimitedToolAcknowledgement(
                                     textState.lastToolName,
+                                    acknowledgementError,
                                   )
                                 : EMPTY_MODEL_RESPONSE,
                             );
@@ -941,7 +953,10 @@ export function streamCoachTurn({
                         writeDeterministicText(
                           writer,
                           textState,
-                          buildToolAcknowledgement(textState.lastToolName),
+                          buildRateLimitedToolAcknowledgement(
+                            textState.lastToolName,
+                            error,
+                          ),
                         );
                         break;
                       }

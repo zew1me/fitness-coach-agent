@@ -892,7 +892,7 @@ describe("streamCoachTurn", () => {
             output: { updated: true },
           },
         };
-        throw rateLimitError();
+        throw rateLimitError("120");
       },
     } as never);
 
@@ -905,6 +905,7 @@ describe("streamCoachTurn", () => {
     const text = await response.text();
 
     expect(text).toContain("Thanks, I'll keep track of that information.");
+    expect(text).toContain("Please try again in about 2 minutes.");
     expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
     expect(sentryMocks.captureException).not.toHaveBeenCalled();
   });
@@ -951,7 +952,7 @@ describe("streamCoachTurn", () => {
           }
         },
       } as never)
-      .mockRejectedValueOnce(rateLimitError());
+      .mockRejectedValueOnce(rateLimitError("120"));
 
     const response = await streamCoachTurn({
       accessToken: "token-1",
@@ -959,8 +960,10 @@ describe("streamCoachTurn", () => {
       context: athleteContextFixture,
       messages: messages(),
     });
-    await response.text();
+    const text = await response.text();
 
+    expect(text).toContain("Thanks, I'll keep track of that information.");
+    expect(text).toContain("Please try again in about 2 minutes.");
     expect(modelCircuitBreaker.snapshot("gpt-5.6-luna")).toMatchObject({
       consecutiveFailures: 1,
       state: "closed",
