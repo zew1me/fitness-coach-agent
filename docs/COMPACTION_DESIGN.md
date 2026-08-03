@@ -179,7 +179,7 @@ a per-environment data migration.
       └─ soft limit 220 000: log Sentry warning, continue with uncompacted context
 5. Agent runs     →  SDK appends items via addItems() during the turn
       └─ lead model honors provider retry delays up to 8 seconds, then falls back
-         to the next model tier only if no response text has streamed
+         only if no stream event, response text, or tool call has started
       └─ longer provider delays skip the in-request retry; if every tier is exhausted,
          the athlete-visible error reports the provider's approximate wait time
 6. After the turn, auto-compaction runs if thresholds are hit
