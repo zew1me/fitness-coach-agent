@@ -282,31 +282,35 @@ function resolveMaxRetries(): number {
 }
 
 export function buildModelSettings(tier: ModelTier): ModelSettings {
-  const transientPolicy: RetryPolicy = ({
-    normalized,
-    error,
-    attempt,
-    maxRetries,
-  }) => {
+  const transientPolicy: RetryPolicy = ({ normalized, attempt }) => {
     if (normalized.isAbort) return false;
     if (normalized.statusCode === 429) {
-      const decision = retryTransient(normalized, `429 attempt ${attempt}`);
-      if (typeof decision === "object" && decision.retry) {
-        captureRateLimit({
-          tier,
-          outcome: "retrying",
-          error,
-          normalized,
-          attempt,
-          maxRetries,
-        });
-      }
-      return decision;
+      return retryTransient(normalized, `429 attempt ${attempt}`);
     }
     if (normalized.statusCode === 503 || normalized.isNetworkError) {
       return retryTransient(normalized, `transient attempt ${attempt}`);
     }
     return false;
+  };
+  const composedPolicy = retryPolicies.any(
+    providerSuggestedWithinRetryBudget,
+    transientPolicy,
+  );
+  const observedPolicy: RetryPolicy = async (context) => {
+    const decision = await composedPolicy(context);
+    const willRetry =
+      decision === true || (typeof decision === "object" && decision.retry);
+    if (context.normalized.statusCode === 429 && willRetry) {
+      captureRateLimit({
+        tier,
+        outcome: "retrying",
+        error: context.error,
+        normalized: context.normalized,
+        attempt: context.attempt,
+        maxRetries: context.maxRetries,
+      });
+    }
+    return decision;
   };
 
   return {
@@ -320,10 +324,7 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
         multiplier: 2,
         jitter: true,
       },
-      policy: retryPolicies.any(
-        providerSuggestedWithinRetryBudget,
-        transientPolicy,
-      ),
+      policy: observedPolicy,
     },
   };
 }

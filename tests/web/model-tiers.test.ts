@@ -252,6 +252,30 @@ describe("model tier compatibility", () => {
         stream: true,
       }),
     ).toMatchObject({ retry: false });
+
+    sentryMocks.captureMessage.mockClear();
+    expect(
+      await settings.retry?.policy?.({
+        attempt: 1,
+        error: Object.assign(new Error("provider suggests retry"), {
+          status: 429,
+        }),
+        maxRetries: 2,
+        normalized: {
+          isAbort: false,
+          isNetworkError: false,
+          statusCode: 429,
+          retryAfterMs: 1_500,
+        },
+        providerAdvice: {
+          suggested: true,
+          replaySafety: "safe",
+          retryAfterMs: 1_500,
+        },
+        stream: true,
+      }),
+    ).toMatchObject({ retry: true, delayMs: 1_500 });
+    expect(sentryMocks.captureMessage).toHaveBeenCalledTimes(1);
   });
 
   it("tags an off-ladder tier as unranked rather than tier 1", () => {
