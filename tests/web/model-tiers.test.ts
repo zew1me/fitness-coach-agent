@@ -70,7 +70,7 @@ describe("model tier compatibility", () => {
     );
   });
 
-  it("clamps unsupported effort from direct model-settings callers", () => {
+  it("clamps direct callers consistently for settings and telemetry", async () => {
     const settings = buildModelSettings({
       model: "gpt-5.6-luna",
       effort: "minimal",
@@ -78,6 +78,26 @@ describe("model tier compatibility", () => {
     });
 
     expect(settings.reasoning?.effort).toBe("none");
+    await settings.retry?.policy?.({
+      attempt: 1,
+      error: Object.assign(new Error("rate limit"), { status: 429 }),
+      maxRetries: 2,
+      normalized: {
+        isAbort: false,
+        isNetworkError: false,
+        statusCode: 429,
+      },
+      stream: true,
+    });
+    expect(sentryMocks.captureMessage).toHaveBeenCalledWith(
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          model_tier: "unranked",
+          reasoning_effort: "none",
+        }),
+      }),
+    );
   });
 
   it("uses the configured OpenAI retry count for agent SDK calls", () => {

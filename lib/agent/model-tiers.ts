@@ -282,6 +282,10 @@ function resolveMaxRetries(): number {
 }
 
 export function buildModelSettings(tier: ModelTier): ModelSettings {
+  const effectiveTier: ModelTier = {
+    ...tier,
+    effort: clampEffort(tier.model, tier.effort),
+  };
   const transientPolicy: RetryPolicy = ({ normalized, attempt }) => {
     if (normalized.isAbort) return false;
     if (normalized.statusCode === 429) {
@@ -302,7 +306,7 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
       decision === true || (typeof decision === "object" && decision.retry);
     if (context.normalized.statusCode === 429 && willRetry) {
       captureRateLimit({
-        tier,
+        tier: effectiveTier,
         outcome: "retrying",
         error: context.error,
         normalized: context.normalized,
@@ -314,7 +318,7 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
   };
 
   return {
-    reasoning: { effort: clampEffort(tier.model, tier.effort) },
+    reasoning: { effort: effectiveTier.effort },
     text: { verbosity: tier.verbosity },
     retry: {
       maxRetries: resolveMaxRetries(),
