@@ -355,10 +355,16 @@ def _build_env_vars(  # noqa: PLR0913
                 "INTERVALS_CLIENT_ID": settings.intervals_client_id,
                 "INTERVALS_CLIENT_SECRET": settings.intervals_client_secret,
                 "INTERVALS_TOKEN_ENCRYPTION_SECRET": settings.intervals_token_encryption_secret,
+                "STRAVA_CLIENT_ID": settings.strava_client_id,
+                "STRAVA_CLIENT_SECRET": settings.strava_client_secret,
+                "STRAVA_TOKEN_ENCRYPTION_SECRET": settings.strava_token_encryption_secret,
+                "STRAVA_AUTHORIZATION_VERSION": settings.strava_authorization_version,
             }.items()
             if value
         }
     )
+    # Always synchronize the flag so a previous true value cannot remain active in Vercel.
+    vars["STRAVA_INTEGRATION_ENABLED"] = "true" if settings.strava_integration_enabled else "false"
     # These should be two distinct Client Keys — a secret server-side DSN and a public
     # browser one — so the public browser DSN can't expose the server's. Bootstrap does
     # not verify they differ; that separation is the operator's responsibility.
@@ -401,6 +407,10 @@ def _print_summary(  # noqa: PLR0913
     print(f"  Intervals client ID  : {_present('INTERVALS_CLIENT_ID')}")
     print(f"  Intervals secret     : {_present('INTERVALS_CLIENT_SECRET')}")
     print(f"  Intervals token key  : {_present('INTERVALS_TOKEN_ENCRYPTION_SECRET')}")
+    print(f"  Strava client ID     : {_present('STRAVA_CLIENT_ID')}")
+    print(f"  Strava secret        : {_present('STRAVA_CLIENT_SECRET')}")
+    print(f"  Strava token key     : {_present('STRAVA_TOKEN_ENCRYPTION_SECRET')}")
+    print(f"  Strava enabled       : {_present('STRAVA_INTEGRATION_ENABLED')}")
     print(f"  Sentry server DSN    : {_present('SENTRY_DSN')}")
     print(f"  Sentry browser DSN   : {_present('NEXT_PUBLIC_SENTRY_DSN')}")
     print(f"  Sentry source maps   : {_present('SENTRY_AUTH_TOKEN')}")

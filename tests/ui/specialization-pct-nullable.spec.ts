@@ -99,7 +99,12 @@ test.describe("profile page — null specialization_pct (#254)", () => {
     await page.goto("/profile");
 
     // Page must load without crashing — no error banner, no JS exception.
-    await expect(page.getByText(/Loading/i)).not.toBeVisible({ timeout: 5000 });
+    // Scope this to the profile status card: a bare /Loading/i also matches the
+    // provider connection panels, which have their own independent loading text
+    // and would make this a strict-mode violation rather than a retrying wait.
+    await expect(
+      page.getByRole("heading", { name: /Loading profile/i }),
+    ).not.toBeVisible({ timeout: 5000 });
     await expect(page.locator("body")).not.toContainText(
       "null value in column",
     );

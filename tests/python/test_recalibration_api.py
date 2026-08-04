@@ -73,7 +73,13 @@ class RecalibrationRepository:
         return self.thresholds
 
     async def list_activities(
-        self, user_id: str, *, sport: str | None = None, since=None, limit: int = 50
+        self,
+        user_id: str,
+        *,
+        sport: str | None = None,
+        since=None,
+        limit: int = 50,
+        exclude_sources=None,
     ) -> list[Activity]:
         self.activity_calls.append(
             {"limit": limit, "since": since, "sport": sport, "user_id": user_id}
@@ -214,6 +220,37 @@ class TestRecalibrateThresholdsEndpoint:
         assert running_result["status"] == "insufficient_evidence"
         assert repo.upserted == []
         assert repo.created_candidates == []
+
+    async def test_strava_performance_canary_is_excluded_from_recalibration(
+        self, monkeypatch
+    ) -> None:
+        canary = "STRAVA_RECALIBRATION_AI_CANARY_998877"
+        strava_effort = _activity(
+            id=canary,
+            source="strava_sync",
+            source_file_key=f"strava:{canary}",
+            athlete_notes=canary,
+            raw_extraction={"strava_summary": {"name": canary}},
+            duration_seconds=900,
+            rpe=10,
+        )
+        repo = RecalibrationRepository(
+            thresholds=[],
+            activities_by_sport={"running": [strava_effort], "cycling": []},
+        )
+        monkeypatch.setattr(api_index, "repo", repo)
+
+        response = await _post({})
+
+        assert response.status_code == 200
+        running_result = next(
+            result for result in response.json()["results"] if result["sport"] == "running"
+        )
+        assert running_result["status"] == "insufficient_evidence"
+        assert repo.created_candidates == []
+        assert repo.upserted == []
+        assert canary not in response.text
+        assert "strava_sync" not in response.text
 
     async def test_user_confirmed_threshold_is_not_overridden(self, monkeypatch) -> None:
         current = _threshold(

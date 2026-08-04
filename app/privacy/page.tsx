@@ -19,7 +19,7 @@ export default function PrivacyPage(): JSX.Element {
           Back to Coach Arden
         </Link>
         <h1>Privacy Policy</h1>
-        <p className={styles.updated}>Last updated July 8, 2026</p>
+        <p className={styles.updated}>Last updated July 22, 2026</p>
 
         <section>
           <h2>Overview</h2>
@@ -39,7 +39,9 @@ export default function PrivacyPage(): JSX.Element {
             information, app usage data, chat messages, uploaded files, support
             messages, and technical logs. If you connect Intervals.icu, we store
             your Intervals athlete identifier, athlete name, granted scopes,
-            connection status, and an encrypted access token.
+            connection status, and an encrypted access token. If you connect
+            Strava, we store the Strava details described in the Strava Data
+            section below.
           </p>
         </section>
 
@@ -50,6 +52,50 @@ export default function PrivacyPage(): JSX.Element {
             wellness, and calendar data from Intervals.icu according to the
             scopes you approve. We use that data to plan, adapt, and review
             training for your account.
+          </p>
+        </section>
+
+        <section>
+          <h2>Strava Data</h2>
+          <p>
+            If you connect Strava, we store your Strava athlete identifier,
+            athlete name, granted scopes, connection status, and encrypted
+            access and refresh tokens. Tokens are encrypted at rest and are
+            never returned to your browser. Through the Strava API (OAuth) we
+            import all of your activities, including activities marked Only Me.
+            We read activity summaries such as sport, start time, duration,
+            distance, elevation, heart rate, power, and cadence. When available,
+            we also temporarily process Strava&apos;s processed non-GPS streams
+            for time, heart rate, power, cadence, speed, and moving status to
+            calculate normalized power, training stress, intensity, and
+            time-in-zone percentages using your Coach Arden fitness profile and
+            sport thresholds. We store those calculated metrics and a bounded
+            statistical representation of the streams in relative-time windows.
+            Each retained window can contain sample count, mean, median,
+            minimum, 75th percentile, 90th percentile, maximum, and variance for
+            available heart-rate, power, cadence, and speed data. We do not
+            store the original second-by-second samples or absolute stream
+            timestamps. We do not request GPS/location streams, maps or
+            polylines, routes, segments, photos, social data, or write access.
+          </p>
+          <p>
+            We use our hosting and storage subprocessors to import summaries and
+            store our calculated training metrics for non-AI account features
+            such as your training calendar and Strava connection controls.
+            Imported Strava data is excluded from OpenAI and other AI
+            processing: it is not exposed to agent tools, specialist or
+            delegation context, durable model state, or AI-facing derived
+            results such as recent-activity tool results, compliance, training
+            load, or threshold recalibration. Strava data is never sold or
+            displayed to other users. Disconnecting Strava from your profile
+            requests revocation of our access at Strava and, once revocation
+            succeeds, deletes the Strava activities we imported; we confirm the
+            deletion count on screen. To request export or deletion of your
+            Strava data, contact us at{" "}
+            <a href="mailto:privacy@coach.nigels.dev">
+              privacy@coach.nigels.dev
+            </a>
+            .
           </p>
         </section>
 
@@ -71,8 +117,10 @@ export default function PrivacyPage(): JSX.Element {
           <p>
             We keep information while your account or connection is active and
             for as long as needed for service operation, security, legal, and
-            backup purposes. You can disconnect Intervals.icu from your profile.
-            To request account or data deletion, contact us at{" "}
+            backup purposes. You can disconnect Intervals.icu or Strava from
+            your profile at any time; disconnecting Strava additionally revokes
+            our Strava access and deletes the Strava activities we imported. To
+            request account or data deletion, contact us at{" "}
             <a href="mailto:privacy@coach.nigels.dev">
               privacy@coach.nigels.dev
             </a>

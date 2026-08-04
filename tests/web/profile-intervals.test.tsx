@@ -14,17 +14,22 @@ const coachApiMocks = vi.hoisted(() => ({
   confirmProfileMetric: vi.fn(),
   confirmSportThreshold: vi.fn(),
   disconnectIntervals: vi.fn(),
+  disconnectStrava: vi.fn(),
   fetchBrowserToken: vi.fn(),
   loadAthleteSummary: vi.fn(),
   loadFitnessMetrics: vi.fn(),
   loadIntervalsStatus: vi.fn(),
+  loadStravaStatus: vi.fn(),
   startIntervalsAuthorization: vi.fn(),
+  startStravaAuthorization: vi.fn(),
   syncIntervals: vi.fn(),
+  syncStrava: vi.fn(),
 }));
 
 vi.mock("../../lib/coach-api", () => coachApiMocks);
 
 import ProfilePage from "../../app/profile/page";
+import { ProviderConnectionSection } from "../../components/profile/provider-connection-section";
 
 const EMPTY_METRICS = {
   best_times: [],
@@ -51,6 +56,10 @@ beforeEach(() => {
     },
   });
   coachApiMocks.loadIntervalsStatus.mockResolvedValue({
+    connected: false,
+    scopes: [],
+  });
+  coachApiMocks.loadStravaStatus.mockResolvedValue({
     connected: false,
     scopes: [],
   });
@@ -100,7 +109,8 @@ describe("ProfilePage Intervals.icu connection", () => {
 
     await screen.findByRole("heading", { name: "Fitness profile" });
     expect(await screen.findByText("Intervals.icu")).toBeTruthy();
-    expect(screen.getByText(/Not connected/i)).toBeTruthy();
+    // Both provider panels render "Not connected"; Intervals + Strava.
+    expect(screen.getAllByText(/Not connected/i)).toHaveLength(2);
 
     fireEvent.click(
       screen.getByRole("button", { name: /Connect Intervals.icu/i }),
@@ -141,7 +151,10 @@ describe("ProfilePage Intervals.icu connection", () => {
     await waitFor(() => {
       expect(coachApiMocks.disconnectIntervals).toHaveBeenCalledTimes(1);
     });
-    expect(await screen.findByText(/Not connected/i)).toBeTruthy();
+    // Intervals now disconnected too, so both panels show "Not connected".
+    await waitFor(() => {
+      expect(screen.getAllByText(/Not connected/i)).toHaveLength(2);
+    });
   });
 
   it("syncs activities and shows the imported counts", async () => {
@@ -190,6 +203,35 @@ describe("ProfilePage Intervals.icu connection", () => {
     await waitFor(() => {
       expect((syncButton as HTMLButtonElement).disabled).toBe(false);
     });
+  });
+
+  it("uses the provider name in a pending-disconnect notice", () => {
+    render(
+      <ProviderConnectionSection
+        action={null}
+        connectLabel="Connect Intervals.icu"
+        connectingLabel="Connecting..."
+        error={null}
+        notice={null}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onSync={vi.fn()}
+        state={{
+          athleteLabel: "Nigel",
+          connected: true,
+          disconnectPending: true,
+          metaLines: [],
+        }}
+        title="Intervals.icu"
+      />,
+    );
+
+    expect(
+      screen.getByText(/Intervals\.icu access could not be revoked yet/i),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/Strava access could not be revoked yet/i),
+    ).toBeNull();
   });
 
   it("shows the callback success notice when Intervals redirects back", async () => {
