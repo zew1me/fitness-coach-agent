@@ -181,7 +181,7 @@ a per-environment data migration.
       └─ lead model honors provider retry delays up to 8 seconds, then falls back
          only if no stream event, response text, or tool call has started
       └─ longer provider delays skip the in-request retry; if every tier is exhausted,
-         the athlete-visible error reports the provider's approximate wait time
+         the athlete-visible error reports the longest provider wait seen across the ladder
 6. After the turn, auto-compaction runs if thresholds are hit
 7. Release lease  →  DELETE /api/chat/model-state/lease  (always in finally)
 ```

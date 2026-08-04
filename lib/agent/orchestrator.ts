@@ -92,10 +92,15 @@ const ACKNOWLEDGEMENT_PROMPT =
   "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
 const EMPTY_MODEL_RESPONSE = "Hey, can you remind me of where we are at?";
 
-function rateLimitStreamErrorMessage(error: unknown, fallback: string): string {
+function rateLimitStreamErrorMessage(
+  error: unknown,
+  fallback: string,
+  priorRetryAfterMs?: number,
+): string {
   if (!isRateLimitError(error)) return fallback;
-  const retryAfterMs = getRetryAfterMs(error);
-  if (retryAfterMs === undefined || retryAfterMs <= 0) return fallback;
+  const errorRetryAfterMs = getRetryAfterMs(error);
+  const retryAfterMs = Math.max(errorRetryAfterMs ?? 0, priorRetryAfterMs ?? 0);
+  if (retryAfterMs <= 0) return fallback;
 
   const seconds = Math.max(1, Math.ceil(retryAfterMs / 1_000));
   const minutes = Math.ceil(seconds / 60);
@@ -571,6 +576,7 @@ export function streamCoachTurn({
       const admittedProbes = new Set<
         ReturnType<typeof modelCircuitBreaker.pickTier>
       >();
+      let maxLeadRetryAfterMs: number | undefined;
       let stopLeaseRenewal: (() => Promise<void>) | undefined =
         acquiredLease === undefined
           ? undefined
@@ -930,6 +936,13 @@ export function streamCoachTurn({
                       }
 
                       const retryAfterMs = getRetryAfterMs(error);
+                      if (
+                        retryAfterMs !== undefined &&
+                        (maxLeadRetryAfterMs === undefined ||
+                          retryAfterMs > maxLeadRetryAfterMs)
+                      ) {
+                        maxLeadRetryAfterMs = retryAfterMs;
+                      }
                       noteTurnRateLimit(tier, error);
                       if (!breakerRecordedModels.has(tier.model)) {
                         modelCircuitBreaker.recordFailure(
@@ -1059,6 +1072,7 @@ export function streamCoachTurn({
         const userErrorMessage = rateLimitStreamErrorMessage(
           error,
           streamErrorMessage,
+          maxLeadRetryAfterMs,
         );
         if (!textState.textStarted) {
           writeDeterministicText(writer, textState, userErrorMessage);

@@ -175,11 +175,14 @@ vi.mock("../../lib/agent/system-prompt", () => ({
 const originalFetch = globalThis.fetch;
 
 function rateLimitError(
-  retryAfter = "0",
+  retryAfter: string | null = "0",
 ): Error & { status: number; headers: Headers } {
   return Object.assign(new Error("rate limit"), {
     status: 429,
-    headers: new Headers({ "Retry-After": retryAfter }),
+    headers:
+      retryAfter === null
+        ? new Headers()
+        : new Headers({ "Retry-After": retryAfter }),
   });
 }
 
@@ -1055,10 +1058,10 @@ describe("streamCoachTurn", () => {
     );
   });
 
-  it("tells the athlete how long to wait when the fallback ladder is exhausted", async () => {
+  it("preserves the longest retry wait across fallback tiers", async () => {
     orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError("300"));
-    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError("300"));
-    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError("300"));
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError("30"));
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError(null));
 
     const response = await streamCoachTurn({
       accessToken: "token-1",
