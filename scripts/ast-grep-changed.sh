@@ -12,16 +12,22 @@ add_file() {
   local file="$1"
   local existing
 
-  [[ -f "$file" ]] || return
+  [[ -f "$file" ]] || return 0
   for existing in "${files[@]}"; do
-    [[ "$existing" == "$file" ]] && return
+    [[ "$existing" == "$file" ]] && return 0
   done
   files+=("$file")
 }
 
-while IFS= read -r -d '' file; do
-  add_file "$file"
-done < <(git diff --name-only --diff-filter=ACMR -z HEAD 2>/dev/null || true)
+diff_paths=$(mktemp)
+trap 'rm -f "$diff_paths"' EXIT
+
+if git rev-parse --verify --quiet HEAD >/dev/null; then
+  git diff --name-only --diff-filter=ACMR -z HEAD >"$diff_paths"
+  while IFS= read -r -d '' file; do
+    add_file "$file"
+  done <"$diff_paths"
+fi
 
 while IFS= read -r -d '' file; do
   add_file "$file"
