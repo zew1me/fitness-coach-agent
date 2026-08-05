@@ -6,8 +6,8 @@ import copy
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date
-from typing import Any
+from datetime import date, datetime, timedelta
+from typing import Any, Literal, TypedDict
 
 import httpx
 from httpx_retries import Retry, aretry_request
@@ -27,6 +27,7 @@ _ACTIVITY_TEXT_MAX_RETRIES = 2
 _MAX_RETRY_DELAY_SECONDS = 8.0
 _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
+DATE_UPDATE_MIN_CONFIDENCE = 0.9
 
 # Transport failures worth another attempt: they fail fast, so retrying costs little
 # and matches how a 503 response is already treated. httpx.TimeoutException is
@@ -148,6 +149,21 @@ class ActivityTextBuildResult:
     activity: Activity | None
     missing: list[str]
     raw_extraction: dict[str, Any]
+
+
+DateEditVerdict = Literal["applied", "refused_authoritative", "refused_implausible"]
+
+
+class RejectedActivityUpdate(TypedDict):
+    field: str
+    value: str
+    reason: DateEditVerdict
+
+
+@dataclass
+class ActivityTextUpdateResult:
+    activity: Activity
+    rejected_updates: list[RejectedActivityUpdate]
 
 
 def _extraction_request_body(text: str, schema: dict[str, Any]) -> dict[str, Any]:
@@ -668,6 +684,26 @@ def _parse_iso_date(value: str | None) -> date:
     return parsed
 
 
+def _plausible_local_dates(started_at: datetime | None) -> set[date] | None:
+    if started_at is None:
+        return None
+    earliest = (started_at - timedelta(hours=12)).date()
+    latest = (started_at + timedelta(hours=14)).date()
+    return {
+        earliest + timedelta(days=day_offset) for day_offset in range((latest - earliest).days + 1)
+    }
+
+
+def _date_edit_verdict(existing: Activity, new_date: date) -> DateEditVerdict:
+    raw_extraction = existing.raw_extraction or {}
+    if raw_extraction.get("activity_date_source") == "fit_local_timestamp":
+        return "refused_authoritative"
+    plausible_dates = _plausible_local_dates(existing.started_at)
+    if plausible_dates is not None and new_date not in plausible_dates:
+        return "refused_implausible"
+    return "applied"
+
+
 def _activity_summary_for_update(existing: Activity) -> dict[str, Any]:
     summary = (
         copy.deepcopy(existing.activity_summary)
@@ -752,9 +788,65 @@ def _apply_text_update_stream_fields(
         summary["data_quality"]["has_power"] = True
 
 
+def _apply_activity_date_update(
+    updated: Activity,
+    summary: dict[str, Any],
+    extraction: ActivityTextExtraction,
+) -> RejectedActivityUpdate | None:
+    if (
+        extraction.activity_date is None
+        or extraction.activity_date_confidence is None
+        or extraction.activity_date_confidence < DATE_UPDATE_MIN_CONFIDENCE
+    ):
+        return None
+    new_date = _try_parse_iso_date(extraction.activity_date)
+    if new_date is None or new_date == updated.activity_date:
+        return None
+
+    verdict = _date_edit_verdict(updated, new_date)
+    if verdict != "applied":
+        logger.info(
+            "activity date update refused activity_id=%s old_date=%s new_date=%s reason=%s",
+            updated.id,
+            updated.activity_date,
+            new_date,
+            verdict,
+        )
+        return {
+            "field": "activity_date",
+            "value": new_date.isoformat(),
+            "reason": verdict,
+        }
+
+    prior_date = updated.activity_date
+    updated.activity_date = new_date
+    summary["session"]["date_start"] = new_date.isoformat()
+    summary["estimates"]["estimated_activity_date_confidence"] = extraction.activity_date_confidence
+    raw_extraction = updated.raw_extraction or {}
+    raw_extraction["activity_date_source"] = "athlete_correction"
+    raw_extraction["prior_activity_date"] = prior_date.isoformat()
+    updated.raw_extraction = raw_extraction
+    logger.info(
+        "activity date update applied activity_id=%s old_date=%s new_date=%s",
+        updated.id,
+        prior_date,
+        new_date,
+    )
+    return None
+
+
 def _apply_text_update_fields(
     updated: Activity, summary: dict[str, Any], extraction: ActivityTextExtraction
-) -> None:
+) -> list[RejectedActivityUpdate]:
+    rejected_updates: list[RejectedActivityUpdate] = []
+    rejected_date = _apply_activity_date_update(updated, summary, extraction)
+    if rejected_date is not None:
+        rejected_updates.append(rejected_date)
+    if extraction.sport is not None:
+        updated.sport = extraction.sport
+        summary["session"]["sport"] = extraction.sport
+        summary["estimates"]["estimated_sport"] = extraction.sport
+        summary["estimates"]["estimated_sport_confidence"] = extraction.sport_confidence
     _apply_text_update_session_fields(updated, summary, extraction)
     _apply_text_update_stream_fields(updated, summary, extraction)
     if extraction.rpe is not None:
@@ -767,18 +859,32 @@ def _apply_text_update_fields(
     if extraction.athlete_notes is not None:
         updated.athlete_notes = extraction.athlete_notes
     _merge_context_summary(summary, extraction)
+    return rejected_updates
+
+
+def _clear_derived_load_metrics(activity: Activity, summary: dict[str, Any]) -> None:
+    activity.tss = None
+    activity.intensity_factor = None
+    for key in ("primary_load", "session_rpe_load", "tss_hr", "tss_power", "work_kj"):
+        summary["load"].pop(key, None)
+    for key in ("intensity_factor", "work_kj"):
+        summary["power"].pop(key, None)
+    summary["estimates"].pop("estimated_tss_power", None)
+    summary["estimates"].pop("estimated_tss_power_confidence", None)
 
 
 async def merge_activity_text_update(
     existing: Activity,
     text: str,
     *,
+    profile: AthleteProfile,
+    thresholds: list[SportThreshold],
     extractor: Extractor | None = None,
-) -> Activity:
+) -> ActivityTextUpdateResult:
     extraction = await (extractor or extract_activity_text)(text)
     updated = existing.model_copy(deep=True)
     summary = _activity_summary_for_update(existing)
-    _apply_text_update_fields(updated, summary, extraction)
+    rejected_updates = _apply_text_update_fields(updated, summary, extraction)
 
     raw_extraction = copy.deepcopy(updated.raw_extraction) if updated.raw_extraction else {}
     text_updates = raw_extraction.setdefault("text_updates", [])
@@ -793,7 +899,12 @@ async def merge_activity_text_update(
     updated.raw_extraction = raw_extraction
     updated.summary_schema_version = SUMMARY_SCHEMA_VERSION
     updated.activity_summary = summary
-    return updated
+
+    _clear_derived_load_metrics(updated, summary)
+    threshold = _threshold_for_sport(thresholds, updated.sport)
+    summary["thresholds_used"] = _thresholds_used(profile, threshold)
+    _add_load_metrics(updated, summary, profile)
+    return ActivityTextUpdateResult(activity=updated, rejected_updates=rejected_updates)
 
 
 def _fueling_notes(extraction: ActivityTextExtraction) -> str | None:

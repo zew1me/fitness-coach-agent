@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,7 @@ class ParsedActivity:
     power_stream: list[int] | None = None  # for NP calculation
     rr_intervals_ms: list[int] | None = None
     hrv_summary: HRVSummary | None = None
+    utc_offset_seconds: int | None = None
 
 
 @dataclass
@@ -275,6 +276,36 @@ def _extract_fit_session_summary(fit: Any) -> _FitSessionSummary:
     return summary
 
 
+_MIN_FIT_UTC_OFFSET_SECONDS = -12 * 60 * 60
+_MAX_FIT_UTC_OFFSET_SECONDS = 14 * 60 * 60
+
+
+def _as_naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _extract_fit_utc_offset_seconds(fit: Any) -> int | None:
+    for message in fit.get_messages("activity"):
+        timestamps = {
+            field.name: field.value
+            for field in message.fields
+            if field.name in {"local_timestamp", "timestamp"}
+        }
+        timestamp = timestamps.get("timestamp")
+        local_timestamp = timestamps.get("local_timestamp")
+        if not isinstance(timestamp, datetime) or not isinstance(local_timestamp, datetime):
+            continue
+        offset_minutes = round(
+            (_as_naive_utc(local_timestamp) - _as_naive_utc(timestamp)).total_seconds() / 60
+        )
+        offset_seconds = offset_minutes * 60
+        if _MIN_FIT_UTC_OFFSET_SECONDS <= offset_seconds <= _MAX_FIT_UTC_OFFSET_SECONDS:
+            return offset_seconds
+    return None
+
+
 def parse_fit(file_path: str | Path) -> ParsedActivity:
     """Parse a Garmin .FIT file into structured activity data."""
     from fitparse import FitFile
@@ -284,6 +315,7 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:
     power_stream: list[int] = []
     rr_intervals: list[int] = []
     session_summary = _extract_fit_session_summary(fit)
+    utc_offset_seconds = _extract_fit_utc_offset_seconds(fit)
 
     elapsed_duration_seconds = (
         int(session_summary.elapsed_total) if session_summary.have_elapsed else None
@@ -311,9 +343,12 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:
             for value in values:
                 _append_rr_interval(rr_intervals, value)
 
-    activity_date = (
-        session_summary.start_time.date() if session_summary.start_time else date.today()
-    )
+    activity_date = date.today()
+    if session_summary.start_time is not None:
+        local_start_time = session_summary.start_time
+        if utc_offset_seconds is not None:
+            local_start_time += timedelta(seconds=utc_offset_seconds)
+        activity_date = local_start_time.date()
 
     return ParsedActivity(
         sport=session_summary.sport,
@@ -331,6 +366,7 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:
         power_stream=power_stream if power_stream else None,
         rr_intervals_ms=rr_intervals if rr_intervals else None,
         hrv_summary=summarize_hrv(rr_intervals) if rr_intervals else None,
+        utc_offset_seconds=utc_offset_seconds,
     )
 
 

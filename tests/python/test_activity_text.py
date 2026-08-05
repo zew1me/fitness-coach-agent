@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
+from backend.engine.tss import compute_tss
 from backend.models.athlete import AthleteProfile, SportThreshold
 from backend.models.training import Activity
 from backend.services.activity_text import (
@@ -265,11 +266,14 @@ async def test_merge_activity_text_update_preserves_original_source_and_adds_est
             rpe_confidence=0.8,
         )
 
-    updated = await merge_activity_text_update(
+    result = await merge_activity_text_update(
         existing,
         "Add that I took 2 gels, gut felt 8/10, RPE 9, and I overdid it.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
         extractor=fake_extractor,
     )
+    updated = result.activity
 
     assert updated.id == "activity-1"
     assert updated.source == "fit_upload"
@@ -368,9 +372,14 @@ async def test_merge_activity_text_update_extends_populated_food_items() -> None
             ],
         )
 
-    updated = await merge_activity_text_update(
-        existing, "Also had an energy bar.", extractor=fake_extractor
+    result = await merge_activity_text_update(
+        existing,
+        "Also had an energy bar.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
     )
+    updated = result.activity
 
     food_names = [item["name"] for item in updated.activity_summary["food_items"]]
     assert "banana" in food_names, "existing food_items must be preserved"
@@ -421,11 +430,14 @@ async def test_merge_activity_text_update_applies_metric_corrections() -> None:
             normalized_power_watts_confidence=0.75,
         )
 
-    updated = await merge_activity_text_update(
+    result = await merge_activity_text_update(
         existing,
         "Correction: moving time was 40 minutes, avg HR 150, max HR 175, avg power 220, NP 235.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
         extractor=fake_extractor,
     )
+    updated = result.activity
 
     assert updated.duration_seconds == 2400
     assert updated.avg_hr_bpm == 150
@@ -615,11 +627,14 @@ async def test_merge_sets_elapsed_fields_when_both_durations_extracted() -> None
             elapsed_duration_seconds_confidence=0.8,
         )
 
-    updated = await merge_activity_text_update(
+    result = await merge_activity_text_update(
         existing,
         "Moving 20 min, elapsed 25 min.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
         extractor=fake_extractor,
     )
+    updated = result.activity
 
     s = updated.activity_summary
     assert updated.duration_seconds == 1200, "preferred duration must be moving"
@@ -680,11 +695,14 @@ async def test_merge_nutrition_confidence_reflects_merged_totals() -> None:
             ]
         )
 
-    updated = await merge_activity_text_update(
+    result = await merge_activity_text_update(
         existing,
         "Also had a second gel.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
         extractor=fake_extractor,
     )
+    updated = result.activity
 
     fueling = updated.activity_summary["fueling"]
     assert fueling["carbs_g"] == 60.0
@@ -694,3 +712,281 @@ async def test_merge_nutrition_confidence_reflects_merged_totals() -> None:
     assert fueling["carbs_g_confidence"] == expected_carbs_conf
     expected_cal_conf = round((160.0 * 0.9 + 80.0 * 0.5) / 240.0, 2)
     assert fueling["calories_kcal_confidence"] == expected_cal_conf
+
+
+@pytest.mark.asyncio
+async def test_merge_activity_text_update_recomputes_session_rpe_load() -> None:
+    existing = Activity(
+        id="activity-rpe",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 7, 5),
+        duration_seconds=5347,
+        rpe=4,
+        source="fit_upload",
+        activity_summary={
+            "load": {"session_rpe_load": 356.5},
+            "subjective": {"rpe_1_10": 4},
+        },
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(rpe=2, rpe_confidence=0.99)
+
+    result = await merge_activity_text_update(
+        existing,
+        "Correction: RPE was 2, not 4.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    assert result.activity.rpe == 2
+    assert result.activity.activity_summary["subjective"]["rpe_1_10"] == 2
+    assert result.activity.activity_summary["load"]["session_rpe_load"] == 178.2
+
+
+@pytest.mark.asyncio
+async def test_merge_duration_update_recomputes_existing_hr_tss() -> None:
+    profile = AthleteProfile(
+        user_id="athlete-1",
+        resting_hr_bpm=50,
+        max_hr_bpm=190,
+        biological_sex="not_specified",
+    )
+    existing = Activity(
+        id="activity-hr-tss",
+        user_id="athlete-1",
+        sport="running",
+        activity_date=date(2026, 7, 5),
+        duration_seconds=3600,
+        avg_hr_bpm=150,
+        tss=999,
+        source="fit_upload",
+        activity_summary={"load": {"primary_load": 999, "tss_hr": 999}},
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            moving_duration_seconds=7200,
+            moving_duration_seconds_confidence=0.99,
+        )
+
+    result = await merge_activity_text_update(
+        existing,
+        "Correction: duration was two hours.",
+        profile=profile,
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+    expected_tss = round(
+        compute_tss(
+            7200,
+            sport="running",
+            avg_hr=150,
+            resting_hr=50,
+            max_hr=190,
+            biological_sex="not_specified",
+        ),
+        1,
+    )
+
+    assert result.activity.tss == expected_tss
+    assert result.activity.tss != 999
+    assert result.activity.activity_summary["load"]["tss_hr"] == expected_tss
+
+
+@pytest.mark.asyncio
+async def test_merge_confident_date_update_without_started_at_is_unbounded() -> None:
+    existing = Activity(
+        id="activity-text-date",
+        user_id="athlete-1",
+        sport="running",
+        activity_date=date(2026, 7, 6),
+        started_at=None,
+        source="text_extract",
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
+    result = await merge_activity_text_update(
+        existing,
+        "That run was July 5.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    assert result.activity.activity_date == date(2026, 7, 5)
+    assert result.activity.activity_summary["session"]["date_start"] == "2026-07-05"
+    assert result.activity.raw_extraction is not None
+    assert result.activity.raw_extraction["activity_date_source"] == "athlete_correction"
+    assert result.activity.raw_extraction["prior_activity_date"] == "2026-07-06"
+    assert result.rejected_updates == []
+
+
+@pytest.mark.asyncio
+async def test_merge_refuses_authoritative_fit_date_but_applies_other_updates() -> None:
+    existing = Activity(
+        id="activity-authoritative-date",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 7, 5),
+        duration_seconds=3600,
+        rpe=4,
+        source="fit_upload",
+        raw_extraction={"activity_date_source": "fit_local_timestamp"},
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-06",
+            activity_date_confidence=0.99,
+            rpe=2,
+            rpe_confidence=0.99,
+        )
+
+    result = await merge_activity_text_update(
+        existing,
+        "Move it to July 6 and set RPE to 2.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    assert result.activity.activity_date == date(2026, 7, 5)
+    assert result.activity.rpe == 2
+    assert result.rejected_updates == [
+        {
+            "field": "activity_date",
+            "value": "2026-07-06",
+            "reason": "refused_authoritative",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("new_date", "expected_date", "expected_reason"),
+    [
+        ("2026-07-05", date(2026, 7, 5), None),
+        ("2026-07-09", date(2026, 7, 6), "refused_implausible"),
+    ],
+)
+async def test_merge_legacy_fit_date_update_must_be_physically_plausible(
+    new_date: str,
+    expected_date: date,
+    expected_reason: str | None,
+) -> None:
+    existing = Activity(
+        id="activity-legacy-fit",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 7, 6),
+        started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
+        source="fit_upload",
+        raw_extraction={"filename": "ride.fit"},
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date=new_date,
+            activity_date_confidence=0.99,
+        )
+
+    result = await merge_activity_text_update(
+        existing,
+        f"Move it to {new_date}.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    assert result.activity.activity_date == expected_date
+    if expected_reason is None:
+        assert result.rejected_updates == []
+    else:
+        assert result.rejected_updates[0]["reason"] == expected_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("activity_date", "confidence"),
+    [("2026-07-05", 0.89), (None, None)],
+)
+async def test_merge_ignores_low_confidence_or_absent_activity_date(
+    activity_date: str | None,
+    confidence: float | None,
+) -> None:
+    existing = Activity(
+        id="activity-ignored-date",
+        user_id="athlete-1",
+        sport="running",
+        activity_date=date(2026, 7, 6),
+        source="text_extract",
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date=activity_date,
+            activity_date_confidence=confidence,
+        )
+
+    result = await merge_activity_text_update(
+        existing,
+        "Maybe this was July 5.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    assert result.activity.activity_date == date(2026, 7, 6)
+    assert result.rejected_updates == []
+
+
+@pytest.mark.asyncio
+async def test_merge_sport_update_refreshes_summary_and_thresholds() -> None:
+    existing = Activity(
+        id="activity-sport",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=date(2026, 7, 5),
+        duration_seconds=3600,
+        normalized_power_watts=240,
+        tss=92.2,
+        intensity_factor=0.96,
+        source="text_extract",
+        activity_summary={
+            "session": {"sport": "cycling"},
+            "thresholds_used": {"ftp_w": 250},
+            "load": {"primary_load": 92.2, "tss_power": 92.2},
+            "power": {"intensity_factor": 0.96},
+        },
+    )
+    thresholds = [
+        SportThreshold(
+            user_id="athlete-1",
+            sport="running",
+            lt2_power_watts=300,
+        )
+    ]
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(sport="running", sport_confidence=0.99)
+
+    result = await merge_activity_text_update(
+        existing,
+        "Correction: this was a run.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=thresholds,
+        extractor=fake_extractor,
+    )
+
+    assert result.activity.sport == "running"
+    assert result.activity.activity_summary["session"]["sport"] == "running"
+    assert result.activity.activity_summary["thresholds_used"]["ftp_w"] == 300
+    assert result.activity.intensity_factor == 0.8

@@ -1554,11 +1554,17 @@ def _build_uploaded_activity(  # noqa: PLR0913
         source=_activity_source_for_filename(filename),
         source_file_key=object_key,
         raw_extraction={
+            "activity_date_source": (
+                "fit_local_timestamp"
+                if parsed.utc_offset_seconds is not None and parsed.started_at is not None
+                else "utc_fallback"
+            ),
             "content_type": content_type,
             "filename": filename,
             "hrv": parsed.hrv_summary,
             "public_url": public_url,
             "rr_interval_count": len(parsed.rr_intervals_ms or []),
+            "utc_offset_seconds": parsed.utc_offset_seconds,
         },
     )
     activity = activity.model_copy(
@@ -2120,6 +2126,62 @@ async def _activity_repo_call(awaitable, *, detail: str, log_message: str):
         raise HTTPException(status_code=503, detail=detail) from exc
 
 
+async def _load_activity_profile_and_thresholds(
+    user_id: str,
+) -> tuple[_AthleteProfile, list[SportThreshold]]:
+    try:
+        profile = await _activity_repo_call(
+            repo.get_athlete_profile(user_id),
+            detail="Failed to load athlete profile.",
+            log_message=f"get_athlete_profile failed for user_id={user_id}",
+        )
+    except RecordNotFoundError:
+        profile = _AthleteProfile(user_id=user_id)
+    thresholds = await _activity_repo_call(
+        repo.get_active_thresholds(user_id),
+        detail="Failed to load athlete thresholds.",
+        log_message=f"get_active_thresholds failed for user_id={user_id}",
+    )
+    return profile, thresholds
+
+
+async def _best_effort_rematch_activity_after_date_change(
+    user_id: str,
+    existing: Activity,
+    updated: Activity,
+) -> dict[str, object] | None:
+    if existing.planned_workout_id is not None:
+        try:
+            await repo.update_plan_workout_fields(
+                user_id,
+                existing.planned_workout_id,
+                {
+                    "status": "scheduled",
+                    "actual_activity_id": None,
+                    "completion_source": None,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "activity date update failed to unlink old plan workout "
+                "user_id=%s activity_id=%s plan_workout_id=%s",
+                user_id,
+                updated.id,
+                existing.planned_workout_id,
+            )
+    try:
+        return await _try_match_activity_to_plan(user_id, updated)
+    except Exception:
+        # _try_match_activity_to_plan is already best-effort. Keep this boundary defensive so a
+        # substituted implementation cannot turn a successful activity save into an error.
+        logger.exception(
+            "activity date update failed to re-match plan workout user_id=%s activity_id=%s",
+            user_id,
+            updated.id,
+        )
+        return None
+
+
 async def _update_activity_from_text(
     user_id: str,
     activity_id: str,
@@ -2138,13 +2200,24 @@ async def _update_activity_from_text(
         )
     except RecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    profile, thresholds = await _load_activity_profile_and_thresholds(user_id)
     try:
-        updated = await merge_activity_text_update(existing, text)
+        result = await merge_activity_text_update(
+            existing,
+            text,
+            profile=profile,
+            thresholds=thresholds,
+        )
     except ActivityTextExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    date_changed = result.activity.activity_date != existing.activity_date
+    if date_changed:
+        # The plan-workout side is cleared best-effort after this save; clear the activity's
+        # reverse link in the same persistence call so the matcher can consider it again.
+        result.activity.planned_workout_id = None
     try:
         activity = await _activity_repo_call(
-            repo.update_activity(updated),
+            repo.update_activity(result.activity),
             detail="Failed to update activity.",
             log_message=f"update_activity failed for user_id={user_id} activity_id={activity_id}",
         )
@@ -2155,10 +2228,20 @@ async def _update_activity_from_text(
             "update_activity failed for user_id=%s activity_id=%s", user_id, activity_id
         )
         raise HTTPException(status_code=503, detail="Failed to update activity.") from exc
+    matched = None
+    if date_changed:
+        matched = await _best_effort_rematch_activity_after_date_change(user_id, existing, activity)
     logger.info(
         "save_activity_from_text user_id=%s activity_id=%s status=updated", user_id, activity_id
     )
-    return {"activity": activity.model_dump(mode="json"), "status": "updated"}
+    response: dict[str, object] = {
+        "activity": activity.model_dump(mode="json"),
+        "rejected_updates": result.rejected_updates,
+        "status": "updated",
+    }
+    if matched is not None:
+        response["matched_plan_workout"] = matched
+    return response
 
 
 @app.post("/api/engine/save-activity-from-text")
@@ -2180,19 +2263,7 @@ async def save_activity_from_text(
             raise HTTPException(status_code=422, detail="Activity id must not be empty.")
         return await _update_activity_from_text(user_context.user_id, activity_id, payload.text)
 
-    try:
-        profile = await _activity_repo_call(
-            repo.get_athlete_profile(user_context.user_id),
-            detail="Failed to load athlete profile.",
-            log_message=f"get_athlete_profile failed for user_id={user_context.user_id}",
-        )
-    except RecordNotFoundError:
-        profile = _AthleteProfile(user_id=user_context.user_id)
-    thresholds = await _activity_repo_call(
-        repo.get_active_thresholds(user_context.user_id),
-        detail="Failed to load athlete thresholds.",
-        log_message=f"get_active_thresholds failed for user_id={user_context.user_id}",
-    )
+    profile, thresholds = await _load_activity_profile_and_thresholds(user_context.user_id)
     try:
         result = await build_activity_from_text(
             payload.text,
