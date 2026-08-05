@@ -343,9 +343,9 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:
             for value in values:
                 _append_rr_interval(rr_intervals, value)
 
-    activity_date = date.today()
+    activity_date = datetime.now(UTC).date()
     if session_summary.start_time is not None:
-        local_start_time = session_summary.start_time
+        local_start_time = _as_naive_utc(session_summary.start_time)
         if utc_offset_seconds is not None:
             local_start_time += timedelta(seconds=utc_offset_seconds)
         activity_date = local_start_time.date()
