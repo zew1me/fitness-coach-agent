@@ -4,6 +4,8 @@
 .hypothesis/
 .mypy_cache/
 .next/
+# Local CodeGraph structural index
+/.codegraph/
 .nox/
 .pyre/
 .pytest_cache/
