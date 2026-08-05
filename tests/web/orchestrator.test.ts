@@ -82,12 +82,17 @@ const orchestratorMocks = vi.hoisted(() => {
   // max-turns catch behaves the same way here as it does in production.
   class MaxTurnsExceededError extends Error {}
 
+  const compact = vi.fn(() =>
+    Promise.reject(new Error("compaction unavailable")),
+  );
+
   return {
     Agent,
     MaxTurnsExceededError,
     Runner,
     agentConfigs,
     agentsRun,
+    compact,
     events,
     runEventSequences,
     streamText,
@@ -170,6 +175,17 @@ vi.mock("../../lib/agent/specialists", () => ({
 
 vi.mock("../../lib/agent/system-prompt", () => ({
   buildLeadCoachPrompt: vi.fn(() => "system prompt"),
+}));
+
+// `DurableCompactionSession` builds a real `OpenAI` on its first compaction, and
+// the constructor throws without credentials. Stubbing the module keeps this
+// suite independent of an ambient OPENAI_API_KEY (which is how the durable
+// tests silently ran against the error path on CI — issue #408) and lets the
+// forced-compaction test reject on demand.
+vi.mock("openai", () => ({
+  default: class OpenAI {
+    responses = { compact: orchestratorMocks.compact };
+  },
 }));
 
 const originalFetch = globalThis.fetch;
@@ -1476,6 +1492,192 @@ describe("streamCoachTurn", () => {
       "http://localhost/api/chat/model-state/lease",
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+
+  // Issue #408: durable-session setup is an optimisation. Lease acquisition
+  // already degraded to a stateless turn on failure, but every step after it
+  // killed the turn, so a transient 5xx reached the athlete as
+  // "Coach is unavailable". Each case below asserts the turn still reaches the
+  // model rather than the stream error path.
+  type DegradingDurableOptions = {
+    modelStateStatus?: number;
+    modelStateWriteStatus?: number;
+    transcriptStatus?: number;
+    storedItems?: unknown[];
+    historyMessages?: UIMessage[];
+    onModelStateRead?: () => void;
+  };
+
+  function modelStateResponse(
+    options: DegradingDurableOptions,
+    init?: RequestInit,
+  ): Response {
+    if (init?.method === "PUT" && options.modelStateWriteStatus !== undefined) {
+      return new Response("write rejected", {
+        status: options.modelStateWriteStatus,
+      });
+    }
+    options.onModelStateRead?.();
+    if (options.modelStateStatus !== undefined) {
+      return new Response("upstream failure", {
+        status: options.modelStateStatus,
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        thread_id: "thread-1",
+        version: 1,
+        items: options.storedItems ?? [],
+        coaching_memory: [],
+        compaction_metadata: {},
+      }),
+      { status: 200 },
+    );
+  }
+
+  function transcriptResponse(options: DegradingDurableOptions): Response {
+    if (options.transcriptStatus !== undefined) {
+      return new Response("upstream failure", {
+        status: options.transcriptStatus,
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        messages: options.historyMessages ?? [],
+        next_cursor: null,
+      }),
+      { status: 200 },
+    );
+  }
+
+  function degradingDurableFetch(
+    options: DegradingDurableOptions,
+  ): ReturnType<typeof vi.fn<(...args: never[]) => Promise<Response>>> {
+    return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "http://localhost/api/chat/model-state/lease") {
+        return Promise.resolve(
+          new Response(JSON.stringify({ thread_id: "thread-1" }), {
+            status: 200,
+          }),
+        );
+      }
+      if (url === "http://localhost/api/chat/model-state") {
+        return Promise.resolve(modelStateResponse(options, init));
+      }
+      if (url === "http://localhost/api/chat/messages?limit=100") {
+        return Promise.resolve(transcriptResponse(options));
+      }
+      if (url === "http://localhost/api/chat/messages") {
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+  }
+
+  async function runDurableTurn(
+    fetchMock: ReturnType<typeof degradingDurableFetch>,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      ...(signal ? { signal } : {}),
+      useDurableSession: true,
+    });
+    return response.text();
+  }
+
+  it("degrades to a stateless turn when the model state is unreadable", async () => {
+    const body = await runDurableTurn(
+      degradingDurableFetch({ modelStateStatus: 503 }),
+    );
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(body).not.toContain("Coach is unavailable");
+  });
+
+  it("degrades to a stateless turn when the transcript cannot be fetched", async () => {
+    const body = await runDurableTurn(
+      degradingDurableFetch({ transcriptStatus: 503 }),
+    );
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(body).not.toContain("Coach is unavailable");
+  });
+
+  it("degrades to a stateless turn when forced compaction fails above the hard limit", async () => {
+    // estimateStoredContext is ceil(bytes / 4), so ~1.1 MB of text clears the
+    // 260 000-token hard limit where compactIfNeeded rethrows.
+    const body = await runDurableTurn(
+      degradingDurableFetch({
+        storedItems: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "x".repeat(1_100_000) }],
+          },
+        ],
+      }),
+    );
+
+    expect(orchestratorMocks.compact).toHaveBeenCalled();
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(body).not.toContain("Coach is unavailable");
+  });
+
+  it("does not degrade to stateless execution when the turn is aborted during setup", async () => {
+    const controller = new AbortController();
+    await runDurableTurn(
+      degradingDurableFetch({
+        modelStateStatus: 503,
+        onModelStateRead: () => controller.abort(),
+      }),
+      controller.signal,
+    );
+
+    expect(orchestratorMocks.agentsRun).not.toHaveBeenCalled();
+  });
+
+  // One older message so seeding actually writes (`addItems` → PUT model-state);
+  // it must not be in the current turn or `initializeSessionFromTranscript`
+  // filters it out and seeds nothing.
+  function priorHistoryMessages(): UIMessage[] {
+    return [
+      {
+        id: "0f1e2d3c-4b5a-4968-8776-655443332211",
+        parts: [{ text: "Yesterday's ride felt easy.", type: "text" }],
+        role: "user",
+      },
+    ];
+  }
+
+  it("does not degrade to stateless execution when a durable setup write hits a lease conflict", async () => {
+    // A 409 survives the CAS retries only when the lease check itself rejects
+    // the write — another turn owns this chat's durable state, so this turn
+    // must end rather than carry on statelessly.
+    await runDurableTurn(
+      degradingDurableFetch({
+        historyMessages: priorHistoryMessages(),
+        modelStateWriteStatus: 409,
+      }),
+    );
+
+    expect(orchestratorMocks.agentsRun).not.toHaveBeenCalled();
+  });
+
+  it("degrades to a stateless turn when a durable setup write fails for a non-conflict reason", async () => {
+    const body = await runDurableTurn(
+      degradingDurableFetch({
+        historyMessages: priorHistoryMessages(),
+        modelStateWriteStatus: 503,
+      }),
+    );
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(body).not.toContain("Coach is unavailable");
   });
 
   it("passes an abort signal to durable pre-run fetches", async () => {

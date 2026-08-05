@@ -202,12 +202,21 @@ type CompactionSessionOptions = {
 };
 
 export class DurableCompactionSession implements OpenAIResponsesCompactionAwareSession {
-  private readonly client: OpenAI;
+  private client: OpenAI | null;
   private readonly options: CompactionSessionOptions;
 
   constructor(options: CompactionSessionOptions) {
     this.options = options;
-    this.client = options.client ?? new OpenAI({ maxRetries: 4 });
+    this.client = options.client ?? null;
+  }
+
+  // Built on first compaction rather than in the constructor. `new OpenAI()`
+  // throws when credentials are missing, and most turns never reach a
+  // compaction threshold — constructing eagerly let a credential problem break
+  // turns that were never going to call the API at all (issue #408).
+  private getClient(): OpenAI {
+    this.client ??= new OpenAI({ maxRetries: 4 });
+    return this.client;
   }
 
   getSessionId = (): Promise<string> =>
@@ -239,7 +248,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     }
 
     const trigger: CompactionTrigger = args.force === true ? "forced" : "auto";
-    const compacted = await this.client.responses.compact({
+    const compacted = await this.getClient().responses.compact({
       ...toOpenAICompactOptions(args),
       model: this.options.model ?? "gpt-5.6-luna",
       input: buildCompactionInput(items, (item) =>

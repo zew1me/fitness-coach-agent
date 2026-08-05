@@ -175,7 +175,7 @@ a per-environment data migration.
 2. Load state     →  GET  /api/chat/model-state
 3. Project token estimate for stored items + incoming messages
 4. If estimate ≥ 220 000 tokens  →  force runCompaction() before agent run
-      └─ hard limit 260 000: if compaction fails, throw (turn aborted)
+      └─ hard limit 260 000: if compaction fails, degrade to stateless (turn still answers)
       └─ soft limit 220 000: log Sentry warning, continue with uncompacted context
 5. Agent runs     →  SDK appends items via addItems() during the turn
       └─ lead model honors provider retry delays up to 8 seconds, then falls back
@@ -189,6 +189,37 @@ a per-environment data migration.
 Thresholds are declared in `lib/agent/orchestrator.ts` (forced pre-turn
 compaction at soft and hard limit of tokens) and in the `DurableCompactionSession`
 constructor defaults (auto-compaction at N tokens or M non-user items).
+
+### Setup is best-effort — only a 409 or an abort ends the turn
+
+A durable session is an optimisation, not a prerequisite for answering the
+athlete, so **every** step of steps 1–4 above shares one failure policy: log,
+tag the Sentry event `degrading: "true"` with the failing `step`
+(`seed` / `project` / `compact`), and run the turn statelessly
+(`prepareDurableSession` in `lib/agent/orchestrator.ts`). Exactly two failures
+still end the turn, because in both cases continuing is unsafe rather than
+merely degraded:
+
+- **Any 409** — another turn owns this chat's session, and two turns writing the
+  same durable state concurrently would corrupt it. This covers both lease
+  acquisition and a `ModelStateError` with `status === 409` escaping a setup
+  write (`addItems` while seeding, `replaceAll` during forced compaction), which
+  means the CAS/lease check rejected the write after exhausting its retries.
+- **An aborted signal** — the caller cancelled, or renewal lost the lease
+  mid-turn (`onLeaseLost`), so this turn no longer owns what it is writing.
+
+Degrading costs this turn's items: they never reach `chat_model_states`, and in
+the `session` context strategy the model sees only the latest user turn plus
+athlete context. That is deliberate and **recoverable** — stored state is left
+untouched, so the next turn seeds from the full transcript (a cold seed only
+happens when stored items are empty) or retries compaction normally. Partial
+seeding was considered and rejected: it would write a truncated history that is
+never re-seeded, trading a one-turn degradation for permanent context loss.
+
+For the same reason `DurableCompactionSession` builds its `OpenAI` client
+lazily, on first compaction rather than in the constructor — `new OpenAI()`
+throws without credentials, and most turns never reach a compaction threshold at
+all. See issue #408.
 
 ---
 
@@ -206,14 +237,15 @@ Operations on `coaching_memory` go through
 
 ## Tests
 
-| File                                           | What it covers                                                                                                                      |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, replaceAll, coaching memory isolation                                                                            |
-| `tests/web/durable-compaction-session.test.ts` | Unit: DurableCompactionSession trigger thresholds, provider-metadata stripping, compact API shape conversion, estimateStoredContext |
-| `tests/web/real-durable-session.test.ts`       | Integration: full turn round-trip with fake repo                                                                                    |
-| `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                              |
-| `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                  |
-| `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                              |
+| File                                           | What it covers                                                                                                                                             |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, replaceAll, coaching memory isolation                                                                                                   |
+| `tests/web/durable-compaction-session.test.ts` | Unit: DurableCompactionSession trigger thresholds, provider-metadata stripping, compact API shape conversion, estimateStoredContext                        |
+| `tests/web/orchestrator.test.ts`               | Turn-level: durable setup degrades to stateless on unreadable model state, unfetchable transcript, and failed forced compaction; still aborts on 409/abort |
+| `tests/web/real-durable-session.test.ts`       | Integration: full turn round-trip with fake repo                                                                                                           |
+| `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                                                     |
+| `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                                         |
+| `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                                                     |
 
 The `@pytest.mark.db` tests (live DB) are excluded from the default `pytest`
 run (`addopts = "-m 'not db'"` in `pyproject.toml`). Run them explicitly with
