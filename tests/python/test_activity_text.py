@@ -908,6 +908,7 @@ async def test_merge_rejects_malformed_high_confidence_date() -> None:
     ("new_date", "expected_date", "expected_reason"),
     [
         ("2026-07-05", date(2026, 7, 5), None),
+        ("2026-07-07", date(2026, 7, 6), "refused_implausible"),
         ("2026-07-09", date(2026, 7, 6), "refused_implausible"),
     ],
 )
