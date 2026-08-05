@@ -42,10 +42,10 @@ const agentsMocks = vi.hoisted(() => {
   return { Agent, constructedAgents, roleName, run };
 });
 
-vi.mock("@openai/agents", () => ({
-  Agent: agentsMocks.Agent,
-  run: agentsMocks.run,
-}));
+vi.mock("@openai/agents", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@openai/agents")>();
+  return { ...actual, Agent: agentsMocks.Agent, run: agentsMocks.run };
+});
 
 beforeEach(() => {
   agentsMocks.constructedAgents.length = 0;
@@ -64,7 +64,7 @@ describe("runSpecialists with the Agents SDK", () => {
 
     const reports = await runSpecialists({
       messages,
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["workout", "recovery"],
       delegations: [
         {
@@ -185,7 +185,7 @@ describe("runSpecialists with the Agents SDK", () => {
           role: "user",
         },
       ],
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["recovery"],
       delegations: [
         {
@@ -244,7 +244,7 @@ describe("runSpecialists with the Agents SDK", () => {
           role: "user",
         },
       ],
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["recovery", "workout"],
       slices: buildContextSlices(athleteContextFixture),
     });
@@ -277,12 +277,54 @@ describe("runSpecialists with the Agents SDK", () => {
           role: "user",
         },
       ],
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["recovery", "workout"],
       slices: buildContextSlices(athleteContextFixture),
     });
 
     expect(reports.map((report) => report.role)).toEqual(["workout"]);
+  });
+
+  it("reports terminal specialist 429s without dropping sibling reports", async () => {
+    const onRateLimit = vi.fn();
+    const rateLimit = Object.assign(new Error("rate limit"), { status: 429 });
+    agentsMocks.run.mockImplementation((agent: { name: string }) =>
+      agentsMocks.roleName(agent) === "recovery"
+        ? Promise.reject(rateLimit)
+        : Promise.resolve({
+            state: { usage: undefined },
+            finalOutput: {
+              confidence: "high",
+              proposedUpdates: [],
+              risks: [],
+              role: agentsMocks.roleName(agent),
+              summary: `${agent.name} report`,
+            },
+          }),
+    );
+    const tier = {
+      model: "gpt-5.6-luna",
+      effort: "medium" as const,
+      verbosity: "low" as const,
+    };
+
+    const reports = await runSpecialists({
+      messages: [
+        {
+          id: "message-1",
+          parts: [{ type: "text", text: "I am sore after today's workout." }],
+          role: "user",
+        },
+      ],
+      tier,
+      onRateLimit,
+      roles: ["recovery", "workout"],
+      slices: buildContextSlices(athleteContextFixture),
+    });
+
+    expect(reports.map((report) => report.role)).toEqual(["workout"]);
+    expect(onRateLimit).toHaveBeenCalledOnce();
+    expect(onRateLimit).toHaveBeenCalledWith(tier, rateLimit);
   });
 
   it("repairs one specialist's malformed proposedUpdate while a sibling specialist succeeds untouched", async () => {
@@ -328,7 +370,7 @@ describe("runSpecialists with the Agents SDK", () => {
           role: "user",
         },
       ],
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["recovery", "workout"],
       slices: buildContextSlices(athleteContextFixture),
     });
@@ -380,7 +422,7 @@ describe("runSpecialists with the Agents SDK", () => {
           role: "user",
         },
       ],
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["recovery", "workout"],
       slices: buildContextSlices(athleteContextFixture),
     });
@@ -441,7 +483,7 @@ describe("runSpecialists with the Agents SDK", () => {
           role: "user",
         },
       ],
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["recovery", "workout"],
       slices: buildContextSlices(athleteContextFixture),
     });
@@ -489,7 +531,7 @@ describe("runSpecialists with the Agents SDK", () => {
           role: "user",
         },
       ],
-      model: "gpt-5.4-mini",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
       roles: ["recovery", "workout"],
       slices: buildContextSlices(athleteContextFixture),
     });

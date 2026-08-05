@@ -1,6 +1,10 @@
+import asyncio
+import logging
 import os
 from datetime import date
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from backend.models.athlete import AthleteProfile, SportThreshold
@@ -12,6 +16,7 @@ from backend.services.activity_text import (
     ExtractedFoodItem,
     NutritionEstimate,
     build_activity_from_text,
+    extract_activity_text,
     merge_activity_text_update,
 )
 
@@ -433,14 +438,137 @@ async def test_merge_activity_text_update_applies_metric_corrections() -> None:
     assert updated.activity_summary["food_items"][0]["name"] == "banana"
 
 
+@pytest.mark.asyncio
+async def test_extract_activity_text_retries_429_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from backend.services import activity_text
+
+    monkeypatch.setattr(activity_text.settings, "openai_api_key", "test-key")
+    statuses = iter([429, 200])
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        status = next(statuses)
+        if status == 429:
+            return httpx.Response(status, headers={"Retry-After": "30"}, request=request)
+        return httpx.Response(
+            status,
+            json={"output_text": '{"sport":"running"}'},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(activity_text.httpx, "AsyncClient", lambda **_kwargs: client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    with caplog.at_level(logging.WARNING, logger=activity_text.logger.name):
+        result = await extract_activity_text("Easy run")
+
+    assert result.sport == "running"
+    assert attempts == 2
+    # Retry-After: 30 is capped — a serverless request must not be held that long.
+    sleep.assert_awaited_once_with(8.0)
+    assert "status=429 attempt=1" in caplog.text
+    assert "status=200 retries=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_extract_activity_text_retries_connection_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped connection is as transient as a 503 and fails fast, so it retries."""
+    from backend.services import activity_text
+
+    monkeypatch.setattr(activity_text.settings, "openai_api_key", "test-key")
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(
+            200,
+            json={"output_text": '{"sport":"running"}'},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(activity_text.httpx, "AsyncClient", lambda **_kwargs: client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    result = await extract_activity_text("Easy run")
+
+    assert result.sport == "running"
+    assert attempts == 2
+    sleep.assert_awaited_once_with(0.5)
+
+
+@pytest.mark.asyncio
+async def test_extract_activity_text_does_not_retry_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout already consumed the full request budget; retrying would multiply it."""
+    from backend.services import activity_text
+
+    monkeypatch.setattr(activity_text.settings, "openai_api_key", "test-key")
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(activity_text.httpx, "AsyncClient", lambda **_kwargs: client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    with pytest.raises(ActivityTextExtractionUnavailable):
+        await extract_activity_text("Easy run")
+
+    assert attempts == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_extract_activity_text_exhausts_bounded_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.services import activity_text
+
+    monkeypatch.setattr(activity_text.settings, "openai_api_key", "test-key")
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(activity_text.httpx, "AsyncClient", lambda **_kwargs: client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    with pytest.raises(ActivityTextExtractionUnavailable):
+        await extract_activity_text("Easy run")
+
+    assert attempts == 3
+    assert sleep.await_count == 2
+
+
 @pytest.mark.skipif(
     not (_RUN_OAI_TESTS and _OPENAI_CONFIGURED),
     reason="RUN_OAI_TESTS=1 and OPENAI_API_KEY are required for live OpenAI extraction.",
 )
 @pytest.mark.asyncio
 async def test_extract_activity_text_live_openai_returns_food_and_confidence() -> None:
-    from backend.services.activity_text import extract_activity_text
-
     extraction = await extract_activity_text(
         "I rode a hard 52 minute lunch crit today. I ate one Maurten Gel 100 "
         "and drank half a bottle of Skratch."

@@ -207,7 +207,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
 
   constructor(options: CompactionSessionOptions) {
     this.options = options;
-    this.client = options.client ?? new OpenAI();
+    this.client = options.client ?? new OpenAI({ maxRetries: 4 });
   }
 
   getSessionId = (): Promise<string> =>
