@@ -1,7 +1,7 @@
 id: no-supabase-client-outside-repositories
 language: Python
 severity: error
-message: Create Supabase clients in backend/repositories, not API handlers or services.
+message: Create Supabase clients in backend/repos, not API handlers or services.
 note: |
   Persistence configuration and lifecycle belong in repository classes. Inject or use a repository
   from API handlers and services instead of calling create_client directly.
