@@ -46,7 +46,10 @@ import {
   type SpecialistReport,
 } from "./orchestration-types";
 import { runSpecialists } from "./specialists";
-import { SupabaseAgentSession } from "./supabase-agent-session";
+import {
+  ModelStateError,
+  SupabaseAgentSession,
+} from "./supabase-agent-session";
 import { buildLeadCoachPrompt } from "./system-prompt";
 import type { AthleteContextBundle } from "./types";
 import { recordStageUsage } from "./usage-metrics";
@@ -418,6 +421,12 @@ async function prepareDurableSession(
     // or renewal lost the lease to another turn. Continuing statelessly would
     // keep working on a turn that no longer owns its session.
     if (options.signal?.aborted) throw error;
+    // A 409 escaping a setup write (`addItems` while seeding, `replaceAll`
+    // during forced compaction) means the CAS/lease check rejected it after
+    // exhausting retries — another turn owns this chat's durable state. That is
+    // the same condition acquireDurableLeaseState and the renewal loop already
+    // treat as fatal, so it must not be degraded away here either.
+    if (error instanceof ModelStateError && error.status === 409) throw error;
     Sentry.captureException(error, {
       tags: {
         subsystem: "durable-session-setup",

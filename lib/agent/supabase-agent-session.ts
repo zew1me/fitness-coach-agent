@@ -24,6 +24,22 @@ import {
 
 const MODEL_STATE_FETCH_TIMEOUT_MS = 10_000;
 
+/**
+ * A `/api/chat/model-state` request failed. Carries the HTTP status so callers
+ * can tell a transient upstream failure apart from a **409**, which means the
+ * CAS/lease check rejected the write — another turn owns this chat's durable
+ * state. Mirrors the `Lease*Error` shape in `lease-client.ts`.
+ */
+export class ModelStateError extends Error {
+  readonly status: number | undefined;
+
+  constructor(message: string, options?: { cause?: unknown; status?: number }) {
+    super(message, options);
+    this.name = "ModelStateError";
+    this.status = options?.status;
+  }
+}
+
 type SessionOptions = {
   accessToken: string;
   baseUrl: string;
@@ -64,7 +80,10 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
       },
     );
     if (!response.ok)
-      throw new Error(`Unable to load model state (${response.status})`);
+      throw new ModelStateError(
+        `Unable to load model state (${response.status})`,
+        { status: response.status },
+      );
     this.state = modelStateSchema.parse(await response.json());
     return this.state;
   }
@@ -100,7 +119,10 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
         return;
       }
       if (response.status !== 409 || attempt === attempts - 1) {
-        throw new Error(`Unable to replace model state (${response.status})`);
+        throw new ModelStateError(
+          `Unable to replace model state (${response.status})`,
+          { status: response.status },
+        );
       }
     }
   }

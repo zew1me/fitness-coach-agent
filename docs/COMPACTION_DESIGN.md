@@ -193,8 +193,11 @@ tag the Sentry event `degrading: "true"` with the failing `step`
 still end the turn, because in both cases continuing is unsafe rather than
 merely degraded:
 
-- **409 on lease acquisition** — another turn owns this chat's session, and two
-  turns writing the same durable state concurrently would corrupt it.
+- **Any 409** — another turn owns this chat's session, and two turns writing the
+  same durable state concurrently would corrupt it. This covers both lease
+  acquisition and a `ModelStateError` with `status === 409` escaping a setup
+  write (`addItems` while seeding, `replaceAll` during forced compaction), which
+  means the CAS/lease check rejected the write after exhausting its retries.
 - **An aborted signal** — the caller cancelled, or renewal lost the lease
   mid-turn (`onLeaseLost`), so this turn no longer owns what it is writing.
 
