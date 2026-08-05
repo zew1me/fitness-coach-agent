@@ -3454,7 +3454,7 @@ async def test_non_date_activity_update_does_not_touch_plan_workouts(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_activity_date_update_swallows_plan_matching_failure(monkeypatch) -> None:
+async def test_activity_date_update_swallows_outer_plan_matching_failure(monkeypatch) -> None:
     from backend.services import activity_text
     from backend.services.activity_text import ActivityTextExtraction
 
@@ -3470,14 +3470,18 @@ async def test_activity_date_update_swallows_plan_matching_failure(monkeypatch) 
                 raw_extraction={"filename": "ride.fit"},
             )
 
-        async def list_plan_workouts_between(self, *_args, **_kwargs) -> list[PlanWorkout]:
-            raise RuntimeError("matching unavailable")
-
     async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
         return ActivityTextExtraction(
             activity_date="2026-07-05",
             activity_date_confidence=0.99,
         )
+
+    match_attempts = 0
+
+    async def fail_plan_match(_user_id: str, _activity: Activity) -> None:
+        nonlocal match_attempts
+        match_attempts += 1
+        raise RuntimeError("matching unavailable")
 
     restore_override = _override_require_user_context(
         UserContext(
@@ -3489,6 +3493,7 @@ async def test_activity_date_update_swallows_plan_matching_failure(monkeypatch) 
     )
     monkeypatch.setattr(api_index, "repo", ActivityRepository())
     monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+    monkeypatch.setattr(api_index, "_try_match_activity_to_plan", fail_plan_match)
 
     try:
         transport = ASGITransport(app=api_index.app)
@@ -3503,6 +3508,7 @@ async def test_activity_date_update_swallows_plan_matching_failure(monkeypatch) 
     assert response.status_code == 200
     assert response.json()["activity"]["activity_date"] == "2026-07-05"
     assert "matched_plan_workout" not in response.json()
+    assert match_attempts == 1
 
 
 @pytest.mark.asyncio
