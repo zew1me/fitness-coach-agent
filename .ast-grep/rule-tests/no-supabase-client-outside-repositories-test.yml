@@ -2,5 +2,23 @@ id: no-supabase-client-outside-repositories
 valid:
   - "return repository.get_athlete(user_id)"
   - "client = get_client()"
+  - |
+    def create_client(url, key):
+        return LocalClient(url, key)
+    client = create_client(url, key)
+  - |
+    from internal_clients import create_client
+    client = create_client(url, key)
 invalid:
-  - "client = create_client(url, service_role_key)"
+  - |
+    from supabase import create_client
+    client = create_client(url, service_role_key)
+  - |
+    from supabase import create_client as make_supabase_client
+    client = make_supabase_client(url, service_role_key)
+  - |
+    import supabase
+    client = supabase.create_client(url, service_role_key)
+  - |
+    import supabase as supabase_sdk
+    client = supabase_sdk.create_client(url, service_role_key)

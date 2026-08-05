@@ -9,4 +9,36 @@ files:
   - api/**/*.py
   - backend/services/**/*.py
 rule:
-  pattern: create_client($$$)
+  any:
+    - all:
+        - pattern: create_client($$$)
+        - inside:
+            kind: module
+            has:
+              pattern: from supabase import create_client
+              stopBy: end
+            stopBy: end
+    - all:
+        - pattern: $CREATE($$$)
+        - inside:
+            kind: module
+            has:
+              pattern: from supabase import create_client as $CREATE
+              stopBy: end
+            stopBy: end
+    - all:
+        - pattern: supabase.create_client($$$)
+        - inside:
+            kind: module
+            has:
+              pattern: import supabase
+              stopBy: end
+            stopBy: end
+    - all:
+        - pattern: $SUPABASE.create_client($$$)
+        - inside:
+            kind: module
+            has:
+              pattern: import supabase as $SUPABASE
+              stopBy: end
+            stopBy: end
