@@ -12,4 +12,13 @@ ignores:
   # This canonical conversion boundary is the only module allowed to construct input_file before sanitizing it.
   - lib/agent/agent-input.ts
 rule:
-  pattern: '{ type: "input_file", $$$ }'
+  kind: object
+  has:
+    all:
+      - kind: pair
+      - has:
+          field: key
+          regex: ^(?:type|["']type["'])$
+      - has:
+          field: value
+          regex: ^["']input_file["']$

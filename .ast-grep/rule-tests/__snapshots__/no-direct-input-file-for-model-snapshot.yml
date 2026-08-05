@@ -1,8 +1,74 @@
 id: no-direct-input-file-for-model
 snapshots:
+  'const content = { "type": "input_file", id: attachment.id };':
+    labels:
+      - source: '{ "type": "input_file", id: attachment.id }'
+        style: primary
+        start: 16
+        end: 59
+      - source: '"type"'
+        style: secondary
+        start: 18
+        end: 24
+      - source: '"input_file"'
+        style: secondary
+        start: 26
+        end: 38
+      - source: '"type": "input_file"'
+        style: secondary
+        start: 18
+        end: 38
+  'const content = { file: { url: attachment.url }, type: "input_file" };':
+    labels:
+      - source: '{ file: { url: attachment.url }, type: "input_file" }'
+        style: primary
+        start: 16
+        end: 69
+      - source: type
+        style: secondary
+        start: 49
+        end: 53
+      - source: '"input_file"'
+        style: secondary
+        start: 55
+        end: 67
+      - source: 'type: "input_file"'
+        style: secondary
+        start: 49
+        end: 67
   'const content = { type: "input_file", file: { url: attachment.url } };':
     labels:
       - source: '{ type: "input_file", file: { url: attachment.url } }'
         style: primary
         start: 16
         end: 69
+      - source: type
+        style: secondary
+        start: 18
+        end: 22
+      - source: '"input_file"'
+        style: secondary
+        start: 24
+        end: 36
+      - source: 'type: "input_file"'
+        style: secondary
+        start: 18
+        end: 36
+  "const content = { type: 'input_file' };":
+    labels:
+      - source: "{ type: 'input_file' }"
+        style: primary
+        start: 16
+        end: 38
+      - source: type
+        style: secondary
+        start: 18
+        end: 22
+      - source: "'input_file'"
+        style: secondary
+        start: 24
+        end: 36
+      - source: "type: 'input_file'"
+        style: secondary
+        start: 18
+        end: 36
