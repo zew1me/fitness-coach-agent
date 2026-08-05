@@ -354,15 +354,19 @@ async function compactIfNeeded(
   }
 }
 
-async function prepareDurableSession(
-  options: PrepareDurableSessionOptions,
-): Promise<PreparedDurableSession | null> {
-  const leaseState =
-    options.leaseState ?? (await acquireDurableLeaseState(options));
-  if (leaseState === null) return null;
+// Which setup step was in flight when a failure degraded the turn. Recorded on
+// the Sentry event so "model state unreachable" and "compaction blew up" stay
+// distinguishable instead of collapsing into one undifferentiated alert.
+type DurableSetupStep = "seed" | "project" | "compact";
 
+async function buildDurableSession(
+  options: PrepareDurableSessionOptions,
+  leaseState: ChatTurnLeaseState,
+  progress: { step: DurableSetupStep },
+): Promise<PreparedDurableSession> {
   const traceGroupId = leaseState.thread_id ?? options.context.profile.user_id;
   const underlyingSession = createUnderlyingSession(options);
+  progress.step = "seed";
   await initializeSessionFromTranscript({
     session: underlyingSession,
     accessToken: options.accessToken,
@@ -373,14 +377,63 @@ async function prepareDurableSession(
     ),
     ...(options.signal ? { signal: options.signal } : {}),
   });
+  progress.step = "project";
   const projected = [
     ...(await underlyingSession.getItems()),
     ...toAgentInputItems(options.selectedMessages),
   ];
   const estimate = estimateStoredContext(projected);
+  progress.step = "compact";
   const durableSession = new DurableCompactionSession({ underlyingSession });
   await compactIfNeeded(durableSession, estimate);
   return { durableSession, traceGroupId, underlyingSession };
+}
+
+/**
+ * A durable session is an optimisation, not a prerequisite for answering the
+ * athlete, so every setup step gets the same policy lease acquisition already
+ * has: log, tag, and run the turn statelessly (issue #408).  Before this, only
+ * the lease step degraded and everything after it — model-state/transcript
+ * fetches, the compaction client, forced compaction — killed the turn outright,
+ * so a transient 5xx surfaced as "Coach is unavailable".
+ *
+ * Degrading leaves any acquired lease held; the caller's `finally` releases it,
+ * and a renewal loop started by `markLeaseAcquired` simply runs against a
+ * stateless turn.  The turn's items never reach `chat_model_states`, which is
+ * the same trade lease degradation already makes — and it stays recoverable,
+ * because stored state is left untouched for the next turn to seed or compact.
+ */
+async function prepareDurableSession(
+  options: PrepareDurableSessionOptions,
+): Promise<PreparedDurableSession | null> {
+  const leaseState =
+    options.leaseState ?? (await acquireDurableLeaseState(options));
+  if (leaseState === null) return null;
+
+  const progress: { step: DurableSetupStep } = { step: "seed" };
+  try {
+    return await buildDurableSession(options, leaseState, progress);
+  } catch (error) {
+    // An abort means the turn is being torn down — either the caller cancelled
+    // or renewal lost the lease to another turn. Continuing statelessly would
+    // keep working on a turn that no longer owns its session.
+    if (options.signal?.aborted) throw error;
+    Sentry.captureException(error, {
+      tags: {
+        subsystem: "durable-session-setup",
+        degrading: "true",
+        step: progress.step,
+      },
+    });
+    Sentry.logger.warn(
+      "coach: durable session setup failed; degrading to stateless mode",
+      {
+        error: error instanceof Error ? error.message : String(error),
+        step: progress.step,
+      },
+    );
+    return null;
+  }
 }
 
 function hasActivityFileAttachment(messages: UIMessage[]): boolean {
