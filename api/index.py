@@ -2169,6 +2169,8 @@ async def _best_effort_rematch_activity_after_date_change(
                 updated.id,
                 existing.planned_workout_id,
             )
+            # Avoid attaching a second workout while the old workout still claims this activity.
+            return None
     try:
         return await _try_match_activity_to_plan(user_id, updated)
     except Exception:

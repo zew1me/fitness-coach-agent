@@ -3362,6 +3362,47 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
 
 
 @pytest.mark.asyncio
+async def test_activity_date_update_does_not_rematch_when_unlink_fails(monkeypatch) -> None:
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.unlink_attempts = 0
+            self.match_attempts = 0
+
+        async def update_plan_workout_fields(self, *_args, **_kwargs) -> PlanWorkout:
+            self.unlink_attempts += 1
+            raise RuntimeError("unlink unavailable")
+
+        async def list_plan_workouts_between(self, *_args, **_kwargs) -> list[PlanWorkout]:
+            self.match_attempts += 1
+            return []
+
+    existing = Activity(
+        id="activity-1",
+        user_id="athlete-1",
+        sport="cycling",
+        activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+        planned_workout_id="old-workout",
+        source="fit_upload",
+    )
+    updated = existing.model_copy(
+        update={
+            "activity_date": datetime(2026, 7, 5, tzinfo=UTC).date(),
+            "planned_workout_id": None,
+        }
+    )
+    repository = ActivityRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    matched = await api_index._best_effort_rematch_activity_after_date_change(
+        "athlete-1", existing, updated
+    )
+
+    assert matched is None
+    assert repository.unlink_attempts == 1
+    assert repository.match_attempts == 0
+
+
+@pytest.mark.asyncio
 async def test_non_date_activity_update_does_not_touch_plan_workouts(monkeypatch) -> None:
     from backend.services import activity_text
     from backend.services.activity_text import ActivityTextExtraction
