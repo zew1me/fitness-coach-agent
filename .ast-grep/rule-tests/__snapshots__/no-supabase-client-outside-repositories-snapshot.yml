@@ -1,0 +1,80 @@
+id: no-supabase-client-outside-repositories
+snapshots:
+  client = create_client(url, service_role_key):
+    labels:
+      - source: create_client(url, service_role_key)
+        style: primary
+        start: 9
+        end: 45
+  ? |
+    from supabase import create_client
+    client = create_client(url, service_role_key)
+  : labels:
+      - source: create_client(url, service_role_key)
+        style: primary
+        start: 44
+        end: 80
+      - source: from supabase import create_client
+        style: secondary
+        start: 0
+        end: 34
+      - source: |
+          from supabase import create_client
+          client = create_client(url, service_role_key)
+        style: secondary
+        start: 0
+        end: 81
+  ? |
+    from supabase import create_client as make_supabase_client
+    client = make_supabase_client(url, service_role_key)
+  : labels:
+      - source: make_supabase_client(url, service_role_key)
+        style: primary
+        start: 68
+        end: 111
+      - source: from supabase import create_client as make_supabase_client
+        style: secondary
+        start: 0
+        end: 58
+      - source: |
+          from supabase import create_client as make_supabase_client
+          client = make_supabase_client(url, service_role_key)
+        style: secondary
+        start: 0
+        end: 112
+  ? |
+    import supabase
+    client = supabase.create_client(url, service_role_key)
+  : labels:
+      - source: supabase.create_client(url, service_role_key)
+        style: primary
+        start: 25
+        end: 70
+      - source: import supabase
+        style: secondary
+        start: 0
+        end: 15
+      - source: |
+          import supabase
+          client = supabase.create_client(url, service_role_key)
+        style: secondary
+        start: 0
+        end: 71
+  ? |
+    import supabase as supabase_sdk
+    client = supabase_sdk.create_client(url, service_role_key)
+  : labels:
+      - source: supabase_sdk.create_client(url, service_role_key)
+        style: primary
+        start: 41
+        end: 90
+      - source: import supabase as supabase_sdk
+        style: secondary
+        start: 0
+        end: 31
+      - source: |
+          import supabase as supabase_sdk
+          client = supabase_sdk.create_client(url, service_role_key)
+        style: secondary
+        start: 0
+        end: 91

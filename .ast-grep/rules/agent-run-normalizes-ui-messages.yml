@@ -1,0 +1,16 @@
+id: agent-run-normalizes-ui-messages
+language: TypeScript
+severity: error
+message: Normalize UI messages with toAgentInputItems before running an agent.
+note: |
+  Raw UIMessage file parts can become invalid Responses API input. Pass UIMessage arrays
+  through toAgentInputItems(...) at the model boundary.
+files:
+  - lib/agent/**/*.ts
+rule:
+  any:
+    - pattern: run($AGENT, $MESSAGES, $$$)
+    - pattern: $RUNNER.run($AGENT, $MESSAGES, $$$)
+constraints:
+  MESSAGES:
+    regex: ^(messages|selectedMessages)$

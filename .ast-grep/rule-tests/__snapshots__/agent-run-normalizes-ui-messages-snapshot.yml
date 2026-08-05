@@ -1,0 +1,14 @@
+id: agent-run-normalizes-ui-messages
+snapshots:
+  "run(agent, messages, { maxTurns: 1 });":
+    labels:
+      - source: "run(agent, messages, { maxTurns: 1 })"
+        style: primary
+        start: 0
+        end: 37
+  "runner.run(agent, selectedMessages, { maxTurns: 1 });":
+    labels:
+      - source: "runner.run(agent, selectedMessages, { maxTurns: 1 })"
+        style: primary
+        start: 0
+        end: 52
