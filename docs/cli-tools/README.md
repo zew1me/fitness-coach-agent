@@ -1,8 +1,8 @@
 # CLI tool briefs
 
 This directory is the progressive-disclosure reference for project CLI tools. `AGENTS.md`
-contains only the catalog and shared rules; load the relevant brief before using an unfamiliar,
-destructive, externally visible, or organization-specific tool.
+contains the catalog and shared quick-reference rules; load the relevant brief before using an
+unfamiliar, destructive, externally visible, or organization-specific tool.
 
 | Tool        | Use it for                                                                 | Brief                        |
 | ----------- | -------------------------------------------------------------------------- | ---------------------------- |
