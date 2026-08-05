@@ -63,8 +63,9 @@ loading order live in [`docs/cli-tools/README.md`](docs/cli-tools/README.md).
 
 ### CodeGraph
 
-Local, pre-indexed structural code graph for navigating unfamiliar or large repositories. Invoke the
-local development dependency with `bunx --no-install codegraph`.
+Local structural code graph for navigating unfamiliar or large repositories. It relies on a
+generated local `.codegraph/` index. Invoke the local development dependency with
+`bunx --no-install codegraph`.
 
 Use when you need to:
 
