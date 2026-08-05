@@ -2213,13 +2213,14 @@ async def _update_activity_from_text(
     except ActivityTextExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     date_changed = result.activity.activity_date != existing.activity_date
+    activity_to_save = result.activity
     if date_changed:
         # The plan-workout side is cleared best-effort after this save; clear the activity's
         # reverse link in the same persistence call so the matcher can consider it again.
-        result.activity.planned_workout_id = None
+        activity_to_save = result.activity.model_copy(update={"planned_workout_id": None})
     try:
         activity = await _activity_repo_call(
-            repo.update_activity(result.activity),
+            repo.update_activity(activity_to_save),
             detail="Failed to update activity.",
             log_message=f"update_activity failed for user_id={user_id} activity_id={activity_id}",
         )
