@@ -29,7 +29,6 @@ ISSUE_209_TEXT = (
     "and next steps."
 )
 
-_RUN_OAI_TESTS = os.environ.get("RUN_OAI_TESTS") == "1"
 _OPENAI_CONFIGURED = bool(os.environ.get("OPENAI_API_KEY"))
 
 
@@ -575,9 +574,10 @@ async def test_extract_activity_text_exhausts_bounded_retries(
     assert sleep.await_count == 2
 
 
+@pytest.mark.oai
 @pytest.mark.skipif(
-    not (_RUN_OAI_TESTS and _OPENAI_CONFIGURED),
-    reason="RUN_OAI_TESTS=1 and OPENAI_API_KEY are required for live OpenAI extraction.",
+    not _OPENAI_CONFIGURED,
+    reason="OPENAI_API_KEY is required for live OpenAI extraction.",
 )
 @pytest.mark.asyncio
 async def test_extract_activity_text_live_openai_returns_food_and_confidence() -> None:
