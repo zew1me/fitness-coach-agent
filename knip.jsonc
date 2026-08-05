@@ -5,7 +5,9 @@
     "@next/eslint-plugin-next",
     "@testing-library/jest-dom",
     "eslint-config-next",
-    "jscpd"
+    "jscpd",
+    // CodeGraph is invoked through documented bunx commands, which static import analysis cannot see.
+    "@colbymchenry/codegraph"
   ],
   "ignore": [
     ".worktrees/**",
