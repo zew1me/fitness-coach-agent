@@ -151,13 +151,14 @@ class ActivityTextBuildResult:
     raw_extraction: dict[str, Any]
 
 
-DateEditVerdict = Literal["applied", "refused_authoritative", "refused_implausible"]
+RefusedDateEditReason = Literal["refused_authoritative", "refused_implausible"]
+DateEditVerdict = Literal["applied"] | RefusedDateEditReason
 
 
 class RejectedActivityUpdate(TypedDict):
     field: str
     value: str
-    reason: DateEditVerdict
+    reason: RefusedDateEditReason
 
 
 @dataclass
