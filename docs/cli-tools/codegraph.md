@@ -43,8 +43,9 @@ Check the index when results seem incomplete or stale:
 bunx --no-install codegraph status
 ```
 
-`init` and `sync` write local index data. Do not run them where repository modifications are
-restricted without permission. Rebuild only when the index is structurally incorrect:
+`init`, `sync`, and `index --force` write local index data. Do not run them where repository
+modifications are restricted without permission. Rebuild only when the index is structurally
+incorrect:
 
 ```bash
 bunx --no-install codegraph index --force
