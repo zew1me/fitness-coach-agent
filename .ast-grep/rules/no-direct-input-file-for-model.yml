@@ -1,0 +1,14 @@
+id: no-direct-input-file-for-model
+language: TypeScript
+severity: error
+message: Send non-image attachments to the model as link-preserving input_text, not input_file.
+note: |
+  Activity files poison durable sessions when sent as input_file. Keep conversion centralized in
+  toAgentInputItems and convert unsupported file parts to link-preserving input_text.
+files:
+  - app/api/chat/route.ts
+  - lib/agent/**/*.ts
+ignores:
+  - lib/agent/agent-input.ts
+rule:
+  pattern: '{ type: "input_file", $$$ }'

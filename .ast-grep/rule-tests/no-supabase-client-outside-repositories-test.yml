@@ -1,0 +1,6 @@
+id: no-supabase-client-outside-repositories
+valid:
+  - "return repository.get_athlete(user_id)"
+  - "client = get_client()"
+invalid:
+  - "client = create_client(url, service_role_key)"

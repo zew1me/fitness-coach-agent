@@ -1,0 +1,6 @@
+id: no-direct-input-file-for-model
+valid:
+  - 'const content = { type: "input_text", text: attachment.url };'
+  - 'const contentType = "input_file";'
+invalid:
+  - 'const content = { type: "input_file", file: { url: attachment.url } };'

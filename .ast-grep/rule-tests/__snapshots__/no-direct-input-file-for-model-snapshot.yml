@@ -1,0 +1,8 @@
+id: no-direct-input-file-for-model
+snapshots:
+  'const content = { type: "input_file", file: { url: attachment.url } };':
+    labels:
+      - source: '{ type: "input_file", file: { url: attachment.url } }'
+        style: primary
+        start: 16
+        end: 69

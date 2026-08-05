@@ -1,0 +1,8 @@
+id: no-supabase-client-outside-repositories
+snapshots:
+  client = create_client(url, service_role_key):
+    labels:
+      - source: create_client(url, service_role_key)
+        style: primary
+        start: 9
+        end: 45

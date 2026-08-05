@@ -43,6 +43,19 @@ one-shot repository glue in `scripts/`; build durable, configurable, dependency-
 user-facing Python CLIs as Typer packages under `tools/` in the uv workspace. Update the shared
 lockfile and root checks whenever a workspace tool is added.
 
+## ast-grep guardrails
+
+Use the locally pinned `ast-grep` CLI to discover and preserve repository-specific structural
+contracts; it complements, but does not replace, ESLint, Ruff, or type checking.
+
+- Before an unfamiliar change, use an AST query from [`docs/ast-grep.md`](docs/ast-grep.md) to find
+  existing implementation patterns rather than relying on text matches.
+- After an edit, run `bun run ast-grep:changed`; before handing work off, run
+  `bun run ast-grep:check`.
+- Add a rule only for a demonstrated review, regression, or incident pattern. Each rule needs
+  valid and invalid cases under `.ast-grep/rule-tests/`; keep it narrowly scoped and free of
+  false positives. Use a tested interactive rewrite for mechanical migrations.
+
 ## External Service CLI Tools
 
 Use these CLIs when they match the task. Verify availability before use:
