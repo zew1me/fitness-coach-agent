@@ -9,6 +9,7 @@ files:
   - app/api/chat/route.ts
   - lib/agent/**/*.ts
 ignores:
+  # This canonical conversion boundary is the only module allowed to construct input_file before sanitizing it.
   - lib/agent/agent-input.ts
 rule:
   pattern: '{ type: "input_file", $$$ }'
