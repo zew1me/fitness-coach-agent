@@ -38,4 +38,10 @@ if (( ${#files[@]} == 0 )); then
   exit 0
 fi
 
-bunx --no-install ast-grep scan --config sgconfig.yml --error "${files[@]}"
+scan_files=()
+for file in "${files[@]}"; do
+  # Git emits repository-relative paths; prefix them so option-like filenames stay operands.
+  scan_files+=("./$file")
+done
+
+bunx --no-install ast-grep scan --config sgconfig.yml --error "${scan_files[@]}"
