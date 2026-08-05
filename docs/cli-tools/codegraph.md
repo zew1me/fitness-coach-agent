@@ -33,9 +33,12 @@ Before structural queries, generate or update the local `.codegraph/` index:
 # First use in this repository
 bunx --no-install codegraph init
 
-# Later uses, after source changes
+# When the CodeGraph watcher is disabled or a script needs a pre-flight update
 bunx --no-install codegraph sync
 ```
+
+With the CodeGraph MCP server active, its watcher keeps the index synchronized after source
+changes. Run `sync` manually only when that watcher is disabled or for scripted workflows.
 
 Check the index when results seem incomplete or stale:
 
