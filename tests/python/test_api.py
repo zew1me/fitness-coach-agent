@@ -1,7 +1,7 @@
 import base64
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from hashlib import sha256
 from typing import Any, Literal, TypedDict, cast
 
@@ -3242,6 +3242,7 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
         def __init__(self) -> None:
             self.plan_workout_updates: list[tuple[str, str, dict[str, object]]] = []
             self.matched_workout_ids: list[str] = []
+            self.match_windows: list[tuple[date, date]] = []
             self.updated_activity: Activity | None = None
 
         async def get_activity(self, user_id: str, activity_id: str) -> Activity:
@@ -3281,8 +3282,9 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
             )
 
         async def list_plan_workouts_between(
-            self, user_id: str, *, start, end
+            self, user_id: str, *, start: date, end: date
         ) -> list[PlanWorkout]:
+            self.match_windows.append((start, end))
             return [
                 PlanWorkout(
                     id="new-workout",
@@ -3357,6 +3359,9 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
         )
     ]
     assert repository.matched_workout_ids == ["new-workout"]
+    assert len(repository.match_windows) == 1
+    match_start, match_end = repository.match_windows[0]
+    assert match_start <= date(2026, 7, 5) <= match_end
     assert repository.updated_activity is not None
     assert repository.updated_activity.planned_workout_id is None
 
