@@ -950,6 +950,56 @@ async def test_merge_legacy_fit_date_update_must_be_physically_plausible(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("started_at", "new_date", "expected_reason"),
+    [
+        (datetime(2026, 7, 6, 0, tzinfo=UTC), "2026-07-05", None),
+        (datetime(2026, 7, 6, 0, tzinfo=UTC), "2026-07-06", None),
+        (datetime(2026, 7, 6, 0, tzinfo=UTC), "2026-07-04", "refused_implausible"),
+        (datetime(2026, 7, 6, 0, tzinfo=UTC), "2026-07-07", "refused_implausible"),
+        (datetime(2026, 7, 6, 12, tzinfo=UTC), "2026-07-06", None),
+        (datetime(2026, 7, 6, 12, tzinfo=UTC), "2026-07-07", None),
+        (datetime(2026, 7, 6, 12, tzinfo=UTC), "2026-07-05", "refused_implausible"),
+        (datetime(2026, 7, 6, 12, tzinfo=UTC), "2026-07-08", "refused_implausible"),
+    ],
+)
+async def test_merge_date_update_enforces_utc_minus_12_to_plus_14_skew_limits(
+    started_at: datetime,
+    new_date: str,
+    expected_reason: str | None,
+) -> None:
+    existing = Activity(
+        id="activity-timezone-limit",
+        user_id="athlete-1",
+        sport="running",
+        activity_date=started_at.date(),
+        started_at=started_at,
+        source="fit_upload",
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date=new_date,
+            activity_date_confidence=0.99,
+        )
+
+    result = await merge_activity_text_update(
+        existing,
+        f"Move it to {new_date}.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    if expected_reason is None:
+        assert result.activity.activity_date == date.fromisoformat(new_date)
+        assert result.rejected_updates == []
+    else:
+        assert result.activity.activity_date == started_at.date()
+        assert result.rejected_updates[0]["reason"] == expected_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("activity_date", "confidence"),
     [("2026-07-05", 0.89), (None, None)],
 )
