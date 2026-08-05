@@ -27,6 +27,12 @@ import { z } from "zod";
 
 import { DurableCompactionSession } from "../../lib/agent/durable-compaction-session";
 import {
+  buildModelSettings,
+  MODEL_SUPPORTED_EFFORTS,
+  MODEL_TIERS,
+  REASONING_EFFORT_LADDER,
+} from "../../lib/agent/model-tiers";
+import {
   type SpecialistReport,
   specialistReportSchema,
   specialistReportWireSchema,
@@ -208,7 +214,67 @@ class InMemoryCompactionSession implements SessionHistoryRewriteAwareSession {
   }
 }
 
+const SUPPORTED_MODEL_EFFORT_PAIRS = Object.entries(
+  MODEL_SUPPORTED_EFFORTS,
+).flatMap(([model, efforts]) =>
+  REASONING_EFFORT_LADDER.filter((effort) => efforts.has(effort)).map(
+    (effort) => ({ effort, model }),
+  ),
+);
+
 describe("OpenAI Agents SDK — Responses API integration", () => {
+  it.each(SUPPORTED_MODEL_EFFORT_PAIRS)(
+    "accepts documented reasoning compatibility: $model / $effort",
+    async ({ effort, model }) => {
+      const agent = new Agent({
+        name: "Reasoning compatibility probe",
+        instructions: "Reply with exactly OK.",
+        model,
+        modelSettings: {
+          reasoning: { effort },
+          text: { verbosity: "low" },
+        },
+      });
+      const result = await run(agent, MINIMAL_USER_INPUT, { maxTurns: 1 });
+      expect(result.finalOutput).toEqual(expect.any(String));
+    },
+    60_000,
+  );
+
+  it("rejects max reasoning effort on gpt-5.4-mini", async () => {
+    const client = new OpenAI();
+    await expect(
+      client.responses.create({
+        model: "gpt-5.4-mini",
+        input: "Reply with exactly OK.",
+        reasoning: {
+          // The OpenAI API documents `max`, but openai@6.44.0 does not yet
+          // expose it in this SDK type. This live negative probe verifies the
+          // model-specific rejection that the production allowlist prevents.
+          effort: "max" as "xhigh",
+        },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  }, 60_000);
+  // The compatibility matrix above hand-builds `modelSettings`. This is the
+  // only test that sends the object production actually ships — including the
+  // `retry` policy the rate-limit ladder configures — so a retry/backoff field
+  // the Responses API rejects surfaces here rather than as a 400 in prod.
+  it.each(MODEL_TIERS.map((tier, index) => ({ index, tier })))(
+    "accepts the production model settings for ladder tier $index: $tier.model",
+    async ({ tier }) => {
+      const agent = new Agent({
+        name: "Production model settings probe",
+        instructions: "Reply with exactly OK.",
+        model: tier.model,
+        modelSettings: buildModelSettings(tier),
+      });
+      const result = await run(agent, MINIMAL_USER_INPUT, { maxTurns: 1 });
+      expect(result.finalOutput).toEqual(expect.any(String));
+    },
+    60_000,
+  );
+
   it("accepts the specialist structured-output schema without a 400", async () => {
     const agent = new Agent({
       name: "Intake specialist",
@@ -503,23 +569,39 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       model: MODEL,
       tools: [echo],
     });
-    const result = await run(
-      agent,
-      [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: "Logging today's easy 5km run." },
-          ],
-        },
-      ],
-      { maxTurns: 3 },
-    );
+    // Whether a turn this simple emits a reasoning item is not deterministic —
+    // it varies run to run, and pinning `reasoning.effort` does not control it
+    // (verified against medium and high). A reasoning item is this test's
+    // prerequisite, not its subject, so retry the setup run a bounded number of
+    // times to obtain one. Retrying the prerequisite is not the same as
+    // loosening the assertion: if no attempt produces a reasoning item, the
+    // test still fails rather than silently testing nothing.
+    const REASONING_ATTEMPTS = 3;
+    const runInput = [
+      {
+        role: "user" as const,
+        content: [
+          {
+            type: "input_text" as const,
+            text: "Logging today's easy 5km run.",
+          },
+        ],
+      },
+    ];
+    const hasReasoning = (items: AgentInputItem[]): boolean =>
+      items.some((item) => "type" in item && item.type === "reasoning");
+
+    let result = await run(agent, runInput, { maxTurns: 3 });
+    for (
+      let attempt = 1;
+      attempt < REASONING_ATTEMPTS && !hasReasoning(result.history);
+      attempt += 1
+    ) {
+      result = await run(agent, runInput, { maxTurns: 3 });
+    }
     expect(
-      result.history.some(
-        (item) => "type" in item && item.type === "reasoning",
-      ),
-      "Expected the real run to produce a reasoning item to test namespace against",
+      hasReasoning(result.history),
+      `No reasoning item after ${REASONING_ATTEMPTS} runs of ${MODEL}; cannot test namespace against real reasoning history`,
     ).toBe(true);
 
     const toolCallId = "call_namespaced_tool";

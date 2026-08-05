@@ -27,10 +27,15 @@ class Settings(BaseSettings):
     app_base_url: str = ""  # leave blank on Vercel preview; set explicitly for production
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None
+    openai_max_retries: int = 4
     openai_activity_text_model: str = "gpt-5.6-sol"
     openai_activity_text_timeout_seconds: float = 60.0
     openai_vision_model: str = "gpt-5.6-luna"
     openai_vision_timeout_seconds: float = 45.0
+    # Ceiling on one _call_vision, retries included. openai_max_retries applies per
+    # request, so retries alone could hold a serverless request for minutes; a
+    # screenshot is best-effort, so give up and return "no data" instead.
+    openai_vision_total_timeout_seconds: float = 90.0
     # gpt-5.x vision is a reasoning model: reasoning draws down the output budget, so keep
     # this generous — a truncated response is invalid even under strict structured outputs.
     openai_vision_max_output_tokens: int = 8000
@@ -68,7 +73,11 @@ class Settings(BaseSettings):
             )
         return stripped
 
-    @field_validator("openai_activity_text_timeout_seconds", "openai_vision_timeout_seconds")
+    @field_validator(
+        "openai_activity_text_timeout_seconds",
+        "openai_vision_timeout_seconds",
+        "openai_vision_total_timeout_seconds",
+    )
     @classmethod
     def validate_openai_timeout(cls, v: float) -> float:
         if not math.isfinite(v) or v <= 0:
@@ -80,6 +89,13 @@ class Settings(BaseSettings):
     def validate_vision_max_output_tokens(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("openai_vision_max_output_tokens must be a positive integer")
+        return v
+
+    @field_validator("openai_max_retries")
+    @classmethod
+    def validate_openai_max_retries(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("openai_max_retries must be a non-negative integer")
         return v
 
     @field_validator("openai_vision_reasoning_effort", mode="before")

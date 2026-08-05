@@ -10,6 +10,7 @@ from datetime import date
 from typing import Any
 
 import httpx
+from httpx_retries import Retry, aretry_request
 from pydantic import BaseModel, Field
 
 from backend.config import settings
@@ -22,6 +23,54 @@ logger = logging.getLogger(__name__)
 SUMMARY_SCHEMA_VERSION = 1
 SUMMARY_SCHEMA_NAME = "activity_summary_v1"
 RESPONSES_API_URL = "https://api.openai.com/v1/responses"
+_ACTIVITY_TEXT_MAX_RETRIES = 2
+_MAX_RETRY_DELAY_SECONDS = 8.0
+_RATE_LIMIT_STATUS = 429
+_SERVER_ERROR_STATUS = 500
+
+# Transport failures worth another attempt: they fail fast, so retrying costs little
+# and matches how a 503 response is already treated. httpx.TimeoutException is
+# deliberately excluded — it only surfaces after the full request timeout, so retrying
+# it would multiply worst-case latency inside a single serverless request.
+_RETRYABLE_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
+)
+
+
+class _ObservedRetry(Retry):
+    async def asleep(self, response: httpx.Response | Exception) -> None:
+        # Sentry's logging integration records these as logs, not noisy error issues.
+        if isinstance(response, httpx.Response):
+            logger.warning(
+                "OpenAI activity text extraction transient failure; status=%s attempt=%s",
+                response.status_code,
+                self.attempts_made,
+            )
+        else:
+            logger.warning(
+                "OpenAI activity text extraction transport failure; error=%s attempt=%s",
+                type(response).__name__,
+                self.attempts_made,
+            )
+        await super().asleep(response)
+
+
+_ACTIVITY_TEXT_RETRY = _ObservedRetry(
+    total=_ACTIVITY_TEXT_MAX_RETRIES,
+    allowed_methods={"POST"},
+    status_forcelist={_RATE_LIMIT_STATUS, *range(_SERVER_ERROR_STATUS, 600)},
+    retry_on_exceptions=_RETRYABLE_TRANSPORT_ERRORS,
+    # httpx-retries increments before sleeping and calculates factor * 2**attempts,
+    # so 0.25 preserves the existing 0.5s, 1s backoff sequence.
+    backoff_factor=0.25,
+    backoff_jitter=0,
+    max_backoff_wait=_MAX_RETRY_DELAY_SECONDS,
+    # Two provider-directed sleeps of up to eight seconds preserve the existing bound.
+    total_timeout=_ACTIVITY_TEXT_MAX_RETRIES * _MAX_RETRY_DELAY_SECONDS,
+)
 
 Extractor = Callable[[str], Awaitable["ActivityTextExtraction"]]
 
@@ -101,6 +150,66 @@ class ActivityTextBuildResult:
     raw_extraction: dict[str, Any]
 
 
+def _extraction_request_body(text: str, schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "model": settings.openai_activity_text_model,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": _activity_text_extraction_instructions(),
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        ],
+        "tools": [{"type": "web_search"}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "activity_text_extraction",
+                "strict": False,
+                "schema": schema,
+            }
+        },
+    }
+
+
+async def _post_with_retries(
+    client: httpx.AsyncClient, text: str, schema: dict[str, Any]
+) -> dict[str, Any]:
+    """POST the extraction request, retrying transient failures a bounded number of times."""
+    response = await aretry_request(
+        client,
+        "POST",
+        RESPONSES_API_URL,
+        retry=_ACTIVITY_TEXT_RETRY,
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        json=_extraction_request_body(text, schema),
+    )
+    retry_state = response.extensions.get("retry")
+    retries = retry_state.attempts_made if isinstance(retry_state, Retry) else 0
+    if retries:
+        # Sentry's default HTTPX integration spans every attempt. This warning also makes
+        # recovered retries visible in Sentry logs without creating a noisy error issue.
+        logger.warning(
+            "OpenAI activity text extraction request used retries; status=%s retries=%s",
+            response.status_code,
+            retries,
+        )
+    response.raise_for_status()
+    payload: dict[str, Any] = response.json()
+    return payload
+
+
 async def extract_activity_text(text: str) -> ActivityTextExtraction:
     """Use OpenAI structured outputs and web search to extract activity text."""
     if not settings.openai_api_key:
@@ -111,42 +220,7 @@ async def extract_activity_text(text: str) -> ActivityTextExtraction:
         async with httpx.AsyncClient(
             timeout=settings.openai_activity_text_timeout_seconds
         ) as client:
-            response = await client.post(
-                RESPONSES_API_URL,
-                headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.openai_activity_text_model,
-                    "input": [
-                        {
-                            "role": "system",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": _activity_text_extraction_instructions(),
-                                }
-                            ],
-                        },
-                        {
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": text}],
-                        },
-                    ],
-                    "tools": [{"type": "web_search"}],
-                    "text": {
-                        "format": {
-                            "type": "json_schema",
-                            "name": "activity_text_extraction",
-                            "strict": False,
-                            "schema": schema,
-                        }
-                    },
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
+            payload = await _post_with_retries(client, text, schema)
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("OpenAI activity text extraction failed", exc_info=True)
         raise ActivityTextExtractionUnavailable(

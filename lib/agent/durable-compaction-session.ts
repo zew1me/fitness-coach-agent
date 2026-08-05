@@ -215,7 +215,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
   // compaction threshold — constructing eagerly let a credential problem break
   // turns that were never going to call the API at all (issue #408).
   private getClient(): OpenAI {
-    this.client ??= new OpenAI();
+    this.client ??= new OpenAI({ maxRetries: 4 });
     return this.client;
   }
 

@@ -98,7 +98,7 @@ liveDescribe("real OpenAI durable-session continuity", () => {
       latestUserTurn: latest,
       coachingMemory: [],
       athleteContext: athleteContextFixture,
-      model: "gpt-5.6-luna",
+      tier: { model: "gpt-5.6-luna", effort: "medium", verbosity: "low" },
     });
     expect(plan.delegations.length).toBeLessThanOrEqual(2);
     expect(plan.delegations.map((item) => item.role)).toContain("recovery");

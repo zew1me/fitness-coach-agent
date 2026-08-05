@@ -140,7 +140,10 @@ rather than replacing durable context with nothing. This prevents a model error
 or API glitch from silently erasing the conversation.
 
 Compaction defaults to `gpt-5.6-luna`, the cost-sensitive GPT-5.6 tier, unless
-the session supplies an explicit model override.
+the session supplies an explicit model override. Its raw OpenAI client allows four
+retries (and honors provider `Retry-After` guidance) so transient rate limits do not
+unnecessarily abort the pre-turn compaction step. Compaction does not use the
+user-facing coach model fallback ladder.
 
 **`previous_response_id` is never sent to `responses.compact`.** This session's
 `input` (built by `buildCompactionInput` from the Supabase-stored `items`) is
@@ -175,6 +178,10 @@ a per-environment data migration.
       └─ hard limit 260 000: if compaction fails, degrade to stateless (turn still answers)
       └─ soft limit 220 000: log Sentry warning, continue with uncompacted context
 5. Agent runs     →  SDK appends items via addItems() during the turn
+      └─ lead model honors provider retry delays up to 8 seconds, then falls back
+         only if no stream event, response text, or tool call has started
+      └─ longer provider delays skip the in-request retry; if every tier is exhausted,
+         the athlete-visible error reports the longest provider wait seen across the ladder
 6. After the turn, auto-compaction runs if thresholds are hit
 7. Release lease  →  DELETE /api/chat/model-state/lease  (always in finally)
 ```
