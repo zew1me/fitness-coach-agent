@@ -61,6 +61,25 @@ Do not load every brief preemptively. Select the relevant tool, then read its br
 unfamiliar, destructive, externally visible, or organization-specific operation. The catalog and
 loading order live in [`docs/cli-tools/README.md`](docs/cli-tools/README.md).
 
+### CodeGraph
+
+Local, pre-indexed structural code graph for navigating unfamiliar or large repositories. Invoke the
+local development dependency with `bunx --no-install codegraph`.
+
+Use when you need to:
+
+- locate symbols and their definitions
+- understand callers, callees, imports, or inheritance
+- trace relationships between multiple symbols
+- estimate the blast radius of a change
+- identify tests likely affected by changed files
+- orient within a large repository without repeatedly scanning it
+
+Prefer ordinary `rg`, `fd`, file reads, or LSP for simple exact lookups. Before structural queries,
+generate or update the local `.codegraph/` index.
+
+Read: [`docs/cli-tools/codegraph.md`](docs/cli-tools/codegraph.md)
+
 Prefer repository-defined commands over hand-built equivalents, deterministic non-interactive
 execution, bounded output, and machine-readable output when supported. Use this discovery order:
 
