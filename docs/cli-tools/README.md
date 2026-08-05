@@ -15,7 +15,7 @@ unfamiliar, destructive, externally visible, or organization-specific tool.
 
 1. Select the tool from the table above; do not load every brief preemptively.
 2. Read that tool's brief.
-3. Run `<tool> --help`, then `<tool> <group> --help` or the exact command's `--help` when needed.
+3. Run `<tool> --help`, then `<tool> <group> --help` or the exact command's `--help` when needed. For CodeGraph, invoke the local dependency as `bunx --no-install codegraph`.
 4. Consult upstream documentation only if the brief and installed CLI help are insufficient.
 
 The installed CLI is the authority for its available commands and flags. Prefer bounded,
