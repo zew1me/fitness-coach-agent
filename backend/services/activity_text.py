@@ -151,7 +151,7 @@ class ActivityTextBuildResult:
     raw_extraction: dict[str, Any]
 
 
-RefusedDateEditReason = Literal["refused_authoritative", "refused_implausible"]
+RefusedDateEditReason = Literal["refused_authoritative", "refused_implausible", "refused_invalid"]
 DateEditVerdict = Literal["applied"] | RefusedDateEditReason
 
 
@@ -801,7 +801,20 @@ def _apply_activity_date_update(
     ):
         return None
     new_date = _try_parse_iso_date(extraction.activity_date)
-    if new_date is None or new_date == updated.activity_date:
+    if new_date is None:
+        logger.info(
+            "activity date update refused activity_id=%s old_date=%s new_date=%s reason=%s",
+            updated.id,
+            updated.activity_date,
+            extraction.activity_date,
+            "refused_invalid",
+        )
+        return {
+            "field": "activity_date",
+            "value": extraction.activity_date,
+            "reason": "refused_invalid",
+        }
+    if new_date == updated.activity_date:
         return None
 
     verdict = _date_edit_verdict(updated, new_date)

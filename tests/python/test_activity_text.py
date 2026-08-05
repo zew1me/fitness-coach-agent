@@ -870,6 +870,40 @@ async def test_merge_refuses_authoritative_fit_date_but_applies_other_updates() 
 
 
 @pytest.mark.asyncio
+async def test_merge_rejects_malformed_high_confidence_date() -> None:
+    existing = Activity(
+        id="activity-invalid-date",
+        user_id="athlete-1",
+        sport="running",
+        activity_date=date(2026, 2, 28),
+        source="text_extract",
+    )
+
+    async def fake_extractor(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-02-30",
+            activity_date_confidence=0.99,
+        )
+
+    result = await merge_activity_text_update(
+        existing,
+        "Move this run to February 30.",
+        profile=AthleteProfile(user_id="athlete-1"),
+        thresholds=[],
+        extractor=fake_extractor,
+    )
+
+    assert result.activity.activity_date == date(2026, 2, 28)
+    assert result.rejected_updates == [
+        {
+            "field": "activity_date",
+            "value": "2026-02-30",
+            "reason": "refused_invalid",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("new_date", "expected_date", "expected_reason"),
     [
