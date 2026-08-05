@@ -21,7 +21,7 @@
         "zod": "^4.4.3",
       },
       "devDependencies": {
-        "@ast-grep/cli": "^0.45.0",
+        "@ast-grep/cli": "0.45.0",
         "@eslint/eslintrc": "^3.3.5",
         "@eslint/js": "^9.22.0",
         "@next/eslint-plugin-next": "^15.2.2",
