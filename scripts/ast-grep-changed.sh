@@ -44,4 +44,4 @@ for file in "${files[@]}"; do
   scan_files+=("./$file")
 done
 
-bunx --no-install ast-grep scan --config sgconfig.yml --error "${scan_files[@]}"
+ast-grep scan --config sgconfig.yml --error "${scan_files[@]}"

@@ -1,7 +1,7 @@
 import base64
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from hashlib import sha256
 from typing import Any, Literal, TypedDict, cast
 
@@ -185,6 +185,16 @@ class EngineRepository:
 
     async def update_activity(self, activity: Activity) -> Activity:
         return activity
+
+    async def unlink_plan_workout_from_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+    ) -> Activity:
+        activity = await self.get_activity(user_id, activity_id)
+        return activity.model_copy(update={"planned_workout_id": None})
 
     async def match_plan_workout_to_activity(
         self,
@@ -1295,6 +1305,31 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
     assert body["public_url"] == public_url
 
 
+def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) -> None:
+    from backend.engine.gpx_parser import ParsedActivity
+
+    parsed = ParsedActivity(
+        sport="cycling",
+        activity_date=datetime(2026, 7, 5, tzinfo=UTC).date(),
+        started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
+        utc_offset_seconds=-25200,
+    )
+    monkeypatch.setattr(api_index, "_parse_uploaded_activity_file", lambda *_args: parsed)
+
+    activity = api_index._build_uploaded_activity(
+        user_id="athlete-1",
+        filename="ride.fit",
+        content_type="application/vnd.garmin.fit",
+        object_key="users/athlete-1/ride.fit",
+        public_url="https://cdn.example.com/ride.fit",
+        file_bytes=b"fit bytes",
+    )
+
+    assert activity.raw_extraction is not None
+    assert activity.raw_extraction["utc_offset_seconds"] == -25200
+    assert activity.raw_extraction["activity_date_source"] == "fit_local_timestamp"
+
+
 @pytest.mark.asyncio
 async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     auth_service_fixture, monkeypatch, caplog
@@ -1357,6 +1392,8 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     assert body["activity"]["activity_summary"]["schema"] == "activity_summary_v1"
     assert body["activity"]["activity_summary"]["session"]["sport"] == "running"
     assert body["activity"]["activity_summary"]["data_quality"]["has_gps"] is True
+    assert body["activity"]["raw_extraction"]["activity_date_source"] == "utc_fallback"
+    assert body["activity"]["raw_extraction"]["utc_offset_seconds"] is None
     assert captured == {"user_id": "athlete-1", "object_key": object_key}
     assert sensitive_filename not in caplog.text
     assert "filename_suffix=.gpx" in caplog.text
@@ -3198,11 +3235,328 @@ async def test_save_activity_from_text_updates_existing_activity(monkeypatch) ->
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "updated"
+    assert body["rejected_updates"] == []
     assert body["activity"]["source"] == "fit_upload"
     assert body["activity"]["rpe"] == 9
     assert body["activity"]["activity_summary"]["subjective"]["overdid_it_flag"] is True
     assert repository.updated_activity is not None
     assert repository.updated_activity.source == "fit_upload"
+
+
+@pytest.mark.asyncio
+async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.unlink_calls: list[tuple[str, str, str]] = []
+            self.workout_actual_activity_id: str | None = "activity-1"
+            self.matched_workout_ids: list[str] = []
+            self.match_windows: list[tuple[date, date]] = []
+            self.updated_activity: Activity | None = None
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            return Activity(
+                id=activity_id,
+                user_id=user_id,
+                sport="cycling",
+                activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+                started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
+                duration_seconds=3600,
+                planned_workout_id="old-workout",
+                source="fit_upload",
+                raw_extraction={"filename": "ride.fit"},
+            )
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.updated_activity = activity
+            return activity
+
+        async def unlink_plan_workout_from_activity(
+            self,
+            *,
+            user_id: str,
+            workout_id: str,
+            activity_id: str,
+        ) -> Activity:
+            self.unlink_calls.append((user_id, workout_id, activity_id))
+            assert self.workout_actual_activity_id == activity_id
+            self.workout_actual_activity_id = None
+            assert self.updated_activity is not None
+            assert self.updated_activity.id == activity_id
+            return self.updated_activity.model_copy(update={"planned_workout_id": None})
+
+        async def list_plan_workouts_between(
+            self, user_id: str, *, start: date, end: date
+        ) -> list[PlanWorkout]:
+            self.match_windows.append((start, end))
+            return [
+                PlanWorkout(
+                    id="new-workout",
+                    plan_id="plan-1",
+                    user_id=user_id,
+                    workout_date=datetime(2026, 7, 5, tzinfo=UTC).date(),
+                    day_of_week=6,
+                    week_number=1,
+                    sport="cycling",
+                    title="Correct-day ride",
+                    workout_type="endurance",
+                )
+            ]
+
+        async def match_plan_workout_to_activity(
+            self,
+            *,
+            user_id: str,
+            workout_id: str,
+            activity_id: str,
+            completion_source: Literal["auto_matched", "athlete_confirmed", "coach_confirmed"],
+        ) -> PlanWorkout:
+            self.matched_workout_ids.append(workout_id)
+            assert self.updated_activity is not None
+            self.updated_activity = self.updated_activity.model_copy(
+                update={"planned_workout_id": workout_id}
+            )
+            return await super().match_plan_workout_to_activity(
+                user_id=user_id,
+                workout_id=workout_id,
+                activity_id=activity_id,
+                completion_source=completion_source,
+            )
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Move this ride to July 5."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["activity"]["activity_date"] == "2026-07-05"
+    assert body["activity"]["planned_workout_id"] == "new-workout"
+    assert body["matched_plan_workout"]["plan_workout_id"] == "new-workout"
+    assert repository.unlink_calls == [("athlete-1", "old-workout", "activity-1")]
+    assert repository.workout_actual_activity_id is None
+    assert repository.matched_workout_ids == ["new-workout"]
+    assert len(repository.match_windows) == 1
+    match_start, match_end = repository.match_windows[0]
+    assert match_start <= date(2026, 7, 5) <= match_end
+    assert repository.updated_activity is not None
+    assert repository.updated_activity.planned_workout_id == "new-workout"
+
+
+@pytest.mark.asyncio
+async def test_activity_date_update_preserves_both_links_when_atomic_unlink_fails(
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.stored_activity = Activity(
+                id="activity-1",
+                user_id="athlete-1",
+                sport="cycling",
+                activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+                planned_workout_id="old-workout",
+                source="fit_upload",
+            )
+            self.workout_actual_activity_id: str | None = "activity-1"
+            self.unlink_should_fail = True
+            self.unlink_attempts = 0
+            self.match_attempts = 0
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            assert user_id == self.stored_activity.user_id
+            assert activity_id == self.stored_activity.id
+            return self.stored_activity
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.stored_activity = activity
+            return activity
+
+        async def unlink_plan_workout_from_activity(self, **_kwargs) -> Activity:
+            self.unlink_attempts += 1
+            if self.unlink_should_fail:
+                raise RuntimeError("unlink unavailable")
+            self.workout_actual_activity_id = None
+            self.stored_activity = self.stored_activity.model_copy(
+                update={"planned_workout_id": None}
+            )
+            return self.stored_activity
+
+        async def list_plan_workouts_between(self, *_args, **_kwargs) -> list[PlanWorkout]:
+            self.match_attempts += 1
+            return []
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Move this ride to July 5."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["activity"]["activity_date"] == "2026-07-05"
+    assert response.json()["activity"]["planned_workout_id"] == "old-workout"
+    assert repository.stored_activity.planned_workout_id == "old-workout"
+    assert repository.workout_actual_activity_id == "activity-1"
+    assert repository.unlink_attempts == 1
+    assert repository.match_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_non_date_activity_update_does_not_touch_plan_workouts(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.plan_workout_calls = 0
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            activity = await super().get_activity(user_id, activity_id)
+            return activity.model_copy(update={"planned_workout_id": "existing-workout"})
+
+        async def update_plan_workout_fields(self, *_args, **_kwargs) -> PlanWorkout:
+            self.plan_workout_calls += 1
+            raise AssertionError("non-date updates must not touch plan workouts")
+
+        async def list_plan_workouts_between(self, *_args, **_kwargs) -> list[PlanWorkout]:
+            self.plan_workout_calls += 1
+            raise AssertionError("non-date updates must not attempt plan matching")
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(rpe=2, rpe_confidence=0.99)
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "RPE was 2."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["activity"]["rpe"] == 2
+    assert repository.plan_workout_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_activity_date_update_swallows_outer_plan_matching_failure(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            return Activity(
+                id=activity_id,
+                user_id=user_id,
+                sport="cycling",
+                activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+                started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
+                source="fit_upload",
+                raw_extraction={"filename": "ride.fit"},
+            )
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
+    match_attempts = 0
+
+    async def fail_plan_match(_user_id: str, _activity: Activity) -> None:
+        nonlocal match_attempts
+        match_attempts += 1
+        raise RuntimeError("matching unavailable")
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+    monkeypatch.setattr(api_index, "_try_match_activity_to_plan", fail_plan_match)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Move this ride to July 5."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["activity"]["activity_date"] == "2026-07-05"
+    assert "matched_plan_workout" not in response.json()
+    assert match_attempts == 1
 
 
 @pytest.mark.asyncio
@@ -3383,8 +3737,21 @@ async def test_save_activity_from_text_update_maps_repository_failures_to_503(
                 raise HTTPError("activity update unavailable")
             return activity
 
-    async def fake_merge_activity_text_update(existing: Activity, _text: str) -> Activity:
-        return existing.model_copy(update={"rpe": 9})
+    async def fake_merge_activity_text_update(
+        existing: Activity,
+        _text: str,
+        *,
+        profile: AthleteProfile,
+        thresholds: list[SportThreshold],
+    ):
+        from backend.services.activity_text import ActivityTextUpdateResult
+
+        assert profile.user_id == existing.user_id
+        assert thresholds
+        return ActivityTextUpdateResult(
+            activity=existing.model_copy(update={"rpe": 9}),
+            rejected_updates=[],
+        )
 
     restore_override = _override_require_user_context(
         UserContext(

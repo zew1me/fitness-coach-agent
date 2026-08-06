@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pytest
@@ -153,6 +153,84 @@ def test_parse_fit_handles_missing_timer_time_falls_back_to_elapsed(
     assert activity.duration_seconds == 1200
     assert activity.elapsed_duration_seconds == 1200
     assert activity.moving_duration_seconds is None
+
+
+@pytest.mark.parametrize("timestamp_tz", [UTC, None])
+def test_parse_fit_uses_activity_local_timestamp_for_activity_date(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+    timestamp_tz: tzinfo | None,
+) -> None:
+    start_time = datetime(2026, 7, 6, 3, 31, 48, tzinfo=timestamp_tz)
+    _patch_fitparse["session"] = [_session_message(sport="cycling", start_time=start_time)]
+    _patch_fitparse["activity"] = [
+        _session_message(
+            timestamp=datetime(2026, 7, 6, 3, 31, 48, tzinfo=timestamp_tz),
+            local_timestamp=datetime(2026, 7, 5, 20, 31, 48, tzinfo=timestamp_tz),
+        )
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert activity.activity_date.isoformat() == "2026-07-05"
+    assert activity.utc_offset_seconds == -25200
+
+
+def test_parse_fit_normalizes_aware_session_start_before_local_offset(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    source_timezone = timezone(timedelta(hours=5, minutes=30))
+    _patch_fitparse["session"] = [
+        _session_message(
+            sport="cycling",
+            start_time=datetime(2026, 7, 6, 9, 1, 48, tzinfo=source_timezone),
+        )
+    ]
+    _patch_fitparse["activity"] = [
+        _session_message(
+            timestamp=datetime(2026, 7, 6, 9, 1, 48, tzinfo=source_timezone),
+            local_timestamp=datetime(2026, 7, 5, 20, 31, 48, tzinfo=UTC),
+        )
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert activity.activity_date.isoformat() == "2026-07-05"
+    assert activity.utc_offset_seconds == -25200
+
+
+def test_parse_fit_without_activity_message_keeps_utc_date(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    _patch_fitparse["session"] = [
+        _session_message(sport="cycling", start_time=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC))
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert activity.activity_date.isoformat() == "2026-07-06"
+    assert activity.utc_offset_seconds is None
+
+
+def test_parse_fit_rejects_out_of_range_activity_utc_offset(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    start_time = datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC)
+    _patch_fitparse["session"] = [_session_message(sport="cycling", start_time=start_time)]
+    _patch_fitparse["activity"] = [
+        _session_message(
+            timestamp=start_time,
+            local_timestamp=datetime(2026, 7, 6, 18, 31, 48, tzinfo=UTC),
+        )
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert activity.activity_date.isoformat() == "2026-07-06"
+    assert activity.utc_offset_seconds is None
 
 
 def test_parse_fit_preserves_zero_moving_duration(

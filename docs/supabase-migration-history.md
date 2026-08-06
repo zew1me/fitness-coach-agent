@@ -23,6 +23,7 @@
 - `20260716000000_intervals_sync_idempotency.sql` — unique generated key for idempotent Intervals activity imports (#338)
 - `20260719000000_replace_intervals_connection_atomic.sql` — service-role RPC for atomic Intervals.icu connection replacement
 - `20260721000000_update_goal_course_profile_notes_atomic.sql` — service-role RPC for atomic course-profile note merging
+- `20260806003910_unlink_plan_workout_from_activity_atomic.sql` — service-role RPC for atomic bidirectional workout/activity unlinking
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -321,6 +322,25 @@ backend's write path, never called directly from the browser.
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Additive migration; no backfill or data rewrite required.
+
+## 20260806003910 — atomic plan workout/activity unlink (2026-08-06)
+
+**File:** `supabase/migrations/20260806003910_unlink_plan_workout_from_activity_atomic.sql`
+
+**Change:** Adds the service-role-only `unlink_plan_workout_from_activity` RPC. It locks the
+workout and activity in the same order as the existing match RPCs, verifies that they still point
+to each other, and atomically resets the workout to scheduled while clearing both link columns.
+Already-unlinked pairs are treated as an idempotent retry; mismatched pairs are rejected rather
+than overwriting a concurrent reassignment.
+
+**Why:** Activity-date corrections must unlink a prior workout before attempting to match the
+corrected date. Separate REST updates could leave `plan_workouts.actual_activity_id` and
+`activities.planned_workout_id` disagreeing if either write failed. The endpoint now saves other
+activity edits while retaining the old link, then invokes this RPC, so a failed unlink leaves both
+persisted references intact and skips rematching.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset` locally). Additive
+migration; no backfill or data rewrite required.
 
 ## 20260707000000 — threshold recalibration candidates (2026-07-07)
 

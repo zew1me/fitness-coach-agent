@@ -384,6 +384,39 @@ def _plan_workout_row(**overrides: object) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_unlink_plan_workout_from_activity_uses_atomic_rpc() -> None:
+    activity_row: dict[str, object] = {
+        "id": "00000000-0000-0000-0000-000000000012",
+        "user_id": "athlete-1",
+        "sport": "cycling",
+        "activity_date": "2026-07-03",
+        "source": "fit_upload",
+        "planned_workout_id": None,
+    }
+    client = FakeRpcClient(activity_row)
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.unlink_plan_workout_from_activity(
+        user_id="athlete-1",
+        workout_id="00000000-0000-0000-0000-000000000011",
+        activity_id="00000000-0000-0000-0000-000000000012",
+    )
+
+    assert isinstance(updated, Activity)
+    assert updated.planned_workout_id is None
+    assert client.calls == [
+        (
+            "unlink_plan_workout_from_activity",
+            {
+                "p_user_id": "athlete-1",
+                "p_plan_workout_id": "00000000-0000-0000-0000-000000000011",
+                "p_activity_id": "00000000-0000-0000-0000-000000000012",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_match_plan_workout_to_activity_uses_atomic_rpc() -> None:
     client = FakeRpcClient([_plan_workout_row()])
     repo = SupabaseRepository(client=client)

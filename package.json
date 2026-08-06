@@ -2,6 +2,9 @@
   "name": "exercise-training-plan-gpt",
   "private": true,
   "packageManager": "bun@1.2.4",
+  "trustedDependencies": [
+    "@ast-grep/cli"
+  ],
   "engines": {
     "node": "24.x"
   },
