@@ -3251,6 +3251,7 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
     class ActivityRepository(EngineRepository):
         def __init__(self) -> None:
             self.unlink_calls: list[tuple[str, str, str]] = []
+            self.workout_actual_activity_id: str | None = "activity-1"
             self.matched_workout_ids: list[str] = []
             self.match_windows: list[tuple[date, date]] = []
             self.updated_activity: Activity | None = None
@@ -3280,6 +3281,8 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
             activity_id: str,
         ) -> Activity:
             self.unlink_calls.append((user_id, workout_id, activity_id))
+            assert self.workout_actual_activity_id == activity_id
+            self.workout_actual_activity_id = None
             assert self.updated_activity is not None
             assert self.updated_activity.id == activity_id
             return self.updated_activity.model_copy(update={"planned_workout_id": None})
@@ -3356,6 +3359,7 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
     assert body["activity"]["planned_workout_id"] == "new-workout"
     assert body["matched_plan_workout"]["plan_workout_id"] == "new-workout"
     assert repository.unlink_calls == [("athlete-1", "old-workout", "activity-1")]
+    assert repository.workout_actual_activity_id is None
     assert repository.matched_workout_ids == ["new-workout"]
     assert len(repository.match_windows) == 1
     match_start, match_end = repository.match_windows[0]
@@ -3382,6 +3386,7 @@ async def test_activity_date_update_preserves_both_links_when_atomic_unlink_fail
                 source="fit_upload",
             )
             self.workout_actual_activity_id: str | None = "activity-1"
+            self.unlink_should_fail = True
             self.unlink_attempts = 0
             self.match_attempts = 0
 
@@ -3396,7 +3401,13 @@ async def test_activity_date_update_preserves_both_links_when_atomic_unlink_fail
 
         async def unlink_plan_workout_from_activity(self, **_kwargs) -> Activity:
             self.unlink_attempts += 1
-            raise RuntimeError("unlink unavailable")
+            if self.unlink_should_fail:
+                raise RuntimeError("unlink unavailable")
+            self.workout_actual_activity_id = None
+            self.stored_activity = self.stored_activity.model_copy(
+                update={"planned_workout_id": None}
+            )
+            return self.stored_activity
 
         async def list_plan_workouts_between(self, *_args, **_kwargs) -> list[PlanWorkout]:
             self.match_attempts += 1
