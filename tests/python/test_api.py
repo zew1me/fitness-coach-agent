@@ -186,6 +186,16 @@ class EngineRepository:
     async def update_activity(self, activity: Activity) -> Activity:
         return activity
 
+    async def unlink_plan_workout_from_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+    ) -> Activity:
+        activity = await self.get_activity(user_id, activity_id)
+        return activity.model_copy(update={"planned_workout_id": None})
+
     async def match_plan_workout_to_activity(
         self,
         *,
@@ -3262,24 +3272,27 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
             self.updated_activity = activity
             return activity
 
-        async def update_plan_workout_fields(
+        async def unlink_plan_workout_from_activity(
             self,
+            *,
             user_id: str,
             workout_id: str,
-            fields: dict[str, object],
-        ) -> PlanWorkout:
-            self.plan_workout_updates.append((user_id, workout_id, fields))
-            return PlanWorkout(
-                id=workout_id,
-                plan_id="plan-1",
-                user_id=user_id,
-                workout_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
-                day_of_week=0,
-                week_number=1,
-                sport="cycling",
-                title="Old ride",
-                workout_type="endurance",
+            activity_id: str,
+        ) -> Activity:
+            self.plan_workout_updates.append(
+                (
+                    user_id,
+                    workout_id,
+                    {
+                        "status": "scheduled",
+                        "actual_activity_id": None,
+                        "completion_source": None,
+                    },
+                )
             )
+            assert self.updated_activity is not None
+            assert self.updated_activity.id == activity_id
+            return self.updated_activity.model_copy(update={"planned_workout_id": None})
 
         async def list_plan_workouts_between(
             self, user_id: str, *, start: date, end: date
@@ -3308,6 +3321,10 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
             completion_source: Literal["auto_matched", "athlete_confirmed", "coach_confirmed"],
         ) -> PlanWorkout:
             self.matched_workout_ids.append(workout_id)
+            assert self.updated_activity is not None
+            self.updated_activity = self.updated_activity.model_copy(
+                update={"planned_workout_id": workout_id}
+            )
             return await super().match_plan_workout_to_activity(
                 user_id=user_id,
                 workout_id=workout_id,
@@ -3346,6 +3363,7 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
     assert response.status_code == 200
     body = response.json()
     assert body["activity"]["activity_date"] == "2026-07-05"
+    assert body["activity"]["planned_workout_id"] == "new-workout"
     assert body["matched_plan_workout"]["plan_workout_id"] == "new-workout"
     assert repository.plan_workout_updates == [
         (
@@ -3363,17 +3381,40 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
     match_start, match_end = repository.match_windows[0]
     assert match_start <= date(2026, 7, 5) <= match_end
     assert repository.updated_activity is not None
-    assert repository.updated_activity.planned_workout_id is None
+    assert repository.updated_activity.planned_workout_id == "new-workout"
 
 
 @pytest.mark.asyncio
-async def test_activity_date_update_does_not_rematch_when_unlink_fails(monkeypatch) -> None:
+async def test_activity_date_update_preserves_both_links_when_atomic_unlink_fails(
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
     class ActivityRepository(EngineRepository):
         def __init__(self) -> None:
+            self.stored_activity = Activity(
+                id="activity-1",
+                user_id="athlete-1",
+                sport="cycling",
+                activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+                planned_workout_id="old-workout",
+                source="fit_upload",
+            )
+            self.workout_actual_activity_id: str | None = "activity-1"
             self.unlink_attempts = 0
             self.match_attempts = 0
 
-        async def update_plan_workout_fields(self, *_args, **_kwargs) -> PlanWorkout:
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            assert user_id == self.stored_activity.user_id
+            assert activity_id == self.stored_activity.id
+            return self.stored_activity
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.stored_activity = activity
+            return activity
+
+        async def unlink_plan_workout_from_activity(self, **_kwargs) -> Activity:
             self.unlink_attempts += 1
             raise RuntimeError("unlink unavailable")
 
@@ -3381,28 +3422,39 @@ async def test_activity_date_update_does_not_rematch_when_unlink_fails(monkeypat
             self.match_attempts += 1
             return []
 
-    existing = Activity(
-        id="activity-1",
-        user_id="athlete-1",
-        sport="cycling",
-        activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
-        planned_workout_id="old-workout",
-        source="fit_upload",
-    )
-    updated = existing.model_copy(
-        update={
-            "activity_date": datetime(2026, 7, 5, tzinfo=UTC).date(),
-            "planned_workout_id": None,
-        }
-    )
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
     repository = ActivityRepository()
-    monkeypatch.setattr(api_index, "repo", repository)
-
-    matched = await api_index._best_effort_rematch_activity_after_date_change(
-        "athlete-1", existing, updated
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
     )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
 
-    assert matched is None
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Move this ride to July 5."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["activity"]["activity_date"] == "2026-07-05"
+    assert response.json()["activity"]["planned_workout_id"] == "old-workout"
+    assert repository.stored_activity.planned_workout_id == "old-workout"
+    assert repository.workout_actual_activity_id == "activity-1"
     assert repository.unlink_attempts == 1
     assert repository.match_attempts == 0
 

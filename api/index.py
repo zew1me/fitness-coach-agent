@@ -2149,17 +2149,14 @@ async def _best_effort_rematch_activity_after_date_change(
     user_id: str,
     existing: Activity,
     updated: Activity,
-) -> dict[str, object] | None:
+) -> tuple[Activity, dict[str, object] | None]:
+    rematch_candidate = updated
     if existing.planned_workout_id is not None:
         try:
-            await repo.update_plan_workout_fields(
-                user_id,
-                existing.planned_workout_id,
-                {
-                    "status": "scheduled",
-                    "actual_activity_id": None,
-                    "completion_source": None,
-                },
+            rematch_candidate = await repo.unlink_plan_workout_from_activity(
+                user_id=user_id,
+                workout_id=existing.planned_workout_id,
+                activity_id=updated.id or "",
             )
         except Exception:
             logger.exception(
@@ -2169,19 +2166,25 @@ async def _best_effort_rematch_activity_after_date_change(
                 updated.id,
                 existing.planned_workout_id,
             )
-            # Avoid attaching a second workout while the old workout still claims this activity.
-            return None
+            # The atomic RPC failed, so both persisted links remain intact. Do not attach a second
+            # workout, and return the saved activity with its original reverse link preserved.
+            return updated, None
     try:
-        return await _try_match_activity_to_plan(user_id, updated)
+        matched = await _try_match_activity_to_plan(user_id, rematch_candidate)
     except Exception:
         # _try_match_activity_to_plan is already best-effort. Keep this boundary defensive so a
         # substituted implementation cannot turn a successful activity save into an error.
         logger.exception(
             "activity date update failed to re-match plan workout user_id=%s activity_id=%s",
             user_id,
-            updated.id,
+            rematch_candidate.id,
         )
-        return None
+        return rematch_candidate, None
+    if matched is not None:
+        rematch_candidate = rematch_candidate.model_copy(
+            update={"planned_workout_id": matched["plan_workout_id"]}
+        )
+    return rematch_candidate, matched
 
 
 async def _update_activity_from_text(
@@ -2213,14 +2216,11 @@ async def _update_activity_from_text(
     except ActivityTextExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     date_changed = result.activity.activity_date != existing.activity_date
-    activity_to_save = result.activity
-    if date_changed:
-        # The plan-workout side is cleared best-effort after this save; clear the activity's
-        # reverse link in the same persistence call so the matcher can consider it again.
-        activity_to_save = result.activity.model_copy(update={"planned_workout_id": None})
     try:
+        # Keep the existing reverse link while saving the corrected activity. If the subsequent
+        # atomic unlink fails, both persisted sides still describe the same relationship.
         activity = await _activity_repo_call(
-            repo.update_activity(activity_to_save),
+            repo.update_activity(result.activity),
             detail="Failed to update activity.",
             log_message=f"update_activity failed for user_id={user_id} activity_id={activity_id}",
         )
@@ -2233,7 +2233,9 @@ async def _update_activity_from_text(
         raise HTTPException(status_code=503, detail="Failed to update activity.") from exc
     matched = None
     if date_changed:
-        matched = await _best_effort_rematch_activity_after_date_change(user_id, existing, activity)
+        activity, matched = await _best_effort_rematch_activity_after_date_change(
+            user_id, existing, activity
+        )
     logger.info(
         "save_activity_from_text user_id=%s activity_id=%s status=updated", user_id, activity_id
     )

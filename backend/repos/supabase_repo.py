@@ -869,6 +869,27 @@ class SupabaseRepository:
             return PlanWorkout.model_validate(response_data)
         raise RuntimeError("Supabase RPC did not return an updated plan workout row.")
 
+    async def unlink_plan_workout_from_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+    ) -> Activity:
+        client = self._require_client()
+        response = client.rpc(
+            "unlink_plan_workout_from_activity",
+            {
+                "p_user_id": user_id,
+                "p_plan_workout_id": workout_id,
+                "p_activity_id": activity_id,
+            },
+        ).execute()
+        row = response.data
+        if not row:
+            raise RuntimeError("Supabase RPC did not return the unlinked activity row.")
+        return Activity.model_validate(row)
+
     async def match_plan_workout_to_activity(
         self,
         *,
