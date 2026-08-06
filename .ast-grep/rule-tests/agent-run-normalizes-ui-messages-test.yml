@@ -1,0 +1,7 @@
+id: agent-run-normalizes-ui-messages
+valid:
+  - "run(agent, toAgentInputItems(selectedMessages), { maxTurns: 1 });"
+  - "runner.run(agent, result.output, { maxTurns: 1 });"
+invalid:
+  - "run(agent, messages, { maxTurns: 1 });"
+  - "runner.run(agent, selectedMessages, { maxTurns: 1 });"
