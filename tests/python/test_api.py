@@ -3250,7 +3250,7 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
 
     class ActivityRepository(EngineRepository):
         def __init__(self) -> None:
-            self.plan_workout_updates: list[tuple[str, str, dict[str, object]]] = []
+            self.unlink_calls: list[tuple[str, str, str]] = []
             self.matched_workout_ids: list[str] = []
             self.match_windows: list[tuple[date, date]] = []
             self.updated_activity: Activity | None = None
@@ -3279,17 +3279,7 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
             workout_id: str,
             activity_id: str,
         ) -> Activity:
-            self.plan_workout_updates.append(
-                (
-                    user_id,
-                    workout_id,
-                    {
-                        "status": "scheduled",
-                        "actual_activity_id": None,
-                        "completion_source": None,
-                    },
-                )
-            )
+            self.unlink_calls.append((user_id, workout_id, activity_id))
             assert self.updated_activity is not None
             assert self.updated_activity.id == activity_id
             return self.updated_activity.model_copy(update={"planned_workout_id": None})
@@ -3365,17 +3355,7 @@ async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(mon
     assert body["activity"]["activity_date"] == "2026-07-05"
     assert body["activity"]["planned_workout_id"] == "new-workout"
     assert body["matched_plan_workout"]["plan_workout_id"] == "new-workout"
-    assert repository.plan_workout_updates == [
-        (
-            "athlete-1",
-            "old-workout",
-            {
-                "status": "scheduled",
-                "actual_activity_id": None,
-                "completion_source": None,
-            },
-        )
-    ]
+    assert repository.unlink_calls == [("athlete-1", "old-workout", "activity-1")]
     assert repository.matched_workout_ids == ["new-workout"]
     assert len(repository.match_windows) == 1
     match_start, match_end = repository.match_windows[0]
