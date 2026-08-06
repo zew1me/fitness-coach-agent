@@ -2,6 +2,7 @@ import type { AgentInputItem } from "@openai/agents";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_AUTO_COMPACT_TOKENS,
   DurableCompactionSession,
   estimateStoredContext,
 } from "../../lib/agent/durable-compaction-session";
@@ -357,6 +358,53 @@ describe("DurableCompactionSession", () => {
     const result = await session.runCompaction();
     expect(result).toBeNull();
     expect(client.responses.compact).not.toHaveBeenCalled();
+  });
+
+  it("uses the TPM-safe default token threshold for user-only history", async () => {
+    const belowThreshold = [userItem("x".repeat(119_000))];
+    const aboveThreshold = [userItem("x".repeat(120_000))];
+    expect(estimateStoredContext(belowThreshold).estimatedTokens).toBeLessThan(
+      DEFAULT_AUTO_COMPACT_TOKENS,
+    );
+    expect(
+      estimateStoredContext(aboveThreshold).estimatedTokens,
+    ).toBeGreaterThanOrEqual(DEFAULT_AUTO_COMPACT_TOKENS);
+
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi
+        .fn()
+        .mockResolvedValueOnce(belowThreshold)
+        .mockResolvedValueOnce(aboveThreshold),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [userItem("compacted")],
+          usage: {
+            input_tokens: 30_000,
+            output_tokens: 100,
+            total_tokens: 30_100,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+    });
+
+    await expect(session.runCompaction()).resolves.toBeNull();
+    await expect(session.runCompaction()).resolves.not.toBeNull();
+
+    expect(client.responses.compact).toHaveBeenCalledTimes(1);
   });
 
   it("force bypasses threshold checks and calls the API", async () => {

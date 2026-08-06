@@ -862,7 +862,7 @@ describe("streamCoachTurn", () => {
     expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
   });
 
-  it("uses a deterministic acknowledgement instead of replaying after a post-tool 429", async () => {
+  it("uses a deterministic acknowledgement after a wrapped post-tool 429", async () => {
     orchestratorMocks.agentsRun.mockResolvedValueOnce({
       completed: Promise.resolve(),
       finalOutput: null,
@@ -894,7 +894,7 @@ describe("streamCoachTurn", () => {
             output: { updated: true },
           },
         };
-        throw rateLimitError("120");
+        throw new Error("stream failed", { cause: rateLimitError("120") });
       },
     } as never);
 
@@ -1574,6 +1574,28 @@ describe("streamCoachTurn", () => {
     return response.text();
   }
 
+  it("degrades to stateless when required pre-run auto-compaction fails", async () => {
+    const storedItems = Array.from({ length: 41 }, (_, index) => ({
+      role: "assistant",
+      content: [{ type: "output_text", text: `Historical reply ${index}` }],
+    }));
+    const body = await runDurableTurn(degradingDurableFetch({ storedItems }));
+
+    expect(orchestratorMocks.compact).toHaveBeenCalledTimes(1);
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.not.objectContaining({ session: expect.anything() }),
+    );
+    expect(body).not.toContain("Coach is unavailable");
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({ step: "compact" }),
+      }),
+    );
+  });
+
   it("degrades to a stateless turn when the model state is unreadable", async () => {
     const body = await runDurableTurn(
       degradingDurableFetch({ modelStateStatus: 503 }),
@@ -1592,9 +1614,9 @@ describe("streamCoachTurn", () => {
     expect(body).not.toContain("Coach is unavailable");
   });
 
-  it("degrades to a stateless turn when forced compaction fails above the hard limit", async () => {
-    // estimateStoredContext is ceil(bytes / 4), so ~1.1 MB of text clears the
-    // 260 000-token hard limit where compactIfNeeded rethrows.
+  it("degrades to a stateless turn when oversized pre-run compaction fails", async () => {
+    // estimateStoredContext is ceil(bytes / 4), so ~1.1 MB of text is far above
+    // the pre-run threshold and must force a compaction attempt.
     const body = await runDurableTurn(
       degradingDurableFetch({
         storedItems: [
