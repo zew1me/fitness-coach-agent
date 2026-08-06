@@ -692,9 +692,9 @@ export function streamCoachTurn({
           admittedProbes.add(startingAdmission);
         }
         const traceMetadata = {
-          fallbackModels: MODEL_TIERS.map((tier) => tier.model),
+          fallbackModels: MODEL_TIERS.map((tier) => tier.model).join(","),
           startingModel: startingTier.model,
-        };
+        } satisfies Record<string, string>;
         await Sentry.startSpan(
           {
             name: "fitness-coach-turn",
