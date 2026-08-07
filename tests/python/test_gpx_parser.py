@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.engine.gpx_parser import parse_fit
+from backend.engine.gpx_parser import ParsedActivity, ParsedCourse, parse_fit
 
 
 class _FakeField:
@@ -57,6 +57,8 @@ def test_parse_fit_extracts_elapsed_and_moving_duration_single_session(
 
     activity = parse_fit(tmp_path / "ride.fit")
 
+    assert isinstance(activity, ParsedActivity)
+
     assert activity.sport == "cycling"
     assert activity.duration_seconds == 5880
     assert activity.elapsed_duration_seconds == 5880
@@ -76,6 +78,8 @@ def test_parse_fit_prefers_moving_time_when_elapsed_and_moving_differ(
     ]
 
     activity = parse_fit(tmp_path / "ride.fit")
+
+    assert isinstance(activity, ParsedActivity)
 
     assert activity.duration_seconds == 3600
     assert activity.elapsed_duration_seconds == 4000
@@ -100,6 +104,8 @@ def test_parse_fit_sums_durations_across_multiple_sessions(
     ]
 
     activity = parse_fit(tmp_path / "brick.fit")
+
+    assert isinstance(activity, ParsedActivity)
 
     # Regression test for the last-one-wins overwrite bug: the correct total
     # is the sum across sessions (5400), not just the last session's value
@@ -132,6 +138,8 @@ def test_parse_fit_sums_distance_and_ascent_across_multiple_sessions(
 
     activity = parse_fit(tmp_path / "brick.fit")
 
+    assert isinstance(activity, ParsedActivity)
+
     assert activity.started_at == first_start
     assert activity.distance_meters == 50000
     assert activity.elevation_gain_meters == 500
@@ -149,6 +157,8 @@ def test_parse_fit_handles_missing_timer_time_falls_back_to_elapsed(
     ]
 
     activity = parse_fit(tmp_path / "run.fit")
+
+    assert isinstance(activity, ParsedActivity)
 
     assert activity.duration_seconds == 1200
     assert activity.elapsed_duration_seconds == 1200
@@ -171,6 +181,8 @@ def test_parse_fit_uses_activity_local_timestamp_for_activity_date(
     ]
 
     activity = parse_fit(tmp_path / "ride.fit")
+
+    assert isinstance(activity, ParsedActivity)
 
     assert activity.activity_date.isoformat() == "2026-07-05"
     assert activity.utc_offset_seconds == -25200
@@ -196,6 +208,8 @@ def test_parse_fit_normalizes_aware_session_start_before_local_offset(
 
     activity = parse_fit(tmp_path / "ride.fit")
 
+    assert isinstance(activity, ParsedActivity)
+
     assert activity.activity_date.isoformat() == "2026-07-05"
     assert activity.utc_offset_seconds == -25200
 
@@ -209,6 +223,8 @@ def test_parse_fit_without_activity_message_keeps_utc_date(
     ]
 
     activity = parse_fit(tmp_path / "ride.fit")
+
+    assert isinstance(activity, ParsedActivity)
 
     assert activity.activity_date.isoformat() == "2026-07-06"
     assert activity.utc_offset_seconds is None
@@ -229,6 +245,8 @@ def test_parse_fit_rejects_out_of_range_activity_utc_offset(
 
     activity = parse_fit(tmp_path / "ride.fit")
 
+    assert isinstance(activity, ParsedActivity)
+
     assert activity.activity_date.isoformat() == "2026-07-06"
     assert activity.utc_offset_seconds is None
 
@@ -247,6 +265,102 @@ def test_parse_fit_preserves_zero_moving_duration(
 
     activity = parse_fit(tmp_path / "ride.fit")
 
+    assert isinstance(activity, ParsedActivity)
+
     assert activity.duration_seconds == 0
     assert activity.elapsed_duration_seconds == 1200
     assert activity.moving_duration_seconds == 0
+
+
+# --- FIT course files ----------------------------------------------------------
+#
+# Unlike GPX, a FIT says outright which it is: a course file carries a `course`
+# message and no `session`. Its timestamps, where present, are synthetic, so
+# absence-of-time is the wrong test here.
+
+
+def test_parse_fit_course_message_yields_a_course_not_an_activity(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    _patch_fitparse["course"] = [_session_message(sport="cycling", name="Schotterfest Long")]
+    _patch_fitparse["lap"] = [_session_message(total_distance=94490.2, total_ascent=2308.6)]
+    _patch_fitparse["record"] = [
+        _session_message(distance=0.0, altitude=100.0),
+        _session_message(distance=1000.0, altitude=180.0),
+    ]
+
+    course = parse_fit(tmp_path / "course.fit")
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "cycling"
+    assert course.name == "Schotterfest Long"
+    # Lap totals are authoritative; the record stream only supplies grades.
+    assert course.profile.distance_meters == 94490.2
+    assert course.profile.elevation_gain_meters == 2308.6
+    assert course.profile.avg_grade_pct == 8.0
+
+
+def test_parse_fit_course_without_records_omits_grades_rather_than_faking_them(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    _patch_fitparse["course"] = [_session_message(sport="cycling")]
+    _patch_fitparse["lap"] = [_session_message(total_distance=94490.2, total_ascent=2308.6)]
+
+    course = parse_fit(tmp_path / "course.fit")
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 94490.2
+    assert course.profile.elevation_gain_meters == 2308.6
+    assert course.profile.avg_grade_pct is None
+    assert course.profile.max_grade_pct is None
+
+
+def test_parse_fit_course_with_unmappable_sport_reports_unknown(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    _patch_fitparse["course"] = [_session_message(sport="generic")]
+    _patch_fitparse["lap"] = [_session_message(total_distance=5000.0)]
+
+    course = parse_fit(tmp_path / "course.fit")
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "general"
+
+
+def test_parse_fit_prefers_the_session_when_a_file_carries_both(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    # A recorded ride that also embeds the course it followed is still a recording.
+    _patch_fitparse["course"] = [_session_message(sport="cycling", name="Followed course")]
+    _patch_fitparse["session"] = [
+        _session_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400),
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert isinstance(activity, ParsedActivity)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.duration_seconds == 3400
+
+
+def test_parse_fit_prefers_enhanced_altitude_when_present(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    # Garmin writes both; `enhanced_altitude` is the higher-resolution field.
+    _patch_fitparse["course"] = [_session_message(sport="running")]
+    _patch_fitparse["lap"] = [_session_message(total_distance=1000.0)]
+    _patch_fitparse["record"] = [
+        _session_message(distance=0.0, altitude=100.0, enhanced_altitude=100.0),
+        _session_message(distance=500.0, altitude=120.0, enhanced_altitude=150.0),
+    ]
+
+    course = parse_fit(tmp_path / "course.fit")
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.avg_grade_pct == 10.0

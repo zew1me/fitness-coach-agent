@@ -1,7 +1,15 @@
 from datetime import date
 from pathlib import Path
 
-from backend.engine.gpx_parser import parse_gpx, parse_tcx
+import pytest
+
+from backend.engine.gpx_parser import (
+    ParsedActivity,
+    ParsedCourse,
+    _canonical_sport,
+    parse_gpx,
+    parse_tcx,
+)
 from backend.engine.hrv import summarize_hrv
 from backend.engine.periodization import build_plan_skeleton
 from backend.engine.thresholds import estimate_cycling_thresholds, estimate_running_thresholds
@@ -115,6 +123,8 @@ def test_parse_gpx_extracts_rr_interval_extensions(tmp_path: Path) -> None:
 
     activity = parse_gpx(gpx_file)
 
+    assert isinstance(activity, ParsedActivity)
+
     assert activity.rr_intervals_ms == [820, 830, 815, 825]
     assert activity.hrv_summary is not None
     assert activity.hrv_summary["quality"] == "insufficient_rr_intervals"
@@ -144,6 +154,8 @@ def test_parse_gpx_trackpoint_extension_values_are_not_duplicated(tmp_path: Path
     )
 
     activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
 
     assert activity.avg_hr_bpm == 140
     assert activity.max_hr_bpm == 140
@@ -185,9 +197,305 @@ def test_parse_tcx_extracts_activity_and_rr_intervals(tmp_path: Path) -> None:
 
     activity = parse_tcx(tcx_file)
 
+    assert isinstance(activity, ParsedActivity)
+
     assert activity.sport == "running"
     assert activity.duration_seconds == 60
     assert activity.distance_meters == 200
     assert activity.avg_hr_bpm == 142
     assert activity.max_hr_bpm == 145
     assert activity.rr_intervals_ms == [820, 830, 815, 825]
+
+
+# --- Course files (planned routes) --------------------------------------------
+#
+# A course is a route the athlete intends to ride or run, uploaded so the coach can
+# advise on it. It is not something they have done, so it must never come back as a
+# ParsedActivity. See backend/engine/gpx_parser.py for the per-format evidence each
+# file type offers.
+
+
+def _write_gpx(tmp_path: Path, body: str, name: str = "course.gpx") -> Path:
+    gpx_file = tmp_path / name
+    gpx_file.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">\n'
+        f"{body}\n</gpx>",
+        encoding="utf-8",
+    )
+    return gpx_file
+
+
+# Two points 0.001 degrees of longitude apart at 37 degrees latitude. The closed
+# form 111_320 * cos(37 degrees) * 0.001 gives ~88.9 m, which is the independent
+# check that distance is real rather than whatever gpxpy happens to return.
+_EXPECTED_STEP_METERS = 88.9
+
+
+def test_parse_gpx_untimed_track_is_a_course_not_a_run(tmp_path: Path) -> None:
+    # The reported bug: no <time> means pace inference cannot run, and the old
+    # fallback labelled every such file "running" *and* saved it as a completed
+    # activity. A course GPX has no timestamps by definition.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>110</ele></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "general"
+    assert course.profile.distance_meters == pytest.approx(_EXPECTED_STEP_METERS, abs=1.0)
+    assert course.profile.elevation_gain_meters == 10.0
+
+
+def test_parse_gpx_course_takes_sport_from_declared_track_type(tmp_path: Path) -> None:
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><type>cycling</type><name>Schotterfest Long</name><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>110</ele></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "cycling"
+    assert course.name == "Schotterfest Long"
+
+
+def test_parse_gpx_route_only_file_reports_distance_and_elevation(tmp_path: Path) -> None:
+    # <rte>/<rtept> is what Garmin Course and RideWithGPS exports commonly emit.
+    # Walking only <trk> reported these as zero distance and zero vertical.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <rte><type>Ride</type>
+    <rtept lat="37.0" lon="-122.0"><ele>100</ele></rtept>
+    <rtept lat="37.0" lon="-122.001"><ele>130</ele></rtept>
+  </rte>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "cycling"
+    assert course.profile.distance_meters == pytest.approx(_EXPECTED_STEP_METERS, abs=1.0)
+    assert course.profile.elevation_gain_meters == 30.0
+
+
+def test_parse_gpx_does_not_double_count_a_track_and_its_redundant_route(
+    tmp_path: Path,
+) -> None:
+    # A Garmin course export can carry both. Summing them would double every number.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>110</ele></trkpt>
+  </trkseg></trk>
+  <rte>
+    <rtept lat="37.0" lon="-122.0"><ele>100</ele></rtept>
+    <rtept lat="37.0" lon="-122.001"><ele>110</ele></rtept>
+  </rte>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == pytest.approx(_EXPECTED_STEP_METERS, abs=1.0)
+    assert course.profile.elevation_gain_meters == 10.0
+
+
+def test_parse_gpx_reads_declared_sport_from_a_route_beside_an_untyped_track(
+    tmp_path: Path,
+) -> None:
+    # The route's points are skipped, but its <type> is still the only sport signal
+    # in the file.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>110</ele></trkpt>
+  </trkseg></trk>
+  <rte><type>mountainbiking</type>
+    <rtept lat="37.0" lon="-122.0"><ele>100</ele></rtept>
+  </rte>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "cycling"
+
+
+def test_parse_gpx_unmappable_declared_type_falls_through_to_unknown(tmp_path: Path) -> None:
+    # Strava writes a numeric <type>. It must not poison the result.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><type>1</type><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>110</ele></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "general"
+
+
+def test_parse_gpx_timed_track_is_still_a_recorded_run(tmp_path: Path) -> None:
+    # No regression: a real recording keeps its existing pace-inferred sport.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>""",
+        name="run.gpx",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.sport == "running"
+
+
+def test_parse_gpx_timed_track_at_cycling_pace_is_still_a_recorded_ride(tmp_path: Path) -> None:
+    # ~89 m in 10 s is roughly 32 km/h, comfortably under the 180 s/km cycling cutoff.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:00:10Z</time></trkpt>
+  </trkseg></trk>""",
+        name="ride.gpx",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.sport == "cycling"
+
+
+def test_parse_gpx_declared_type_beats_the_pace_heuristic(tmp_path: Path) -> None:
+    # A stop-heavy recorded ride averages slower than the cycling cutoff, so pace
+    # alone would call it a run. The file says otherwise.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><type>Ride</type><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:30:00Z</time></trkpt>
+  </trkseg></trk>""",
+        name="ride.gpx",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.sport == "cycling"
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("Trail_Run", "running"),
+        ("trail run", "running"),
+        ("TrailRun", "running"),
+        ("  RIDE  ", "cycling"),
+        ("mountain-biking", "cycling"),
+        ("Open Water Swim", "swimming"),
+        ("Hike", "hiking"),
+        ("rowing", "rowing"),
+        ("1", None),
+        ("kitesurfing", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_canonical_sport_normalizes_known_dialects(declared: object, expected: str | None) -> None:
+    assert _canonical_sport(declared) == expected
+
+
+def test_parse_tcx_course_file_is_a_course(tmp_path: Path) -> None:
+    # Before this, parse_tcx raised ValueError on every Garmin Course export because
+    # it searched the whole tree for an <Activity> and found none.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Name>Schotterfest Long</Name>
+      <Lap><TotalTimeSeconds>10800</TotalTimeSeconds><DistanceMeters>1000</DistanceMeters></Lap>
+      <Track>
+        <Trackpoint><Time>2026-06-21T10:00:00Z</Time>
+          <AltitudeMeters>100</AltitudeMeters><DistanceMeters>0</DistanceMeters></Trackpoint>
+        <Trackpoint><Time>2026-06-21T10:01:00Z</Time>
+          <AltitudeMeters>150</AltitudeMeters><DistanceMeters>1000</DistanceMeters></Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.name == "Schotterfest Long"
+    # The Course schema carries no sport attribute, so it stays unknown.
+    assert course.sport == "general"
+    assert course.profile.distance_meters == 1000.0
+    assert course.profile.elevation_gain_meters == 50.0
+
+
+def test_parse_tcx_prefers_an_activity_when_a_file_carries_both_sections(tmp_path: Path) -> None:
+    # Precedence guard: a hybrid file must keep behaving exactly as it does today.
+    tcx_file = tmp_path / "hybrid.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Activities>
+    <Activity Sport="Biking">
+      <Id>2026-04-19T10:00:00Z</Id>
+      <Lap StartTime="2026-04-19T10:00:00Z">
+        <TotalTimeSeconds>60</TotalTimeSeconds>
+        <DistanceMeters>200</DistanceMeters>
+      </Lap>
+    </Activity>
+  </Activities>
+  <Courses><Course><Name>Ignored</Name></Course></Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    activity = parse_tcx(tcx_file)
+
+    assert isinstance(activity, ParsedActivity)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.sport == "cycling"
+
+
+def test_parse_tcx_without_activity_or_course_still_raises(tmp_path: Path) -> None:
+    tcx_file = tmp_path / "empty.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not contain an Activity"):
+        parse_tcx(tcx_file)

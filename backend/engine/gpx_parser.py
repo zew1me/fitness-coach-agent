@@ -3,19 +3,74 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from backend.engine.course_profile import (
+    CourseProfile,
+    build_course_points,
+    summarize_course,
+    summarize_course_with_totals,
+)
 from backend.engine.hrv import HRVSummary, summarize_hrv
 
 CYCLING_INFERRED_PACE_SEC_KM = 180
 MIN_RR_INTERVAL_MS = 300
 MAX_RR_INTERVAL_MS = 2000
 SECONDS_TO_MS_THRESHOLD = 10
+
+# What we call a sport we cannot determine. Already the fallback used by
+# `_FitSessionSummary` and `_normalize_tcx_sport`, and a permitted value in the
+# `sport_thresholds` check constraint — so nothing downstream needs to learn it.
+UNKNOWN_SPORT = "general"
+
+# Declared-sport vocabulary. Route files name their sport in wildly different
+# dialects (`<type>` in GPX, `sport` on a FIT course message), and the value is
+# free text, so map only what we recognise onto the canonical set and let anything
+# else fall through to inference. Keys are alphanumeric-only; see `_canonical_sport`.
+_SPORT_ALIASES: Mapping[str, str] = {
+    "bike": "cycling",
+    "biking": "cycling",
+    "cycle": "cycling",
+    "cycling": "cycling",
+    "ebikeride": "cycling",
+    "gravelride": "cycling",
+    "mountainbiking": "cycling",
+    "mtb": "cycling",
+    "ride": "cycling",
+    "roadcycling": "cycling",
+    "virtualride": "cycling",
+    "hike": "hiking",
+    "hiking": "hiking",
+    "openwaterswim": "swimming",
+    "swim": "swimming",
+    "swimming": "swimming",
+    "row": "rowing",
+    "rowing": "rowing",
+    "run": "running",
+    "running": "running",
+    "trailrun": "running",
+    "trailrunning": "running",
+    "virtualrun": "running",
+}
+
+
+def _canonical_sport(value: object) -> str | None:
+    """Map a declared sport onto the canonical set, or ``None`` if unrecognised.
+
+    Casefolds and drops non-alphanumerics, so ``Trail_Run``, ``trail run``, and
+    ``TrailRun`` all collapse to the same key. Returning ``None`` rather than
+    guessing matters: Strava writes a numeric ``<type>1</type>``, which must fall
+    through to inference instead of poisoning the result.
+    """
+    if value is None:
+        return None
+    normalized = "".join(char for char in str(value).casefold() if char.isalnum())
+    return _SPORT_ALIASES.get(normalized)
 
 
 @dataclass
@@ -41,6 +96,20 @@ class ParsedActivity:
 
 
 @dataclass
+class ParsedCourse:
+    """A planned route, not something the athlete has done.
+
+    Course files carry no time signal, so there is no duration, no heart rate, and
+    nothing to score. They exist so the coach can advise on pacing and preparation —
+    they must never be persisted as a completed activity.
+    """
+
+    sport: str
+    profile: CourseProfile
+    name: str | None = None
+
+
+@dataclass
 class _GpxSummary:
     total_distance: float = 0.0
     total_elevation_gain: float = 0.0
@@ -50,6 +119,17 @@ class _GpxSummary:
     rr_intervals: list[int] = dataclass_field(default_factory=list)
     start_time: datetime | None = None
     end_time: datetime | None = None
+    # Declared `<type>` from a <trk> or <rte>, already canonicalised.
+    declared_sport: str | None = None
+    name: str | None = None
+    # Counted so route fallback can tell "no track" from "a track with one point";
+    # `total_distance == 0` cannot, and would double-count a file carrying both.
+    point_count: int = 0
+    # Any point at all carrying a <time>. A course has none; that is what makes it
+    # a course rather than a recording.
+    timed_point_count: int = 0
+    # (distance_from_previous_point, elevation) per point, for course grade math.
+    segments: list[tuple[float, float | None]] = dataclass_field(default_factory=list)
 
     @property
     def duration(self) -> int | None:
@@ -58,22 +138,43 @@ class _GpxSummary:
         return int((self.end_time - self.start_time).total_seconds())
 
     @property
+    def is_course(self) -> bool:
+        """A GPX with points but no timestamps anywhere is a route, not a recording.
+
+        GPX has no course/activity marker of its own, so the absence of time is the
+        only evidence the format offers.
+        """
+        return self.point_count > 0 and self.timed_point_count == 0
+
+    @property
     def sport(self) -> str:
+        if self.declared_sport:
+            return self.declared_sport
         if self.duration and self.total_distance > 0:
             pace_sec_km = self.duration / (self.total_distance / 1000)
             if pace_sec_km < CYCLING_INFERRED_PACE_SEC_KM:
                 return "cycling"
-        return "running"
+            return "running"
+        # Pace inference needs time, and a course has none. Saying "running" here —
+        # as this did — labelled every uploaded ride a run.
+        return UNKNOWN_SPORT
 
 
-def parse_gpx(file_path: str | Path) -> ParsedActivity:
-    """Parse a GPX file into structured activity data."""
+def parse_gpx(file_path: str | Path) -> ParsedActivity | ParsedCourse:
+    """Parse a GPX file into a recorded activity, or a course if it has no timestamps."""
     import gpxpy
 
     with Path(file_path).open() as f:
         gpx = gpxpy.parse(f)
 
     summary = _extract_gpx_summary(gpx)
+    if summary.is_course:
+        return ParsedCourse(
+            sport=summary.sport,
+            profile=summarize_course(build_course_points(summary.segments)),
+            name=summary.name,
+        )
+
     duration = summary.duration
     activity_date = summary.start_time.date() if summary.start_time else date.today()
     hr_values = summary.hr_values
@@ -109,9 +210,33 @@ def parse_gpx(file_path: str | Path) -> ParsedActivity:
 def _extract_gpx_summary(gpx: Any) -> _GpxSummary:
     summary = _GpxSummary()
     for track in gpx.tracks:
+        _absorb_gpx_container_metadata(summary, track)
         for segment in track.segments:
             _accumulate_gpx_segment(summary, segment.points)
+
+    # <rte>/<rtept> is how Garmin Course and RideWithGPS exports commonly describe a
+    # route, and walking only <trk> reported those as zero distance and zero
+    # vertical. Fall back rather than add: a Garmin course can carry a track *and* a
+    # redundant route, and summing both would double every number.
+    for route in gpx.routes:
+        _absorb_gpx_container_metadata(summary, route)
+        if summary.point_count == 0:
+            _accumulate_gpx_segment(summary, route.points)
+
     return summary
+
+
+def _absorb_gpx_container_metadata(summary: _GpxSummary, container: Any) -> None:
+    """Take the declared sport and name off a <trk> or <rte>, first one wins.
+
+    Read from routes even when their points are skipped: a track with no <type>
+    sitting beside a route that has one should still resolve.
+    """
+    if summary.declared_sport is None:
+        summary.declared_sport = _canonical_sport(getattr(container, "type", None))
+    if summary.name is None:
+        name = getattr(container, "name", None)
+        summary.name = str(name) if name else None
 
 
 def _accumulate_gpx_segment(summary: _GpxSummary, points: list[Any]) -> None:
@@ -123,9 +248,14 @@ def _accumulate_gpx_segment(summary: _GpxSummary, points: list[Any]) -> None:
     if points[-1].time:
         summary.end_time = points[-1].time
 
+    summary.point_count += len(points)
+    summary.timed_point_count += sum(1 for point in points if point.time)
+
     for index, point in enumerate(points):
+        segment_distance = 0.0
         if index > 0:
-            _accumulate_gpx_point_distance(summary, point, points[index - 1])
+            segment_distance = _accumulate_gpx_point_distance(summary, point, points[index - 1])
+        summary.segments.append((segment_distance, point.elevation))
         for ext in point.extensions or []:
             _extract_gpx_extension(
                 ext,
@@ -136,11 +266,14 @@ def _accumulate_gpx_segment(summary: _GpxSummary, points: list[Any]) -> None:
             )
 
 
-def _accumulate_gpx_point_distance(summary: _GpxSummary, point: Any, previous_point: Any) -> None:
-    summary.total_distance += point.distance_2d(previous_point) or 0
+def _accumulate_gpx_point_distance(summary: _GpxSummary, point: Any, previous_point: Any) -> float:
+    """Add one point-to-point step to the running totals, returning its distance."""
+    step = point.distance_2d(previous_point) or 0
+    summary.total_distance += step
     ele_diff = (point.elevation or 0) - (previous_point.elevation or 0)
     if ele_diff > 0:
         summary.total_elevation_gain += ele_diff
+    return step
 
 
 def _extract_gpx_extension(
@@ -306,16 +439,107 @@ def _extract_fit_utc_offset_seconds(fit: Any) -> int | None:
     return None
 
 
-def parse_fit(file_path: str | Path) -> ParsedActivity:
-    """Parse a Garmin .FIT file into structured activity data."""
+def _fit_field(message: Any, name: str) -> Any:
+    for field in message.fields:
+        if field.name == name and field.value is not None:
+            return field.value
+    return None
+
+
+def _extract_fit_course(fit: Any) -> ParsedCourse | None:
+    """Build a course from a FIT file's ``course`` message, or ``None`` if it has none.
+
+    Unlike GPX, FIT says outright which it is: a course file carries a ``course``
+    message (global message 31) and no ``session``. Its timestamps, where present,
+    are synthetic, so absence-of-time is the wrong test here.
+    """
+    course_messages = list(fit.get_messages("course"))
+    if not course_messages or list(fit.get_messages("session")):
+        return None
+
+    course = course_messages[0]
+    name = _fit_field(course, "name")
+    sport = _canonical_sport(_fit_field(course, "sport")) or UNKNOWN_SPORT
+
+    # `lap` carries the authoritative totals. `record` is walked only for grades,
+    # and a course without a usable record stream simply reports grades as None.
+    distance: float | None = None
+    elevation_gain: float | None = None
+    for lap in fit.get_messages("lap"):
+        lap_distance = _fit_field(lap, "total_distance")
+        if lap_distance is not None:
+            distance = (distance or 0.0) + float(lap_distance)
+        lap_ascent = _fit_field(lap, "total_ascent")
+        if lap_ascent is not None:
+            elevation_gain = (elevation_gain or 0.0) + float(lap_ascent)
+
+    return ParsedCourse(
+        sport=sport,
+        profile=summarize_course_with_totals(
+            _fit_course_points(fit),
+            distance_meters=distance,
+            elevation_gain_meters=elevation_gain,
+        ),
+        name=str(name) if name else None,
+    )
+
+
+def _fit_course_points(fit: Any) -> list[Any]:
+    """Course points from the record stream: cumulative distance plus altitude."""
+    segments: list[tuple[float, float | None]] = []
+    previous_distance = 0.0
+    for record in fit.get_messages("record"):
+        distance = _fit_field(record, "distance")
+        if distance is None:
+            continue
+        altitude = _fit_field(record, "enhanced_altitude")
+        if altitude is None:
+            altitude = _fit_field(record, "altitude")
+        segments.append(
+            (float(distance) - previous_distance, float(altitude) if altitude is not None else None)
+        )
+        previous_distance = float(distance)
+    return build_course_points(segments)
+
+
+def _extract_fit_power_stream(fit: Any) -> list[int]:
+    """Per-record power, for normalized-power calculation."""
+    power_stream: list[int] = []
+    for record in fit.get_messages("record"):
+        power_stream.extend(
+            int(field.value)
+            for field in record.fields
+            if field.name == "power" and field.value is not None
+        )
+    return power_stream
+
+
+def _extract_fit_rr_intervals(fit: Any) -> list[int]:
+    rr_intervals: list[int] = []
+    for record in fit.get_messages("hrv"):
+        for field in record.fields:
+            if field.name != "time" or field.value is None:
+                continue
+            values = field.value if isinstance(field.value, list) else [field.value]
+            for value in values:
+                _append_rr_interval(rr_intervals, value)
+    return rr_intervals
+
+
+def parse_fit(file_path: str | Path) -> ParsedActivity | ParsedCourse:
+    """Parse a Garmin .FIT file into a recorded activity, or a course if it is one."""
     from fitparse import FitFile
 
     fit = FitFile(str(file_path))
 
-    power_stream: list[int] = []
-    rr_intervals: list[int] = []
+    course = _extract_fit_course(fit)
+    if course is not None:
+        return course
+
     session_summary = _extract_fit_session_summary(fit)
     utc_offset_seconds = _extract_fit_utc_offset_seconds(fit)
+    power_stream = _extract_fit_power_stream(fit)
+    rr_intervals = _extract_fit_rr_intervals(fit)
 
     elapsed_duration_seconds = (
         int(session_summary.elapsed_total) if session_summary.have_elapsed else None
@@ -326,22 +550,6 @@ def parse_fit(file_path: str | Path) -> ParsedActivity:
     duration = (
         moving_duration_seconds if moving_duration_seconds is not None else elapsed_duration_seconds
     )
-
-    # Collect power stream from records for NP calculation
-    for record in fit.get_messages("record"):
-        power_stream.extend(
-            int(field.value)
-            for field in record.fields
-            if field.name == "power" and field.value is not None
-        )
-
-    for record in fit.get_messages("hrv"):
-        for field in record.fields:
-            if field.name != "time" or field.value is None:
-                continue
-            values = field.value if isinstance(field.value, list) else [field.value]
-            for value in values:
-                _append_rr_interval(rr_intervals, value)
 
     activity_date = datetime.now(UTC).date()
     if session_summary.start_time is not None:
@@ -388,14 +596,29 @@ class _TcxSummary:
         return self.max_distance if self.max_distance > 0 else None
 
 
-def parse_tcx(file_path: str | Path) -> ParsedActivity:
-    """Parse a Garmin TCX file into structured activity data."""
+def parse_tcx(file_path: str | Path) -> ParsedActivity | ParsedCourse:
+    """Parse a Garmin TCX file into a recorded activity, or a course if it is one.
+
+    A TCX declares which it is structurally — ``<Activities>`` versus ``<Courses>`` —
+    so, unlike GPX, timestamps are not the test. Course trackpoints legitimately
+    carry (synthetic) ``<Time>`` elements.
+
+    ``Activity`` is checked first so that today's behaviour is preserved exactly for
+    every file that already parses, including a hybrid carrying both sections. Only
+    the case that used to raise changes.
+    """
     root = ET.parse(file_path).getroot()
     activity = next(
         (element for element in root.iter() if _local_name(element.tag) == "Activity"),
         None,
     )
     if activity is None:
+        course = next(
+            (element for element in root.iter() if _local_name(element.tag) == "Course"),
+            None,
+        )
+        if course is not None:
+            return _parse_tcx_course(course)
         raise ValueError("TCX file does not contain an Activity.")
 
     summary = _extract_tcx_summary(activity)
@@ -418,6 +641,34 @@ def parse_tcx(file_path: str | Path) -> ParsedActivity:
         max_hr_bpm=max(hr_values) if hr_values else None,
         rr_intervals_ms=rr_intervals if rr_intervals else None,
         hrv_summary=summarize_hrv(rr_intervals) if rr_intervals else None,
+    )
+
+
+def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
+    """Build a course from a TCX ``<Course>`` element.
+
+    The Course schema has no sport attribute, so sport stays unknown and the coach
+    asks. Distance comes from the trackpoints' own cumulative ``DistanceMeters``
+    where present, which is what Garmin writes, rather than being re-derived from
+    coordinates.
+    """
+    segments: list[tuple[float, float | None]] = []
+    previous_distance = 0.0
+    for trackpoint in course.iter():
+        if _local_name(trackpoint.tag) != "Trackpoint":
+            continue
+        distance_text = _first_text(trackpoint, "DistanceMeters")
+        altitude_text = _first_text(trackpoint, "AltitudeMeters")
+        distance = float(distance_text) if distance_text else previous_distance
+        segments.append(
+            (distance - previous_distance, float(altitude_text) if altitude_text else None)
+        )
+        previous_distance = distance
+
+    return ParsedCourse(
+        sport=UNKNOWN_SPORT,
+        profile=summarize_course(build_course_points(segments)),
+        name=_first_text(course, "Name"),
     )
 
 
