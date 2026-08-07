@@ -132,13 +132,13 @@ runCompaction(args?) → OpenAIResponsesCompactionResult | null
 Trigger conditions (any one is sufficient):
 
 - `args.force === true` (explicit forced compaction)
-- `estimatedTokens >= autoCompactTokens` (default 30 000)
+- `estimatedTokens >= autoCompactTokens` (default 60 000)
 - `nonUserItemCount >= autoCompactNonUserItems` (default 40)
 
 The token threshold is intentionally well below the model context window. A
 single coach turn can replay durable history through the delegation planner,
 the lead coach, and a post-tool follow-up in the same one-minute quota window.
-Compacting around 30 000 estimated history tokens leaves headroom for those
+Compacting around 60 000 estimated history tokens leaves headroom for those
 additional requests under the current 200 000 TPM model quota; waiting until a
 context-window threshold would allow one turn to consume the quota several
 times over.
