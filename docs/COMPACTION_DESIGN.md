@@ -183,7 +183,7 @@ a per-environment data migration.
 2. Load state     →  GET  /api/chat/model-state
 3. Project token estimate for stored items + incoming messages
 4. Run the pre-turn compaction check on every turn
-      ├─ force compaction if the projection is ≥ 30 000 estimated tokens
+      ├─ force compaction if the projection is ≥ 60 000 estimated tokens
       ├─ otherwise compact when stored history has ≥ 40 non-user items
       └─ if required compaction fails, degrade to stateless (turn still answers),
          except a 409 conflict or aborted signal still ends the turn
