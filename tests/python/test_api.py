@@ -1325,6 +1325,7 @@ def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) 
         file_bytes=b"fit bytes",
     )
 
+    assert isinstance(activity, Activity)
     assert activity.raw_extraction is not None
     assert activity.raw_extraction["utc_offset_seconds"] == -25200
     assert activity.raw_extraction["activity_date_source"] == "fit_local_timestamp"
@@ -4757,3 +4758,176 @@ async def test_process_uploaded_zip_returns_404_on_no_such_key(
     # the rest of the turn once one has run, so a retry is unfollowable and
     # strands the model until maxTurns throws (Sentry 7633993901).
     assert "Do not retry" in detail
+
+
+# --- Course uploads ------------------------------------------------------------
+#
+# A course is a route the athlete plans to ride or run. It must never reach the
+# training log as a completed activity — see backend/services/course.py.
+
+_SAMPLE_COURSE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><type>cycling</type><name>Schotterfest Long</name><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.01"><ele>160</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.02"><ele>140</ele></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+
+class _CourseRepository(EngineRepository):
+    """EngineRepository plus a body weight, so cycling analysis can actually run.
+
+    Also records every create_activity call, because "no activity was written" is
+    the assertion this whole change exists for and it must be checked directly
+    rather than inferred from the response body.
+    """
+
+    def __init__(self) -> None:
+        self.created: list[Activity] = []
+
+    async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+        profile = await super().get_athlete_profile(user_id)
+        return profile.model_copy(update={"weight_kg": 72.0})
+
+    async def create_activity(self, activity: Activity) -> Activity:
+        self.created.append(activity)
+        return activity.model_copy(update={"id": "activity-1"})
+
+
+async def _post_uploaded_course(
+    monkeypatch, file_bytes: bytes, filename: str = "course.gpx"
+) -> tuple[dict[str, Any], _CourseRepository]:
+    repo = _CourseRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return file_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": "application/gpx+xml",
+                    "filename": filename,
+                    "object_key": f"users/athlete-1/chat-attachment/2024/01/01/{filename}",
+                    "public_url": f"https://cdn.example.com/{filename}",
+                },
+            )
+    finally:
+        restore_override()
+    assert response.status_code == 200
+    return response.json(), repo
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_never_writes_an_activity(monkeypatch) -> None:
+    body, repo = await _post_uploaded_course(monkeypatch, _SAMPLE_COURSE_GPX)
+
+    # The load-bearing assertion of this entire change.
+    assert repo.created == []
+    assert "activity" not in body
+    assert body["kind"] == "course"
+    assert body["status"] == "analyzed"
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_returns_terrain_and_analysis(monkeypatch) -> None:
+    body, _ = await _post_uploaded_course(monkeypatch, _SAMPLE_COURSE_GPX)
+
+    course = body["course"]
+    assert course["sport"] == "cycling"
+    assert course["name"] == "Schotterfest Long"
+    assert course["distance_meters"] > 0
+    assert course["elevation_gain_meters"] == 60.0
+    assert course["source_file_key"].endswith("course.gpx")
+
+    # EngineRepository has a cycling FTP and _CourseRepository adds a weight, so
+    # the cycling model runs end to end.
+    assert body["analysis_unavailable_reason"] is None
+    assert body["analysis"]["primary_training_emphasis"] == "climbing_power"
+    assert body["analysis"]["vam_target"] > 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_degrades_when_thresholds_are_missing(
+    monkeypatch,
+) -> None:
+    # Losing the whole upload because an athlete has not given us an FTP would be a
+    # worse answer than terrain plus an explanation.
+    class _NoThresholdRepository(_CourseRepository):
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            return []
+
+    repo = _NoThresholdRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _SAMPLE_COURSE_GPX
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": "application/gpx+xml",
+                    "filename": "course.gpx",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
+                    "public_url": None,
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert body["analysis"] is None
+    assert "FTP" in body["analysis_unavailable_reason"]
+    # Terrain survives even when the model doesn't.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_analyzes_a_course_member_without_saving_it(
+    monkeypatch,
+) -> None:
+    repo = _CourseRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+    zip_bytes = _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return zip_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    processed = response.json()["processed"]
+    kinds = sorted(entry["kind"] for entry in processed)
+    assert kinds == ["activity", "course"]
+    # The recorded run is saved; the course is not.
+    assert len(repo.created) == 1
+    assert repo.created[0].source == "gpx_upload"

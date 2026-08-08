@@ -36,6 +36,7 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import settings
+from backend.engine.gpx_parser import ParsedActivity, ParsedCourse
 from backend.logging_config import configure_logging
 from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
@@ -81,6 +82,7 @@ from backend.services.auth import (
     OAuthLoginRequiredError,
 )
 from backend.services.chat import ChatService, ChatUnavailableError
+from backend.services.course import build_course_payload
 from backend.services.goal_service import (
     GoalService,
     InvalidGoalPayloadError,
@@ -1502,7 +1504,9 @@ def _activity_source_for_filename(filename: str) -> str:
     return "file_upload"
 
 
-def _parse_uploaded_activity_file(filename: str, content_type: str, file_bytes: bytes):
+def _parse_uploaded_activity_file(
+    filename: str, content_type: str, file_bytes: bytes
+) -> ParsedActivity | ParsedCourse:
     from backend.engine.gpx_parser import parse_fit, parse_gpx, parse_tcx
 
     suffix = Path(filename).suffix.lower()
@@ -1532,13 +1536,28 @@ def _build_uploaded_activity(  # noqa: PLR0913
     object_key: str,
     public_url: str | None,
     file_bytes: bytes,
-) -> Activity:
-    """Parse an activity file's bytes and build a summarized ``Activity``.
+) -> Activity | ParsedCourse:
+    """Parse an upload's bytes into a summarized ``Activity`` — or a ``ParsedCourse``.
 
     Shared by the single-file and zip upload endpoints so both derive the same
     ``source``/``source_file_key``/``raw_extraction`` shape from the parsed metrics.
+
+    A course is a route the athlete plans to do, not one they have done, so it is
+    returned unchanged for the caller to report rather than being coerced into an
+    ``Activity``. Callers must branch; persisting a course would put a workout the
+    athlete never did into their training log.
     """
     parsed = _parse_uploaded_activity_file(filename, content_type, file_bytes)
+    if isinstance(parsed, ParsedCourse):
+        logger.info(
+            "course parsed user_id=%s sport=%s distance_m=%.0f gain_m=%.0f",
+            user_id,
+            parsed.sport,
+            parsed.profile.distance_meters,
+            parsed.profile.elevation_gain_meters,
+        )
+        return parsed
+
     activity = Activity(
         user_id=user_id,
         sport=parsed.sport,
@@ -1599,7 +1618,7 @@ async def process_uploaded_file_endpoint(
         user_id=user_context.user_id,
         object_key=object_key,
     )
-    activity = _build_uploaded_activity(
+    parsed = _build_uploaded_activity(
         user_id=user_context.user_id,
         filename=payload.filename,
         content_type=payload.content_type,
@@ -1607,9 +1626,60 @@ async def process_uploaded_file_endpoint(
         public_url=payload.public_url,
         file_bytes=file_bytes,
     )
+    if isinstance(parsed, ParsedCourse):
+        return await _build_course_response(
+            user_context.user_id,
+            parsed,
+            object_key=object_key,
+            public_url=payload.public_url,
+        )
     return await _persist_extracted_activity(
-        user_context.user_id, activity, calling_endpoint="process_uploaded_file"
+        user_context.user_id, parsed, calling_endpoint="process_uploaded_file"
     )
+
+
+async def _build_course_response(
+    user_id: str,
+    course: ParsedCourse,
+    *,
+    object_key: str,
+    public_url: str | None,
+) -> Mapping[str, object]:
+    """Analyze a course and return it. Deliberately writes nothing.
+
+    The athlete has not done this route, so there is no activity to save and no
+    plan workout to match. The coach gets the terrain and, where the athlete's
+    thresholds allow it, a pacing estimate.
+    """
+    profile, thresholds = await _athlete_context_for_course(user_id)
+    logger.info("course analyzed user_id=%s sport=%s", user_id, course.sport)
+    return build_course_payload(
+        course,
+        profile=profile,
+        thresholds=thresholds,
+        source_file_key=object_key,
+        public_url=public_url,
+    )
+
+
+async def _athlete_context_for_course(
+    user_id: str,
+) -> tuple[_AthleteProfile | None, list[SportThreshold]]:
+    """Fetch the athlete's profile and thresholds, tolerating their absence.
+
+    These only sharpen the estimate — the terrain is useful without them. A DB
+    problem here is caught rather than propagated (unlike the usual contract in
+    AGENTS.md, which lets ``PostgRESTAPIError`` reach the centralized handler)
+    because failing the whole upload over a missing FTP would be a worse answer
+    than returning distance and vertical with a note explaining the gap.
+    """
+    try:
+        return await repo.get_athlete_profile(user_id), await repo.get_active_thresholds(user_id)
+    except (PostgRESTAPIError, httpx.HTTPError, RepositoryNotConfiguredError):
+        logger.warning(
+            "course analysis falling back to terrain only user_id=%s", user_id, exc_info=True
+        )
+        return None, []
 
 
 # Activity/image members inside an uploaded .zip are processed; every other member is
@@ -1662,7 +1732,7 @@ async def _zip_activity_entry(
     *, user_id: str, filename: str, content_type: str, zip_object_key: str, member_bytes: bytes
 ) -> dict[str, object] | None:
     try:
-        activity = _build_uploaded_activity(
+        parsed = _build_uploaded_activity(
             user_id=user_id,
             filename=filename,
             content_type=content_type,
@@ -1675,6 +1745,20 @@ async def _zip_activity_entry(
     except Exception:  # best-effort per member; a bad file must not abort the whole zip
         logger.exception("failed to parse activity from zip member user_id=%s", user_id)
         return None
+
+    if isinstance(parsed, ParsedCourse):
+        # A course inside an archive is still a course: analyze it, save nothing.
+        try:
+            return dict(
+                await _build_course_response(
+                    user_id, parsed, object_key=zip_object_key, public_url=None
+                )
+            )
+        except Exception:  # best-effort per member, same as the activity path below
+            logger.exception("failed to analyze course from zip member user_id=%s", user_id)
+            return None
+
+    activity = parsed
     try:
         # Persist like the single-file path so zip activities reach the calendar and
         # compliance instead of being surfaced and dropped.
