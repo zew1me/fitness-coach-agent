@@ -333,10 +333,27 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
   };
 }
 
+function errorChain(error: unknown): RateLimitError[] {
+  const chain: RateLimitError[] = [];
+  const seen = new Set<object>();
+  let current = error;
+
+  while (
+    current !== null &&
+    typeof current === "object" &&
+    !seen.has(current)
+  ) {
+    seen.add(current);
+    chain.push(current as RateLimitError);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return chain;
+}
+
 export function isRateLimitError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as RateLimitError;
-  return candidate.status === 429 || candidate.statusCode === 429;
+  return errorChain(error).some(
+    (candidate) => candidate.status === 429 || candidate.statusCode === 429,
+  );
 }
 
 function retryAfterHeader(headers: unknown): string | undefined {
@@ -349,13 +366,18 @@ function retryAfterHeader(headers: unknown): string | undefined {
 }
 
 export function getRetryAfterMs(error: unknown): number | undefined {
-  if (!error || typeof error !== "object") return undefined;
-  const value = retryAfterHeader((error as RateLimitError).headers);
-  if (!value) return undefined;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
-  const date = Date.parse(value);
-  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+  for (const candidate of errorChain(error)) {
+    const value = retryAfterHeader(candidate.headers);
+    if (!value) continue;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+    const date = Date.parse(value);
+    if (!Number.isNaN(date)) {
+      return Math.max(0, date - Date.now());
+    }
+    continue;
+  }
+  return undefined;
 }
 
 export const MODEL_TIERS = resolveModelTiers();

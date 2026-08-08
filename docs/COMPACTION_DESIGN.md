@@ -132,8 +132,16 @@ runCompaction(args?) → OpenAIResponsesCompactionResult | null
 Trigger conditions (any one is sufficient):
 
 - `args.force === true` (explicit forced compaction)
-- `estimatedTokens >= autoCompactTokens` (default 120 000)
+- `estimatedTokens >= autoCompactTokens` (default 60 000)
 - `nonUserItemCount >= autoCompactNonUserItems` (default 40)
+
+The token threshold is intentionally well below the model context window. A
+single coach turn can replay durable history through the delegation planner,
+the lead coach, and a post-tool follow-up in the same one-minute quota window.
+Compacting around 60 000 estimated history tokens leaves headroom for those
+additional requests under the current 200 000 TPM model quota; waiting until a
+context-window threshold would allow one turn to consume the quota several
+times over.
 
 Safety guard: if `responses.compact` returns an empty array the method **throws**
 rather than replacing durable context with nothing. This prevents a model error
@@ -174,21 +182,34 @@ a per-environment data migration.
 1. Acquire lease  →  POST /api/chat/model-state/lease
 2. Load state     →  GET  /api/chat/model-state
 3. Project token estimate for stored items + incoming messages
-4. If estimate ≥ 220 000 tokens  →  force runCompaction() before agent run
-      └─ hard limit 260 000: if compaction fails, degrade to stateless (turn still answers)
-      └─ soft limit 220 000: log Sentry warning, continue with uncompacted context
+4. Run the pre-turn compaction check on every turn
+      ├─ force compaction if the projection is ≥ 60 000 estimated tokens
+      ├─ otherwise compact when stored history has ≥ 40 non-user items
+      └─ if required compaction fails, degrade to stateless (turn still answers),
+         except a 409 conflict or aborted signal still ends the turn
 5. Agent runs     →  SDK appends items via addItems() during the turn
       └─ lead model honors provider retry delays up to 8 seconds, then falls back
          only if no stream event, response text, or tool call has started
       └─ longer provider delays skip the in-request retry; if every tier is exhausted,
          the athlete-visible error reports the longest provider wait seen across the ladder
-6. After the turn, auto-compaction runs if thresholds are hit
+6. After a successful turn, auto-compaction runs if the same thresholds are hit
 7. Release lease  →  DELETE /api/chat/model-state/lease  (always in finally)
+
+The pre-turn check is required even though the SDK also compacts after a
+successful turn. A turn that exceeds TPM can fail after appending tool-call
+items but before the SDK reaches post-turn compaction. If the next request only
+checks a high context-window threshold, the durable state becomes trapped in a
+fail/retry loop. Pre-turn compaction lets that state recover; if the compaction
+request itself is rate-limited, stateless degradation prevents a user-visible
+failure and leaves the stored state intact for a later retry. As with every
+durable setup step, a 409 conflict or aborted signal still ends the turn because
+continuing without ownership would be unsafe.
 ```
 
-Thresholds are declared in `lib/agent/orchestrator.ts` (forced pre-turn
-compaction at soft and hard limit of tokens) and in the `DurableCompactionSession`
-constructor defaults (auto-compaction at N tokens or M non-user items).
+Thresholds are declared by `DurableCompactionSession` and reused by the
+orchestrator for its projected pre-turn check. Compaction runs at the token
+threshold or the non-user-item threshold; the orchestrator forces it when the
+projection (stored history plus the incoming turn) reaches the token threshold.
 
 ### Setup is best-effort — only a 409 or an abort ends the turn
 
@@ -237,15 +258,15 @@ Operations on `coaching_memory` go through
 
 ## Tests
 
-| File                                           | What it covers                                                                                                                                             |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, replaceAll, coaching memory isolation                                                                                                   |
-| `tests/web/durable-compaction-session.test.ts` | Unit: DurableCompactionSession trigger thresholds, provider-metadata stripping, compact API shape conversion, estimateStoredContext                        |
-| `tests/web/orchestrator.test.ts`               | Turn-level: durable setup degrades to stateless on unreadable model state, unfetchable transcript, and failed forced compaction; still aborts on 409/abort |
-| `tests/web/real-durable-session.test.ts`       | Integration: full turn round-trip with fake repo                                                                                                           |
-| `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                                                     |
-| `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                                         |
-| `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                                                     |
+| File                                           | What it covers                                                                                                                                                                                                                        |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, replaceAll, coaching memory isolation                                                                                                                                                                              |
+| `tests/web/durable-compaction-session.test.ts` | Unit: DurableCompactionSession trigger thresholds, provider-metadata stripping, compact API shape conversion, estimateStoredContext                                                                                                   |
+| `tests/web/orchestrator.test.ts`               | Turn-level: durable setup degrades to stateless on unreadable model state, unfetchable transcript, and failed required pre-turn compaction; wrapped post-tool 429s produce a deterministic acknowledgement; still aborts on 409/abort |
+| `tests/web/real-durable-session.test.ts`       | Integration: full turn round-trip with fake repo                                                                                                                                                                                      |
+| `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                                                                                                                                |
+| `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                                                                                                                    |
+| `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                                                                                                                                |
 
 The `@pytest.mark.db` tests (live DB) are excluded from the default `pytest`
 run (`addopts = "-m 'not db'"` in `pyproject.toml`). Run them explicitly with

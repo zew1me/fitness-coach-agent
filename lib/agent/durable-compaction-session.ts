@@ -90,6 +90,13 @@ type CompactionThresholds = Pick<
   "autoCompactTokens" | "autoCompactNonUserItems"
 >;
 
+// A coach turn can replay durable history through delegation, the lead, and a
+// post-tool follow-up inside one TPM window. Keeping one request below the
+// model context window is therefore insufficient; compact early enough to
+// leave room for the turn's other model calls under the 200k TPM quota.
+export const DEFAULT_AUTO_COMPACT_TOKENS = 60_000;
+const DEFAULT_AUTO_COMPACT_NON_USER_ITEMS = 40;
+
 function shouldTriggerCompaction(
   args: OpenAIResponsesCompactionArgs,
   before: StoredContextEstimate,
@@ -97,8 +104,11 @@ function shouldTriggerCompaction(
 ): boolean {
   return (
     args.force === true ||
-    before.estimatedTokens >= (thresholds.autoCompactTokens ?? 120000) ||
-    before.nonUserItemCount >= (thresholds.autoCompactNonUserItems ?? 40)
+    before.estimatedTokens >=
+      (thresholds.autoCompactTokens ?? DEFAULT_AUTO_COMPACT_TOKENS) ||
+    before.nonUserItemCount >=
+      (thresholds.autoCompactNonUserItems ??
+        DEFAULT_AUTO_COMPACT_NON_USER_ITEMS)
   );
 }
 

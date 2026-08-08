@@ -27,6 +27,7 @@ import { oldestDueFollowUp } from "./coaching-memory";
 import { buildContextSlices } from "./context-slices";
 import { planSpecialistDelegation } from "./delegation-planner";
 import {
+  DEFAULT_AUTO_COMPACT_TOKENS,
   DurableCompactionSession,
   estimateStoredContext,
 } from "./durable-compaction-session";
@@ -375,23 +376,15 @@ async function compactIfNeeded(
   durableSession: DurableCompactionSession,
   estimate: ReturnType<typeof estimateStoredContext>,
 ): Promise<void> {
-  if (estimate.estimatedTokens < 220_000) return;
-  try {
-    await durableSession.runCompaction({
-      force: true,
-      compactionMode: "input",
-    });
-  } catch (error) {
-    if (estimate.estimatedTokens >= 260_000) throw error;
-    Sentry.captureException(error, {
-      tags: { subsystem: "forced-compaction" },
-      extra: { estimated_tokens: estimate.estimatedTokens },
-    });
-    Sentry.logger.warn("coach: forced compaction failed below hard limit", {
-      estimated_tokens: estimate.estimatedTokens,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  // Check the session's item-count trigger before every turn. Post-turn
+  // compaction never runs when a model turn fails, so relying on it alone can
+  // strand an overgrown session in a permanent fail/retry loop.
+  await durableSession.runCompaction({
+    ...(estimate.estimatedTokens >= DEFAULT_AUTO_COMPACT_TOKENS
+      ? { force: true }
+      : {}),
+    compactionMode: "input",
+  });
 }
 
 // Which setup step was in flight when a failure degraded the turn. Recorded on

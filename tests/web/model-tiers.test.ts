@@ -9,6 +9,8 @@ import {
   buildModelSettings,
   captureRateLimit,
   clampEffort,
+  getRetryAfterMs,
+  isRateLimitError,
   MODEL_SUPPORTED_EFFORTS,
   MODEL_TIERS,
   type ModelTier,
@@ -98,6 +100,17 @@ describe("model tier compatibility", () => {
         }),
       }),
     );
+  });
+
+  it("recognizes rate limits wrapped by streamed SDK errors", () => {
+    const cause = Object.assign(new Error("rate limit"), {
+      status: 429,
+      headers: new Headers({ "Retry-After": "1.2" }),
+    });
+    const wrapped = new Error("stream failed", { cause });
+
+    expect(isRateLimitError(wrapped)).toBe(true);
+    expect(getRetryAfterMs(wrapped)).toBe(1_200);
   });
 
   it("uses the configured OpenAI retry count for agent SDK calls", () => {
