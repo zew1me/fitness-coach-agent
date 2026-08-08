@@ -678,6 +678,18 @@ def _tcx_trackpoint_position(trackpoint: ET.Element) -> tuple[float, float] | No
     return float(latitude), float(longitude)
 
 
+def _tcx_lap_distance(course: ET.Element) -> float | None:
+    """Total DistanceMeters declared across the Course's own ``<Lap>`` elements."""
+    total: float | None = None
+    for lap in course.iter():
+        if _local_name(lap.tag) != "Lap":
+            continue
+        declared = _first_text(lap, "DistanceMeters")
+        if declared:
+            total = (total or 0.0) + float(declared)
+    return total
+
+
 def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
     """Build a course from a TCX ``<Course>`` element.
 
@@ -723,9 +735,23 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
             previous_position = position
         segments.append((step, elevation))
 
+    # A Course whose trackpoints carry neither DistanceMeters nor Position leaves the
+    # stream at zero. The Lap's own total is the only distance the file states, so use
+    # it rather than reporting a coherent-looking "0 m course with 800 m of climbing".
+    # Scoped to the Lap element: `_first_text` over the whole Course would happily
+    # return a trackpoint's reading instead. Trackpoint-derived distance stays
+    # authoritative whenever there is any.
+    lap_distance = _tcx_lap_distance(course)
+    points = build_course_points(segments)
+    profile = summarize_course(points)
+    if profile.distance_meters <= 0 and lap_distance:
+        profile = summarize_course_with_totals(
+            points, distance_meters=lap_distance, elevation_gain_meters=None
+        )
+
     return ParsedCourse(
         sport=UNKNOWN_SPORT,
-        profile=summarize_course(build_course_points(segments)),
+        profile=profile,
         name=_first_text(course, "Name"),
     )
 

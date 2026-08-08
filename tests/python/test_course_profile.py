@@ -268,7 +268,9 @@ def test_unusable_supplied_totals_fall_back_to_the_point_stream(bad: float) -> N
 
     assert profile.distance_meters == 500.0
     assert profile.elevation_gain_meters == 50.0
-    assert json.dumps({"d": profile.distance_meters, "g": profile.elevation_gain_meters})
+    assert json.dumps(
+        {"d": profile.distance_meters, "g": profile.elevation_gain_meters}, allow_nan=False
+    )
 
 
 def test_zero_is_a_usable_supplied_total() -> None:
@@ -320,7 +322,10 @@ def test_non_finite_values_in_the_point_stream_never_reach_the_profile() -> None
             "gain": profile.elevation_gain_meters,
             "avg": profile.avg_grade_pct,
             "max": profile.max_grade_pct,
-        }
+        },
+        # allow_nan=False makes the check real: json.dumps would otherwise write
+        # NaN and Infinity happily, which is exactly the invalid output being guarded.
+        allow_nan=False,
     )
 
 
@@ -367,7 +372,7 @@ def test_directly_built_points_with_non_finite_distances_are_dropped() -> None:
         profile.max_grade_pct,
     ):
         assert value is None or math.isfinite(value)
-    assert json.dumps({"d": profile.distance_meters, "m": profile.max_grade_pct})
+    assert json.dumps({"d": profile.distance_meters, "m": profile.max_grade_pct}, allow_nan=False)
 
 
 def test_descent_only_course_reports_a_negative_max_grade() -> None:
@@ -382,3 +387,27 @@ def test_descent_only_course_reports_a_negative_max_grade() -> None:
     assert profile.elevation_gain_meters == 0.0
     assert profile.avg_grade_pct is None
     assert profile.max_grade_pct == -10.0
+
+
+def test_a_gap_in_the_elevation_stream_does_not_split_gain_from_max_grade() -> None:
+    # Pairing raw points meant a missing reading broke the chain for gain while
+    # _max_windowed_grade, which filters first, bridged straight across it. The two
+    # then disagreed: 30% max grade alongside 0 m of total climbing.
+    points = _points((0, 100), (100, None), (200, 160))
+
+    profile = summarize_course(points)
+
+    assert profile.elevation_gain_meters == 60.0
+    assert profile.avg_grade_pct == 30.0
+    assert profile.max_grade_pct == 30.0
+
+
+def test_backwards_distance_in_directly_built_points_is_clamped_not_obeyed() -> None:
+    # build_course_points clamps by construction; points arriving directly did not,
+    # so a course reaching 500 m and stepping back to 100 m reported 100 m total and
+    # left the monotonic window pointer scanning an unsorted sequence.
+    points = [CoursePoint(0.0, 0.0), CoursePoint(500.0, 50.0), CoursePoint(100.0, 60.0)]
+
+    profile = summarize_course(points)
+
+    assert profile.distance_meters == 500.0

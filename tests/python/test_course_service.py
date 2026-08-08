@@ -163,9 +163,19 @@ def test_running_estimate_uses_grade_over_the_whole_course_not_just_the_climbs()
     assert reason is None
     assert analysis is not None
     assert analysis.estimated_duration_seconds is not None
-    # 2.5% overall means +30 s/km over 40 km, not 5% meaning +60 s/km — about a
-    # 20 minute difference in the number the coach quotes the athlete.
-    assert analysis.estimated_duration_seconds == pytest.approx((300 + 30) * 40, rel=0.1)
+
+    # Pinned exactly rather than loosely, so the wrong answer cannot slip through the
+    # tolerance. 2.5% overall means +30 s/km over 40 km; 5% would mean +60. Both then
+    # take analyze_running_climb's fatigue factor, and the gap between them is about
+    # 24 minutes in the number the coach quotes the athlete.
+    def _with_fatigue(seconds: float) -> int:
+        return round(seconds * (1.0 + max(0.0, (seconds - 1800) / 7200) * 0.05))
+
+    correct = _with_fatigue((300 + 30) * 40)
+    ascending_portions_instead = _with_fatigue((300 + 60) * 40)
+
+    assert analysis.estimated_duration_seconds == correct
+    assert ascending_portions_instead - correct > 20 * 60
 
 
 def test_running_course_without_a_threshold_pace_explains_itself() -> None:

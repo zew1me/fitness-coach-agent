@@ -759,3 +759,64 @@ def test_parse_tcx_course_declared_distance_after_derived_steps_re_anchors(
 
     assert isinstance(course, ParsedCourse)
     assert course.profile.distance_meters == pytest.approx(178.0, abs=1.0)
+
+
+def test_parse_tcx_course_falls_back_to_the_lap_distance_total(tmp_path: Path) -> None:
+    # Trackpoints with neither DistanceMeters nor Position leave the stream at zero.
+    # The Lap total is the only distance the file states, and reporting a coherent
+    # "0 m course with 800 m of climbing" instead would be silently wrong.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Name>Lap total only</Name>
+      <Lap><DistanceMeters>42195</DistanceMeters></Lap>
+      <Track>
+        <Trackpoint><AltitudeMeters>100</AltitudeMeters></Trackpoint>
+        <Trackpoint><AltitudeMeters>900</AltitudeMeters></Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 42195.0
+    # Gain stays 0 and the grades stay None on purpose. With no DistanceMeters and no
+    # Position, every reading lands at the same cumulative distance, and the guard
+    # that stops duplicated points inventing vertical cannot tell that case apart
+    # from this one. The lap total is real information and is reported; where the
+    # climbing sits along it is not, so nothing is claimed about it.
+    assert course.profile.elevation_gain_meters == 0.0
+    assert course.profile.avg_grade_pct is None
+
+
+def test_parse_tcx_course_prefers_trackpoint_distance_over_the_lap_total(
+    tmp_path: Path,
+) -> None:
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Lap><DistanceMeters>99999</DistanceMeters></Lap>
+      <Track>
+        <Trackpoint><AltitudeMeters>100</AltitudeMeters><DistanceMeters>0</DistanceMeters></Trackpoint>
+        <Trackpoint><AltitudeMeters>150</AltitudeMeters><DistanceMeters>1000</DistanceMeters></Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 1000.0
