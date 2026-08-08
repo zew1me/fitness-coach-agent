@@ -339,7 +339,9 @@ def test_thinning_does_not_change_a_densely_sampled_grade() -> None:
     profile = summarize_course(dense)
     elapsed = time.perf_counter() - started
 
-    assert elapsed < 5.0
+    # The bound has to sit below the 3.2s the unthinned scan took here, or the test
+    # cannot fail on the regression it exists to catch. Thinned, this is milliseconds.
+    assert elapsed < 1.0
     assert profile.max_grade_pct == 10.0
 
 
