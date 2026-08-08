@@ -3,9 +3,11 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 import botocore.exceptions
+import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient, HTTPError
@@ -1316,7 +1318,7 @@ def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) 
     )
     monkeypatch.setattr(api_index, "_parse_uploaded_activity_file", lambda *_args: parsed)
 
-    activity = api_index._build_uploaded_activity(
+    activity = api_index._build_uploaded_activity_or_course(
         user_id="athlete-1",
         filename="ride.fit",
         content_type="application/vnd.garmin.fit",
@@ -1325,6 +1327,7 @@ def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) 
         file_bytes=b"fit bytes",
     )
 
+    assert isinstance(activity, Activity)
     assert activity.raw_extraction is not None
     assert activity.raw_extraction["utc_offset_seconds"] == -25200
     assert activity.raw_extraction["activity_date_source"] == "fit_local_timestamp"
@@ -4757,3 +4760,309 @@ async def test_process_uploaded_zip_returns_404_on_no_such_key(
     # the rest of the turn once one has run, so a retry is unfollowable and
     # strands the model until maxTurns throws (Sentry 7633993901).
     assert "Do not retry" in detail
+
+
+# --- Course uploads ------------------------------------------------------------
+#
+# A course is a route the athlete plans to ride or run. It must never reach the
+# training log as a completed activity — see backend/services/course.py.
+
+_SAMPLE_COURSE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><type>cycling</type><name>Schotterfest Long</name><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.01"><ele>160</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.02"><ele>140</ele></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+
+class _CourseRepository(EngineRepository):
+    """EngineRepository plus a body weight, so cycling analysis can actually run.
+
+    Also records every create_activity call, because "no activity was written" is
+    the assertion this whole change exists for and it must be checked directly
+    rather than inferred from the response body.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.created: list[Activity] = []
+
+    async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+        profile = await super().get_athlete_profile(user_id)
+        return profile.model_copy(update={"weight_kg": 72.0})
+
+    async def create_activity(self, activity: Activity) -> Activity:
+        self.created.append(activity)
+        return activity.model_copy(update={"id": "activity-1"})
+
+
+_ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS = {
+    ".gpx": "application/gpx+xml",
+    ".fit": "application/vnd.garmin.fit",
+    ".tcx": "application/vnd.garmin.tcx+xml",
+}
+
+
+async def _post_uploaded_zip_archive(
+    monkeypatch, zip_bytes: bytes, repo: _CourseRepository | None = None
+) -> tuple[dict[str, Any], _CourseRepository]:
+    """POST one archive to process-uploaded-zip and hand back the body and the repo."""
+    repo = repo if repo is not None else _CourseRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return zip_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    return response.json(), repo
+
+
+async def _post_uploaded_file(
+    monkeypatch,
+    file_bytes: bytes,
+    filename: str = "course.gpx",
+    repo: _CourseRepository | None = None,
+    public_url: str | None = None,
+    content_type: str | None = None,
+) -> tuple[dict[str, Any], _CourseRepository]:
+    """POST one file to process-uploaded-file and hand back the body and the repo.
+
+    Used for recordings as well as courses — the point is that the caller asserts on
+    what the repository recorded, so the helper must not presuppose either outcome.
+    """
+    repo = repo if repo is not None else _CourseRepository()
+    # Derived rather than hardcoded: passing a .fit through with a GPX content type
+    # would fail in a way that looks like a parser bug rather than a test bug.
+    content_type = (
+        content_type or _ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS[Path(filename).suffix.lower()]
+    )
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return file_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": content_type,
+                    "filename": filename,
+                    "object_key": f"users/athlete-1/chat-attachment/2024/01/01/{filename}",
+                    "public_url": public_url,
+                },
+            )
+    finally:
+        restore_override()
+    assert response.status_code == 200
+    return response.json(), repo
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_never_writes_an_activity(monkeypatch) -> None:
+    body, repo = await _post_uploaded_file(monkeypatch, _SAMPLE_COURSE_GPX)
+
+    # The load-bearing assertion of this entire change.
+    assert repo.created == []
+    assert "activity" not in body
+    assert body["kind"] == "course"
+    assert body["status"] == "analyzed"
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_returns_terrain_and_analysis(monkeypatch) -> None:
+    body, _ = await _post_uploaded_file(monkeypatch, _SAMPLE_COURSE_GPX)
+
+    course = body["course"]
+    assert course["sport"] == "cycling"
+    assert course["name"] == "Schotterfest Long"
+    assert course["distance_meters"] > 0
+    assert course["elevation_gain_meters"] == 60.0
+    assert course["source_file_key"].endswith("course.gpx")
+
+    # EngineRepository has a cycling FTP and _CourseRepository adds a weight, so
+    # the cycling model runs end to end.
+    assert body["analysis_unavailable_reason"] is None
+    assert body["analysis"]["primary_training_emphasis"] == "climbing_power"
+    assert body["analysis"]["vam_target"] > 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_degrades_when_thresholds_are_missing(
+    monkeypatch,
+) -> None:
+    # Losing the whole upload because an athlete has not given us an FTP would be a
+    # worse answer than terrain plus an explanation.
+    class _NoThresholdRepository(_CourseRepository):
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            return []
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_NoThresholdRepository()
+    )
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert body["analysis"] is None
+    assert "FTP" in body["analysis_unavailable_reason"]
+    # Terrain survives even when the model doesn't.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_analyzes_a_course_member_without_saving_it(
+    monkeypatch,
+) -> None:
+    body, repo = await _post_uploaded_zip_archive(
+        monkeypatch, _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
+    )
+    processed = body["processed"]
+    kinds = sorted(entry["kind"] for entry in processed)
+    assert kinds == ["activity", "course"]
+    # The recorded run is saved; the course is not.
+    assert len(repo.created) == 1
+    assert repo.created[0].source == "gpx_upload"
+
+    # The archive path must carry the same analysis as a single-file upload, not
+    # just the discriminator — a course entry stripped of its terrain would satisfy
+    # the kind assertion above while telling the coach nothing.
+    course_entry = next(entry for entry in processed if entry["kind"] == "course")
+    assert course_entry["course"]["sport"] == "cycling"
+    assert course_entry["course"]["elevation_gain_meters"] == 60.0
+    assert course_entry["analysis"]["primary_training_emphasis"] == "climbing_power"
+
+
+@pytest.mark.asyncio
+async def test_saved_activity_response_carries_the_activity_kind_discriminator(
+    monkeypatch,
+) -> None:
+    # Pairs with kind: "course". Additive, so nothing that reads "activity" or
+    # "status" today has to change.
+    body, repo = await _post_uploaded_file(monkeypatch, _SAMPLE_GPX, filename="run.gpx")
+
+    assert body["kind"] == "activity"
+    assert body["status"] == "saved"
+    assert len(repo.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_admits_a_lookup_failure_instead_of_blaming_the_athlete(
+    monkeypatch,
+) -> None:
+    # During an outage both fetches come back empty. Telling the athlete to supply an
+    # FTP they already gave us, on every upload, would be a falsehood.
+    class _BrokenRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise httpx.ConnectError("supabase unreachable")
+
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            raise httpx.ConnectError("supabase unreachable")
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_BrokenRepository()
+    )
+    # The invariant has to hold on the degraded path too — an outage must not become
+    # a route in the training log.
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert "FTP" not in body["analysis_unavailable_reason"]
+    assert "couldn't be read" in body["analysis_unavailable_reason"]
+    # Terrain is unaffected by the outage.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_survives_an_athlete_with_no_profile_row(
+    monkeypatch,
+) -> None:
+    # get_athlete_profile raises RecordNotFoundError rather than returning None, and
+    # RecordNotFoundError is a LookupError caught by no DB-fault class and no
+    # registered exception handler. Sharing one try with the threshold fetch turned a
+    # brand-new athlete's first course upload into a 500 — losing the upload the
+    # degradation path exists to protect, for exactly the people most likely to be
+    # uploading a goal event's course file.
+    class _NoProfileRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_NoProfileRepository()
+    )
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert body["course"]["elevation_gain_meters"] == 60.0
+    # No profile means no body weight, so the cycling model can't run — but that is
+    # reported, not raised.
+    assert "body weight" in body["analysis_unavailable_reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_degrades_when_the_database_is_unavailable(
+    monkeypatch,
+) -> None:
+    # The catch in _athlete_context_for_course deliberately departs from the
+    # AGENTS.md rule that PostgRESTAPIError reaches the centralized handler. Without
+    # a test, a future narrowing of that except tuple turns a transient DB blip into
+    # a 5xx that loses the athlete's upload.
+    class _BrokenRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
+
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_BrokenRepository()
+    )
+    assert repo.created == []
+    # Terrain is unaffected by the outage.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+    # And the athlete is not told to re-enter an FTP they already gave us.
+    reason = body["analysis_unavailable_reason"]
+    assert "couldn't be read" in reason
+    assert "FTP" not in reason
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_survives_a_course_member_that_cannot_be_analyzed(
+    monkeypatch,
+) -> None:
+    # The course branch's broad catch decides whether one unanalyzable route kills a
+    # 20-member archive. _athlete_context_for_course only absorbs DB faults, so
+    # anything else — a pydantic ValidationError on a malformed sport_thresholds row,
+    # say — lands here instead of in the degrade path. The sibling activity must
+    # still be processed and the failure counted as a skip, not a 500.
+    def explode(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise ValueError("malformed threshold row")
+
+    monkeypatch.setattr(api_index, "build_course_payload", explode)
+
+    body, repo = await _post_uploaded_zip_archive(
+        monkeypatch, _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
+    )
+
+    # The recorded run survives; the course is skipped rather than saved.
+    assert [entry["kind"] for entry in body["processed"]] == ["activity"]
+    assert body["skipped_count"] == 1
+    assert len(repo.created) == 1

@@ -948,6 +948,33 @@ describe("coachToolDefinitions", () => {
     expect(description).toContain("no_processable_files");
   });
 
+  it("tells the coach that a course result was not saved", () => {
+    // The backend refuses to log a course, but the model still has to describe it
+    // honestly — reporting a planned route as a completed workout is the failure
+    // this wording exists to prevent.
+    const description = coachToolDefinitions.process_uploaded_file.description;
+
+    expect(description).toContain("Check the 'kind' field on every result");
+    expect(description).toContain(
+      "'activity' is a workout the athlete completed and it has been saved",
+    );
+    expect(description).toContain("'course' is a route they plan to do");
+    expect(description).toContain("nothing was written");
+    expect(description).toContain(
+      "treating it as completed would credit them with a workout they have not done",
+    );
+
+    // The archive contract too: the coach has to know which zip entries were saved,
+    // which were only analyzed, and what an empty result means — otherwise it either
+    // re-saves activities the server already wrote or reports an empty archive as a
+    // failure.
+    expect(description).toContain("status 'saved'");
+    expect(description).toContain("status 'analyzed'");
+    expect(description).toContain("no_processable_files");
+    expect(description).toContain("empty processed list");
+    expect(description).toContain("do not re-save these activities yourself");
+  });
+
   it.each([
     ["application/zip", "garmin-export.zip"],
     ["application/x-zip-compressed", "garmin-export.zip"],
