@@ -68,9 +68,21 @@ def analyze_course(
     Returns ``(analysis, reason)`` with exactly one of them set.
     """
     elevation_gain = course.profile.elevation_gain_meters
-    # `analyze_*_climb` inverts avg grade to recover climbing distance and guards
-    # against a non-positive value, so 0.0 is a safe stand-in for "unknown". The
-    # payload still reports the real `None` — this substitution never escapes.
+
+    # An unknown grade is missing data, not a zero. Substituting 0.0 looks harmless
+    # because `analyze_cycling_climb` guards its climb-distance division, but the
+    # guard is what does the damage: at zero grade it treats the whole route as flat
+    # and adds a full 30 km/h transit *on top of* the climb time. A 30 km course with
+    # 1200 m of vertical came back at 2.14 h instead of 1.64 h, with
+    # `analysis_unavailable_reason: None` presenting it as authoritative.
+    # `analyze_running_climb` has no guard at all — it would price 1200 m of climbing
+    # at flat threshold pace.
+    if course.profile.avg_grade_pct is None and elevation_gain > 0:
+        return None, (
+            "This file has distance and vertical but no usable elevation stream, so "
+            "the average grade is unknown and any pacing estimate would be wrong. "
+            "The terrain totals are still accurate — use those."
+        )
     avg_grade = course.profile.avg_grade_pct or 0.0
 
     if course.sport == "cycling":

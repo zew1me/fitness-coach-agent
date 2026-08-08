@@ -158,9 +158,11 @@ def test_unknown_sport_with_modest_vertical_asks_which_sport_it_is() -> None:
     assert "which sport" in reason
 
 
-def test_absent_grades_do_not_break_analysis() -> None:
-    # A FIT course with lap totals but no record stream. Unknown grade must not
-    # crash the model, and must not be reported as a confident 0.0 either.
+def test_unknown_grade_on_a_hilly_course_refuses_to_estimate() -> None:
+    # A FIT course with lap totals but no record stream. Passing 0.0 for the unknown
+    # grade does not fail loudly — it makes analyze_cycling_climb treat the whole
+    # route as flat and bill a full 30 km/h transit on top of the climb, which
+    # inflated a 1.64 h estimate to 2.14 h while reporting no reason at all.
     course = _course("cycling", avg_grade_pct=None, max_grade_pct=None)
 
     analysis, reason = analyze_course(
@@ -169,12 +171,35 @@ def test_absent_grades_do_not_break_analysis() -> None:
         thresholds=[_threshold("cycling", lt2_power_watts=260)],
     )
 
-    assert reason is None
-    assert analysis is not None
+    assert analysis is None
+    assert reason is not None
+    assert "grade is unknown" in reason
 
     payload = build_course_payload(course, profile=_profile(), thresholds=[])
+    # Terrain is still reported, and the unknown grade stays honestly unknown.
     assert payload["course"]["avg_grade_pct"] is None
     assert payload["course"]["max_grade_pct"] is None
+    assert payload["course"]["elevation_gain_meters"] == pytest.approx(2308.6)
+
+
+def test_unknown_grade_on_a_flat_course_still_analyzes() -> None:
+    # No vertical means no climb to mis-price, so an absent grade costs nothing.
+    course = _course(
+        "running",
+        distance_meters=10_000.0,
+        elevation_gain_meters=0.0,
+        avg_grade_pct=None,
+        max_grade_pct=None,
+    )
+
+    analysis, reason = analyze_course(
+        course,
+        profile=_profile(),
+        thresholds=[_threshold("running", lt2_pace_sec_per_km=255)],
+    )
+
+    assert reason is None
+    assert analysis is not None
 
 
 def test_threshold_lookup_skips_rows_missing_the_field_we_need() -> None:
