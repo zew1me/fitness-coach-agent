@@ -1655,7 +1655,7 @@ async def _build_course_response(
     logger.info("course analyzed user_id=%s sport=%s", user_id, course.sport)
     return build_course_payload(
         course,
-        athlete,
+        athlete=athlete,
         source_file_key=object_key,
         public_url=public_url,
     )

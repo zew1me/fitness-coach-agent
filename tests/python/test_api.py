@@ -4948,51 +4948,6 @@ async def test_saved_activity_response_carries_the_activity_kind_discriminator(
 
 
 @pytest.mark.asyncio
-async def test_process_uploaded_course_survives_an_athlete_with_no_profile_row(
-    monkeypatch,
-) -> None:
-    # get_athlete_profile raises RecordNotFoundError — a LookupError caught by none
-    # of the DB fault classes and by no registered exception handler — so sharing one
-    # try with the threshold fetch let it escape as a 500 and lose the upload. New
-    # athletes are exactly who uploads a goal event's course file.
-    class _NoProfileRepository(_CourseRepository):
-        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-            raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
-
-    repo = _NoProfileRepository()
-    monkeypatch.setattr(api_index, "repo", repo)
-
-    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        return _SAMPLE_COURSE_GPX
-
-    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
-    restore_override = _override_require_user_context(_ZIP_TEST_USER)
-    try:
-        transport = ASGITransport(app=api_index.app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post(
-                "/api/engine/process-uploaded-file",
-                json={
-                    "content_type": "application/gpx+xml",
-                    "filename": "course.gpx",
-                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
-                    "public_url": None,
-                },
-            )
-    finally:
-        restore_override()
-
-    assert response.status_code == 200
-    body = response.json()
-    assert repo.created == []
-    assert body["kind"] == "course"
-    assert body["course"]["elevation_gain_meters"] == 60.0
-    # No profile means no weight, so the estimate is unavailable — but it is the
-    # missing-data message, not the lookup-failure one, because absence is normal.
-    assert "body weight" in body["analysis_unavailable_reason"]
-
-
-@pytest.mark.asyncio
 async def test_process_uploaded_course_admits_a_lookup_failure_instead_of_blaming_the_athlete(
     monkeypatch,
 ) -> None:
@@ -5035,3 +4990,99 @@ async def test_process_uploaded_course_admits_a_lookup_failure_instead_of_blamin
     assert "couldn't be read" in body["analysis_unavailable_reason"]
     # Terrain is unaffected by the outage.
     assert body["course"]["elevation_gain_meters"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_survives_an_athlete_with_no_profile_row(
+    monkeypatch,
+) -> None:
+    # get_athlete_profile raises RecordNotFoundError rather than returning None, and
+    # RecordNotFoundError is a LookupError caught by no DB-fault class and no
+    # registered exception handler. Sharing one try with the threshold fetch turned a
+    # brand-new athlete's first course upload into a 500 — losing the upload the
+    # degradation path exists to protect, for exactly the people most likely to be
+    # uploading a goal event's course file.
+    class _NoProfileRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
+
+    repo = _NoProfileRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _SAMPLE_COURSE_GPX
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": "application/gpx+xml",
+                    "filename": "course.gpx",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
+                    "public_url": None,
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert body["course"]["elevation_gain_meters"] == 60.0
+    # No profile means no body weight, so the cycling model can't run — but that is
+    # reported, not raised.
+    assert "body weight" in body["analysis_unavailable_reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_degrades_when_the_database_is_unavailable(
+    monkeypatch,
+) -> None:
+    # The catch in _athlete_context_for_course deliberately departs from the
+    # AGENTS.md rule that PostgRESTAPIError reaches the centralized handler. Without
+    # a test, a future narrowing of that except tuple turns a transient DB blip into
+    # a 5xx that loses the athlete's upload.
+    class _BrokenRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
+
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
+
+    repo = _BrokenRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _SAMPLE_COURSE_GPX
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": "application/gpx+xml",
+                    "filename": "course.gpx",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
+                    "public_url": None,
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert repo.created == []
+    # Terrain is unaffected by the outage.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+    # And the athlete is not told to re-enter an FTP they already gave us.
+    reason = body["analysis_unavailable_reason"]
+    assert "couldn't be read" in reason
+    assert "FTP" not in reason

@@ -42,8 +42,8 @@ class AthleteCourseContext:
 
 def build_course_payload(
     course: ParsedCourse,
-    context: AthleteCourseContext,
     *,
+    athlete: AthleteCourseContext,
     source_file_key: str | None = None,
     public_url: str | None = None,
 ) -> dict[str, Any]:
@@ -52,7 +52,7 @@ def build_course_payload(
     ``kind`` is the discriminator the coach reads to know nothing was logged. It
     matches the shape already used for activity entries in the zip response.
     """
-    analysis, unavailable_reason = analyze_course(course, athlete=context)
+    analysis, unavailable_reason = analyze_course(course, athlete=athlete)
 
     return {
         "kind": "course",
@@ -111,9 +111,18 @@ def analyze_course(
     avg_grade = course.profile.avg_grade_pct or 0.0
 
     if course.sport == "cycling":
+        # The cycling model inverts avg grade to recover climbing distance, so it
+        # wants the grade of the ascending portions — exactly what CourseProfile
+        # reports.
         return _analyze_cycling(course, athlete, avg_grade)
     if course.sport == "running":
-        return _analyze_running(course, athlete, avg_grade)
+        # The running model uses grade the other way round: it adds a GAP penalty of
+        # roughly 12 s/km per 1% across the *whole* distance. Handing it the
+        # ascending-portions grade penalises the flat and descending kilometres as
+        # well — on a 40 km course with 1000 m of gain that is +60 s/km applied to
+        # all 40 km instead of +30, some twenty minutes of invented finish time. Give
+        # it the grade averaged over the whole route instead.
+        return _analyze_running(course, athlete, _overall_grade_pct(course))
     if course.sport == "hiking" or elevation_gain > HIGH_ALTITUDE_GAIN_METERS:
         # Big vertical is worth advising on whatever the file called itself, and
         # this analyzer needs nothing from the athlete.
@@ -161,7 +170,7 @@ def _analyze_cycling(
 def _analyze_running(
     course: ParsedCourse,
     athlete: AthleteCourseContext,
-    avg_grade: float,
+    overall_grade: float,
 ) -> tuple[CourseAnalysis | None, str | None]:
     lt2_pace = _threshold_for(athlete.thresholds, "running", "lt2_pace_sec_per_km")
     if lt2_pace is None:
@@ -176,11 +185,32 @@ def _analyze_running(
         analyze_running_climb(
             distance_meters=course.profile.distance_meters,
             elevation_gain_meters=course.profile.elevation_gain_meters,
-            avg_grade_pct=avg_grade,
+            avg_grade_pct=overall_grade,
             lt2_pace_sec_km=lt2_pace,
         ),
         None,
     )
+
+
+def _overall_grade_pct(course: ParsedCourse) -> float:
+    """Total ascent as a percentage of total distance, for whole-route grade models."""
+    if course.profile.distance_meters <= 0:
+        return 0.0
+    return course.profile.elevation_gain_meters / course.profile.distance_meters * 100
+
+
+def _overall_grade_pct(course: ParsedCourse) -> float:
+    """Elevation gain as a percentage of the *whole* route distance.
+
+    Distinct from ``CourseProfile.avg_grade_pct``, which averages over the ascending
+    portions only. Which one a model wants depends on how it spends the number:
+    ``analyze_cycling_climb`` inverts it to recover climbing distance and needs the
+    ascending figure, while ``analyze_running_climb`` multiplies a per-kilometre
+    penalty across the entire route and needs this one.
+    """
+    if course.profile.distance_meters <= 0:
+        return 0.0
+    return course.profile.elevation_gain_meters / course.profile.distance_meters * 100
 
 
 def _threshold_for(thresholds: list[SportThreshold], sport: str, attribute: str) -> int | None:
