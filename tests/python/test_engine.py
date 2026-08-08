@@ -810,8 +810,12 @@ def test_parse_tcx_course_prefers_trackpoint_distance_over_the_lap_total(
     <Course>
       <Lap><DistanceMeters>99999</DistanceMeters></Lap>
       <Track>
-        <Trackpoint><AltitudeMeters>100</AltitudeMeters><DistanceMeters>0</DistanceMeters></Trackpoint>
-        <Trackpoint><AltitudeMeters>150</AltitudeMeters><DistanceMeters>1000</DistanceMeters></Trackpoint>
+        <Trackpoint>
+          <AltitudeMeters>100</AltitudeMeters><DistanceMeters>0</DistanceMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <AltitudeMeters>150</AltitudeMeters><DistanceMeters>1000</DistanceMeters>
+        </Trackpoint>
       </Track>
     </Course>
   </Courses>
@@ -823,3 +827,24 @@ def test_parse_tcx_course_prefers_trackpoint_distance_over_the_lap_total(
 
     assert isinstance(course, ParsedCourse)
     assert course.profile.distance_meters == 1000.0
+
+
+def test_parse_gpx_out_of_order_timestamps_are_a_course_not_a_negative_activity(
+    tmp_path: Path,
+) -> None:
+    # A file whose last point predates its first yields a negative elapsed span.
+    # Negative is truthy, so it was classified as a recording and reached
+    # ParsedActivity with duration_seconds = -300 — and a negative pace reads as
+    # faster than the cycling cutoff, so it was labelled a ride too.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:05:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "general"

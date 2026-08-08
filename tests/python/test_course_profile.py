@@ -331,8 +331,8 @@ def test_non_finite_values_in_the_point_stream_never_reach_the_profile() -> None
 
 def test_thinning_does_not_change_a_densely_sampled_grade() -> None:
     # 15 000 samples inside 150 m never reach the distance ceiling, so the scan used
-    # to walk the whole tail for every origin — 3.2s. Thinning to 5 m spacing bounds
-    # it without moving the answer.
+    # to walk the whole tail for every origin — 3.2s. Thinning to GRADE_SCAN_MIN_SPACING_METERS
+    # (1 m, below GPS precision) bounds it without moving the answer.
     dense = [CoursePoint(index * 0.01, 100.0 + index * 0.001) for index in range(15_000)]
 
     started = time.perf_counter()
