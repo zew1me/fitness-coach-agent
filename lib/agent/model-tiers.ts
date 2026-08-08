@@ -372,7 +372,10 @@ export function getRetryAfterMs(error: unknown): number | undefined {
     const seconds = Number(value);
     if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
     const date = Date.parse(value);
-    return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+    if (!Number.isNaN(date)) {
+      return Math.max(0, date - Date.now());
+    }
+    continue;
   }
   return undefined;
 }
