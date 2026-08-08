@@ -361,8 +361,8 @@ describe("DurableCompactionSession", () => {
   });
 
   it("uses the TPM-safe default token threshold for user-only history", async () => {
-    const belowThreshold = [userItem("x".repeat(119_000))];
-    const aboveThreshold = [userItem("x".repeat(120_000))];
+    const belowThreshold = [userItem("x".repeat(239_000))];
+    const aboveThreshold = [userItem("x".repeat(240_000))];
     expect(estimateStoredContext(belowThreshold).estimatedTokens).toBeLessThan(
       DEFAULT_AUTO_COMPACT_TOKENS,
     );
