@@ -218,9 +218,14 @@ def _extract_gpx_summary(gpx: Any) -> _GpxSummary:
     # route, and walking only <trk> reported those as zero distance and zero
     # vertical. Fall back rather than add: a Garmin course can carry a track *and* a
     # redundant route, and summing both would double every number.
+    # Decide once, before the loop. Re-reading `point_count` inside it made the first
+    # route disable every route after it, so a course split across several <rte>
+    # elements — which is how RideWithGPS and Garmin often export one — reported only
+    # its first leg.
+    has_track_points = summary.point_count > 0
     for route in gpx.routes:
         _absorb_gpx_container_metadata(summary, route)
-        if summary.point_count == 0:
+        if not has_track_points:
             _accumulate_gpx_segment(summary, route.points)
 
     return summary

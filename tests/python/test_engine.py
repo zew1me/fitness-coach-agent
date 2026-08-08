@@ -499,3 +499,52 @@ def test_parse_tcx_without_activity_or_course_still_raises(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="does not contain an Activity"):
         parse_tcx(tcx_file)
+
+
+def test_parse_gpx_route_only_file_sums_every_route(tmp_path: Path) -> None:
+    # RideWithGPS and Garmin often split one course across several <rte> elements.
+    # Re-checking the point counter inside the loop let the first route disable all
+    # the rest, so a two-leg course reported only its first leg — the same class of
+    # underestimate this change exists to fix.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <rte>
+    <rtept lat="37.0" lon="-122.0"><ele>100</ele></rtept>
+    <rtept lat="37.0" lon="-122.01"><ele>150</ele></rtept>
+  </rte>
+  <rte>
+    <rtept lat="37.0" lon="-122.02"><ele>150</ele></rtept>
+    <rtept lat="37.0" lon="-122.03"><ele>230</ele></rtept>
+  </rte>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    # Each leg spans 0.01 degrees of longitude at latitude 37: 111_320 * cos(37) *
+    # 0.01 is about 889 m, so both legs together are about 1778 m. The gap between
+    # legs is deliberately not counted, matching how multi-segment tracks behave.
+    assert course.profile.distance_meters == pytest.approx(1778.0, abs=20.0)
+    assert course.profile.elevation_gain_meters == 130.0
+
+
+def test_parse_gpx_multi_segment_track_sums_every_segment(tmp_path: Path) -> None:
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk>
+    <trkseg>
+      <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+      <trkpt lat="37.0" lon="-122.01"><ele>150</ele></trkpt>
+    </trkseg>
+    <trkseg>
+      <trkpt lat="37.0" lon="-122.02"><ele>150</ele></trkpt>
+      <trkpt lat="37.0" lon="-122.03"><ele>230</ele></trkpt>
+    </trkseg>
+  </trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == pytest.approx(1778.0, abs=20.0)
+    assert course.profile.elevation_gain_meters == 130.0
