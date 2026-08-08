@@ -3,6 +3,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 import botocore.exceptions
@@ -4797,12 +4798,51 @@ class _CourseRepository(EngineRepository):
         return activity.model_copy(update={"id": "activity-1"})
 
 
+_ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS = {
+    ".gpx": "application/gpx+xml",
+    ".fit": "application/vnd.garmin.fit",
+    ".tcx": "application/vnd.garmin.tcx+xml",
+}
+
+
+async def _post_uploaded_zip_archive(
+    monkeypatch, zip_bytes: bytes, repo: _CourseRepository | None = None
+) -> tuple[dict[str, Any], _CourseRepository]:
+    """POST one archive to process-uploaded-zip and hand back the body and the repo."""
+    repo = repo if repo is not None else _CourseRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return zip_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    return response.json(), repo
+
+
 async def _post_uploaded_file(
     monkeypatch,
     file_bytes: bytes,
     filename: str = "course.gpx",
     repo: _CourseRepository | None = None,
     public_url: str | None = None,
+    content_type: str | None = None,
 ) -> tuple[dict[str, Any], _CourseRepository]:
     """POST one file to process-uploaded-file and hand back the body and the repo.
 
@@ -4810,6 +4850,11 @@ async def _post_uploaded_file(
     what the repository recorded, so the helper must not presuppose either outcome.
     """
     repo = repo if repo is not None else _CourseRepository()
+    # Derived rather than hardcoded: passing a .fit through with a GPX content type
+    # would fail in a way that looks like a parser bug rather than a test bug.
+    content_type = (
+        content_type or _ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS[Path(filename).suffix.lower()]
+    )
     monkeypatch.setattr(api_index, "repo", repo)
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
@@ -4823,7 +4868,7 @@ async def _post_uploaded_file(
             response = await client.post(
                 "/api/engine/process-uploaded-file",
                 json={
-                    "content_type": "application/gpx+xml",
+                    "content_type": content_type,
                     "filename": filename,
                     "object_key": f"users/athlete-1/chat-attachment/2024/01/01/{filename}",
                     "public_url": public_url,
@@ -4889,32 +4934,10 @@ async def test_process_uploaded_course_degrades_when_thresholds_are_missing(
 async def test_process_uploaded_zip_analyzes_a_course_member_without_saving_it(
     monkeypatch,
 ) -> None:
-    repo = _CourseRepository()
-    monkeypatch.setattr(api_index, "repo", repo)
-    zip_bytes = _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
-
-    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        return zip_bytes
-
-    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
-    restore_override = _override_require_user_context(_ZIP_TEST_USER)
-    try:
-        transport = ASGITransport(app=api_index.app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post(
-                "/api/engine/process-uploaded-zip",
-                json={
-                    "content_type": "application/zip",
-                    "filename": "export.zip",
-                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
-                    "public_url": "https://cdn.example.com/export.zip",
-                },
-            )
-    finally:
-        restore_override()
-
-    assert response.status_code == 200
-    processed = response.json()["processed"]
+    body, repo = await _post_uploaded_zip_archive(
+        monkeypatch, _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
+    )
+    processed = body["processed"]
     kinds = sorted(entry["kind"] for entry in processed)
     assert kinds == ["activity", "course"]
     # The recorded run is saved; the course is not.
