@@ -263,11 +263,18 @@ pace — and returned with `kind: "course"`, **writing nothing**. Saved activiti
 `kind: "activity"`. Missing athlete data degrades to terrain plus
 `analysis_unavailable_reason`; it never fails the upload.
 
-Sport comes from the file's declared type (`<type>`, FIT `course.sport`) via
-`_canonical_sport`, then pace inference for real recordings, then `"general"`. Never
-reintroduce a hardcoded sport fallback: pace inference needs time, so guessing `"running"`
-for a course labelled every uploaded ride a run, and sport is a hard equality gate in
-`match_activities_to_workouts` (`backend/services/compliance.py`).
+Sport resolves in three steps: the file's declared type (`<type>`, FIT `course.sport`)
+via `_canonical_sport`, then pace inference, then `"general"`. A declared type wins over
+pace inference for recordings too — pace misreads a stop-heavy ride as a run, and the
+file simply says which it is.
+
+**Never reintroduce a hardcoded sport fallback.** Pace inference needs elapsed time,
+which a course has none of, so the old `"running"` default labelled every uploaded ride
+a run. That is not cosmetic: sport is a hard equality gate in
+`match_activities_to_workouts` (`backend/services/compliance.py`), so a wrong label makes
+an activity silently fail to match its planned workout — and potentially match someone
+else's. `"general"` is the honest answer when the file does not say, and the coach is
+instructed to ask.
 
 ### Unsupported file attachments → text (do not send to the model as `input_file`)
 

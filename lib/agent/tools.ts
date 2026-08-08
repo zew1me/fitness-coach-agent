@@ -314,8 +314,9 @@ export const coachToolDefinitions = {
   ),
   process_uploaded_file: defineTool(
     "Process GPX, FIT, TCX, screenshot, or .zip uploads through the engine. A .zip is " +
-      "unpacked server-side: contained activity files are saved to the training log " +
-      "(each processed entry has status 'saved'), images are analyzed, and everything " +
+      "unpacked server-side: contained recordings are saved to the training log " +
+      "(those entries have status 'saved'), courses are analyzed but not saved " +
+      "(status 'analyzed'), images are analyzed, and everything " +
       "else is discarded — do not re-save these activities yourself. A result with " +
       "status 'no_processable_files' (or an empty processed list) means the archive held " +
       "nothing usable — tell the athlete there was nothing for you in the zip. " +
