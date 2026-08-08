@@ -6,6 +6,8 @@ independent of the implementation rather than a snapshot of it.
 
 from __future__ import annotations
 
+import time
+
 from backend.engine.course_profile import (
     MAX_GRADE_WINDOW_METERS,
     MIN_GRADE_WINDOW_METERS,
@@ -181,3 +183,30 @@ def test_supplied_totals_without_any_points_omit_grades() -> None:
     assert profile.elevation_gain_meters == 2308.6
     assert profile.avg_grade_pct is None
     assert profile.max_grade_pct is None
+
+
+def test_duplicate_location_points_do_not_make_the_grade_scan_quadratic() -> None:
+    # A duplicated or paused export puts thousands of points at one location. Every
+    # span is zero, so a scan that walks the remaining tail looking for a window at
+    # or above the minimum does it once per origin. At 50k points that was tens of
+    # seconds; the monotonic window pointer makes it linear. The ceiling here is
+    # deliberately loose — it is a guard against reintroducing quadratic behaviour,
+    # not a benchmark.
+    points = [CoursePoint(0.0, 100.0) for _ in range(50_000)]
+
+    started = time.perf_counter()
+    profile = summarize_course(points)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 5.0
+    # No window ever reaches the minimum, so there is no grade to report.
+    assert profile.max_grade_pct is None
+
+
+def test_dense_sampling_finds_the_same_grade_as_sparse_sampling() -> None:
+    # The window pointer must not skip candidates. A 10% climb sampled every metre
+    # has to report the same 10% as one sampled every 100 m.
+    dense = _points(*((float(d), d * 0.1) for d in range(0, 501)))
+    sparse = _points(*((float(d), d * 0.1) for d in range(0, 501, 100)))
+
+    assert summarize_course(dense).max_grade_pct == summarize_course(sparse).max_grade_pct == 10.0

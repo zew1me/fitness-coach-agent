@@ -7,7 +7,12 @@ import pytest
 from backend.engine.course_profile import CourseProfile
 from backend.engine.gpx_parser import ParsedCourse
 from backend.models.athlete import AthleteProfile, SportThreshold
-from backend.services.course import analyze_course, build_course_payload
+from backend.services.course import (
+    LOOKUP_FAILED_REASON,
+    AthleteCourseContext,
+    analyze_course,
+    build_course_payload,
+)
 
 
 def _course(
@@ -51,11 +56,25 @@ def _profile(weight_kg: float | None = 72.0) -> AthleteProfile:
     return AthleteProfile(user_id="athlete-1", weight_kg=weight_kg)
 
 
+def _athlete(
+    *,
+    profile: AthleteProfile | None = None,
+    thresholds: list[SportThreshold] | None = None,
+    lookup_failed: bool = False,
+) -> AthleteCourseContext:
+    return AthleteCourseContext(
+        profile=profile,
+        thresholds=thresholds or [],
+        lookup_failed=lookup_failed,
+    )
+
+
 def test_cycling_course_with_ftp_and_weight_gets_a_vam_target() -> None:
     analysis, reason = analyze_course(
         _course("cycling"),
-        profile=_profile(),
-        thresholds=[_threshold("cycling", lt2_power_watts=260)],
+        athlete=_athlete(
+            profile=_profile(), thresholds=[_threshold("cycling", lt2_power_watts=260)]
+        ),
     )
 
     assert reason is None
@@ -67,11 +86,7 @@ def test_cycling_course_with_ftp_and_weight_gets_a_vam_target() -> None:
 
 
 def test_cycling_course_without_an_ftp_explains_itself_instead_of_failing() -> None:
-    analysis, reason = analyze_course(
-        _course("cycling"),
-        profile=_profile(),
-        thresholds=[],
-    )
+    analysis, reason = analyze_course(_course("cycling"), athlete=_athlete(profile=_profile()))
 
     assert analysis is None
     assert reason is not None
@@ -81,8 +96,10 @@ def test_cycling_course_without_an_ftp_explains_itself_instead_of_failing() -> N
 def test_cycling_course_without_a_weight_explains_itself() -> None:
     analysis, reason = analyze_course(
         _course("cycling"),
-        profile=_profile(weight_kg=None),
-        thresholds=[_threshold("cycling", lt2_power_watts=260)],
+        athlete=_athlete(
+            profile=_profile(weight_kg=None),
+            thresholds=[_threshold("cycling", lt2_power_watts=260)],
+        ),
     )
 
     assert analysis is None
@@ -91,7 +108,7 @@ def test_cycling_course_without_a_weight_explains_itself() -> None:
 
 
 def test_missing_ftp_and_weight_are_named_together_in_one_ask() -> None:
-    analysis, reason = analyze_course(_course("cycling"), profile=None, thresholds=[])
+    analysis, reason = analyze_course(_course("cycling"), athlete=_athlete())
 
     assert analysis is None
     assert reason is not None
@@ -99,11 +116,23 @@ def test_missing_ftp_and_weight_are_named_together_in_one_ask() -> None:
     assert "body weight" in reason
 
 
+def test_a_new_athlete_with_no_profile_row_still_gets_terrain() -> None:
+    # get_athlete_profile raises RecordNotFoundError rather than returning None for
+    # an athlete who has not onboarded. That is the most likely person to upload a
+    # goal event's course file, and it must not cost them the upload.
+    payload = build_course_payload(_course("cycling"), _athlete(profile=None))
+
+    assert payload["kind"] == "course"
+    assert payload["course"]["elevation_gain_meters"] == pytest.approx(2308.6)
+    assert payload["analysis_unavailable_reason"] is not None
+
+
 def test_running_course_with_a_threshold_pace_gets_a_gap_estimate() -> None:
     analysis, reason = analyze_course(
         _course("running", distance_meters=21097.0, elevation_gain_meters=600.0),
-        profile=_profile(),
-        thresholds=[_threshold("running", lt2_pace_sec_per_km=255)],
+        athlete=_athlete(
+            profile=_profile(), thresholds=[_threshold("running", lt2_pace_sec_per_km=255)]
+        ),
     )
 
     assert reason is None
@@ -113,7 +142,7 @@ def test_running_course_with_a_threshold_pace_gets_a_gap_estimate() -> None:
 
 
 def test_running_course_without_a_threshold_pace_explains_itself() -> None:
-    analysis, reason = analyze_course(_course("running"), profile=_profile(), thresholds=[])
+    analysis, reason = analyze_course(_course("running"), athlete=_athlete(profile=_profile()))
 
     assert analysis is None
     assert reason is not None
@@ -124,9 +153,7 @@ def test_big_vertical_reaches_the_mountain_model_without_any_athlete_data() -> N
     # 3000 m of gain on a course whose sport we could not determine. Worth advising
     # on regardless, and this analyzer needs nothing from the athlete.
     analysis, reason = analyze_course(
-        _course("general", elevation_gain_meters=3000.0),
-        profile=None,
-        thresholds=[],
+        _course("general", elevation_gain_meters=3000.0), athlete=_athlete()
     )
 
     assert reason is None
@@ -136,9 +163,7 @@ def test_big_vertical_reaches_the_mountain_model_without_any_athlete_data() -> N
 
 def test_hiking_course_reaches_the_mountain_model_at_any_elevation() -> None:
     analysis, reason = analyze_course(
-        _course("hiking", elevation_gain_meters=800.0),
-        profile=None,
-        thresholds=[],
+        _course("hiking", elevation_gain_meters=800.0), athlete=_athlete()
     )
 
     assert reason is None
@@ -149,8 +174,9 @@ def test_hiking_course_reaches_the_mountain_model_at_any_elevation() -> None:
 def test_unknown_sport_with_modest_vertical_asks_which_sport_it_is() -> None:
     analysis, reason = analyze_course(
         _course("general", elevation_gain_meters=300.0),
-        profile=_profile(),
-        thresholds=[_threshold("cycling", lt2_power_watts=260)],
+        athlete=_athlete(
+            profile=_profile(), thresholds=[_threshold("cycling", lt2_power_watts=260)]
+        ),
     )
 
     assert analysis is None
@@ -167,15 +193,16 @@ def test_unknown_grade_on_a_hilly_course_refuses_to_estimate() -> None:
 
     analysis, reason = analyze_course(
         course,
-        profile=_profile(),
-        thresholds=[_threshold("cycling", lt2_power_watts=260)],
+        athlete=_athlete(
+            profile=_profile(), thresholds=[_threshold("cycling", lt2_power_watts=260)]
+        ),
     )
 
     assert analysis is None
     assert reason is not None
     assert "grade is unknown" in reason
 
-    payload = build_course_payload(course, profile=_profile(), thresholds=[])
+    payload = build_course_payload(course, _athlete(profile=_profile()))
     # Terrain is still reported, and the unknown grade stays honestly unknown.
     assert payload["course"]["avg_grade_pct"] is None
     assert payload["course"]["max_grade_pct"] is None
@@ -194,8 +221,44 @@ def test_unknown_grade_on_a_flat_course_still_analyzes() -> None:
 
     analysis, reason = analyze_course(
         course,
-        profile=_profile(),
-        thresholds=[_threshold("running", lt2_pace_sec_per_km=255)],
+        athlete=_athlete(
+            profile=_profile(), thresholds=[_threshold("running", lt2_pace_sec_per_km=255)]
+        ),
+    )
+
+    assert reason is None
+    assert analysis is not None
+
+
+def test_lookup_failure_does_not_blame_the_athlete_for_missing_data() -> None:
+    # A DB outage and "this athlete has no FTP" both arrive as absent values. Telling
+    # someone to re-enter a number they already gave us — on every upload, for the
+    # duration of the outage — is a fallback masking the real problem with a
+    # user-facing falsehood.
+    analysis, reason = analyze_course(_course("cycling"), athlete=_athlete(lookup_failed=True))
+
+    assert analysis is None
+    assert reason == LOOKUP_FAILED_REASON
+    assert "FTP" not in reason
+
+
+def test_lookup_failure_message_also_covers_running() -> None:
+    analysis, reason = analyze_course(_course("running"), athlete=_athlete(lookup_failed=True))
+
+    assert analysis is None
+    assert reason == LOOKUP_FAILED_REASON
+
+
+def test_lookup_failure_still_analyzes_when_the_data_did_arrive() -> None:
+    # One of the two fetches failing must not suppress an estimate the other one
+    # made possible.
+    analysis, reason = analyze_course(
+        _course("cycling"),
+        athlete=_athlete(
+            profile=_profile(),
+            thresholds=[_threshold("cycling", lt2_power_watts=260)],
+            lookup_failed=True,
+        ),
     )
 
     assert reason is None
@@ -206,11 +269,13 @@ def test_threshold_lookup_skips_rows_missing_the_field_we_need() -> None:
     # A sport can have several active rows where only some carry the value.
     analysis, reason = analyze_course(
         _course("cycling"),
-        profile=_profile(),
-        thresholds=[
-            _threshold("cycling", lt2_hr_bpm=165),
-            _threshold("cycling", lt2_power_watts=260),
-        ],
+        athlete=_athlete(
+            profile=_profile(),
+            thresholds=[
+                _threshold("cycling", lt2_hr_bpm=165),
+                _threshold("cycling", lt2_power_watts=260),
+            ],
+        ),
     )
 
     assert reason is None
@@ -220,8 +285,9 @@ def test_threshold_lookup_skips_rows_missing_the_field_we_need() -> None:
 def test_threshold_lookup_ignores_other_sports() -> None:
     analysis, reason = analyze_course(
         _course("cycling"),
-        profile=_profile(),
-        thresholds=[_threshold("running", lt2_power_watts=260)],
+        athlete=_athlete(
+            profile=_profile(), thresholds=[_threshold("running", lt2_power_watts=260)]
+        ),
     )
 
     assert analysis is None
@@ -231,8 +297,7 @@ def test_threshold_lookup_ignores_other_sports() -> None:
 def test_payload_marks_the_upload_as_a_course_and_carries_the_file_reference() -> None:
     payload = build_course_payload(
         _course("cycling"),
-        profile=_profile(),
-        thresholds=[_threshold("cycling", lt2_power_watts=260)],
+        _athlete(profile=_profile(), thresholds=[_threshold("cycling", lt2_power_watts=260)]),
         source_file_key="users/athlete-1/chat-attachment/course.gpx",
         public_url="https://files.example/course.gpx",
     )
@@ -250,7 +315,7 @@ def test_payload_marks_the_upload_as_a_course_and_carries_the_file_reference() -
 
 
 def test_payload_reports_the_reason_when_analysis_is_unavailable() -> None:
-    payload = build_course_payload(_course("cycling"), profile=None, thresholds=[])
+    payload = build_course_payload(_course("cycling"), _athlete())
 
     assert payload["kind"] == "course"
     assert payload["analysis"] is None

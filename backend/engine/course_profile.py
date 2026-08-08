@@ -155,11 +155,29 @@ def _max_windowed_grade(points: Sequence[CoursePoint]) -> float | None:
         return None
 
     steepest: float | None = None
+    # Cumulative distance never decreases, so the first candidate far enough from the
+    # origin never moves backwards as the origin advances: one monotonic pointer
+    # skips the whole sub-minimum prefix instead of re-walking it. Without that, a
+    # file whose points share a location — a duplicated or paused export — spends the
+    # entire remaining tail failing the minimum, for every origin, and the scan goes
+    # quadratic on exactly the malformed input least worth spending time on.
+    window_start = 1
     for start, origin in enumerate(elevated):
-        for candidate in elevated[start + 1 :]:
+        window_start = max(window_start, start + 1)
+        while (
+            window_start < len(elevated)
+            and elevated[window_start].cumulative_distance_meters
+            - origin.cumulative_distance_meters
+            < MIN_GRADE_WINDOW_METERS
+        ):
+            window_start += 1
+        if window_start >= len(elevated):
+            # No window reaches the minimum from here, and later origins are only
+            # further along, so none of them will either.
+            break
+
+        for candidate in elevated[window_start:]:
             span = candidate.cumulative_distance_meters - origin.cumulative_distance_meters
-            if span < MIN_GRADE_WINDOW_METERS:
-                continue
             # `elevation_meters` is non-None for every member of `elevated`; the
             # explicit reads keep the type checker honest without a cast.
             rise = (candidate.elevation_meters or 0.0) - (origin.elevation_meters or 0.0)

@@ -82,7 +82,7 @@ from backend.services.auth import (
     OAuthLoginRequiredError,
 )
 from backend.services.chat import ChatService, ChatUnavailableError
-from backend.services.course import build_course_payload
+from backend.services.course import AthleteCourseContext, build_course_payload
 from backend.services.goal_service import (
     GoalService,
     InvalidGoalPayloadError,
@@ -1651,20 +1651,23 @@ async def _build_course_response(
     plan workout to match. The coach gets the terrain and, where the athlete's
     thresholds allow it, a pacing estimate.
     """
-    profile, thresholds = await _athlete_context_for_course(user_id)
+    athlete = await _athlete_context_for_course(user_id)
     logger.info("course analyzed user_id=%s sport=%s", user_id, course.sport)
     return build_course_payload(
         course,
-        profile=profile,
-        thresholds=thresholds,
+        athlete,
         source_file_key=object_key,
         public_url=public_url,
     )
 
 
-async def _athlete_context_for_course(
-    user_id: str,
-) -> tuple[_AthleteProfile | None, list[SportThreshold]]:
+# Infrastructure faults worth degrading over rather than failing the upload. A missing
+# profile row is deliberately *not* here: absence is normal for a new athlete and is
+# handled as missing data, not as a fault.
+_COURSE_CONTEXT_FAULTS = (PostgRESTAPIError, httpx.HTTPError, RepositoryNotConfiguredError)
+
+
+async def _athlete_context_for_course(user_id: str) -> AthleteCourseContext:
     """Fetch the athlete's profile and thresholds, tolerating their absence.
 
     These only sharpen the estimate — the terrain is useful without them. A DB
@@ -1672,14 +1675,39 @@ async def _athlete_context_for_course(
     AGENTS.md, which lets ``PostgRESTAPIError`` reach the centralized handler)
     because failing the whole upload over a missing FTP would be a worse answer
     than returning distance and vertical with a note explaining the gap.
+
+    The two fetches are independent on purpose. Sharing one ``try`` meant a new
+    athlete with no ``athlete_profiles`` row never reached the threshold query at
+    all, and it also let ``RecordNotFoundError`` — a ``LookupError``, caught by
+    none of the DB fault classes and by no registered exception handler — escape as
+    a 500, losing the very upload this function exists to protect.
+
+    ``lookup_failed`` reports whether a *fault* occurred, so the coach can tell the
+    athlete "we couldn't read your profile just now" instead of wrongly insisting
+    they never supplied an FTP.
     """
+    lookup_failed = False
+
+    profile: _AthleteProfile | None = None
     try:
-        return await repo.get_athlete_profile(user_id), await repo.get_active_thresholds(user_id)
-    except (PostgRESTAPIError, httpx.HTTPError, RepositoryNotConfiguredError):
-        logger.warning(
-            "course analysis falling back to terrain only user_id=%s", user_id, exc_info=True
-        )
-        return None, []
+        profile = await repo.get_athlete_profile(user_id)
+    except RecordNotFoundError:
+        # Normal for an athlete who hasn't onboarded yet — not a fault.
+        logger.info("course analysis: no athlete profile user_id=%s", user_id)
+    except _COURSE_CONTEXT_FAULTS:
+        # error, not warning: a RepositoryNotConfiguredError here is a permanent
+        # deployment fault that would silently degrade every course upload.
+        lookup_failed = True
+        logger.error("course analysis: profile fetch failed user_id=%s", user_id, exc_info=True)
+
+    thresholds: list[SportThreshold] = []
+    try:
+        thresholds = await repo.get_active_thresholds(user_id)
+    except _COURSE_CONTEXT_FAULTS:
+        lookup_failed = True
+        logger.error("course analysis: threshold fetch failed user_id=%s", user_id, exc_info=True)
+
+    return AthleteCourseContext(profile=profile, thresholds=thresholds, lookup_failed=lookup_failed)
 
 
 # Activity/image members inside an uploaded .zip are processed; every other member is

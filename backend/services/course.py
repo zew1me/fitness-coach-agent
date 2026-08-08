@@ -11,6 +11,7 @@ coach's cue to ask — never a 5xx that loses the upload.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from backend.engine.course_analyzer import (
@@ -24,11 +25,25 @@ from backend.engine.gpx_parser import ParsedCourse
 from backend.models.athlete import AthleteProfile, SportThreshold
 
 
+@dataclass(frozen=True)
+class AthleteCourseContext:
+    """What we know about the athlete when analyzing a course.
+
+    ``lookup_failed`` is the part that is easy to leave out and expensive to omit:
+    "this athlete has no FTP" and "we could not read this athlete's data" both
+    arrive as absent values, and only the first should produce a message asking
+    them to supply one.
+    """
+
+    profile: AthleteProfile | None = None
+    thresholds: list[SportThreshold] = field(default_factory=list)
+    lookup_failed: bool = False
+
+
 def build_course_payload(
     course: ParsedCourse,
+    context: AthleteCourseContext,
     *,
-    profile: AthleteProfile | None,
-    thresholds: list[SportThreshold],
     source_file_key: str | None = None,
     public_url: str | None = None,
 ) -> dict[str, Any]:
@@ -37,7 +52,7 @@ def build_course_payload(
     ``kind`` is the discriminator the coach reads to know nothing was logged. It
     matches the shape already used for activity entries in the zip response.
     """
-    analysis, unavailable_reason = analyze_course(course, profile=profile, thresholds=thresholds)
+    analysis, unavailable_reason = analyze_course(course, athlete=context)
 
     return {
         "kind": "course",
@@ -57,15 +72,25 @@ def build_course_payload(
     }
 
 
+LOOKUP_FAILED_REASON = (
+    "Your profile and thresholds couldn't be read just now, so there's no pacing "
+    "estimate for this one. The terrain below is accurate. Try again shortly."
+)
+
+
 def analyze_course(
     course: ParsedCourse,
     *,
-    profile: AthleteProfile | None,
-    thresholds: list[SportThreshold],
+    athlete: AthleteCourseContext,
 ) -> tuple[CourseAnalysis | None, str | None]:
     """Pick and run the analyzer that fits this course, or explain why we can't.
 
     Returns ``(analysis, reason)`` with exactly one of them set.
+
+    ``athlete.lookup_failed`` distinguishes "this athlete has no FTP" from "we could
+    not read the athlete's data". Both arrive here as absent values, but telling
+    someone to supply a number they already gave us — during an outage, on every
+    upload — is a worse answer than admitting we couldn't look it up.
     """
     elevation_gain = course.profile.elevation_gain_meters
 
@@ -86,9 +111,9 @@ def analyze_course(
     avg_grade = course.profile.avg_grade_pct or 0.0
 
     if course.sport == "cycling":
-        return _analyze_cycling(course, profile, thresholds, avg_grade)
+        return _analyze_cycling(course, athlete, avg_grade)
     if course.sport == "running":
-        return _analyze_running(course, thresholds, avg_grade)
+        return _analyze_running(course, athlete, avg_grade)
     if course.sport == "hiking" or elevation_gain > HIGH_ALTITUDE_GAIN_METERS:
         # Big vertical is worth advising on whatever the file called itself, and
         # this analyzer needs nothing from the athlete.
@@ -102,14 +127,15 @@ def analyze_course(
 
 def _analyze_cycling(
     course: ParsedCourse,
-    profile: AthleteProfile | None,
-    thresholds: list[SportThreshold],
+    athlete: AthleteCourseContext,
     avg_grade: float,
 ) -> tuple[CourseAnalysis | None, str | None]:
-    ftp_watts = _threshold_for(thresholds, "cycling", "lt2_power_watts")
-    weight_kg = profile.weight_kg if profile else None
+    ftp_watts = _threshold_for(athlete.thresholds, "cycling", "lt2_power_watts")
+    weight_kg = athlete.profile.weight_kg if athlete.profile else None
 
     if ftp_watts is None or weight_kg is None:
+        if athlete.lookup_failed:
+            return None, LOOKUP_FAILED_REASON
         missing = [
             label
             for label, value in (("an FTP", ftp_watts), ("a body weight", weight_kg))
@@ -134,11 +160,13 @@ def _analyze_cycling(
 
 def _analyze_running(
     course: ParsedCourse,
-    thresholds: list[SportThreshold],
+    athlete: AthleteCourseContext,
     avg_grade: float,
 ) -> tuple[CourseAnalysis | None, str | None]:
-    lt2_pace = _threshold_for(thresholds, "running", "lt2_pace_sec_per_km")
+    lt2_pace = _threshold_for(athlete.thresholds, "running", "lt2_pace_sec_per_km")
     if lt2_pace is None:
+        if athlete.lookup_failed:
+            return None, LOOKUP_FAILED_REASON
         return None, (
             "Estimating this run needs a threshold pace on file. "
             "Ask the athlete for a recent race or test result."
@@ -155,8 +183,8 @@ def _analyze_running(
     )
 
 
-def _threshold_for(thresholds: list[SportThreshold], sport: str, field: str) -> int | None:
-    """First non-null value of ``field`` among the athlete's active thresholds for ``sport``.
+def _threshold_for(thresholds: list[SportThreshold], sport: str, attribute: str) -> int | None:
+    """First non-null ``attribute`` among the athlete's active thresholds for ``sport``.
 
     ``get_active_thresholds`` orders newest first, so the first hit is the current
     one. A sport can have several rows where only some carry the field we want.
@@ -164,7 +192,7 @@ def _threshold_for(thresholds: list[SportThreshold], sport: str, field: str) -> 
     for threshold in thresholds:
         if threshold.sport != sport:
             continue
-        value = getattr(threshold, field, None)
+        value = getattr(threshold, attribute, None)
         if value is not None:
             return int(value)
     return None
