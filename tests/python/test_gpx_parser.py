@@ -22,6 +22,14 @@ class _FakeFitFile:
         self._messages_by_type = messages_by_type
 
     def get_messages(self, name: str) -> list[_FakeMessage]:
+        """Return all fake FIT messages with the specified type.
+        
+        Parameters:
+            name (str): FIT message type to retrieve.
+        
+        Returns:
+            list[_FakeMessage]: Messages matching the specified type.
+        """
         return self._messages_by_type.get(name, [])
 
 

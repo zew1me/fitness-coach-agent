@@ -1494,6 +1494,14 @@ async def analyze_screenshot_endpoint(
 
 
 def _activity_source_for_filename(filename: str) -> str:
+    """Return the upload source label associated with a filename extension.
+    
+    Parameters:
+    	filename (str): The uploaded filename.
+    
+    Returns:
+    	str: The source label for FIT, GPX, or TCX files, or a generic file-upload label for other extensions.
+    """
     suffix = Path(filename).suffix.lower()
     if suffix == ".fit":
         return "fit_upload"
@@ -1507,6 +1515,20 @@ def _activity_source_for_filename(filename: str) -> str:
 def _parse_uploaded_activity_file(
     filename: str, content_type: str, file_bytes: bytes
 ) -> ParsedActivity | ParsedCourse:
+    """
+    Parse uploaded GPX, FIT, or TCX data into an activity or course representation.
+    
+    Parameters:
+        filename (str): Name of the uploaded file used to identify its format.
+        content_type (str): MIME type of the uploaded file.
+        file_bytes (bytes): Raw uploaded file contents.
+    
+    Returns:
+        ParsedActivity | ParsedCourse: Parsed activity or course data.
+    
+    Raises:
+        HTTPException: If the file format is unsupported.
+    """
     from backend.engine.gpx_parser import parse_fit, parse_gpx, parse_tcx
 
     suffix = Path(filename).suffix.lower()
@@ -1537,15 +1559,20 @@ def _build_uploaded_activity(  # noqa: PLR0913
     public_url: str | None,
     file_bytes: bytes,
 ) -> Activity | ParsedCourse:
-    """Parse an upload's bytes into a summarized ``Activity`` — or a ``ParsedCourse``.
-
-    Shared by the single-file and zip upload endpoints so both derive the same
-    ``source``/``source_file_key``/``raw_extraction`` shape from the parsed metrics.
-
-    A course is a route the athlete plans to do, not one they have done, so it is
-    returned unchanged for the caller to report rather than being coerced into an
-    ``Activity``. Callers must branch; persisting a course would put a workout the
-    athlete never did into their training log.
+    """
+    Parse uploaded activity data into an `Activity` or `ParsedCourse`.
+    
+    Parameters:
+        user_id (str): Identifier of the athlete who uploaded the file.
+        filename (str): Original uploaded filename.
+        content_type (str): MIME type of the uploaded file.
+        object_key (str): Storage key for the uploaded file.
+        public_url (str | None): Public URL associated with the uploaded file.
+        file_bytes (bytes): Uploaded file contents.
+    
+    Returns:
+        Activity | ParsedCourse: A summarized activity with upload metadata, or
+        an unpersisted course when the file describes a planned route.
     """
     parsed = _parse_uploaded_activity_file(filename, content_type, file_bytes)
     if isinstance(parsed, ParsedCourse):
@@ -1604,6 +1631,16 @@ async def process_uploaded_file_endpoint(
     payload: ProcessUploadedFileRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    """
+    Process an uploaded GPX, FIT, or TCX file as either a course analysis or an activity.
+    
+    Parameters:
+    	payload (ProcessUploadedFileRequest): Uploaded file metadata and storage location.
+    	user_context (UserContext): Authenticated user context.
+    
+    Returns:
+    	Mapping[str, object]: Course analysis data for course files, or the persisted activity data for activity files.
+    """
     logger.info(
         "processing uploaded file user_id=%s filename_suffix=%s content_type=%s",
         user_context.user_id,
@@ -1645,11 +1682,17 @@ async def _build_course_response(
     object_key: str,
     public_url: str | None,
 ) -> Mapping[str, object]:
-    """Analyze a course and return it. Deliberately writes nothing.
-
-    The athlete has not done this route, so there is no activity to save and no
-    plan workout to match. The coach gets the terrain and, where the athlete's
-    thresholds allow it, a pacing estimate.
+    """
+    Analyze a parsed course and prepare its terrain and pacing information.
+    
+    Parameters:
+        user_id (str): Identifier of the athlete whose profile and thresholds inform the analysis.
+        course (ParsedCourse): Parsed course data to analyze.
+        object_key (str): Storage key for the uploaded course file.
+        public_url (str | None): Public URL for the uploaded course file, if available.
+    
+    Returns:
+        Mapping[str, object]: Course analysis payload containing terrain data and, when possible, pacing estimates.
     """
     athlete = await _athlete_context_for_course(user_id)
     logger.info("course analyzed user_id=%s sport=%s", user_id, course.sport)
@@ -1668,23 +1711,18 @@ _COURSE_CONTEXT_FAULTS = (PostgRESTAPIError, httpx.HTTPError, RepositoryNotConfi
 
 
 async def _athlete_context_for_course(user_id: str) -> AthleteCourseContext:
-    """Fetch the athlete's profile and thresholds, tolerating their absence.
-
-    These only sharpen the estimate — the terrain is useful without them. A DB
-    problem here is caught rather than propagated (unlike the usual contract in
-    AGENTS.md, which lets ``PostgRESTAPIError`` reach the centralized handler)
-    because failing the whole upload over a missing FTP would be a worse answer
-    than returning distance and vertical with a note explaining the gap.
-
-    The two fetches are independent on purpose. Sharing one ``try`` meant a new
-    athlete with no ``athlete_profiles`` row never reached the threshold query at
-    all, and it also let ``RecordNotFoundError`` — a ``LookupError``, caught by
-    none of the DB fault classes and by no registered exception handler — escape as
-    a 500, losing the very upload this function exists to protect.
-
-    ``lookup_failed`` reports whether a *fault* occurred, so the coach can tell the
-    athlete "we couldn't read your profile just now" instead of wrongly insisting
-    they never supplied an FTP.
+    """
+    Load optional athlete profile and threshold data for course analysis.
+    
+    Database lookup failures are recorded in the returned context so course analysis
+    can continue with degraded estimates.
+    
+    Parameters:
+        user_id (str): Identifier of the athlete.
+    
+    Returns:
+        AthleteCourseContext: Athlete data and a flag indicating whether a lookup
+            failed.
     """
     lookup_failed = False
 
@@ -1759,6 +1797,19 @@ def _empty_zip_result(skipped_count: int = 0) -> dict[str, object]:
 async def _zip_activity_entry(
     *, user_id: str, filename: str, content_type: str, zip_object_key: str, member_bytes: bytes
 ) -> dict[str, object] | None:
+    """
+    Process an activity or course extracted from a ZIP archive.
+    
+    Parameters:
+    	user_id (str): Identifier of the user who uploaded the archive.
+    	filename (str): Archive member filename.
+    	content_type (str): MIME type of the archive member.
+    	zip_object_key (str): Storage key of the uploaded ZIP archive.
+    	member_bytes (bytes): Raw bytes of the archive member.
+    
+    Returns:
+    	dict[str, object] | None: Serialized activity or course data, or `None` if processing fails.
+    """
     try:
         parsed = _build_uploaded_activity(
             user_id=user_id,
@@ -2431,6 +2482,17 @@ async def _finalize_persisted_activity(
     *,
     calling_endpoint: ActivityPersistenceEndpoint,
 ) -> Mapping[str, object]:
+    """
+    Finalize a persisted activity and optionally associate it with a planned workout.
+    
+    Parameters:
+        user_id (str): Identifier of the user who owns the activity.
+        activity (Activity): Persisted activity to finalize.
+        calling_endpoint (ActivityPersistenceEndpoint): Endpoint responsible for the persistence operation.
+    
+    Returns:
+        Mapping[str, object]: Response containing the saved activity, its status, kind, and any matched planned workout.
+    """
     logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {

@@ -24,6 +24,7 @@ def _course(
     max_grade_pct: float | None = 14.2,
     name: str | None = "Schotterfest Long",
 ) -> ParsedCourse:
+    """Create a parsed course fixture with configurable terrain and name."""
     return ParsedCourse(
         sport=sport,
         profile=CourseProfile(
