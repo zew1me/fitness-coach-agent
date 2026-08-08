@@ -348,3 +348,31 @@ def test_grade_less_high_vertical_course_still_reaches_the_mountain_model() -> N
     assert reason is None
     assert analysis is not None
     assert analysis.primary_training_emphasis == "high_altitude_endurance"
+
+
+def test_a_big_vertical_cycling_course_still_gets_cycling_advice() -> None:
+    # Ordering guard. Routing every high-vertical course to the mountain model
+    # regardless of sport looks tidy and is wrong: analyze_mountain_objective
+    # prescribes loaded hikes, pack-carrying strength, and summit pushes. A 3000 m
+    # gran fondo wants VAM and climbing power. Sport-specific models come first;
+    # the mountain model is the fallback for sports we cannot model.
+    analysis, reason = analyze_course(
+        _course("cycling", distance_meters=120_000.0, elevation_gain_meters=3500.0),
+        athlete=_cycling_athlete(),
+    )
+
+    assert reason is None
+    assert analysis is not None
+    assert analysis.primary_training_emphasis == "climbing_power"
+    assert analysis.vam_target is not None
+
+
+def test_a_big_vertical_running_course_still_gets_running_advice() -> None:
+    analysis, reason = analyze_course(
+        _course("running", distance_meters=50_000.0, elevation_gain_meters=3500.0),
+        athlete=_athlete(thresholds=[_threshold("running", lt2_pace_sec_per_km=300)]),
+    )
+
+    assert reason is None
+    assert analysis is not None
+    assert analysis.primary_training_emphasis == "uphill_running_economy"

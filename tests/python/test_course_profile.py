@@ -6,7 +6,10 @@ independent of the implementation rather than a snapshot of it.
 
 from __future__ import annotations
 
+import json
 import time
+
+import pytest
 
 from backend.engine.course_profile import (
     MAX_GRADE_WINDOW_METERS,
@@ -249,3 +252,27 @@ def test_a_real_climb_after_a_duplicated_point_is_still_counted() -> None:
 
     assert profile.elevation_gain_meters == 20.0
     assert profile.avg_grade_pct == 10.0
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -50.0])
+def test_unusable_supplied_totals_fall_back_to_the_point_stream(bad: float) -> None:
+    # A corrupt FIT lap can carry any of these. NaN and infinity are the sharper
+    # problem: json.dumps emits them bare, which is not valid JSON, so one bad lap
+    # would hand the model a response it cannot parse.
+    points = _points((0, 0), (500, 50))
+
+    profile = summarize_course_with_totals(points, distance_meters=bad, elevation_gain_meters=bad)
+
+    assert profile.distance_meters == 500.0
+    assert profile.elevation_gain_meters == 50.0
+    assert json.dumps({"d": profile.distance_meters, "g": profile.elevation_gain_meters})
+
+
+def test_zero_is_a_usable_supplied_total() -> None:
+    # A genuinely flat course declares 0 m of ascent; that must not be mistaken for
+    # a missing value and replaced by the derived one.
+    points = _points((0, 0), (500, 50))
+
+    profile = summarize_course_with_totals(points, distance_meters=500.0, elevation_gain_meters=0.0)
+
+    assert profile.elevation_gain_meters == 0.0

@@ -25,7 +25,8 @@ class _FakeFitFile:
         return self._messages_by_type.get(name, [])
 
 
-def _session_message(**fields: object) -> _FakeMessage:
+def _fit_message(**fields: object) -> _FakeMessage:
+    """Build any FIT message — session, course, lap, record, or file_id."""
     return _FakeMessage([_FakeField(name, value) for name, value in fields.items()])
 
 
@@ -48,7 +49,7 @@ def test_parse_fit_extracts_elapsed_and_moving_duration_single_session(
     tmp_path: Path,
 ) -> None:
     _patch_fitparse["session"] = [
-        _session_message(
+        _fit_message(
             sport="cycling",
             total_elapsed_time=5880.208,
             total_timer_time=5880.208,
@@ -70,7 +71,7 @@ def test_parse_fit_prefers_moving_time_when_elapsed_and_moving_differ(
     tmp_path: Path,
 ) -> None:
     _patch_fitparse["session"] = [
-        _session_message(
+        _fit_message(
             sport="cycling",
             total_elapsed_time=4000,
             total_timer_time=3600,
@@ -91,12 +92,12 @@ def test_parse_fit_sums_durations_across_multiple_sessions(
     tmp_path: Path,
 ) -> None:
     _patch_fitparse["session"] = [
-        _session_message(
+        _fit_message(
             sport="running",
             total_elapsed_time=1800,
             total_timer_time=1800,
         ),
-        _session_message(
+        _fit_message(
             sport="cycling",
             total_elapsed_time=3600,
             total_timer_time=3600,
@@ -122,13 +123,13 @@ def test_parse_fit_sums_distance_and_ascent_across_multiple_sessions(
     first_start = datetime(2026, 7, 7, 6, 30, tzinfo=UTC)
     second_start = datetime(2026, 7, 7, 7, 10, tzinfo=UTC)
     _patch_fitparse["session"] = [
-        _session_message(
+        _fit_message(
             sport="running",
             start_time=second_start,
             total_distance=10000,
             total_ascent=150,
         ),
-        _session_message(
+        _fit_message(
             sport="cycling",
             start_time=first_start,
             total_distance=40000,
@@ -150,7 +151,7 @@ def test_parse_fit_handles_missing_timer_time_falls_back_to_elapsed(
     tmp_path: Path,
 ) -> None:
     _patch_fitparse["session"] = [
-        _session_message(
+        _fit_message(
             sport="running",
             total_elapsed_time=1200,
         ),
@@ -172,9 +173,9 @@ def test_parse_fit_uses_activity_local_timestamp_for_activity_date(
     timestamp_tz: tzinfo | None,
 ) -> None:
     start_time = datetime(2026, 7, 6, 3, 31, 48, tzinfo=timestamp_tz)
-    _patch_fitparse["session"] = [_session_message(sport="cycling", start_time=start_time)]
+    _patch_fitparse["session"] = [_fit_message(sport="cycling", start_time=start_time)]
     _patch_fitparse["activity"] = [
-        _session_message(
+        _fit_message(
             timestamp=datetime(2026, 7, 6, 3, 31, 48, tzinfo=timestamp_tz),
             local_timestamp=datetime(2026, 7, 5, 20, 31, 48, tzinfo=timestamp_tz),
         )
@@ -194,13 +195,13 @@ def test_parse_fit_normalizes_aware_session_start_before_local_offset(
 ) -> None:
     source_timezone = timezone(timedelta(hours=5, minutes=30))
     _patch_fitparse["session"] = [
-        _session_message(
+        _fit_message(
             sport="cycling",
             start_time=datetime(2026, 7, 6, 9, 1, 48, tzinfo=source_timezone),
         )
     ]
     _patch_fitparse["activity"] = [
-        _session_message(
+        _fit_message(
             timestamp=datetime(2026, 7, 6, 9, 1, 48, tzinfo=source_timezone),
             local_timestamp=datetime(2026, 7, 5, 20, 31, 48, tzinfo=UTC),
         )
@@ -219,7 +220,7 @@ def test_parse_fit_without_activity_message_keeps_utc_date(
     tmp_path: Path,
 ) -> None:
     _patch_fitparse["session"] = [
-        _session_message(sport="cycling", start_time=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC))
+        _fit_message(sport="cycling", start_time=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC))
     ]
 
     activity = parse_fit(tmp_path / "ride.fit")
@@ -235,9 +236,9 @@ def test_parse_fit_rejects_out_of_range_activity_utc_offset(
     tmp_path: Path,
 ) -> None:
     start_time = datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC)
-    _patch_fitparse["session"] = [_session_message(sport="cycling", start_time=start_time)]
+    _patch_fitparse["session"] = [_fit_message(sport="cycling", start_time=start_time)]
     _patch_fitparse["activity"] = [
-        _session_message(
+        _fit_message(
             timestamp=start_time,
             local_timestamp=datetime(2026, 7, 6, 18, 31, 48, tzinfo=UTC),
         )
@@ -256,7 +257,7 @@ def test_parse_fit_preserves_zero_moving_duration(
     tmp_path: Path,
 ) -> None:
     _patch_fitparse["session"] = [
-        _session_message(
+        _fit_message(
             sport="cycling",
             total_elapsed_time=1200,
             total_timer_time=0,
@@ -283,11 +284,11 @@ def test_parse_fit_course_message_yields_a_course_not_an_activity(
     _patch_fitparse: dict[str, list[_FakeMessage]],
     tmp_path: Path,
 ) -> None:
-    _patch_fitparse["course"] = [_session_message(sport="cycling", name="Schotterfest Long")]
-    _patch_fitparse["lap"] = [_session_message(total_distance=94490.2, total_ascent=2308.6)]
+    _patch_fitparse["course"] = [_fit_message(sport="cycling", name="Schotterfest Long")]
+    _patch_fitparse["lap"] = [_fit_message(total_distance=94490.2, total_ascent=2308.6)]
     _patch_fitparse["record"] = [
-        _session_message(distance=0.0, altitude=100.0),
-        _session_message(distance=1000.0, altitude=180.0),
+        _fit_message(distance=0.0, altitude=100.0),
+        _fit_message(distance=1000.0, altitude=180.0),
     ]
 
     course = parse_fit(tmp_path / "course.fit")
@@ -305,8 +306,8 @@ def test_parse_fit_course_without_records_omits_grades_rather_than_faking_them(
     _patch_fitparse: dict[str, list[_FakeMessage]],
     tmp_path: Path,
 ) -> None:
-    _patch_fitparse["course"] = [_session_message(sport="cycling")]
-    _patch_fitparse["lap"] = [_session_message(total_distance=94490.2, total_ascent=2308.6)]
+    _patch_fitparse["course"] = [_fit_message(sport="cycling")]
+    _patch_fitparse["lap"] = [_fit_message(total_distance=94490.2, total_ascent=2308.6)]
 
     course = parse_fit(tmp_path / "course.fit")
 
@@ -321,8 +322,8 @@ def test_parse_fit_course_with_unmappable_sport_reports_unknown(
     _patch_fitparse: dict[str, list[_FakeMessage]],
     tmp_path: Path,
 ) -> None:
-    _patch_fitparse["course"] = [_session_message(sport="generic")]
-    _patch_fitparse["lap"] = [_session_message(total_distance=5000.0)]
+    _patch_fitparse["course"] = [_fit_message(sport="generic")]
+    _patch_fitparse["lap"] = [_fit_message(total_distance=5000.0)]
 
     course = parse_fit(tmp_path / "course.fit")
 
@@ -335,16 +336,15 @@ def test_parse_fit_prefers_the_session_when_a_file_carries_both(
     tmp_path: Path,
 ) -> None:
     # A recorded ride that also embeds the course it followed is still a recording.
-    _patch_fitparse["course"] = [_session_message(sport="cycling", name="Followed course")]
+    _patch_fitparse["course"] = [_fit_message(sport="cycling", name="Followed course")]
     _patch_fitparse["session"] = [
-        _session_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400),
+        _fit_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400),
     ]
 
     activity = parse_fit(tmp_path / "ride.fit")
 
     assert isinstance(activity, ParsedActivity)
 
-    assert isinstance(activity, ParsedActivity)
     assert activity.duration_seconds == 3400
 
 
@@ -353,50 +353,17 @@ def test_parse_fit_prefers_enhanced_altitude_when_present(
     tmp_path: Path,
 ) -> None:
     # Garmin writes both; `enhanced_altitude` is the higher-resolution field.
-    _patch_fitparse["course"] = [_session_message(sport="running")]
-    _patch_fitparse["lap"] = [_session_message(total_distance=1000.0)]
+    _patch_fitparse["course"] = [_fit_message(sport="running")]
+    _patch_fitparse["lap"] = [_fit_message(total_distance=1000.0)]
     _patch_fitparse["record"] = [
-        _session_message(distance=0.0, altitude=100.0, enhanced_altitude=100.0),
-        _session_message(distance=500.0, altitude=120.0, enhanced_altitude=150.0),
+        _fit_message(distance=0.0, altitude=100.0, enhanced_altitude=100.0),
+        _fit_message(distance=500.0, altitude=120.0, enhanced_altitude=150.0),
     ]
 
     course = parse_fit(tmp_path / "course.fit")
 
     assert isinstance(course, ParsedCourse)
     assert course.profile.avg_grade_pct == 10.0
-
-
-def test_parse_fit_course_declared_only_by_file_id_is_still_a_course(
-    _patch_fitparse: dict[str, list[_FakeMessage]],
-    tmp_path: Path,
-) -> None:
-    # `file_id.type` is the file's own declaration of what it is. Keying only on the
-    # presence of a `course` message meant a course export that omitted one was
-    # persisted as an activity dated today.
-    _patch_fitparse["file_id"] = [_session_message(type="course")]
-    _patch_fitparse["lap"] = [_session_message(total_distance=42000.0, total_ascent=900.0)]
-
-    course = parse_fit(tmp_path / "course.fit")
-
-    assert isinstance(course, ParsedCourse)
-    assert course.sport == "general"
-    assert course.profile.distance_meters == 42000.0
-    assert course.profile.elevation_gain_meters == 900.0
-
-
-def test_parse_fit_file_id_declaring_an_activity_stays_an_activity(
-    _patch_fitparse: dict[str, list[_FakeMessage]],
-    tmp_path: Path,
-) -> None:
-    _patch_fitparse["file_id"] = [_session_message(type="activity")]
-    _patch_fitparse["session"] = [
-        _session_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400)
-    ]
-
-    activity = parse_fit(tmp_path / "ride.fit")
-
-    assert isinstance(activity, ParsedActivity)
-    assert activity.duration_seconds == 3400
 
 
 def test_parse_fit_file_id_declares_a_course_without_a_course_message(
@@ -406,8 +373,8 @@ def test_parse_fit_file_id_declares_a_course_without_a_course_message(
     # file_id.type is the file's own declaration of what it is, and is the stronger
     # signal. Keying only on the `course` message meant a course file that omitted it
     # was persisted as an activity dated today — the exact issue-243 symptom.
-    _patch_fitparse["file_id"] = [_session_message(type="course")]
-    _patch_fitparse["lap"] = [_session_message(total_distance=42000.0, total_ascent=900.0)]
+    _patch_fitparse["file_id"] = [_fit_message(type="course")]
+    _patch_fitparse["lap"] = [_fit_message(total_distance=42000.0, total_ascent=900.0)]
 
     course = parse_fit(tmp_path / "course.fit")
 
@@ -422,12 +389,33 @@ def test_parse_fit_activity_file_id_is_not_treated_as_a_course(
     _patch_fitparse: dict[str, list[_FakeMessage]],
     tmp_path: Path,
 ) -> None:
-    _patch_fitparse["file_id"] = [_session_message(type="activity")]
+    _patch_fitparse["file_id"] = [_fit_message(type="activity")]
     _patch_fitparse["session"] = [
-        _session_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400),
+        _fit_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400),
     ]
 
     activity = parse_fit(tmp_path / "ride.fit")
 
     assert isinstance(activity, ParsedActivity)
     assert activity.duration_seconds == 3400
+
+
+def test_parse_fit_course_record_stream_starting_part_way_does_not_invent_distance(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    # The first record with a distance anchors the scale rather than travelling.
+    # Starting the baseline at 0.0 charged its whole cumulative reading as a step, so
+    # a stream opening part-way along the route invented that much distance.
+    _patch_fitparse["course"] = [_fit_message(sport="cycling")]
+    _patch_fitparse["record"] = [
+        _fit_message(distance=5000.0, altitude=100.0),
+        _fit_message(distance=6000.0, altitude=180.0),
+    ]
+
+    course = parse_fit(tmp_path / "course.fit")
+
+    assert isinstance(course, ParsedCourse)
+    # 1000 m of travel, not 6000.
+    assert course.profile.distance_meters == 1000.0
+    assert course.profile.avg_grade_pct == 8.0

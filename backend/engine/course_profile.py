@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
+from math import isfinite
 
 # A grade needs two elevations to exist at all.
 MIN_POINTS_FOR_GRADE = 2
@@ -106,15 +107,24 @@ def summarize_course_with_totals(
     """
     derived = summarize_course(points)
     return CourseProfile(
-        distance_meters=round(distance_meters, 1)
-        if distance_meters is not None
-        else derived.distance_meters,
-        elevation_gain_meters=round(elevation_gain_meters, 1)
-        if elevation_gain_meters is not None
-        else derived.elevation_gain_meters,
+        distance_meters=_usable_total(distance_meters, derived.distance_meters),
+        elevation_gain_meters=_usable_total(elevation_gain_meters, derived.elevation_gain_meters),
         avg_grade_pct=derived.avg_grade_pct,
         max_grade_pct=derived.max_grade_pct,
     )
+
+
+def _usable_total(supplied: float | None, fallback: float) -> float:
+    """Take a file-supplied total only when it is a real, non-negative number.
+
+    A corrupt FIT lap can carry NaN, infinity, or a negative distance. NaN and
+    infinity are the sharper problem: ``json.dumps`` emits them as bare ``NaN`` and
+    ``Infinity``, which are not valid JSON, so one bad lap would produce a response
+    the model cannot parse rather than a merely wrong number.
+    """
+    if supplied is None or not isfinite(supplied) or supplied < 0:
+        return fallback
+    return round(supplied, 1)
 
 
 def _has_elevation(points: Sequence[CoursePoint]) -> bool:

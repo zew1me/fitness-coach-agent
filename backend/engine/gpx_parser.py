@@ -509,7 +509,11 @@ def _extract_fit_course(fit: Any) -> ParsedCourse | None:
 def _fit_course_points(fit: Any) -> list[Any]:
     """Course points from the record stream: cumulative distance plus altitude."""
     segments: list[tuple[float, float | None]] = []
-    previous_distance = 0.0
+    # None until the first record with a distance, which anchors the scale rather
+    # than travelling. Starting at 0.0 charged the first record's whole cumulative
+    # reading as a step, so a stream that opens part-way along the route invented
+    # that much distance — the GPX and TCX paths both start their first point at zero.
+    previous_distance: float | None = None
     for record in fit.get_messages("record"):
         distance = _fit_field(record, "distance")
         if distance is None:
@@ -517,10 +521,10 @@ def _fit_course_points(fit: Any) -> list[Any]:
         altitude = _fit_field(record, "enhanced_altitude")
         if altitude is None:
             altitude = _fit_field(record, "altitude")
-        segments.append(
-            (float(distance) - previous_distance, float(altitude) if altitude is not None else None)
-        )
-        previous_distance = float(distance)
+        cumulative = float(distance)
+        step = max(0.0, cumulative - previous_distance) if previous_distance is not None else 0.0
+        segments.append((step, float(altitude) if altitude is not None else None))
+        previous_distance = cumulative
     return build_course_points(segments)
 
 
@@ -703,10 +707,16 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
 
         if distance_text:
             distance = float(distance_text)
-            step = distance - previous_distance if previous_distance is not None else 0.0
+            step = max(0.0, distance - previous_distance) if previous_distance is not None else 0.0
             previous_distance = distance
         elif position is not None and previous_position is not None:
             step = haversine_distance(*previous_position, *position) or 0.0
+            # Advance the baseline too. Without this a position-derived step left
+            # `previous_distance` behind, so the next declared DistanceMeters was
+            # measured against a stale value and the movement in between counted
+            # twice — a course declaring 178 m came out at 267 m.
+            if previous_distance is not None:
+                previous_distance += step
         else:
             step = 0.0
 

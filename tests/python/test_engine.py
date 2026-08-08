@@ -369,7 +369,6 @@ def test_parse_gpx_timed_track_is_still_a_recorded_run(tmp_path: Path) -> None:
 
     assert isinstance(activity, ParsedActivity)
 
-    assert isinstance(activity, ParsedActivity)
     assert activity.sport == "running"
 
 
@@ -388,7 +387,6 @@ def test_parse_gpx_timed_track_at_cycling_pace_is_still_a_recorded_ride(tmp_path
 
     assert isinstance(activity, ParsedActivity)
 
-    assert isinstance(activity, ParsedActivity)
     assert activity.sport == "cycling"
 
 
@@ -408,7 +406,6 @@ def test_parse_gpx_declared_type_beats_the_pace_heuristic(tmp_path: Path) -> Non
 
     assert isinstance(activity, ParsedActivity)
 
-    assert isinstance(activity, ParsedActivity)
     assert activity.sport == "cycling"
 
 
@@ -490,7 +487,6 @@ def test_parse_tcx_prefers_an_activity_when_a_file_carries_both_sections(tmp_pat
 
     assert isinstance(activity, ParsedActivity)
 
-    assert isinstance(activity, ParsedActivity)
     assert activity.sport == "cycling"
 
 
@@ -554,43 +550,6 @@ def test_parse_gpx_multi_segment_track_sums_every_segment(tmp_path: Path) -> Non
     assert isinstance(course, ParsedCourse)
     assert course.profile.distance_meters == pytest.approx(1778.0, abs=20.0)
     assert course.profile.elevation_gain_meters == 130.0
-
-
-def test_parse_tcx_course_derives_distance_from_position_when_absent(tmp_path: Path) -> None:
-    # DistanceMeters is optional on a TCX Trackpoint. Carrying the previous cumulative
-    # value forward made every delta zero, so a file without it reported a coherent
-    # but wrong "0 m course with 50 m of climbing".
-    tcx_file = tmp_path / "course.tcx"
-    tcx_file.write_text(
-        """<?xml version="1.0" encoding="UTF-8"?>
-<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
-  <Courses>
-    <Course>
-      <Name>No distances</Name>
-      <Track>
-        <Trackpoint>
-          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
-            <LongitudeDegrees>-122.0</LongitudeDegrees></Position>
-          <AltitudeMeters>100</AltitudeMeters>
-        </Trackpoint>
-        <Trackpoint>
-          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
-            <LongitudeDegrees>-122.01</LongitudeDegrees></Position>
-          <AltitudeMeters>150</AltitudeMeters>
-        </Trackpoint>
-      </Track>
-    </Course>
-  </Courses>
-</TrainingCenterDatabase>""",
-        encoding="utf-8",
-    )
-
-    course = parse_tcx(tcx_file)
-
-    assert isinstance(course, ParsedCourse)
-    # 0.01 degrees of longitude at latitude 37 is about 889 m.
-    assert course.profile.distance_meters == pytest.approx(889.0, abs=20.0)
-    assert course.profile.elevation_gain_meters == 50.0
 
 
 def test_parse_tcx_course_prefers_declared_distance_over_position(tmp_path: Path) -> None:
@@ -719,39 +678,42 @@ def test_parse_tcx_course_without_trackpoint_distance_derives_it_from_position(
     assert course.profile.elevation_gain_meters == 50.0
 
 
-def test_parse_gpx_identical_timestamps_on_every_point_are_still_a_course(
+def test_parse_tcx_course_mixing_declared_and_derived_distance_does_not_double_count(
     tmp_path: Path,
 ) -> None:
-    # Planning tools stamp a synthetic time on each route point. Testing for the mere
-    # presence of <time> let those through as recordings — with no duration, an
-    # invented sport, and a real chance of satisfying a planned workout.
-    gpx_file = _write_gpx(
-        tmp_path,
-        """  <trk><type>cycling</type><trkseg>
-    <trkpt lat="37.0" lon="-122.0"><ele>100</ele><time>2026-06-21T10:00:00Z</time></trkpt>
-    <trkpt lat="37.0" lon="-122.01"><ele>160</ele><time>2026-06-21T10:00:00Z</time></trkpt>
-  </trkseg></trk>""",
+    # A position-derived step used to leave the declared-distance baseline behind, so
+    # the next DistanceMeters was measured against a stale value and the movement in
+    # between was counted twice: a course declaring 178 m came out at 267 m.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Track>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.0</LongitudeDegrees></Position>
+          <AltitudeMeters>10</AltitudeMeters><DistanceMeters>0</DistanceMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.001</LongitudeDegrees></Position>
+          <AltitudeMeters>20</AltitudeMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.002</LongitudeDegrees></Position>
+          <AltitudeMeters>30</AltitudeMeters><DistanceMeters>178</DistanceMeters>
+        </Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
     )
 
-    course = parse_gpx(gpx_file)
+    course = parse_tcx(tcx_file)
 
     assert isinstance(course, ParsedCourse)
-    assert course.sport == "cycling"
-    assert course.profile.elevation_gain_meters == 60.0
-
-
-def test_parse_gpx_timestamp_on_only_the_first_point_is_still_a_course(
-    tmp_path: Path,
-) -> None:
-    gpx_file = _write_gpx(
-        tmp_path,
-        """  <trk><trkseg>
-    <trkpt lat="37.0" lon="-122.0"><ele>100</ele><time>2026-06-21T10:00:00Z</time></trkpt>
-    <trkpt lat="37.0" lon="-122.01"><ele>160</ele></trkpt>
-  </trkseg></trk>""",
-    )
-
-    course = parse_gpx(gpx_file)
-
-    assert isinstance(course, ParsedCourse)
-    assert course.profile.elevation_gain_meters == 60.0
+    assert course.profile.distance_meters == 178.0
