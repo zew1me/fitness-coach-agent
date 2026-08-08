@@ -4959,6 +4959,9 @@ async def test_process_uploaded_course_admits_a_lookup_failure_instead_of_blamin
     body, repo = await _post_uploaded_file(
         monkeypatch, _SAMPLE_COURSE_GPX, repo=_BrokenRepository()
     )
+    # The invariant has to hold on the degraded path too — an outage must not become
+    # a route in the training log.
+    assert repo.created == []
     assert body["kind"] == "course"
     assert "FTP" not in body["analysis_unavailable_reason"]
     assert "couldn't be read" in body["analysis_unavailable_reason"]
