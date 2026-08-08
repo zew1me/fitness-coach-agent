@@ -11,6 +11,7 @@ coach's cue to ask — never a 5xx that loses the upload.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -138,7 +139,7 @@ def _analyze_cycling(
     athlete: AthleteCourseContext,
     avg_grade: float,
 ) -> tuple[CourseAnalysis | None, str | None]:
-    ftp_watts = _threshold_for(athlete.thresholds, "cycling", "lt2_power_watts")
+    ftp_watts = _threshold_for(athlete.thresholds, "cycling", lambda t: t.lt2_power_watts)
     weight_kg = athlete.profile.weight_kg if athlete.profile else None
 
     if ftp_watts is None or weight_kg is None:
@@ -171,7 +172,7 @@ def _analyze_running(
     athlete: AthleteCourseContext,
     overall_grade: float,
 ) -> tuple[CourseAnalysis | None, str | None]:
-    lt2_pace = _threshold_for(athlete.thresholds, "running", "lt2_pace_sec_per_km")
+    lt2_pace = _threshold_for(athlete.thresholds, "running", lambda t: t.lt2_pace_sec_per_km)
     if lt2_pace is None:
         if athlete.lookup_failed:
             return None, LOOKUP_FAILED_REASON
@@ -205,16 +206,26 @@ def _overall_grade_pct(course: ParsedCourse) -> float:
     return course.profile.elevation_gain_meters / course.profile.distance_meters * 100
 
 
-def _threshold_for(thresholds: list[SportThreshold], sport: str, attribute: str) -> int | None:
-    """First non-null ``attribute`` among the athlete's active thresholds for ``sport``.
+def _threshold_for(
+    thresholds: list[SportThreshold],
+    sport: str,
+    read: Callable[[SportThreshold], int | None],
+) -> int | None:
+    """First non-null reading among the athlete's active thresholds for ``sport``.
 
     ``get_active_thresholds`` orders newest first, so the first hit is the current
     one. A sport can have several rows where only some carry the field we want.
+
+    Takes an accessor rather than a field name on purpose. ``getattr`` with a string
+    fails silently on a typo or a renamed model field — it returns ``None``, which is
+    indistinguishable here from "this athlete has no FTP", so the athlete would be
+    asked for a number they had already given us and no error would ever surface.
+    A lambda is checked.
     """
     for threshold in thresholds:
         if threshold.sport != sport:
             continue
-        value = getattr(threshold, attribute, None)
+        value = read(threshold)
         if value is not None:
             return int(value)
     return None
