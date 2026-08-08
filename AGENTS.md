@@ -229,7 +229,7 @@ Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST 
 
 An uploaded route file is a **course** — something the athlete plans to do — not a
 completed activity. It must never reach `activities`. Persisting one credits the athlete
-with a workout they have not done, dates it today (a course has no timestamps), and lets
+with a workout they have not done, dates it today (a course has no real start time), and lets
 it compete to satisfy a planned workout.
 
 Classification is **from the file only**; there is deliberately no model-judged override
@@ -237,14 +237,23 @@ and no `treat_as` parameter, because the file answers the question definitively 
 tool-selection ambiguity is already a known failure mode (#336). Each format offers
 different evidence, so each is tested separately (`backend/engine/gpx_parser.py`):
 
-| Format | Course when                                   | Why not the others' test                                                                    |
-| ------ | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| GPX    | no `<time>` on any track or route point       | GPX has no course marker of its own                                                         |
-| FIT    | a `course` message and no `session`           | FIT course timestamps are synthetic, so absence-of-time would misfire                       |
-| TCX    | no `Activity` anywhere, but a `Course` exists | `<Activities>` vs `<Courses>` is structural; Course trackpoints legitimately carry `<Time>` |
+| Format | Course when                                                    | Why not the others' test                                                                    |
+| ------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| GPX    | the track/route spans no **elapsed** time                      | GPX has no course marker of its own                                                         |
+| FIT    | no `session`, plus a `course` message or `file_id.type=course` | FIT course timestamps are synthetic, so absence-of-time would misfire                       |
+| TCX    | no `Activity` anywhere, but a `Course` exists                  | `<Activities>` vs `<Courses>` is structural; Course trackpoints legitimately carry `<Time>` |
 
-TCX checks `Activity` **first**, so a file carrying both sections keeps its existing
-behaviour and only the case that used to raise `ValueError` changes.
+**Elapsed time, not the presence of `<time>`.** Route builders stamp synthetic
+timestamps — one on the first point, or the same instant on every point — so testing
+for absence-of-any-timestamp let those through as recordings. A recording always spans
+a positive interval; a course never does. This also covers empty and waypoint-only
+files, where reporting a zero-distance course beats writing a phantom workout dated today.
+
+Each format checks the _recording_ evidence first: TCX looks for `Activity` before
+`Course`, and FIT for `session` before either course signal, so a file carrying both —
+a ride that embeds the course it followed — stays an activity. For TCX that also means
+every file which parses today is unaffected; only the case that used to raise
+`ValueError` changes.
 
 The parsers return `ParsedActivity | ParsedCourse`; both upload endpoints
 (`process-uploaded-file` and the per-member zip path) branch on it. A course is analyzed
