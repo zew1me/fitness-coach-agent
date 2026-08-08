@@ -117,8 +117,10 @@ def test_course_without_elevation_reports_distance_but_no_grades() -> None:
     assert profile.max_grade_pct is None
 
 
-def test_flat_course_with_elevation_reports_zero_grade_not_none() -> None:
-    # Distinct from the no-elevation case: we know the grade, and it is zero.
+def test_flat_course_reports_a_zero_max_grade_but_no_average() -> None:
+    # Distinct from the no-elevation case: here we know the terrain and it is flat,
+    # so max grade is a real 0.0. There is no ascending distance to average over,
+    # so avg grade stays None rather than being invented.
     points = _points((0, 10), (500, 10), (1000, 10))
 
     profile = summarize_course(points)
@@ -366,3 +368,17 @@ def test_directly_built_points_with_non_finite_distances_are_dropped() -> None:
     ):
         assert value is None or math.isfinite(value)
     assert json.dumps({"d": profile.distance_meters, "m": profile.max_grade_pct})
+
+
+def test_descent_only_course_reports_a_negative_max_grade() -> None:
+    # Deliberate, and worth pinning because it looks like a bug. "Max grade" is the
+    # steepest gradient on the route, signed. A pure descent has no ascent to report,
+    # and clamping to 0.0 would claim a flat section the route does not contain —
+    # the same fabricated-zero problem the grade fields exist to avoid.
+    points = _points((0, 200), (500, 150), (1000, 100))
+
+    profile = summarize_course(points)
+
+    assert profile.elevation_gain_meters == 0.0
+    assert profile.avg_grade_pct is None
+    assert profile.max_grade_pct == -10.0

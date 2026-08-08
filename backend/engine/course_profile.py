@@ -231,6 +231,10 @@ def _max_windowed_grade(points: Sequence[CoursePoint]) -> float | None:
 
     Both endpoints of a window must carry elevation, so a file with sparse
     elevations still yields a usable answer instead of dropping to ``None``.
+
+    The result is signed. A descent-only route reports a negative max grade, which
+    reads oddly but is true: clamping to zero would claim a flat section the route
+    does not contain.
     """
     elevated = _thinned_for_grade_scan(
         [point for point in points if _elevation_of(point) is not None]
