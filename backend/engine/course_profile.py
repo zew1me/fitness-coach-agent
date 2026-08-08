@@ -1,7 +1,8 @@
 """Terrain math for uploaded *course* files (planned routes, not recorded activities).
 
 A course carries no time signal, so the only things it can tell us are geometric:
-how far, how much vertical, and how steep. Those four numbers map one-to-one onto
+how far, how much vertical, and how steep (average and maximum). Those four
+numbers map one-to-one onto
 the ``goals.course_*`` columns and are the inputs
 ``backend/engine/course_analyzer.py`` needs to estimate pacing and training emphasis.
 """

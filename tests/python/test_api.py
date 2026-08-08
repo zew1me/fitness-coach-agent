@@ -4785,6 +4785,7 @@ class _CourseRepository(EngineRepository):
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self.created: list[Activity] = []
 
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
@@ -4796,10 +4797,19 @@ class _CourseRepository(EngineRepository):
         return activity.model_copy(update={"id": "activity-1"})
 
 
-async def _post_uploaded_course(
-    monkeypatch, file_bytes: bytes, filename: str = "course.gpx"
+async def _post_uploaded_file(
+    monkeypatch,
+    file_bytes: bytes,
+    filename: str = "course.gpx",
+    repo: _CourseRepository | None = None,
+    public_url: str | None = None,
 ) -> tuple[dict[str, Any], _CourseRepository]:
-    repo = _CourseRepository()
+    """POST one file to process-uploaded-file and hand back the body and the repo.
+
+    Used for recordings as well as courses — the point is that the caller asserts on
+    what the repository recorded, so the helper must not presuppose either outcome.
+    """
+    repo = repo if repo is not None else _CourseRepository()
     monkeypatch.setattr(api_index, "repo", repo)
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
@@ -4816,7 +4826,7 @@ async def _post_uploaded_course(
                     "content_type": "application/gpx+xml",
                     "filename": filename,
                     "object_key": f"users/athlete-1/chat-attachment/2024/01/01/{filename}",
-                    "public_url": f"https://cdn.example.com/{filename}",
+                    "public_url": public_url,
                 },
             )
     finally:
@@ -4827,7 +4837,7 @@ async def _post_uploaded_course(
 
 @pytest.mark.asyncio
 async def test_process_uploaded_course_never_writes_an_activity(monkeypatch) -> None:
-    body, repo = await _post_uploaded_course(monkeypatch, _SAMPLE_COURSE_GPX)
+    body, repo = await _post_uploaded_file(monkeypatch, _SAMPLE_COURSE_GPX)
 
     # The load-bearing assertion of this entire change.
     assert repo.created == []
@@ -4838,7 +4848,7 @@ async def test_process_uploaded_course_never_writes_an_activity(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_process_uploaded_course_returns_terrain_and_analysis(monkeypatch) -> None:
-    body, _ = await _post_uploaded_course(monkeypatch, _SAMPLE_COURSE_GPX)
+    body, _ = await _post_uploaded_file(monkeypatch, _SAMPLE_COURSE_GPX)
 
     course = body["course"]
     assert course["sport"] == "cycling"
@@ -4864,31 +4874,9 @@ async def test_process_uploaded_course_degrades_when_thresholds_are_missing(
         async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
             return []
 
-    repo = _NoThresholdRepository()
-    monkeypatch.setattr(api_index, "repo", repo)
-
-    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        return _SAMPLE_COURSE_GPX
-
-    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
-    restore_override = _override_require_user_context(_ZIP_TEST_USER)
-    try:
-        transport = ASGITransport(app=api_index.app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post(
-                "/api/engine/process-uploaded-file",
-                json={
-                    "content_type": "application/gpx+xml",
-                    "filename": "course.gpx",
-                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
-                    "public_url": None,
-                },
-            )
-    finally:
-        restore_override()
-
-    assert response.status_code == 200
-    body = response.json()
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_NoThresholdRepository()
+    )
     assert repo.created == []
     assert body["kind"] == "course"
     assert body["analysis"] is None
@@ -4948,7 +4936,7 @@ async def test_saved_activity_response_carries_the_activity_kind_discriminator(
 ) -> None:
     # Pairs with kind: "course". Additive, so nothing that reads "activity" or
     # "status" today has to change.
-    body, repo = await _post_uploaded_course(monkeypatch, _SAMPLE_GPX, filename="run.gpx")
+    body, repo = await _post_uploaded_file(monkeypatch, _SAMPLE_GPX, filename="run.gpx")
 
     assert body["kind"] == "activity"
     assert body["status"] == "saved"
@@ -4968,31 +4956,9 @@ async def test_process_uploaded_course_admits_a_lookup_failure_instead_of_blamin
         async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
             raise httpx.ConnectError("supabase unreachable")
 
-    repo = _BrokenRepository()
-    monkeypatch.setattr(api_index, "repo", repo)
-
-    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        return _SAMPLE_COURSE_GPX
-
-    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
-    restore_override = _override_require_user_context(_ZIP_TEST_USER)
-    try:
-        transport = ASGITransport(app=api_index.app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post(
-                "/api/engine/process-uploaded-file",
-                json={
-                    "content_type": "application/gpx+xml",
-                    "filename": "course.gpx",
-                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
-                    "public_url": None,
-                },
-            )
-    finally:
-        restore_override()
-
-    assert response.status_code == 200
-    body = response.json()
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_BrokenRepository()
+    )
     assert body["kind"] == "course"
     assert "FTP" not in body["analysis_unavailable_reason"]
     assert "couldn't be read" in body["analysis_unavailable_reason"]
@@ -5014,31 +4980,9 @@ async def test_process_uploaded_course_survives_an_athlete_with_no_profile_row(
         async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
             raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
 
-    repo = _NoProfileRepository()
-    monkeypatch.setattr(api_index, "repo", repo)
-
-    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        return _SAMPLE_COURSE_GPX
-
-    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
-    restore_override = _override_require_user_context(_ZIP_TEST_USER)
-    try:
-        transport = ASGITransport(app=api_index.app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post(
-                "/api/engine/process-uploaded-file",
-                json={
-                    "content_type": "application/gpx+xml",
-                    "filename": "course.gpx",
-                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
-                    "public_url": None,
-                },
-            )
-    finally:
-        restore_override()
-
-    assert response.status_code == 200
-    body = response.json()
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_NoProfileRepository()
+    )
     assert repo.created == []
     assert body["kind"] == "course"
     assert body["course"]["elevation_gain_meters"] == 60.0
@@ -5062,31 +5006,9 @@ async def test_process_uploaded_course_degrades_when_the_database_is_unavailable
         async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
             raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
 
-    repo = _BrokenRepository()
-    monkeypatch.setattr(api_index, "repo", repo)
-
-    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        return _SAMPLE_COURSE_GPX
-
-    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
-    restore_override = _override_require_user_context(_ZIP_TEST_USER)
-    try:
-        transport = ASGITransport(app=api_index.app)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post(
-                "/api/engine/process-uploaded-file",
-                json={
-                    "content_type": "application/gpx+xml",
-                    "filename": "course.gpx",
-                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
-                    "public_url": None,
-                },
-            )
-    finally:
-        restore_override()
-
-    assert response.status_code == 200
-    body = response.json()
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_BrokenRepository()
+    )
     assert repo.created == []
     # Terrain is unaffected by the outage.
     assert body["course"]["elevation_gain_meters"] == 60.0

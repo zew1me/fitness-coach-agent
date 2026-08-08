@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.engine.course_profile import (
+    CoursePoint,
     CourseProfile,
     build_course_points,
     summarize_course,
@@ -506,7 +507,7 @@ def _extract_fit_course(fit: Any) -> ParsedCourse | None:
     )
 
 
-def _fit_course_points(fit: Any) -> list[Any]:
+def _fit_course_points(fit: Any) -> list[CoursePoint]:
     """Course points from the record stream: cumulative distance plus altitude."""
     segments: list[tuple[float, float | None]] = []
     # None until the first record with a distance, which anchors the scale rather

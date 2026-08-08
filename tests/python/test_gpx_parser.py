@@ -389,15 +389,16 @@ def test_parse_fit_activity_file_id_is_not_treated_as_a_course(
     _patch_fitparse: dict[str, list[_FakeMessage]],
     tmp_path: Path,
 ) -> None:
+    # No session and no course message, so file_id.type is the only thing deciding
+    # this — which is the point. With a session present the session check would
+    # short-circuit first and this would prove nothing about file_id at all; that
+    # precedence is covered separately by the "carries both" test.
     _patch_fitparse["file_id"] = [_fit_message(type="activity")]
-    _patch_fitparse["session"] = [
-        _fit_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400),
-    ]
+    _patch_fitparse["lap"] = [_fit_message(total_distance=42000.0, total_ascent=900.0)]
 
-    activity = parse_fit(tmp_path / "ride.fit")
+    parsed = parse_fit(tmp_path / "ride.fit")
 
-    assert isinstance(activity, ParsedActivity)
-    assert activity.duration_seconds == 3400
+    assert isinstance(parsed, ParsedActivity)
 
 
 def test_parse_fit_course_record_stream_starting_part_way_does_not_invent_distance(

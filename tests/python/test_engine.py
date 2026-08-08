@@ -440,7 +440,7 @@ def test_parse_tcx_course_file_is_a_course(tmp_path: Path) -> None:
   <Courses>
     <Course>
       <Name>Schotterfest Long</Name>
-      <Lap><TotalTimeSeconds>10800</TotalTimeSeconds><DistanceMeters>1000</DistanceMeters></Lap>
+      <Lap><TotalTimeSeconds>10800</TotalTimeSeconds><DistanceMeters>5000</DistanceMeters></Lap>
       <Track>
         <Trackpoint><Time>2026-06-21T10:00:00Z</Time>
           <AltitudeMeters>100</AltitudeMeters><DistanceMeters>0</DistanceMeters></Trackpoint>
@@ -459,6 +459,9 @@ def test_parse_tcx_course_file_is_a_course(tmp_path: Path) -> None:
     assert course.name == "Schotterfest Long"
     # The Course schema carries no sport attribute, so it stays unknown.
     assert course.sport == "general"
+    # The lap declares 5000 m and the trackpoints add up to 1000 m. Asserting 1000
+    # is what proves the trackpoint stream wins over the lap fallback rather than
+    # the two happening to agree.
     assert course.profile.distance_meters == 1000.0
     assert course.profile.elevation_gain_meters == 50.0
 

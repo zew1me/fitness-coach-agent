@@ -227,10 +227,11 @@ Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST 
 
 ### Courses versus recorded activities (uploaded GPX/FIT/TCX)
 
-An uploaded route file is a **course** — something the athlete plans to do — not a
-completed activity. It must never reach `activities`. Persisting one credits the athlete
-with a workout they have not done, dates it today (a course has no real start time), and lets
-it compete to satisfy a planned workout.
+An upload is a **course** — something the athlete plans to do — only when the file's own
+evidence says so; anything carrying recording evidence is an activity and takes the normal
+persistence path. Once classified as a course, it must never reach `activities`. Persisting
+one credits the athlete with a workout they have not done, dates it today (a course has no
+real start time), and lets it compete to satisfy a planned workout.
 
 Classification is **from the file only**; there is deliberately no model-judged override
 and no `treat_as` parameter, because the file answers the question definitively and
