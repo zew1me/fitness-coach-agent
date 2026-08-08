@@ -649,26 +649,53 @@ def parse_tcx(file_path: str | Path) -> ParsedActivity | ParsedCourse:
     )
 
 
+def _tcx_trackpoint_position(trackpoint: ET.Element) -> tuple[float, float] | None:
+    latitude = _first_text(trackpoint, "LatitudeDegrees")
+    longitude = _first_text(trackpoint, "LongitudeDegrees")
+    if not latitude or not longitude:
+        return None
+    return float(latitude), float(longitude)
+
+
 def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
     """Build a course from a TCX ``<Course>`` element.
 
     The Course schema has no sport attribute, so sport stays unknown and the coach
-    asks. Distance comes from the trackpoints' own cumulative ``DistanceMeters``
-    where present, which is what Garmin writes, rather than being re-derived from
-    coordinates.
+    asks. Distance prefers the trackpoints' own cumulative ``DistanceMeters``, which
+    is what Garmin writes and is authoritative when present.
+
+    ``DistanceMeters`` is optional on a Trackpoint, though. Falling back to the
+    previous cumulative value made every delta zero, so a file without it reported a
+    coherent-looking "0 m course with 800 m of climbing" — the totals silently wrong
+    while the elevation was right. Where the trackpoint carries a position instead,
+    the distance is derived from coordinates, the same measurement the GPX path uses.
     """
+    from gpxpy.geo import haversine_distance
+
     segments: list[tuple[float, float | None]] = []
-    previous_distance = 0.0
+    previous_distance: float | None = None
+    previous_position: tuple[float, float] | None = None
+
     for trackpoint in course.iter():
         if _local_name(trackpoint.tag) != "Trackpoint":
             continue
-        distance_text = _first_text(trackpoint, "DistanceMeters")
         altitude_text = _first_text(trackpoint, "AltitudeMeters")
-        distance = float(distance_text) if distance_text else previous_distance
-        segments.append(
-            (distance - previous_distance, float(altitude_text) if altitude_text else None)
-        )
-        previous_distance = distance
+        elevation = float(altitude_text) if altitude_text else None
+        distance_text = _first_text(trackpoint, "DistanceMeters")
+        position = _tcx_trackpoint_position(trackpoint)
+
+        if distance_text:
+            distance = float(distance_text)
+            step = distance - previous_distance if previous_distance is not None else 0.0
+            previous_distance = distance
+        elif position is not None and previous_position is not None:
+            step = haversine_distance(*previous_position, *position) or 0.0
+        else:
+            step = 0.0
+
+        if position is not None:
+            previous_position = position
+        segments.append((step, elevation))
 
     return ParsedCourse(
         sport=UNKNOWN_SPORT,

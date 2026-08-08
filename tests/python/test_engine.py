@@ -548,3 +548,72 @@ def test_parse_gpx_multi_segment_track_sums_every_segment(tmp_path: Path) -> Non
     assert isinstance(course, ParsedCourse)
     assert course.profile.distance_meters == pytest.approx(1778.0, abs=20.0)
     assert course.profile.elevation_gain_meters == 130.0
+
+
+def test_parse_tcx_course_derives_distance_from_position_when_absent(tmp_path: Path) -> None:
+    # DistanceMeters is optional on a TCX Trackpoint. Carrying the previous cumulative
+    # value forward made every delta zero, so a file without it reported a coherent
+    # but wrong "0 m course with 50 m of climbing".
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Name>No distances</Name>
+      <Track>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.0</LongitudeDegrees></Position>
+          <AltitudeMeters>100</AltitudeMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.01</LongitudeDegrees></Position>
+          <AltitudeMeters>150</AltitudeMeters>
+        </Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    # 0.01 degrees of longitude at latitude 37 is about 889 m.
+    assert course.profile.distance_meters == pytest.approx(889.0, abs=20.0)
+    assert course.profile.elevation_gain_meters == 50.0
+
+
+def test_parse_tcx_course_prefers_declared_distance_over_position(tmp_path: Path) -> None:
+    # Garmin's own cumulative DistanceMeters is authoritative where present.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Track>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.0</LongitudeDegrees></Position>
+          <AltitudeMeters>100</AltitudeMeters><DistanceMeters>0</DistanceMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.01</LongitudeDegrees></Position>
+          <AltitudeMeters>150</AltitudeMeters><DistanceMeters>2000</DistanceMeters>
+        </Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 2000.0
