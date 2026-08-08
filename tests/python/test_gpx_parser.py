@@ -364,3 +364,70 @@ def test_parse_fit_prefers_enhanced_altitude_when_present(
 
     assert isinstance(course, ParsedCourse)
     assert course.profile.avg_grade_pct == 10.0
+
+
+def test_parse_fit_course_declared_only_by_file_id_is_still_a_course(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    # `file_id.type` is the file's own declaration of what it is. Keying only on the
+    # presence of a `course` message meant a course export that omitted one was
+    # persisted as an activity dated today.
+    _patch_fitparse["file_id"] = [_session_message(type="course")]
+    _patch_fitparse["lap"] = [_session_message(total_distance=42000.0, total_ascent=900.0)]
+
+    course = parse_fit(tmp_path / "course.fit")
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "general"
+    assert course.profile.distance_meters == 42000.0
+    assert course.profile.elevation_gain_meters == 900.0
+
+
+def test_parse_fit_file_id_declaring_an_activity_stays_an_activity(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    _patch_fitparse["file_id"] = [_session_message(type="activity")]
+    _patch_fitparse["session"] = [
+        _session_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400)
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.duration_seconds == 3400
+
+
+def test_parse_fit_file_id_declares_a_course_without_a_course_message(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    # file_id.type is the file's own declaration of what it is, and is the stronger
+    # signal. Keying only on the `course` message meant a course file that omitted it
+    # was persisted as an activity dated today — the exact issue-243 symptom.
+    _patch_fitparse["file_id"] = [_session_message(type="course")]
+    _patch_fitparse["lap"] = [_session_message(total_distance=42000.0, total_ascent=900.0)]
+
+    course = parse_fit(tmp_path / "course.fit")
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 42000.0
+    assert course.profile.elevation_gain_meters == 900.0
+    # No course message means no declared sport to read.
+    assert course.sport == "general"
+
+
+def test_parse_fit_activity_file_id_is_not_treated_as_a_course(
+    _patch_fitparse: dict[str, list[_FakeMessage]],
+    tmp_path: Path,
+) -> None:
+    _patch_fitparse["file_id"] = [_session_message(type="activity")]
+    _patch_fitparse["session"] = [
+        _session_message(sport="cycling", total_elapsed_time=3600, total_timer_time=3400),
+    ]
+
+    activity = parse_fit(tmp_path / "ride.fit")
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.duration_seconds == 3400

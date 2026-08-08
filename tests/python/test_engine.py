@@ -148,6 +148,9 @@ def test_parse_gpx_trackpoint_extension_values_are_not_duplicated(tmp_path: Path
         </gpxtpx:TrackPointExtension>
       </extensions>
     </trkpt>
+    <trkpt lat="37.0" lon="-122.001">
+      <ele>12</ele><time>2026-04-19T10:01:00Z</time>
+    </trkpt>
   </trkseg></trk>
 </gpx>""",
         encoding="utf-8",
@@ -155,8 +158,11 @@ def test_parse_gpx_trackpoint_extension_values_are_not_duplicated(tmp_path: Path
 
     activity = parse_gpx(gpx_file)
 
+    # The second, bare trackpoint exists only to give the file a positive elapsed
+    # time so it is classified as a recording. It carries no extensions, so the
+    # values below still come from exactly one point and the duplication this test
+    # guards against would still show up.
     assert isinstance(activity, ParsedActivity)
-
     assert activity.avg_hr_bpm == 140
     assert activity.max_hr_bpm == 140
     assert activity.avg_cadence_rpm == 85
@@ -617,3 +623,135 @@ def test_parse_tcx_course_prefers_declared_distance_over_position(tmp_path: Path
 
     assert isinstance(course, ParsedCourse)
     assert course.profile.distance_meters == 2000.0
+
+
+def test_parse_gpx_synthetic_timestamp_on_one_point_is_still_a_course(tmp_path: Path) -> None:
+    # Planning tools stamp a single <time> on the first point. Testing for the
+    # absence of *any* timestamp let that through as a recorded activity — no
+    # duration, a fabricated sport, and a shot at satisfying a planned workout.
+    # The test has to be elapsed time, which a route never has.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><type>cycling</type><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele><time>2026-06-21T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.01"><ele>150</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.02"><ele>140</ele></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "cycling"
+    assert course.profile.elevation_gain_meters == 50.0
+
+
+def test_parse_gpx_identical_timestamps_on_every_point_is_still_a_course(
+    tmp_path: Path,
+) -> None:
+    # The worse variant: stamp the same instant on every point and the file looks
+    # fully timed, but the elapsed span is zero. Pace inference would fire on a
+    # non-zero duration and invent a sport.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele><time>2026-06-21T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.01"><ele>150</ele><time>2026-06-21T10:00:00Z</time></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "general"
+
+
+def test_parse_gpx_empty_file_is_a_zero_course_not_a_phantom_activity(tmp_path: Path) -> None:
+    # An empty or waypoint-only GPX used to become an activity with every metric
+    # None, dated today, and get written to the training log.
+    gpx_file = _write_gpx(tmp_path, "  <trk><trkseg></trkseg></trk>")
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 0.0
+
+
+def test_parse_tcx_course_without_trackpoint_distance_derives_it_from_position(
+    tmp_path: Path,
+) -> None:
+    # DistanceMeters is optional on a TCX Trackpoint. Carrying the previous
+    # cumulative value forward made every delta zero, so the course reported "0 m
+    # with 50 m of climbing" — coherent-looking and wrong, while the guard that
+    # suppresses a pacing estimate still told the coach the totals were accurate.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Name>No Distance Course</Name>
+      <Track>
+        <Trackpoint>
+          <Position>
+            <LatitudeDegrees>37.0</LatitudeDegrees><LongitudeDegrees>-122.0</LongitudeDegrees>
+          </Position>
+          <AltitudeMeters>100</AltitudeMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <Position>
+            <LatitudeDegrees>37.0</LatitudeDegrees><LongitudeDegrees>-122.01</LongitudeDegrees>
+          </Position>
+          <AltitudeMeters>150</AltitudeMeters>
+        </Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    # 0.01 degrees of longitude at latitude 37 is about 889 m.
+    assert course.profile.distance_meters == pytest.approx(889.0, abs=20.0)
+    assert course.profile.elevation_gain_meters == 50.0
+
+
+def test_parse_gpx_identical_timestamps_on_every_point_are_still_a_course(
+    tmp_path: Path,
+) -> None:
+    # Planning tools stamp a synthetic time on each route point. Testing for the mere
+    # presence of <time> let those through as recordings — with no duration, an
+    # invented sport, and a real chance of satisfying a planned workout.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><type>cycling</type><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele><time>2026-06-21T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.01"><ele>160</ele><time>2026-06-21T10:00:00Z</time></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.sport == "cycling"
+    assert course.profile.elevation_gain_meters == 60.0
+
+
+def test_parse_gpx_timestamp_on_only_the_first_point_is_still_a_course(
+    tmp_path: Path,
+) -> None:
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele><time>2026-06-21T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.01"><ele>160</ele></trkpt>
+  </trkseg></trk>""",
+    )
+
+    course = parse_gpx(gpx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.elevation_gain_meters == 60.0

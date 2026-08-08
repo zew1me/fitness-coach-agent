@@ -125,9 +125,6 @@ class _GpxSummary:
     # Counted so route fallback can tell "no track" from "a track with one point";
     # `total_distance == 0` cannot, and would double-count a file carrying both.
     point_count: int = 0
-    # Any point at all carrying a <time>. A course has none; that is what makes it
-    # a course rather than a recording.
-    timed_point_count: int = 0
     # (distance_from_previous_point, elevation) per point, for course grade math.
     segments: list[tuple[float, float | None]] = dataclass_field(default_factory=list)
 
@@ -139,12 +136,21 @@ class _GpxSummary:
 
     @property
     def is_course(self) -> bool:
-        """A GPX with points but no timestamps anywhere is a route, not a recording.
+        """A GPX that describes no elapsed time is a route, not a recording.
 
-        GPX has no course/activity marker of its own, so the absence of time is the
-        only evidence the format offers.
+        GPX has no course/activity marker of its own, so time is the only evidence
+        the format offers — but the test has to be *elapsed* time, not the mere
+        presence of a ``<time>`` element. Planning tools write synthetic timestamps:
+        one on the first point, or the same instant on every point. Testing for
+        absence-of-any-timestamp let those through as activities with a fabricated
+        sport, no duration, and a real chance of satisfying a planned workout.
+
+        A recording always spans a positive interval. A course never does, however
+        many timestamps someone stamped on it. An empty or waypoint-only file has no
+        interval either, and reporting it as a zero-distance course beats writing a
+        phantom workout dated today.
         """
-        return self.point_count > 0 and self.timed_point_count == 0
+        return not self.duration
 
     @property
     def sport(self) -> str:
@@ -254,7 +260,6 @@ def _accumulate_gpx_segment(summary: _GpxSummary, points: list[Any]) -> None:
         summary.end_time = points[-1].time
 
     summary.point_count += len(points)
-    summary.timed_point_count += sum(1 for point in points if point.time)
 
     for index, point in enumerate(points):
         segment_distance = 0.0
@@ -458,13 +463,25 @@ def _extract_fit_course(fit: Any) -> ParsedCourse | None:
     message (global message 31) and no ``session``. Its timestamps, where present,
     are synthetic, so absence-of-time is the wrong test here.
     """
-    course_messages = list(fit.get_messages("course"))
-    if not course_messages or list(fit.get_messages("session")):
+    if list(fit.get_messages("session")):
+        # A recording that happens to embed the course it followed is still a
+        # recording.
         return None
 
-    course = course_messages[0]
-    name = _fit_field(course, "name")
-    sport = _canonical_sport(_fit_field(course, "sport")) or UNKNOWN_SPORT
+    course_messages = list(fit.get_messages("course"))
+    # `file_id.type` is the file's own declaration of what it is and is the stronger
+    # signal; the `course` message corroborates it. Keying on the message alone meant
+    # a course file that omitted it was persisted as an activity dated today.
+    declares_course = any(
+        str(_fit_field(message, "type") or "").lower() == "course"
+        for message in fit.get_messages("file_id")
+    )
+    if not course_messages and not declares_course:
+        return None
+
+    course = course_messages[0] if course_messages else None
+    name = _fit_field(course, "name") if course else None
+    sport = (_canonical_sport(_fit_field(course, "sport")) if course else None) or UNKNOWN_SPORT
 
     # `lap` carries the authoritative totals. `record` is walked only for grades,
     # and a course without a usable record stream simply reports grades as None.
