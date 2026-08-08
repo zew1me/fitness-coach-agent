@@ -4933,6 +4933,14 @@ async def test_process_uploaded_zip_analyzes_a_course_member_without_saving_it(
     assert len(repo.created) == 1
     assert repo.created[0].source == "gpx_upload"
 
+    # The archive path must carry the same analysis as a single-file upload, not
+    # just the discriminator — a course entry stripped of its terrain would satisfy
+    # the kind assertion above while telling the coach nothing.
+    course_entry = next(entry for entry in processed if entry["kind"] == "course")
+    assert course_entry["course"]["sport"] == "cycling"
+    assert course_entry["course"]["elevation_gain_meters"] == 60.0
+    assert course_entry["analysis"]["primary_training_emphasis"] == "climbing_power"
+
 
 @pytest.mark.asyncio
 async def test_saved_activity_response_carries_the_activity_kind_discriminator(

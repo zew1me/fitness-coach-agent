@@ -303,3 +303,48 @@ def test_payload_reports_the_reason_when_analysis_is_unavailable() -> None:
     # Terrain is still there even when the model isn't — that is the point of
     # degrading rather than failing.
     assert payload["course"]["elevation_gain_meters"] == pytest.approx(2308.6)
+
+
+def test_grade_less_running_course_still_estimates() -> None:
+    # The running model derives its own whole-route grade from gain and distance,
+    # both of which a lap-totals-only file has. Refusing here would withhold an
+    # estimate we are perfectly able to make.
+    course = _course(
+        "running",
+        distance_meters=42195.0,
+        elevation_gain_meters=800.0,
+        avg_grade_pct=None,
+        max_grade_pct=None,
+    )
+
+    analysis, reason = analyze_course(
+        course,
+        athlete=_athlete(thresholds=[_threshold("running", lt2_pace_sec_per_km=255)]),
+    )
+
+    assert reason is None
+    assert analysis is not None
+    assert analysis.estimated_duration_seconds is not None
+
+
+def test_grade_less_hiking_course_still_reaches_the_mountain_model() -> None:
+    course = _course("hiking", elevation_gain_meters=1400.0, avg_grade_pct=None, max_grade_pct=None)
+
+    analysis, reason = analyze_course(course, athlete=_athlete())
+
+    assert reason is None
+    assert analysis is not None
+    assert analysis.primary_training_emphasis == "mountain_endurance"
+
+
+def test_grade_less_high_vertical_course_still_reaches_the_mountain_model() -> None:
+    # The mountain model needs only elevation gain, which a lap-totals-only file has.
+    course = _course(
+        "general", elevation_gain_meters=3200.0, avg_grade_pct=None, max_grade_pct=None
+    )
+
+    analysis, reason = analyze_course(course, athlete=_athlete())
+
+    assert reason is None
+    assert analysis is not None
+    assert analysis.primary_training_emphasis == "high_altitude_endurance"

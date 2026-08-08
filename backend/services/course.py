@@ -77,6 +77,18 @@ LOOKUP_FAILED_REASON = (
     "estimate for this one. The terrain below is accurate. Try again shortly."
 )
 
+# Only the cycling model needs this. An unknown grade is missing data, not a zero:
+# substituting 0.0 looks harmless because `analyze_cycling_climb` guards its
+# climb-distance division, but the guard is what does the damage — at zero grade it
+# treats the whole route as flat and adds a full 30 km/h transit *on top of* the climb
+# time. A 30 km course with 1200 m of vertical came back at 2.14 h instead of 1.64 h,
+# reported as authoritative.
+UNKNOWN_CLIMB_GRADE_REASON = (
+    "This file has distance and vertical but no usable elevation stream, so the "
+    "climbing grade is unknown and a ride estimate would be wrong. The terrain "
+    "totals are still accurate — use those."
+)
+
 
 def analyze_course(
     course: ParsedCourse,
@@ -94,27 +106,14 @@ def analyze_course(
     """
     elevation_gain = course.profile.elevation_gain_meters
 
-    # An unknown grade is missing data, not a zero. Substituting 0.0 looks harmless
-    # because `analyze_cycling_climb` guards its climb-distance division, but the
-    # guard is what does the damage: at zero grade it treats the whole route as flat
-    # and adds a full 30 km/h transit *on top of* the climb time. A 30 km course with
-    # 1200 m of vertical came back at 2.14 h instead of 1.64 h, with
-    # `analysis_unavailable_reason: None` presenting it as authoritative.
-    # `analyze_running_climb` has no guard at all — it would price 1200 m of climbing
-    # at flat threshold pace.
-    if course.profile.avg_grade_pct is None and elevation_gain > 0:
-        return None, (
-            "This file has distance and vertical but no usable elevation stream, so "
-            "the average grade is unknown and any pacing estimate would be wrong. "
-            "The terrain totals are still accurate — use those."
-        )
-    avg_grade = course.profile.avg_grade_pct or 0.0
-
     if course.sport == "cycling":
         # The cycling model inverts avg grade to recover climbing distance, so it
         # wants the grade of the ascending portions — exactly what CourseProfile
-        # reports.
-        return _analyze_cycling(course, athlete, avg_grade)
+        # reports, and the one figure that is genuinely unavailable without an
+        # elevation stream. Only this branch has to refuse.
+        if course.profile.avg_grade_pct is None and elevation_gain > 0:
+            return None, UNKNOWN_CLIMB_GRADE_REASON
+        return _analyze_cycling(course, athlete, course.profile.avg_grade_pct or 0.0)
     if course.sport == "running":
         # The running model uses grade the other way round: it adds a GAP penalty of
         # roughly 12 s/km per 1% across the *whole* distance. Handing it the
@@ -190,13 +189,6 @@ def _analyze_running(
         ),
         None,
     )
-
-
-def _overall_grade_pct(course: ParsedCourse) -> float:
-    """Total ascent as a percentage of total distance, for whole-route grade models."""
-    if course.profile.distance_meters <= 0:
-        return 0.0
-    return course.profile.elevation_gain_meters / course.profile.distance_meters * 100
 
 
 def _overall_grade_pct(course: ParsedCourse) -> float:
