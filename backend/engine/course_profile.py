@@ -47,7 +47,15 @@ MAX_GRADE_WINDOW_METERS = 200.0
 #
 # One metre is deliberately below GPS precision, so for any real file this thins
 # nothing and the scan is exact. It only engages on sub-metre sampling, where the
-# extra points cannot describe real terrain anyway — and there it is the difference
+# extra points cannot describe real terrain anyway
+#
+# Thinning by distance can drop a point whose elevation is an outlier, and that is
+# the right trade rather than a gap to close. Two samples less than a metre apart
+# with metres of elevation between them describe a slope in the thousands of
+# percent — barometric drift or a GPS fix jumping, recorded while the athlete was
+# effectively stationary. Preserving such extrema so they can anchor a window would
+# make max grade *more* sensitive to exactly the noise MIN_GRADE_WINDOW_METERS
+# exists to suppress, and would report terrain that is not there — and there it is the difference
 # between bounded work and none. A coarser threshold is tempting and costs accuracy:
 # at 5 m, points at 0 m, 4.9 m, and 54.9 m lose the exact 50 m window between the
 # last two and report 91.1% instead of 100%.

@@ -126,7 +126,15 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("Nothing was logged");
     expect(prompt).toContain("never describe it as completed or saved");
     expect(prompt).toContain("never claim it counts toward compliance");
+    expect(prompt).toContain("no planned workout was matched");
     expect(prompt).toContain("analysis_unavailable_reason");
+    // The two degraded branches, both silent-wrong-answer risks: an absent number
+    // must be asked for rather than guessed, and an unknown sport must be asked
+    // about rather than assumed.
+    expect(prompt).toContain(
+      "ask for the missing number it names rather than estimating one",
+    );
+    expect(prompt).toContain("so ask before advising");
   });
 
   it("includes both training models and age-specific balance note for classification by the LLM", () => {

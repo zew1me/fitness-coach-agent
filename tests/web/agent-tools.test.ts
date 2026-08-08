@@ -963,6 +963,16 @@ describe("coachToolDefinitions", () => {
     expect(description).toContain(
       "treating it as completed would credit them with a workout they have not done",
     );
+
+    // The archive contract too: the coach has to know which zip entries were saved,
+    // which were only analyzed, and what an empty result means — otherwise it either
+    // re-saves activities the server already wrote or reports an empty archive as a
+    // failure.
+    expect(description).toContain("status 'saved'");
+    expect(description).toContain("status 'analyzed'");
+    expect(description).toContain("no_processable_files");
+    expect(description).toContain("empty processed list");
+    expect(description).toContain("do not re-save these activities yourself");
   });
 
   it.each([

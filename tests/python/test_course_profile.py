@@ -435,3 +435,23 @@ def test_thinning_error_is_bounded_by_the_spacing_over_the_window() -> None:
     assert abs(profile.max_grade_pct - exact) / exact <= (
         GRADE_SCAN_MIN_SPACING_METERS / MIN_GRADE_WINDOW_METERS
     )
+
+
+def test_a_sub_metre_elevation_outlier_is_deliberately_not_treated_as_terrain() -> None:
+    # Kept as a decision, not an oversight. Thinning drops the 0.5 m point, so the
+    # steepest window reads 98% rather than the 198% an exact scan would find by
+    # anchoring on it. That point sits half a metre from its neighbour with 50 m of
+    # elevation between them — a slope in the thousands of percent, recorded while
+    # the athlete was effectively stationary. It is barometric drift or a GPS fix
+    # jumping, and letting it anchor a window would report a wall that is not there.
+    with_outlier = _points((0, 50), (0.5, 0), (51, 100))
+
+    assert summarize_course(with_outlier).max_grade_pct == 98.0
+
+
+def test_real_terrain_above_the_thinning_spacing_is_never_dropped() -> None:
+    # The flip side: anything sampled at or above the spacing survives intact, so a
+    # genuine steep pitch is still found at full precision.
+    genuine = _points((0, 50), (1.0, 0), (51, 100))
+
+    assert summarize_course(genuine).max_grade_pct == 200.0

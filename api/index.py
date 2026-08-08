@@ -1532,6 +1532,11 @@ def _parse_uploaded_activity_file(
         return parser(tmp.name)
 
 
+# PLR0913: seven keyword-only parameters, deliberately not bundled. Each is a
+# distinct fact about one upload that both call sites already hold separately, and
+# every one is keyword-only, so the call reads as a labelled list rather than a
+# positional puzzle. A parameter object here would only move the same seven names
+# somewhere else and add a construction step at each site.
 def _build_uploaded_activity_or_course(  # noqa: PLR0913
     *,
     user_id: str,
