@@ -225,6 +225,41 @@ See [COMPACTION_DESIGN.md](COMPACTION_DESIGN.md).
 
 Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
 
+### Courses versus recorded activities (uploaded GPX/FIT/TCX)
+
+An uploaded route file is a **course** — something the athlete plans to do — not a
+completed activity. It must never reach `activities`. Persisting one credits the athlete
+with a workout they have not done, dates it today (a course has no timestamps), and lets
+it compete to satisfy a planned workout.
+
+Classification is **from the file only**; there is deliberately no model-judged override
+and no `treat_as` parameter, because the file answers the question definitively and
+tool-selection ambiguity is already a known failure mode (#336). Each format offers
+different evidence, so each is tested separately (`backend/engine/gpx_parser.py`):
+
+| Format | Course when                                   | Why not the others' test                                                                    |
+| ------ | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| GPX    | no `<time>` on any track or route point       | GPX has no course marker of its own                                                         |
+| FIT    | a `course` message and no `session`           | FIT course timestamps are synthetic, so absence-of-time would misfire                       |
+| TCX    | no `Activity` anywhere, but a `Course` exists | `<Activities>` vs `<Courses>` is structural; Course trackpoints legitimately carry `<Time>` |
+
+TCX checks `Activity` **first**, so a file carrying both sections keeps its existing
+behaviour and only the case that used to raise `ValueError` changes.
+
+The parsers return `ParsedActivity | ParsedCourse`; both upload endpoints
+(`process-uploaded-file` and the per-member zip path) branch on it. A course is analyzed
+by `backend/services/course.py` — terrain from `backend/engine/course_profile.py`, pacing
+from `backend/engine/course_analyzer.py` using the athlete's own FTP/weight/threshold
+pace — and returned with `kind: "course"`, **writing nothing**. Saved activities carry
+`kind: "activity"`. Missing athlete data degrades to terrain plus
+`analysis_unavailable_reason`; it never fails the upload.
+
+Sport comes from the file's declared type (`<type>`, FIT `course.sport`) via
+`_canonical_sport`, then pace inference for real recordings, then `"general"`. Never
+reintroduce a hardcoded sport fallback: pace inference needs time, so guessing `"running"`
+for a course labelled every uploaded ride a run, and sport is a hard equality gate in
+`match_activities_to_workouts` (`backend/services/compliance.py`).
+
 ### Unsupported file attachments → text (do not send to the model as `input_file`)
 
 OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
