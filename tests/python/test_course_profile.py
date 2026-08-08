@@ -334,3 +334,35 @@ def test_thinning_does_not_change_a_densely_sampled_grade() -> None:
 
     assert elapsed < 5.0
     assert profile.max_grade_pct == 10.0
+
+
+def test_grade_window_is_exact_at_realistic_sampling() -> None:
+    # Thinning must not move a window boundary. Points at 0 m, 4.9 m, and 54.9 m have
+    # an exact 50 m window between the last two; a 5 m thinning threshold dropped the
+    # middle point and reported 91.1% instead.
+    points = _points((0, 0), (4.9, 0), (54.9, 50))
+
+    assert summarize_course(points).max_grade_pct == 100.0
+
+
+def test_directly_built_points_with_non_finite_distances_are_dropped() -> None:
+    # build_course_points sanitizes what it builds, but points reach summarize_course
+    # directly too, and one NaN cumulative distance poisons distance_meters and every
+    # grade — landing in the response as bare NaN, which is not valid JSON.
+    points = [
+        CoursePoint(0.0, 100.0),
+        CoursePoint(float("nan"), 150.0),
+        CoursePoint(float("inf"), 200.0),
+        CoursePoint(100.0, 120.0),
+    ]
+
+    profile = summarize_course(points)
+
+    for value in (
+        profile.distance_meters,
+        profile.elevation_gain_meters,
+        profile.avg_grade_pct,
+        profile.max_grade_pct,
+    ):
+        assert value is None or math.isfinite(value)
+    assert json.dumps({"d": profile.distance_meters, "m": profile.max_grade_pct})

@@ -34,10 +34,15 @@ MAX_GRADE_WINDOW_METERS = 200.0
 # Minimum spacing between the samples the grade scan actually looks at. The ceiling
 # above bounds a window by *distance*, but nothing bounds how many points sit inside
 # one: 15 000 samples packed into 150 m never reach the ceiling at all, so the scan
-# walked the whole tail for every origin and took 3.2s. Thinning first bounds it by
-# construction — at 5 m, one tenth of the minimum window, a window holds at most 40
-# samples and the result is unchanged to the nearest tenth of a percent.
-GRADE_SCAN_MIN_SPACING_METERS = 5.0
+# walked the whole tail for every origin and took 3.2s.
+#
+# One metre is deliberately below GPS precision, so for any real file this thins
+# nothing and the scan is exact. It only engages on sub-metre sampling, where the
+# extra points cannot describe real terrain anyway — and there it is the difference
+# between bounded work and none. A coarser threshold is tempting and costs accuracy:
+# at 5 m, points at 0 m, 4.9 m, and 54.9 m lose the exact 50 m window between the
+# last two and report 91.1% instead of 100%.
+GRADE_SCAN_MIN_SPACING_METERS = 1.0
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,22 @@ def build_course_points(
     return points
 
 
+def _finite_points(points: Sequence[CoursePoint]) -> list[CoursePoint]:
+    """Normalize the sequence at the boundary so nothing downstream sees a NaN.
+
+    ``build_course_points`` already sanitizes what it builds, but points reach here
+    directly too, and a single non-finite cumulative distance propagates into
+    ``distance_meters`` and every grade — landing in the response as bare ``NaN``,
+    which is not valid JSON. Non-finite distances are dropped rather than zeroed,
+    since a point with no position tells us nothing about where it sits.
+    """
+    return [
+        CoursePoint(point.cumulative_distance_meters, _elevation_of(point))
+        for point in points
+        if isfinite(point.cumulative_distance_meters)
+    ]
+
+
 def _elevation_of(point: CoursePoint) -> float | None:
     """A point's elevation, treating a non-finite reading as absent.
 
@@ -121,6 +142,7 @@ def _thinned_for_grade_scan(points: Sequence[CoursePoint]) -> list[CoursePoint]:
 
 def summarize_course(points: Sequence[CoursePoint]) -> CourseProfile:
     """Reduce a course's point stream to distance, vertical, and grade."""
+    points = _finite_points(points)
     distance = points[-1].cumulative_distance_meters if points else 0.0
     gain, ascending_distance = _accumulate_ascent(points)
 

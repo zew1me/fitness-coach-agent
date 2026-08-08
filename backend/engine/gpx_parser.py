@@ -463,7 +463,7 @@ def _extract_fit_course(fit: Any) -> ParsedCourse | None:
     message (global message 31) and no ``session``. Its timestamps, where present,
     are synthetic, so absence-of-time is the wrong test here.
     """
-    if list(fit.get_messages("session")):
+    if any(True for _ in fit.get_messages("session")):
         # A recording that happens to embed the course it followed is still a
         # recording.
         return None
@@ -694,7 +694,7 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
     from gpxpy.geo import haversine_distance
 
     segments: list[tuple[float, float | None]] = []
-    previous_distance: float | None = None
+    traveled = 0.0
     previous_position: tuple[float, float] | None = None
 
     for trackpoint in course.iter():
@@ -705,20 +705,19 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
         distance_text = _first_text(trackpoint, "DistanceMeters")
         position = _tcx_trackpoint_position(trackpoint)
 
+        # One running total, advanced by every step whatever its source. A declared
+        # DistanceMeters is cumulative, so its step is the gap to that total — which
+        # re-anchors the scale no matter how much position-derived movement came
+        # first. Keeping a separate declared-only baseline got both orders wrong: a
+        # course declaring 178 m came out at 267 m when the declared reading came
+        # first, and at 89 m when it came last.
         if distance_text:
-            distance = float(distance_text)
-            step = max(0.0, distance - previous_distance) if previous_distance is not None else 0.0
-            previous_distance = distance
+            step = max(0.0, float(distance_text) - traveled)
         elif position is not None and previous_position is not None:
             step = haversine_distance(*previous_position, *position) or 0.0
-            # Advance the baseline too. Without this a position-derived step left
-            # `previous_distance` behind, so the next declared DistanceMeters was
-            # measured against a stale value and the movement in between counted
-            # twice — a course declaring 178 m came out at 267 m.
-            if previous_distance is not None:
-                previous_distance += step
         else:
             step = 0.0
+        traveled += step
 
         if position is not None:
             previous_position = position

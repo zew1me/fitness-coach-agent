@@ -717,3 +717,45 @@ def test_parse_tcx_course_mixing_declared_and_derived_distance_does_not_double_c
 
     assert isinstance(course, ParsedCourse)
     assert course.profile.distance_meters == pytest.approx(178.0, abs=1.0)
+
+
+def test_parse_tcx_course_declared_distance_after_derived_steps_re_anchors(
+    tmp_path: Path,
+) -> None:
+    # The mirror of the double-count case: when the declared DistanceMeters arrives
+    # last, a declared-only baseline started from scratch and threw away the derived
+    # movement, reporting 89 m for a course declaring 178 m. One running total,
+    # advanced by every step, gets both orders right.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Track>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.0</LongitudeDegrees></Position>
+          <AltitudeMeters>10</AltitudeMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.001</LongitudeDegrees></Position>
+          <AltitudeMeters>20</AltitudeMeters>
+        </Trackpoint>
+        <Trackpoint>
+          <Position><LatitudeDegrees>37.0</LatitudeDegrees>
+            <LongitudeDegrees>-122.002</LongitudeDegrees></Position>
+          <AltitudeMeters>30</AltitudeMeters><DistanceMeters>178</DistanceMeters>
+        </Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == pytest.approx(178.0, abs=1.0)
