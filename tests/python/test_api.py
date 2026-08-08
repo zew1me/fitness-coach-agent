@@ -5064,3 +5064,45 @@ async def test_process_uploaded_zip_survives_a_course_member_that_cannot_be_anal
     assert [entry["kind"] for entry in body["processed"]] == ["activity"]
     assert body["skipped_count"] == 1
     assert len(repo.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_surfaces_an_analysis_failure_on_the_single_file_path(
+    monkeypatch,
+) -> None:
+    # Deliberately unlike the zip path, which skips a failing member so the rest of
+    # the archive survives. A single-file upload has nothing else to salvage, and
+    # build_course_payload is the only thing that produces the terrain — if it raises,
+    # there is no partial answer to give, so the failure is surfaced rather than
+    # dressed up as an empty success.
+    repo = _CourseRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    def explode(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise ValueError("malformed threshold row")
+
+    monkeypatch.setattr(api_index, "build_course_payload", explode)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _SAMPLE_COURSE_GPX
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": "application/gpx+xml",
+                    "filename": "course.gpx",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
+                    "public_url": None,
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 500
+    # Whatever the outcome, nothing was written — the branch runs before any persist.
+    assert repo.created == []

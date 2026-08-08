@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import math
-import time
 
 import pytest
 
@@ -197,16 +196,14 @@ def test_duplicate_location_points_do_not_make_the_grade_scan_quadratic() -> Non
     # A duplicated or paused export puts thousands of points at one location. Every
     # span is zero, so a scan that walks the remaining tail looking for a window at
     # or above the minimum does it once per origin. At 50k points that was tens of
-    # seconds; the monotonic window pointer makes it linear. The ceiling here is
-    # deliberately loose — it is a guard against reintroducing quadratic behaviour,
-    # not a benchmark.
+    # seconds; thinning plus the monotonic window pointer makes it linear. This test
+    # asserts the result rather than the runtime — the bound itself is pinned
+    # deterministically by test_thinning_bounds_the_scan_input_deterministically,
+    # which needs no clock and cannot flake on a loaded CI box.
     points = [CoursePoint(0.0, 100.0) for _ in range(50_000)]
 
-    started = time.perf_counter()
     profile = summarize_course(points)
-    elapsed = time.perf_counter() - started
 
-    assert elapsed < 5.0
     # No window ever reaches the minimum, so there is no grade to report.
     assert profile.max_grade_pct is None
 
@@ -227,11 +224,8 @@ def test_two_point_clusters_do_not_make_the_grade_scan_quadratic() -> None:
     points = [CoursePoint(0.0, 100.0) for _ in range(25_000)]
     points += [CoursePoint(1000.0, 200.0) for _ in range(25_000)]
 
-    started = time.perf_counter()
     profile = summarize_course(points)
-    elapsed = time.perf_counter() - started
 
-    assert elapsed < 5.0
     # 100 m of rise over 1000 m, and the answer must survive the optimisation.
     assert profile.max_grade_pct == 10.0
 
@@ -333,17 +327,13 @@ def test_non_finite_values_in_the_point_stream_never_reach_the_profile() -> None
 
 def test_thinning_does_not_change_a_densely_sampled_grade() -> None:
     # 15 000 samples inside 150 m never reach the distance ceiling, so the scan used
-    # to walk the whole tail for every origin — 3.2s. Thinning to GRADE_SCAN_MIN_SPACING_METERS
-    # (1 m, below GPS precision) bounds it without moving the answer.
+    # to walk the whole tail for every origin — 3.2s. Thinning to
+    # GRADE_SCAN_MIN_SPACING_METERS (1 m, below GPS precision) bounds it without
+    # moving the answer, which is what this asserts.
     dense = [CoursePoint(index * 0.01, 100.0 + index * 0.001) for index in range(15_000)]
 
-    started = time.perf_counter()
     profile = summarize_course(dense)
-    elapsed = time.perf_counter() - started
 
-    # The bound has to sit below the 3.2s the unthinned scan took here, or the test
-    # cannot fail on the regression it exists to catch. Thinned, this is milliseconds.
-    assert elapsed < 1.0
     assert profile.max_grade_pct == 10.0
 
 
