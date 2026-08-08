@@ -283,7 +283,7 @@ afterEach(() => {
 });
 
 describe("streamCoachTurn", () => {
-  it("runs the lead coach through the Agents SDK with the existing turn limit", async () => {
+  it("runs the lead coach with string-only trace metadata", async () => {
     const response = await streamCoachTurn({
       accessToken: "token-1",
       baseUrl: "http://localhost",
@@ -312,7 +312,13 @@ describe("streamCoachTurn", () => {
     expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(
       "fitness-coach-turn",
       expect.any(Function),
-      expect.objectContaining({ groupId: "athlete-1" }),
+      expect.objectContaining({
+        groupId: "athlete-1",
+        metadata: {
+          fallbackModels: "gpt-5.6-luna,gpt-5.4-mini,gpt-5.6-terra",
+          startingModel: "gpt-5.6-luna",
+        },
+      }),
     );
   });
 
