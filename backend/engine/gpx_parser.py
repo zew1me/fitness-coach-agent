@@ -150,15 +150,21 @@ class _GpxSummary:
         many timestamps someone stamped on it. An empty or waypoint-only file has no
         interval either, and reporting it as a zero-distance course beats writing a
         phantom workout dated today.
+
+        Strictly positive, so out-of-order timestamps cannot slip through: a file
+        whose last point predates its first produced a negative duration, which is
+        truthy, so it was saved as an activity lasting minus five minutes.
         """
-        return not self.duration
+        duration = self.duration
+        return duration is None or duration <= 0
 
     @property
     def sport(self) -> str:
         if self.declared_sport:
             return self.declared_sport
-        if self.duration and self.total_distance > 0:
-            pace_sec_km = self.duration / (self.total_distance / 1000)
+        duration = self.duration
+        if duration is not None and duration > 0 and self.total_distance > 0:
+            pace_sec_km = duration / (self.total_distance / 1000)
             if pace_sec_km < CYCLING_INFERRED_PACE_SEC_KM:
                 return "cycling"
             return "running"
@@ -168,7 +174,7 @@ class _GpxSummary:
 
 
 def parse_gpx(file_path: str | Path) -> ParsedActivity | ParsedCourse:
-    """Parse a GPX file into a recorded activity, or a course if it has no timestamps."""
+    """Parse a GPX file into a recorded activity, or a course if it spans no elapsed time."""
     import gpxpy
 
     with Path(file_path).open() as f:
@@ -719,10 +725,11 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
         position = _tcx_trackpoint_position(trackpoint)
 
         # One running total, advanced by every step whatever its source. A declared
-        # DistanceMeters is cumulative, so its step is the gap to that total — which
-        # re-anchors the scale no matter how much position-derived movement came
-        # first. Keeping a separate declared-only baseline got both orders wrong: a
-        # course declaring 178 m came out at 267 m when the declared reading came
+        # DistanceMeters is cumulative, so its step is the gap up to that total. The
+        # clamp makes it one-sided on purpose: a declared reading can pull the total
+        # forward, but never drags it back below distance already measured from
+        # positions. Keeping a separate declared-only baseline got both orders wrong —
+        # a course declaring 178 m came out at 267 m when the declared reading came
         # first, and at 89 m when it came last.
         if distance_text:
             step = max(0.0, float(distance_text) - traveled)
