@@ -210,3 +210,42 @@ def test_dense_sampling_finds_the_same_grade_as_sparse_sampling() -> None:
     sparse = _points(*((float(d), d * 0.1) for d in range(0, 501, 100)))
 
     assert summarize_course(dense).max_grade_pct == summarize_course(sparse).max_grade_pct == 10.0
+
+
+def test_two_point_clusters_do_not_make_the_grade_scan_quadratic() -> None:
+    # Harder than a single cluster: the window pointer jumps past the first group
+    # immediately and the inner loop breaks on its first candidate, yet slicing the
+    # remaining tail on every origin was still quadratic in memory traffic.
+    points = [CoursePoint(0.0, 100.0) for _ in range(25_000)]
+    points += [CoursePoint(1000.0, 200.0) for _ in range(25_000)]
+
+    started = time.perf_counter()
+    profile = summarize_course(points)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 5.0
+    # 100 m of rise over 1000 m, and the answer must survive the optimisation.
+    assert profile.max_grade_pct == 10.0
+
+
+def test_elevation_change_over_zero_distance_is_not_counted_as_gain() -> None:
+    # Duplicated points with differing elevations are a vertical teleport — GPS or
+    # barometric noise, or a backwards jump that build_course_points clamped to zero.
+    # Counting the rise inflates the vertical while adding nothing to the distance it
+    # is averaged over.
+    points = _points((0, 0), (0, 100), (100, 100))
+
+    profile = summarize_course(points)
+
+    assert profile.elevation_gain_meters == 0.0
+    assert profile.avg_grade_pct is None
+
+
+def test_a_real_climb_after_a_duplicated_point_is_still_counted() -> None:
+    # The guard must drop only the zero-length interval, not the climb around it.
+    points = _points((0, 0), (0, 50), (200, 70))
+
+    profile = summarize_course(points)
+
+    assert profile.elevation_gain_meters == 20.0
+    assert profile.avg_grade_pct == 10.0

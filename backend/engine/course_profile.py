@@ -128,13 +128,18 @@ def _accumulate_ascent(points: Sequence[CoursePoint]) -> tuple[float, float]:
     for previous, current in pairwise(points):
         if previous.elevation_meters is None or current.elevation_meters is None:
             continue
+        span = current.cumulative_distance_meters - previous.cumulative_distance_meters
+        # A rise over zero horizontal distance is a vertical teleport: duplicated
+        # points with differing elevations, or a backwards jump that
+        # `build_course_points` clamped to zero. Counting it inflates the vertical
+        # while contributing nothing to the distance it is averaged over.
+        if span <= 0:
+            continue
         rise = current.elevation_meters - previous.elevation_meters
         if rise <= 0:
             continue
         gain += rise
-        ascending_distance += (
-            current.cumulative_distance_meters - previous.cumulative_distance_meters
-        )
+        ascending_distance += span
     return gain, ascending_distance
 
 
@@ -176,7 +181,12 @@ def _max_windowed_grade(points: Sequence[CoursePoint]) -> float | None:
             # further along, so none of them will either.
             break
 
-        for candidate in elevated[window_start:]:
+        # Indexed rather than sliced. `elevated[window_start:]` copies the whole
+        # remaining tail on every origin, which is quadratic in memory traffic even
+        # when the loop below breaks on its first candidate — 50k points clustered at
+        # two locations spent 1.3s doing nothing but copying references.
+        for index in range(window_start, len(elevated)):
+            candidate = elevated[index]
             span = candidate.cumulative_distance_meters - origin.cumulative_distance_meters
             # `elevation_meters` is non-None for every member of `elevated`; the
             # explicit reads keep the type checker honest without a cast.
