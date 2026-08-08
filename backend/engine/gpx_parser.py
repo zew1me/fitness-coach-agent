@@ -261,10 +261,15 @@ def _accumulate_gpx_segment(summary: _GpxSummary, points: list[Any]) -> None:
     if not points:
         return
 
-    if summary.start_time is None and points[0].time:
-        summary.start_time = points[0].time
-    if points[-1].time:
-        summary.end_time = points[-1].time
+    # First and last point *carrying a time*, not strictly the first and last point.
+    # A unit that drops the timestamp on its opening fix left start_time unset, which
+    # makes the elapsed span None — so a genuine recording was classified as a course
+    # and never logged at all. Scanning past the gap costs nothing and closes it.
+    if summary.start_time is None:
+        summary.start_time = next((point.time for point in points if point.time), None)
+    last_timed = next((point.time for point in reversed(points) if point.time), None)
+    if last_timed:
+        summary.end_time = last_timed
 
     summary.point_count += len(points)
 
@@ -749,7 +754,19 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
         # a course declaring 178 m came out at 267 m when the declared reading came
         # first, and at 89 m when it came last.
         if distance_text:
-            step = max(0.0, float(distance_text) - traveled)
+            declared = float(distance_text)
+            if segments:
+                step = max(0.0, declared - traveled)
+            else:
+                # The file's very first trackpoint. A course exported part-way along
+                # its route opens at a non-zero cumulative reading, which is where the
+                # route starts rather than distance the athlete covers — charging it
+                # as a step turned a 1 km course opening at 5 km into a 6 km one.
+                # Anchoring only here, rather than on the first *declared* reading,
+                # keeps a declared value that arrives after position-derived movement
+                # working as the cumulative total it is.
+                traveled = declared
+                step = 0.0
         elif position is not None and previous_position is not None:
             step = haversine_distance(*previous_position, *position) or 0.0
         else:

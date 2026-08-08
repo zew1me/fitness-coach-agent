@@ -917,3 +917,71 @@ def test_parse_tcx_course_does_not_take_its_name_from_a_waypoint(tmp_path: Path)
     assert course.name is None
     # The terrain is unaffected by the naming fix.
     assert course.profile.distance_meters == 1000.0
+
+
+def test_parse_tcx_course_opening_part_way_along_its_route(tmp_path: Path) -> None:
+    # A course exported from part-way along a longer route opens at a non-zero
+    # cumulative DistanceMeters. Charging that opening reading as a step turned a
+    # 1 km course into a 6 km one — the same defect already fixed on the FIT path.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Track>
+        <Trackpoint>
+          <AltitudeMeters>100</AltitudeMeters><DistanceMeters>5000</DistanceMeters></Trackpoint>
+        <Trackpoint>
+          <AltitudeMeters>150</AltitudeMeters><DistanceMeters>6000</DistanceMeters></Trackpoint>
+      </Track>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 1000.0
+    assert course.profile.elevation_gain_meters == 50.0
+
+
+def test_parse_gpx_recording_whose_first_point_lost_its_timestamp(tmp_path: Path) -> None:
+    # A unit that drops the timestamp on its opening fix used to leave start_time
+    # unset, so the elapsed span was None and a genuine ride was classified as a
+    # course — meaning it was never logged at all. The scan now starts at the first
+    # point that actually carries a time.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.002"><ele>14</ele><time>2026-04-19T10:02:00Z</time></trkpt>
+  </trkseg></trk>""",
+        name="run.gpx",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.duration_seconds == 60
+
+
+def test_parse_gpx_recording_whose_last_point_lost_its_timestamp(tmp_path: Path) -> None:
+    # The mirror case: a trailing point with no time must not blank out end_time.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.002"><ele>14</ele></trkpt>
+  </trkseg></trk>""",
+        name="run.gpx",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.duration_seconds == 60
