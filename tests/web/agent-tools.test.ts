@@ -948,6 +948,17 @@ describe("coachToolDefinitions", () => {
     expect(description).toContain("no_processable_files");
   });
 
+  it("tells the coach that a course result was not saved", () => {
+    // The backend refuses to log a course, but the model still has to describe it
+    // honestly — reporting a planned route as a completed workout is the failure
+    // this wording exists to prevent.
+    const description = coachToolDefinitions.process_uploaded_file.description;
+
+    expect(description).toContain("kind");
+    expect(description).toContain("course");
+    expect(description).toContain("nothing was written");
+  });
+
   it.each([
     ["application/zip", "garmin-export.zip"],
     ["application/x-zip-compressed", "garmin-export.zip"],

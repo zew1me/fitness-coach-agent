@@ -318,7 +318,11 @@ export const coachToolDefinitions = {
       "(each processed entry has status 'saved'), images are analyzed, and everything " +
       "else is discarded — do not re-save these activities yourself. A result with " +
       "status 'no_processable_files' (or an empty processed list) means the archive held " +
-      "nothing usable — tell the athlete there was nothing for you in the zip.",
+      "nothing usable — tell the athlete there was nothing for you in the zip. " +
+      "Check the 'kind' field on every result: 'activity' is a workout the athlete " +
+      "completed and it has been saved, while 'course' is a route they plan to do — " +
+      "it carries terrain and pacing analysis, nothing was written, and treating it as " +
+      "completed would credit them with a workout they have not done.",
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(

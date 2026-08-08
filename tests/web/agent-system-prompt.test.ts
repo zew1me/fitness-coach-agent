@@ -115,6 +115,18 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("enter a manual threshold");
   });
 
+  it("forbids treating an uploaded course as a completed workout", () => {
+    // The athlete uploaded a route to get advice on it. Congratulating them for
+    // riding it, or letting it count toward compliance, is the specific failure
+    // this guidance exists to prevent.
+    const prompt = buildCoachSystemPrompt(context);
+
+    expect(prompt).toContain('kind "course"');
+    expect(prompt).toContain("never congratulate");
+    expect(prompt).toContain("Nothing was logged");
+    expect(prompt).toContain("analysis_unavailable_reason");
+  });
+
   it("includes both training models and age-specific balance note for classification by the LLM", () => {
     const longevityContext: AthleteContextBundle = {
       ...context,
