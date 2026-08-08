@@ -985,3 +985,39 @@ def test_parse_gpx_recording_whose_last_point_lost_its_timestamp(tmp_path: Path)
 
     assert isinstance(activity, ParsedActivity)
     assert activity.duration_seconds == 60
+
+
+def test_parse_tcx_course_reads_the_lap_total_when_track_is_nested_inside_lap(
+    tmp_path: Path,
+) -> None:
+    # Activity-style layout: <Track> inside <Lap> rather than beside it. A descendant
+    # search for the lap total then returned the first trackpoint's DistanceMeters
+    # instead, so a marathon course reported single-digit metres.
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Name>Nested track</Name>
+      <Lap>
+        <DistanceMeters>42195</DistanceMeters>
+        <Track>
+          <Trackpoint><AltitudeMeters>100</AltitudeMeters></Trackpoint>
+          <Trackpoint><AltitudeMeters>900</AltitudeMeters></Trackpoint>
+        </Track>
+      </Lap>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.profile.distance_meters == 42195.0
+    # Same reasoning as the sibling-Track case: with no spacing information the
+    # climbing cannot be placed along the route, so nothing is claimed about it.
+    assert course.profile.elevation_gain_meters == 0.0
+    assert course.profile.avg_grade_pct is None

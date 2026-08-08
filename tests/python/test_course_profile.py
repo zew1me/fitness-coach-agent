@@ -17,6 +17,7 @@ from backend.engine.course_profile import (
     MAX_GRADE_WINDOW_METERS,
     MIN_GRADE_WINDOW_METERS,
     CoursePoint,
+    _thinned_for_grade_scan,
     build_course_points,
     summarize_course,
     summarize_course_with_totals,
@@ -432,9 +433,11 @@ def test_thinning_error_is_bounded_by_the_spacing_over_the_window() -> None:
     exact = 5 / 50.0 * 100
     assert profile.max_grade_pct is not None
     assert profile.max_grade_pct < exact
-    assert abs(profile.max_grade_pct - exact) / exact <= (
-        GRADE_SCAN_MIN_SPACING_METERS / MIN_GRADE_WINDOW_METERS
-    )
+    # Compared with a small epsilon: the bound is a ratio of two floats and the
+    # measured error can land exactly on it, where binary rounding decides the
+    # comparison rather than the behaviour under test.
+    bound = GRADE_SCAN_MIN_SPACING_METERS / MIN_GRADE_WINDOW_METERS
+    assert abs(profile.max_grade_pct - exact) / exact <= bound + 1e-9
 
 
 def test_a_sub_metre_elevation_outlier_is_deliberately_not_treated_as_terrain() -> None:
@@ -455,3 +458,16 @@ def test_real_terrain_above_the_thinning_spacing_is_never_dropped() -> None:
     genuine = _points((0, 50), (1.0, 0), (51, 100))
 
     assert summarize_course(genuine).max_grade_pct == 200.0
+
+
+def test_thinning_bounds_the_scan_input_deterministically() -> None:
+    # The companion to the wall-clock guards, without their timing dependence: the
+    # scan's input is bounded by distance over spacing however densely the file
+    # samples, which is the property that keeps the work linear.
+    span_meters = 150
+    dense = [CoursePoint(index * 0.01, 100.0) for index in range(15_000)]
+
+    thinned = _thinned_for_grade_scan(dense)
+
+    assert len(dense) == 15_000
+    assert len(thinned) <= span_meters / GRADE_SCAN_MIN_SPACING_METERS + 2

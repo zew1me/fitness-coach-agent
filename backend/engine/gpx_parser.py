@@ -695,14 +695,20 @@ def _tcx_trackpoint_position(trackpoint: ET.Element) -> tuple[float, float] | No
 
 
 def _tcx_lap_distance(course: ET.Element) -> float | None:
-    """Total DistanceMeters declared across the Course's own ``<Lap>`` elements."""
+    """Total DistanceMeters declared on the Course's own ``<Lap>`` elements.
+
+    Direct children only, for the same reason as ``_tcx_course_name``: a Lap can
+    nest its ``<Track>``, and a descendant search then returns the first
+    *trackpoint's* reading as the lap total — a marathon course came back as 7 m.
+    """
     total: float | None = None
     for lap in course.iter():
         if _local_name(lap.tag) != "Lap":
             continue
-        declared = _first_text(lap, "DistanceMeters")
-        if declared:
-            total = (total or 0.0) + float(declared)
+        for child in lap:
+            if _local_name(child.tag) == "DistanceMeters" and child.text:
+                total = (total or 0.0) + float(child.text)
+                break
     return total
 
 

@@ -4798,11 +4798,9 @@ class _CourseRepository(EngineRepository):
         return activity.model_copy(update={"id": "activity-1"})
 
 
-_ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS = {
-    ".gpx": "application/gpx+xml",
-    ".fit": "application/vnd.garmin.fit",
-    ".tcx": "application/vnd.garmin.tcx+xml",
-}
+# The production mapping, not a copy: a newly supported suffix should reach these
+# helpers automatically rather than silently missing test coverage.
+_ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS = api_index._ACTIVITY_SUFFIX_TO_CONTENT_TYPE
 
 
 async def _post_uploaded_zip_archive(
