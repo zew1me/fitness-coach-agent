@@ -36,7 +36,13 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import settings
-from backend.engine.gpx_parser import ParsedActivity, ParsedCourse
+from backend.engine.gpx_parser import (
+    ParsedActivity,
+    ParsedCourse,
+    parse_fit,
+    parse_gpx,
+    parse_tcx,
+)
 from backend.logging_config import configure_logging
 from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
@@ -1507,8 +1513,6 @@ def _activity_source_for_filename(filename: str) -> str:
 def _parse_uploaded_activity_file(
     filename: str, content_type: str, file_bytes: bytes
 ) -> ParsedActivity | ParsedCourse:
-    from backend.engine.gpx_parser import parse_fit, parse_gpx, parse_tcx
-
     suffix = Path(filename).suffix.lower()
     if content_type == "application/gpx+xml" or suffix == ".gpx":
         parser = parse_gpx
@@ -1528,7 +1532,7 @@ def _parse_uploaded_activity_file(
         return parser(tmp.name)
 
 
-def _build_uploaded_activity(  # noqa: PLR0913
+def _build_uploaded_activity_or_course(  # noqa: PLR0913
     *,
     user_id: str,
     filename: str,
@@ -1618,7 +1622,7 @@ async def process_uploaded_file_endpoint(
         user_id=user_context.user_id,
         object_key=object_key,
     )
-    parsed = _build_uploaded_activity(
+    parsed = _build_uploaded_activity_or_course(
         user_id=user_context.user_id,
         filename=payload.filename,
         content_type=payload.content_type,
@@ -1760,7 +1764,7 @@ async def _zip_activity_entry(
     *, user_id: str, filename: str, content_type: str, zip_object_key: str, member_bytes: bytes
 ) -> dict[str, object] | None:
     try:
-        parsed = _build_uploaded_activity(
+        parsed = _build_uploaded_activity_or_course(
             user_id=user_id,
             filename=filename,
             content_type=content_type,

@@ -37,6 +37,14 @@ MAX_GRADE_WINDOW_METERS = 200.0
 # one: 15 000 samples packed into 150 m never reach the ceiling at all, so the scan
 # walked the whole tail for every origin and took 3.2s.
 #
+# Thinning is an approximation, and its error is bounded and small: dropping a
+# candidate endpoint can only shift a window boundary by up to the spacing, so the
+# reported grade moves by at most spacing/MIN_GRADE_WINDOW_METERS — 1/50, or 2%.
+# Points at 0 m, 0.9 m and 50.9 m are the worst case: the exact 50 m window from
+# 0.9 m is lost and 9.8% is reported instead of 10.0%. That is an order of magnitude
+# below the input's own accuracy, since a +/-3 m elevation error over a 50 m window
+# is +/-6% of grade on its own.
+#
 # One metre is deliberately below GPS precision, so for any real file this thins
 # nothing and the scan is exact. It only engages on sub-metre sampling, where the
 # extra points cannot describe real terrain anyway — and there it is the difference

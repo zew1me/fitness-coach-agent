@@ -241,18 +241,18 @@ def test_unknown_grade_on_a_hilly_course_refuses_to_estimate() -> None:
 
 
 def test_unknown_grade_on_a_flat_course_still_analyzes() -> None:
-    # No vertical means no climb to mis-price, so an absent grade costs nothing.
+    # Cycling on purpose: the unknown-grade refusal is scoped to that branch, so a
+    # running course would pass this trivially without ever reaching the guard. No
+    # vertical means no climb to mis-price, so an absent grade costs nothing here.
     course = _course(
-        "running",
+        "cycling",
         distance_meters=10_000.0,
         elevation_gain_meters=0.0,
         avg_grade_pct=None,
         max_grade_pct=None,
     )
 
-    analysis, reason = analyze_course(
-        course, athlete=_athlete(thresholds=[_threshold("running", lt2_pace_sec_per_km=255)])
-    )
+    analysis, reason = analyze_course(course, athlete=_cycling_athlete())
 
     assert reason is None
     assert analysis is not None

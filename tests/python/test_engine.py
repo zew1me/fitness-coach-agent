@@ -848,3 +848,72 @@ def test_parse_gpx_out_of_order_timestamps_are_a_course_not_a_negative_activity(
 
     assert isinstance(course, ParsedCourse)
     assert course.sport == "general"
+
+
+def test_parse_gpx_partial_elevation_stream_does_not_invent_a_climb(tmp_path: Path) -> None:
+    # Recorded-activity path, not the course one. Coalescing a missing <ele> to 0 made
+    # the first real reading a climb from sea level: a track whose opening point has
+    # no elevation followed by one at 500 m reported 500 m of ascent, which then went
+    # into the saved activity.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>500</ele><time>2026-04-19T10:10:00Z</time></trkpt>
+  </trkseg></trk>""",
+        name="run.gpx",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.elevation_gain_meters is None
+
+
+def test_parse_gpx_counts_a_climb_between_two_real_elevations(tmp_path: Path) -> None:
+    # The guard must drop only the unpaired reading, not real ascent around it.
+    gpx_file = _write_gpx(
+        tmp_path,
+        """  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>100</ele><time>2026-04-19T10:05:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.002"><ele>180</ele><time>2026-04-19T10:10:00Z</time></trkpt>
+  </trkseg></trk>""",
+        name="run.gpx",
+    )
+
+    activity = parse_gpx(gpx_file)
+
+    assert isinstance(activity, ParsedActivity)
+    assert activity.elevation_gain_meters == 80.0
+
+
+def test_parse_tcx_course_does_not_take_its_name_from_a_waypoint(tmp_path: Path) -> None:
+    # A <Course> with no <Name> of its own but with <CoursePoint> waypoints: searching
+    # descendants picked up the first waypoint's label, so the coach told the athlete
+    # their route was called "Water stop".
+    tcx_file = tmp_path / "course.tcx"
+    tcx_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Courses>
+    <Course>
+      <Track>
+        <Trackpoint>
+          <AltitudeMeters>100</AltitudeMeters><DistanceMeters>0</DistanceMeters></Trackpoint>
+        <Trackpoint>
+          <AltitudeMeters>150</AltitudeMeters><DistanceMeters>1000</DistanceMeters></Trackpoint>
+      </Track>
+      <CoursePoint><Name>Water stop</Name><PointType>Food</PointType></CoursePoint>
+    </Course>
+  </Courses>
+</TrainingCenterDatabase>""",
+        encoding="utf-8",
+    )
+
+    course = parse_tcx(tcx_file)
+
+    assert isinstance(course, ParsedCourse)
+    assert course.name is None
+    # The terrain is unaffected by the naming fix.
+    assert course.profile.distance_meters == 1000.0

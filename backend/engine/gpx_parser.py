@@ -287,9 +287,13 @@ def _accumulate_gpx_point_distance(summary: _GpxSummary, point: Any, previous_po
     """Add one point-to-point step to the running totals, returning its distance."""
     step = point.distance_2d(previous_point) or 0
     summary.total_distance += step
-    ele_diff = (point.elevation or 0) - (previous_point.elevation or 0)
-    if ele_diff > 0:
-        summary.total_elevation_gain += ele_diff
+    # Both elevations have to be present. Coalescing a missing one to 0 turned the
+    # first reading in a partial stream into a climb from sea level: a track whose
+    # opening point has no <ele> followed by one at 500 m reported 500 m of ascent.
+    if point.elevation is not None and previous_point.elevation is not None:
+        ele_diff = point.elevation - previous_point.elevation
+        if ele_diff > 0:
+            summary.total_elevation_gain += ele_diff
     return step
 
 
@@ -697,6 +701,19 @@ def _tcx_lap_distance(course: ET.Element) -> float | None:
     return total
 
 
+def _tcx_course_name(course: ET.Element) -> str | None:
+    """The Course's own ``<Name>``, never a ``<CoursePoint>`` waypoint label.
+
+    ``_first_text`` walks descendants, so a course with no name of its own but with
+    course points took the first waypoint's name — the coach then told the athlete
+    their route was called "Water stop".
+    """
+    for child in course:
+        if _local_name(child.tag) == "Name" and child.text:
+            return child.text.strip() or None
+    return None
+
+
 def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
     """Build a course from a TCX ``<Course>`` element.
 
@@ -760,7 +777,7 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
     return ParsedCourse(
         sport=UNKNOWN_SPORT,
         profile=profile,
-        name=_first_text(course, "Name"),
+        name=_tcx_course_name(course),
     )
 
 

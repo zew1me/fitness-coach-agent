@@ -13,6 +13,7 @@ import time
 import pytest
 
 from backend.engine.course_profile import (
+    GRADE_SCAN_MIN_SPACING_METERS,
     MAX_GRADE_WINDOW_METERS,
     MIN_GRADE_WINDOW_METERS,
     CoursePoint,
@@ -413,3 +414,24 @@ def test_backwards_distance_in_directly_built_points_is_clamped_not_obeyed() -> 
     profile = summarize_course(points)
 
     assert profile.distance_meters == 500.0
+
+
+def test_thinning_error_is_bounded_by_the_spacing_over_the_window() -> None:
+    # The worst case for thinning: the exact 50 m window from 0.9 m to 50.9 m is
+    # lost because 0.9 m sits inside the 1 m spacing. The scan falls back to the
+    # 50.9 m window from 0 m and reports 9.8% instead of 10.0%.
+    #
+    # Pinned rather than fixed. Removing the thinning restores exactness and also
+    # restores the quadratic scan it exists to prevent, and the error it trades for
+    # that is bounded at spacing/MIN_GRADE_WINDOW_METERS — 2% — which is an order of
+    # magnitude below the elevation accuracy of any real GPS file.
+    points = _points((0, 0), (0.9, 0), (50.9, 5))
+
+    profile = summarize_course(points)
+
+    exact = 5 / 50.0 * 100
+    assert profile.max_grade_pct is not None
+    assert profile.max_grade_pct < exact
+    assert abs(profile.max_grade_pct - exact) / exact <= (
+        GRADE_SCAN_MIN_SPACING_METERS / MIN_GRADE_WINDOW_METERS
+    )
