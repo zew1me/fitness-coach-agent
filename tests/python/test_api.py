@@ -4931,3 +4931,16 @@ async def test_process_uploaded_zip_analyzes_a_course_member_without_saving_it(
     # The recorded run is saved; the course is not.
     assert len(repo.created) == 1
     assert repo.created[0].source == "gpx_upload"
+
+
+@pytest.mark.asyncio
+async def test_saved_activity_response_carries_the_activity_kind_discriminator(
+    monkeypatch,
+) -> None:
+    # Pairs with kind: "course". Additive, so nothing that reads "activity" or
+    # "status" today has to change.
+    body, repo = await _post_uploaded_course(monkeypatch, _SAMPLE_GPX, filename="run.gpx")
+
+    assert body["kind"] == "activity"
+    assert body["status"] == "saved"
+    assert len(repo.created) == 1

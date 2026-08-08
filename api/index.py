@@ -1771,7 +1771,8 @@ async def _zip_activity_entry(
         # archive instead of skipping this one member.
         logger.exception("failed to persist activity from zip member user_id=%s", user_id)
         return None
-    return {"kind": "activity", **persisted}
+    # `kind` already comes from _finalize_persisted_activity.
+    return dict(persisted)
 
 
 async def _best_effort_delete_r2_object(*, user_id: str, object_key: str) -> None:
@@ -2404,7 +2405,13 @@ async def _finalize_persisted_activity(
 ) -> Mapping[str, object]:
     logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
-    response: dict[str, object] = {"activity": activity.model_dump(mode="json"), "status": "saved"}
+    response: dict[str, object] = {
+        # Pairs with kind: "course" so the coach can tell a saved workout from an
+        # analyzed route without inspecting which keys happen to be present.
+        "kind": "activity",
+        "activity": activity.model_dump(mode="json"),
+        "status": "saved",
+    }
     if matched is not None:
         response["matched_plan_workout"] = matched
     return response
