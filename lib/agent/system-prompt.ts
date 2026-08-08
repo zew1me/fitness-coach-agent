@@ -230,6 +230,14 @@ export function buildSpecialistPrompt(
   ].join("\n\n");
 }
 
+/**
+ * Builds the lead coach system prompt from athlete context, specialist reports, and optional coaching-memory follow-up data.
+ *
+ * @param context - The athlete profile, goals, training load, coaching state, and related context.
+ * @param specialistReports - Specialist findings to incorporate into the lead coach's guidance.
+ * @param dueFollowUp - Optional athlete-authored coaching-memory follow-up data.
+ * @returns The assembled lead coach system prompt.
+ */
 export function buildLeadCoachPrompt(
   context: AthleteContextBundle,
   specialistReports: SpecialistReport[] = [],

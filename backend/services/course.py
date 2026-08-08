@@ -47,10 +47,18 @@ def build_course_payload(
     source_file_key: str | None = None,
     public_url: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble the tool result for an uploaded course.
-
-    ``kind`` is the discriminator the coach reads to know nothing was logged. It
-    matches the shape already used for activity entries in the zip response.
+    """
+    Build a coach-facing payload containing course metadata and available analysis.
+    
+    Parameters:
+        athlete (AthleteCourseContext): Athlete data and threshold lookup state used
+            to determine whether sport-specific analysis is available.
+        source_file_key (str | None): Optional key identifying the uploaded source file.
+        public_url (str | None): Optional public URL for the uploaded course.
+    
+    Returns:
+        dict[str, Any]: Payload containing course metadata, serialized analysis when
+            available, and a reason when analysis cannot be provided.
     """
     analysis, unavailable_reason = analyze_course(course, athlete=athlete)
 
@@ -95,14 +103,14 @@ def analyze_course(
     *,
     athlete: AthleteCourseContext,
 ) -> tuple[CourseAnalysis | None, str | None]:
-    """Pick and run the analyzer that fits this course, or explain why we can't.
-
-    Returns ``(analysis, reason)`` with exactly one of them set.
-
-    ``athlete.lookup_failed`` distinguishes "this athlete has no FTP" from "we could
-    not read the athlete's data". Both arrive here as absent values, but telling
-    someone to supply a number they already gave us — during an outage, on every
-    upload — is a worse answer than admitting we couldn't look it up.
+    """
+    Selects the appropriate analysis model for a parsed course.
+    
+    Parameters:
+        athlete (AthleteCourseContext): Athlete data and threshold lookup status used for sport-specific analyses.
+    
+    Returns:
+        tuple[CourseAnalysis | None, str | None]: The course analysis and no reason, or no analysis and an explanation of why analysis is unavailable.
     """
     elevation_gain = course.profile.elevation_gain_meters
 
@@ -138,6 +146,17 @@ def _analyze_cycling(
     athlete: AthleteCourseContext,
     avg_grade: float,
 ) -> tuple[CourseAnalysis | None, str | None]:
+    """
+    Analyze a cycling course using the athlete's FTP and body weight.
+    
+    Parameters:
+        course (ParsedCourse): The parsed cycling course to analyze.
+        athlete (AthleteCourseContext): Athlete profile and threshold data used for estimation.
+        avg_grade (float): The course's average climbing grade as a percentage.
+    
+    Returns:
+        tuple[CourseAnalysis | None, str | None]: The course analysis and no reason when successful, or no analysis and a reason when required athlete data is unavailable.
+    """
     ftp_watts = _threshold_for(athlete.thresholds, "cycling", "lt2_power_watts")
     weight_kg = athlete.profile.weight_kg if athlete.profile else None
 
@@ -171,6 +190,17 @@ def _analyze_running(
     athlete: AthleteCourseContext,
     overall_grade: float,
 ) -> tuple[CourseAnalysis | None, str | None]:
+    """
+    Analyze a running course using the athlete's threshold pace.
+    
+    Parameters:
+        course (ParsedCourse): Parsed course data to analyze.
+        athlete (AthleteCourseContext): Athlete profile, thresholds, and lookup status.
+        overall_grade (float): Elevation gain as a percentage of the full route distance.
+    
+    Returns:
+        tuple[CourseAnalysis | None, str | None]: The course analysis and no reason, or no analysis and a reason when the threshold pace is unavailable.
+    """
     lt2_pace = _threshold_for(athlete.thresholds, "running", "lt2_pace_sec_per_km")
     if lt2_pace is None:
         if athlete.lookup_failed:
@@ -192,13 +222,10 @@ def _analyze_running(
 
 
 def _overall_grade_pct(course: ParsedCourse) -> float:
-    """Elevation gain as a percentage of the *whole* route distance.
-
-    Distinct from ``CourseProfile.avg_grade_pct``, which averages over the ascending
-    portions only. Which one a model wants depends on how it spends the number:
-    ``analyze_cycling_climb`` inverts it to recover climbing distance and needs the
-    ascending figure, while ``analyze_running_climb`` multiplies a per-kilometre
-    penalty across the entire route and needs this one.
+    """Calculate elevation gain as a percentage of the total route distance.
+    
+    Returns:
+    	float: Elevation gain percentage, or 0.0 when the route distance is zero or negative.
     """
     if course.profile.distance_meters <= 0:
         return 0.0
@@ -206,10 +233,15 @@ def _overall_grade_pct(course: ParsedCourse) -> float:
 
 
 def _threshold_for(thresholds: list[SportThreshold], sport: str, attribute: str) -> int | None:
-    """First non-null ``attribute`` among the athlete's active thresholds for ``sport``.
-
-    ``get_active_thresholds`` orders newest first, so the first hit is the current
-    one. A sport can have several rows where only some carry the field we want.
+    """Find the most recent available threshold value for a sport and attribute.
+    
+    Parameters:
+        thresholds (list[SportThreshold]): Athlete thresholds ordered from newest to oldest.
+        sport (str): Sport whose threshold should be selected.
+        attribute (str): Threshold field to retrieve.
+    
+    Returns:
+        int | None: The first available threshold value, or ``None`` if no matching value exists.
     """
     for threshold in thresholds:
         if threshold.sport != sport:
@@ -221,6 +253,14 @@ def _threshold_for(thresholds: list[SportThreshold], sport: str, attribute: str)
 
 
 def _analysis_to_dict(analysis: CourseAnalysis) -> dict[str, Any]:
+    """Convert a course analysis into a serializable dictionary of analysis results.
+    
+    Parameters:
+    	analysis (CourseAnalysis): The analysis to serialize.
+    
+    Returns:
+    	dict[str, Any]: The analysis fields and their corresponding values.
+    """
     return {
         "estimated_duration_seconds": analysis.estimated_duration_seconds,
         "primary_training_emphasis": analysis.primary_training_emphasis,

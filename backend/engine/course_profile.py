@@ -75,11 +75,16 @@ class CourseProfile:
 def build_course_points(
     segments: Iterable[tuple[float, float | None]],
 ) -> list[CoursePoint]:
-    """Build course points from ``(segment_distance_meters, elevation)`` pairs.
-
-    The caller supplies per-segment distances because each source format measures
-    them differently (gpxpy's ``distance_2d`` for GPX/TCX, FIT's cumulative
-    ``distance`` field), and this module deliberately owns no geodesy.
+    """
+    Build cumulative course points from segment distances and optional elevations.
+    
+    Parameters:
+    	segments (Iterable[tuple[float, float | None]]): Segment distances in meters
+    		and optional elevation readings in meters.
+    
+    Returns:
+    	list[CoursePoint]: Course points with cumulative non-negative distances and
+    		invalid elevations represented as ``None``.
     """
     points: list[CoursePoint] = []
     cumulative = 0.0
@@ -100,13 +105,14 @@ def build_course_points(
 
 
 def _finite_points(points: Sequence[CoursePoint]) -> list[CoursePoint]:
-    """Normalize the sequence at the boundary so nothing downstream sees a NaN.
-
-    ``build_course_points`` already sanitizes what it builds, but points reach here
-    directly too, and a single non-finite cumulative distance propagates into
-    ``distance_meters`` and every grade — landing in the response as bare ``NaN``,
-    which is not valid JSON. Non-finite distances are dropped rather than zeroed,
-    since a point with no position tells us nothing about where it sits.
+    """
+    Filter out points with non-finite cumulative distances and normalize invalid elevations to ``None``.
+    
+    Parameters:
+    	points (Sequence[CoursePoint]): Course points to sanitize.
+    
+    Returns:
+    	list[CoursePoint]: Points with finite cumulative distances and normalized elevations.
     """
     return [
         CoursePoint(point.cumulative_distance_meters, _elevation_of(point))
@@ -116,17 +122,18 @@ def _finite_points(points: Sequence[CoursePoint]) -> list[CoursePoint]:
 
 
 def _elevation_of(point: CoursePoint) -> float | None:
-    """A point's elevation, treating a non-finite reading as absent.
-
-    Belt and braces for points built directly rather than through
-    ``build_course_points`` — a single NaN would otherwise poison every total.
+    """
+    Get a point's finite elevation reading.
+    
+    Returns:
+    	float | None: The elevation in meters, or `None` when the reading is missing or non-finite.
     """
     elevation = point.elevation_meters
     return elevation if elevation is not None and isfinite(elevation) else None
 
 
 def _thinned_for_grade_scan(points: Sequence[CoursePoint]) -> list[CoursePoint]:
-    """Drop samples closer together than the scan needs, keeping the last one."""
+    """Reduce closely spaced samples for grade scanning while preserving the final point."""
     kept: list[CoursePoint] = []
     for point in points:
         if (
@@ -141,7 +148,15 @@ def _thinned_for_grade_scan(points: Sequence[CoursePoint]) -> list[CoursePoint]:
 
 
 def summarize_course(points: Sequence[CoursePoint]) -> CourseProfile:
-    """Reduce a course's point stream to distance, vertical, and grade."""
+    """
+    Summarize a course's distance, elevation gain, and grade metrics.
+    
+    Parameters:
+        points (Sequence[CoursePoint]): Course points ordered by cumulative distance.
+    
+    Returns:
+        CourseProfile: Rounded distance and elevation metrics, with grade values when sufficient elevation data is available.
+    """
     points = _finite_points(points)
     distance = points[-1].cumulative_distance_meters if points else 0.0
     gain, ascending_distance = _accumulate_ascent(points)
@@ -164,11 +179,16 @@ def summarize_course_with_totals(
     distance_meters: float | None,
     elevation_gain_meters: float | None,
 ) -> CourseProfile:
-    """Summarize a course whose distance/vertical totals come from the file itself.
-
-    FIT courses report authoritative totals on their ``lap`` messages; the point
-    stream, when present, is only good for grades. Supplied totals win; anything
-    missing falls back to what the points imply.
+    """
+    Summarize a course using supplied totals when they are valid.
+    
+    Parameters:
+        points (Sequence[CoursePoint]): Course points used to derive fallback totals and grade metrics.
+        distance_meters (float | None): Supplied total distance.
+        elevation_gain_meters (float | None): Supplied total elevation gain.
+    
+    Returns:
+        CourseProfile: Course summary using valid supplied totals and point-derived grade metrics.
     """
     derived = summarize_course(points)
     return CourseProfile(
@@ -180,12 +200,15 @@ def summarize_course_with_totals(
 
 
 def _usable_total(supplied: float | None, fallback: float) -> float:
-    """Take a file-supplied total only when it is a real, non-negative number.
-
-    A corrupt FIT lap can carry NaN, infinity, or a negative distance. NaN and
-    infinity are the sharper problem: ``json.dumps`` emits them as bare ``NaN`` and
-    ``Infinity``, which are not valid JSON, so one bad lap would produce a response
-    the model cannot parse rather than a merely wrong number.
+    """
+    Select a supplied total when it is finite and non-negative; otherwise use the fallback.
+    
+    Parameters:
+    	supplied (float | None): The proposed total.
+    	fallback (float): The value to use when the supplied total is invalid.
+    
+    Returns:
+    	float: The selected total rounded to one decimal place when supplied, or the fallback value.
     """
     if supplied is None or not isfinite(supplied) or supplied < 0:
         return fallback
@@ -193,11 +216,20 @@ def _usable_total(supplied: float | None, fallback: float) -> float:
 
 
 def _has_elevation(points: Sequence[CoursePoint]) -> bool:
+    """Determine whether any course point has a valid elevation value."""
     return any(_elevation_of(point) is not None for point in points)
 
 
 def _accumulate_ascent(points: Sequence[CoursePoint]) -> tuple[float, float]:
-    """Total positive elevation change and the distance covered while ascending."""
+    """
+    Calculate total elevation gain and the distance covered during ascents.
+    
+    Parameters:
+        points (Sequence[CoursePoint]): Course points ordered by cumulative distance.
+    
+    Returns:
+        tuple[float, float]: Total positive elevation gain and ascending distance.
+    """
     gain = 0.0
     ascending_distance = 0.0
     for previous, current in pairwise(points):
@@ -221,20 +253,15 @@ def _accumulate_ascent(points: Sequence[CoursePoint]) -> tuple[float, float]:
 
 
 def _max_windowed_grade(points: Sequence[CoursePoint]) -> float | None:
-    """Steepest grade over any window between the min and max window lengths.
-
-    Every window in that range is considered, not just the shortest one anchored at
-    each start. Checking only the shortest is tempting and wrong: with a 50 m
-    minimum and points at 0 m/0 m, 50 m/0 m, 60 m/10 m, the shortest window from the
-    first point is flat, no window starts at the second, and the real 16.7% pitch
-    between 0 m and 60 m goes unreported.
-
-    Both endpoints of a window must carry elevation, so a file with sparse
-    elevations still yields a usable answer instead of dropping to ``None``.
-
-    The result is signed. A descent-only route reports a negative max grade, which
-    reads oddly but is true: clamping to zero would claim a flat section the route
-    does not contain.
+    """
+    Determine the steepest signed grade across valid distance windows.
+    
+    Parameters:
+        points (Sequence[CoursePoint]): Course points used for grade calculation.
+    
+    Returns:
+        float | None: The steepest grade percentage, rounded to one decimal place,
+        or None when fewer than two elevated points or no valid window exists.
     """
     elevated = _thinned_for_grade_scan(
         [point for point in points if _elevation_of(point) is not None]

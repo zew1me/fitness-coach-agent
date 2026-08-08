@@ -222,6 +222,15 @@ def test_parse_tcx_extracts_activity_and_rr_intervals(tmp_path: Path) -> None:
 
 
 def _write_gpx(tmp_path: Path, body: str, name: str = "course.gpx") -> Path:
+    """Write a GPX document containing the provided body to a temporary path.
+    
+    Parameters:
+    	body (str): GPX XML content to place inside the document.
+    	name (str): Output filename.
+    
+    Returns:
+    	Path: Path to the written GPX file.
+    """
     gpx_file = tmp_path / name
     gpx_file.write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n'
