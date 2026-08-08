@@ -94,7 +94,7 @@ type CompactionThresholds = Pick<
 // post-tool follow-up inside one TPM window. Keeping one request below the
 // model context window is therefore insufficient; compact early enough to
 // leave room for the turn's other model calls under the 200k TPM quota.
-export const DEFAULT_AUTO_COMPACT_TOKENS = 30_000;
+export const DEFAULT_AUTO_COMPACT_TOKENS = 60_000;
 const DEFAULT_AUTO_COMPACT_NON_USER_ITEMS = 40;
 
 function shouldTriggerCompaction(
