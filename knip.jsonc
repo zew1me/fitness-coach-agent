@@ -26,6 +26,8 @@
     ".vercel/**",
     ".next/**"
   ],
+  // Both are run as CLIs from package.json scripts and lefthook, never imported, so
+  // knip cannot tie the binary back to the package that provides it.
   "ignoreBinaries": ["uv", "ast-grep"],
   "lefthook": false
 }

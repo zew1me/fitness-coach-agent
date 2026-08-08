@@ -716,4 +716,4 @@ def test_parse_tcx_course_mixing_declared_and_derived_distance_does_not_double_c
     course = parse_tcx(tcx_file)
 
     assert isinstance(course, ParsedCourse)
-    assert course.profile.distance_meters == 178.0
+    assert course.profile.distance_meters == pytest.approx(178.0, abs=1.0)

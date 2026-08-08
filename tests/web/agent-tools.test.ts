@@ -954,9 +954,15 @@ describe("coachToolDefinitions", () => {
     // this wording exists to prevent.
     const description = coachToolDefinitions.process_uploaded_file.description;
 
-    expect(description).toContain("kind");
-    expect(description).toContain("course");
+    expect(description).toContain("Check the 'kind' field on every result");
+    expect(description).toContain(
+      "'activity' is a workout the athlete completed and it has been saved",
+    );
+    expect(description).toContain("'course' is a route they plan to do");
     expect(description).toContain("nothing was written");
+    expect(description).toContain(
+      "treating it as completed would credit them with a workout they have not done",
+    );
   });
 
   it.each([

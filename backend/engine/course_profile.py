@@ -31,6 +31,14 @@ MIN_GRADE_WINDOW_METERS = 50.0
 # see `_max_windowed_grade` for why a coarsely sampled course still gets an answer.
 MAX_GRADE_WINDOW_METERS = 200.0
 
+# Minimum spacing between the samples the grade scan actually looks at. The ceiling
+# above bounds a window by *distance*, but nothing bounds how many points sit inside
+# one: 15 000 samples packed into 150 m never reach the ceiling at all, so the scan
+# walked the whole tail for every origin and took 3.2s. Thinning first bounds it by
+# construction — at 5 m, one tenth of the minimum window, a window holds at most 40
+# samples and the result is unchanged to the nearest tenth of a percent.
+GRADE_SCAN_MIN_SPACING_METERS = 5.0
+
 
 @dataclass(frozen=True)
 class CoursePoint:
@@ -71,9 +79,44 @@ def build_course_points(
     points: list[CoursePoint] = []
     cumulative = 0.0
     for segment_distance, elevation in segments:
-        cumulative += max(0.0, segment_distance)
-        points.append(CoursePoint(cumulative, elevation))
+        # A corrupt file can carry NaN or infinity in either field. Left alone they
+        # propagate through every downstream sum into the response, where
+        # `json.dumps` writes them bare and produces invalid JSON. A non-finite
+        # distance is no movement; a non-finite elevation is no reading.
+        step = segment_distance if isfinite(segment_distance) else 0.0
+        cumulative += max(0.0, step)
+        points.append(
+            CoursePoint(
+                cumulative,
+                elevation if elevation is not None and isfinite(elevation) else None,
+            )
+        )
     return points
+
+
+def _elevation_of(point: CoursePoint) -> float | None:
+    """A point's elevation, treating a non-finite reading as absent.
+
+    Belt and braces for points built directly rather than through
+    ``build_course_points`` — a single NaN would otherwise poison every total.
+    """
+    elevation = point.elevation_meters
+    return elevation if elevation is not None and isfinite(elevation) else None
+
+
+def _thinned_for_grade_scan(points: Sequence[CoursePoint]) -> list[CoursePoint]:
+    """Drop samples closer together than the scan needs, keeping the last one."""
+    kept: list[CoursePoint] = []
+    for point in points:
+        if (
+            not kept
+            or point.cumulative_distance_meters - kept[-1].cumulative_distance_meters
+            >= GRADE_SCAN_MIN_SPACING_METERS
+        ):
+            kept.append(point)
+    if points and kept[-1] is not points[-1]:
+        kept.append(points[-1])
+    return kept
 
 
 def summarize_course(points: Sequence[CoursePoint]) -> CourseProfile:
@@ -128,7 +171,7 @@ def _usable_total(supplied: float | None, fallback: float) -> float:
 
 
 def _has_elevation(points: Sequence[CoursePoint]) -> bool:
-    return any(point.elevation_meters is not None for point in points)
+    return any(_elevation_of(point) is not None for point in points)
 
 
 def _accumulate_ascent(points: Sequence[CoursePoint]) -> tuple[float, float]:
@@ -136,7 +179,9 @@ def _accumulate_ascent(points: Sequence[CoursePoint]) -> tuple[float, float]:
     gain = 0.0
     ascending_distance = 0.0
     for previous, current in pairwise(points):
-        if previous.elevation_meters is None or current.elevation_meters is None:
+        previous_elevation = _elevation_of(previous)
+        current_elevation = _elevation_of(current)
+        if previous_elevation is None or current_elevation is None:
             continue
         span = current.cumulative_distance_meters - previous.cumulative_distance_meters
         # A rise over zero horizontal distance is a vertical teleport: duplicated
@@ -145,7 +190,7 @@ def _accumulate_ascent(points: Sequence[CoursePoint]) -> tuple[float, float]:
         # while contributing nothing to the distance it is averaged over.
         if span <= 0:
             continue
-        rise = current.elevation_meters - previous.elevation_meters
+        rise = current_elevation - previous_elevation
         if rise <= 0:
             continue
         gain += rise
@@ -165,7 +210,9 @@ def _max_windowed_grade(points: Sequence[CoursePoint]) -> float | None:
     Both endpoints of a window must carry elevation, so a file with sparse
     elevations still yields a usable answer instead of dropping to ``None``.
     """
-    elevated = [point for point in points if point.elevation_meters is not None]
+    elevated = _thinned_for_grade_scan(
+        [point for point in points if _elevation_of(point) is not None]
+    )
     if len(elevated) < MIN_POINTS_FOR_GRADE:
         return None
 
@@ -200,7 +247,7 @@ def _max_windowed_grade(points: Sequence[CoursePoint]) -> float | None:
             span = candidate.cumulative_distance_meters - origin.cumulative_distance_meters
             # `elevation_meters` is non-None for every member of `elevated`; the
             # explicit reads keep the type checker honest without a cast.
-            rise = (candidate.elevation_meters or 0.0) - (origin.elevation_meters or 0.0)
+            rise = (_elevation_of(candidate) or 0.0) - (_elevation_of(origin) or 0.0)
             grade = rise / span * 100
             if steepest is None or grade > steepest:
                 steepest = grade

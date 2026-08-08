@@ -124,6 +124,8 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain('kind "course"');
     expect(prompt).toContain("never congratulate");
     expect(prompt).toContain("Nothing was logged");
+    expect(prompt).toContain("never describe it as completed or saved");
+    expect(prompt).toContain("never claim it counts toward compliance");
     expect(prompt).toContain("analysis_unavailable_reason");
   });
 

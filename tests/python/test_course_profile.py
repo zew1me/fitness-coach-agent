@@ -7,6 +7,7 @@ independent of the implementation rather than a snapshot of it.
 from __future__ import annotations
 
 import json
+import math
 import time
 
 import pytest
@@ -276,3 +277,60 @@ def test_zero_is_a_usable_supplied_total() -> None:
     profile = summarize_course_with_totals(points, distance_meters=500.0, elevation_gain_meters=0.0)
 
     assert profile.elevation_gain_meters == 0.0
+
+
+def test_a_coarse_over_ceiling_grade_is_not_masked_by_a_finer_gentler_one() -> None:
+    # Deliberate: the steepest reading wins even when it comes from an over-ceiling
+    # window. Preferring bounded windows globally would let a well-sampled 10% pitch
+    # at one end of the course hide a 20% kilometre at the other — understating what
+    # the athlete actually faces, which is the more dangerous error for pacing.
+    points = _points((0, 0), (1000, 200), (1100, 210))
+
+    assert summarize_course(points).max_grade_pct == 20.0
+
+
+def test_non_finite_values_in_the_point_stream_never_reach_the_profile() -> None:
+    # Same failure as a corrupt lap total, arriving by the other route: json.dumps
+    # writes NaN and Infinity bare, so one bad <ele> would produce a response the
+    # model cannot parse.
+    points = build_course_points(
+        [
+            (0.0, 100.0),
+            (float("nan"), 150.0),
+            (100.0, float("nan")),
+            (float("inf"), 180.0),
+            (100.0, 220.0),
+        ]
+    )
+
+    profile = summarize_course(points)
+
+    for value in (
+        profile.distance_meters,
+        profile.elevation_gain_meters,
+        profile.avg_grade_pct,
+        profile.max_grade_pct,
+    ):
+        assert value is None or math.isfinite(value)
+    assert json.dumps(
+        {
+            "distance": profile.distance_meters,
+            "gain": profile.elevation_gain_meters,
+            "avg": profile.avg_grade_pct,
+            "max": profile.max_grade_pct,
+        }
+    )
+
+
+def test_thinning_does_not_change_a_densely_sampled_grade() -> None:
+    # 15 000 samples inside 150 m never reach the distance ceiling, so the scan used
+    # to walk the whole tail for every origin — 3.2s. Thinning to 5 m spacing bounds
+    # it without moving the answer.
+    dense = [CoursePoint(index * 0.01, 100.0 + index * 0.001) for index in range(15_000)]
+
+    started = time.perf_counter()
+    profile = summarize_course(dense)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 5.0
+    assert profile.max_grade_pct == 10.0
