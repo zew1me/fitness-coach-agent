@@ -47,11 +47,14 @@ export type ModelTier = {
 type RateLimitOutcome = "retrying" | "falling_back" | "exhausted";
 
 type RateLimitError = {
+  code?: unknown;
+  errorCode?: unknown;
+  headers?: unknown;
+  message?: unknown;
   request_id?: unknown;
   requestID?: unknown;
   status?: unknown;
   statusCode?: unknown;
-  headers?: unknown;
 };
 
 function captureInvalidConfiguration(
@@ -350,9 +353,28 @@ function errorChain(error: unknown): RateLimitError[] {
   return chain;
 }
 
+function rateLimitMessage(message: unknown): boolean {
+  if (typeof message !== "string") return false;
+  return /rate[- ]limit\s+(?:reached|exceeded|hit)|too many requests|tokens per min/i.test(
+    message,
+  );
+}
+
+function rateLimitCode(code: unknown): boolean {
+  return (
+    typeof code === "string" &&
+    /rate[-_ ]?limit|too[-_ ]?many[-_ ]?requests/i.test(code)
+  );
+}
+
 export function isRateLimitError(error: unknown): boolean {
   return errorChain(error).some(
-    (candidate) => candidate.status === 429 || candidate.statusCode === 429,
+    (candidate) =>
+      candidate.status === 429 ||
+      candidate.statusCode === 429 ||
+      rateLimitCode(candidate.code) ||
+      rateLimitCode(candidate.errorCode) ||
+      rateLimitMessage(candidate.message),
   );
 }
 
@@ -365,17 +387,43 @@ function retryAfterHeader(headers: unknown): string | undefined {
   return typeof raw === "string" ? raw : undefined;
 }
 
+const RETRY_AFTER_UNIT_MS: Readonly<Record<string, number>> = {
+  m: 60_000,
+  min: 60_000,
+  mins: 60_000,
+  minute: 60_000,
+  minutes: 60_000,
+  ms: 1,
+  millisecond: 1,
+  milliseconds: 1,
+};
+
+function retryAfterMessage(message: unknown): number | undefined {
+  if (typeof message !== "string") return undefined;
+  const match = message.match(
+    /try again in\s+([0-9]+(?:\.[0-9]+)?)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m)\b/i,
+  );
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return undefined;
+  const multiplier =
+    RETRY_AFTER_UNIT_MS[match[2]?.toLowerCase() ?? ""] ?? 1_000;
+  return Math.max(0, amount * multiplier);
+}
+
 export function getRetryAfterMs(error: unknown): number | undefined {
   for (const candidate of errorChain(error)) {
     const value = retryAfterHeader(candidate.headers);
-    if (!value) continue;
-    const seconds = Number(value);
-    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
-    const date = Date.parse(value);
-    if (!Number.isNaN(date)) {
-      return Math.max(0, date - Date.now());
+    if (value) {
+      const seconds = Number(value);
+      if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+      const date = Date.parse(value);
+      if (!Number.isNaN(date)) {
+        return Math.max(0, date - Date.now());
+      }
     }
-    continue;
+    const messageDelay = retryAfterMessage(candidate.message);
+    if (messageDelay !== undefined) return messageDelay;
   }
   return undefined;
 }
