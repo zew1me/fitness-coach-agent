@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "exercise-training-plan-gpt",
+    "fitness-coach-garmin-sidecar",
     "fitness-coach-self-data-backup",
 ]
 
@@ -344,15 +345,9 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
-[package.optional-dependencies]
-garmin = [
-    { name = "garminconnect" },
-    { name = "typer" },
-]
-
 [package.dev-dependencies]
 dev = [
-    { name = "exercise-training-plan-gpt", extra = ["garmin"] },
+    { name = "fitness-coach-garmin-sidecar" },
     { name = "fitness-coach-self-data-backup" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -367,7 +362,6 @@ requires-dist = [
     { name = "cryptography", specifier = ">=46.0.5,<47.0.0" },
     { name = "fastapi", specifier = ">=0.115.12,<0.116.0" },
     { name = "fitparse", specifier = ">=1.2.0" },
-    { name = "garminconnect", marker = "extra == 'garmin'", specifier = ">=0.3.6,<0.4.0" },
     { name = "gpxpy", specifier = ">=1.6.2" },
     { name = "httpx", specifier = ">=0.28.1,<0.29.0" },
     { name = "httpx-retries", specifier = ">=0.6.0,<0.7.0" },
@@ -378,14 +372,12 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.20,<0.0.21" },
     { name = "sentry-sdk", specifier = ">=2.63.0" },
     { name = "supabase", specifier = ">=2.13.0,<2.26.0" },
-    { name = "typer", marker = "extra == 'garmin'", specifier = ">=0.16.0,<1.0.0" },
     { name = "uvicorn", specifier = ">=0.34.0,<0.35.0" },
 ]
-provides-extras = ["garmin"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "exercise-training-plan-gpt", extras = ["garmin"] },
+    { name = "fitness-coach-garmin-sidecar", editable = "tools/garmin-sidecar" },
     { name = "fitness-coach-self-data-backup", editable = "tools/self-data-backup" },
     { name = "pytest", specifier = ">=8.3.5,<9.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.25.3,<0.26.0" },
@@ -406,6 +398,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ca/53/8c38a874844a8b0fa10dd8adf3836ac154082cf88d3f22b544e9ceea0a15/fastapi-0.115.14.tar.gz", hash = "sha256:b1de15cdc1c499a4da47914db35d0e4ef8f1ce62b624e94e0e5824421df99739", size = 296263, upload-time = "2025-06-26T15:29:08.21Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/53/50/b1222562c6d270fea83e9c9075b8e8600b8479150a18e4516a6138b980d1/fastapi-0.115.14-py3-none-any.whl", hash = "sha256:6c0c8bf9420bd58f565e585036d971872472b4f7d3f6c73b698e10cffdefb3ca", size = 95514, upload-time = "2025-06-26T15:29:06.49Z" },
+]
+
+[[package]]
+name = "fitness-coach-garmin-sidecar"
+version = "0.1.0"
+source = { editable = "tools/garmin-sidecar" }
+dependencies = [
+    { name = "garminconnect" },
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "garminconnect", specifier = ">=0.3.6,<0.4.0" },
+    { name = "typer", specifier = ">=0.16.0,<1.0.0" },
 ]
 
 [[package]]

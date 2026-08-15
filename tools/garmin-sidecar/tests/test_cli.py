@@ -8,10 +8,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from fitness_coach_garmin_sidecar import cli as garmin_connect
 from garminconnect import GarminConnectConnectionError
 from typer.testing import CliRunner
-
-from scripts import garmin_connect
 
 
 def _fit_bytes(marker: bytes = b"") -> bytes:
