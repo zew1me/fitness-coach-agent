@@ -85,6 +85,19 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("context-aware prompt to continue");
   });
 
+  it("routes Garmin wellness export blocks to recovery persistence", () => {
+    const prompt = buildCoachSystemPrompt(context);
+
+    expect(prompt).toContain(
+      "=== WELLNESS EXPORT v1 source=garmin_sidecar ===",
+    );
+    expect(prompt).toContain("call save_recovery_data");
+    expect(prompt).toContain("pass null for their required tool fields");
+    expect(prompt).toContain(
+      "Never route a wellness export to save_activity_from_text",
+    );
+  });
+
   it("preserves an agreed dated plan instead of replacing it with a generic template", () => {
     const prompt = buildCoachSystemPrompt({
       ...context,
