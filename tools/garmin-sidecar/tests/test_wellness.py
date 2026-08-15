@@ -102,6 +102,40 @@ def test_collect_wellness_emits_supported_fields_newest_first_and_omits_missing(
     ]
 
 
+def test_collect_wellness_does_not_use_metrics_returned_for_a_different_date() -> None:
+    class WrongDateClient(FakeWellnessClient):
+        def get_body_battery(
+            self, startdate: str, enddate: str | None = None
+        ) -> list[dict[str, Any]]:
+            return [
+                {
+                    "date": "2026-08-14",
+                    "bodyBatteryValuesArray": [[1, 91]],
+                }
+            ]
+
+        def get_rhr_day(self, cdate: str) -> dict[str, Any]:
+            return {
+                "allMetrics": {
+                    "metricsMap": {
+                        "WELLNESS_RESTING_HEART_RATE": [{"calendarDate": "2026-08-14", "value": 48}]
+                    }
+                }
+            }
+
+        def get_user_summary(self, cdate: str) -> dict[str, Any]:
+            return {"averageStressLevel": 28}
+
+    summary = wellness.collect_wellness(
+        WrongDateClient(),
+        start=date(2026, 8, 15),
+        end=date(2026, 8, 15),
+    )
+
+    assert "body_battery" not in summary.rows[0]
+    assert "resting_hr_bpm" not in summary.rows[0]
+
+
 def test_text_and_json_formatters_emit_the_same_rows() -> None:
     rows: list[wellness.WellnessRow] = [
         {

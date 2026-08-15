@@ -129,9 +129,8 @@ def _body_battery_fields(payload: Any, *, log_date: date) -> WellnessRow:
     requested_date = log_date.isoformat()
     entries = [entry for entry in payload if isinstance(entry, Mapping)]
     dated_entries = [entry for entry in entries if entry.get("date") == requested_date]
-    selected_entries = dated_entries or entries
     levels: list[int] = []
-    for entry in selected_entries:
+    for entry in dated_entries:
         values = entry.get("bodyBatteryValuesArray")
         if not isinstance(values, Sequence) or isinstance(values, str | bytes):
             continue
@@ -158,8 +157,7 @@ def _rhr_fields(payload: Any, *, log_date: date) -> WellnessRow:
         for reading in readings
         if isinstance(reading, Mapping) and reading.get("calendarDate") == requested_date
     ]
-    candidates = dated_readings or [reading for reading in readings if isinstance(reading, Mapping)]
-    for reading in candidates:
+    for reading in dated_readings:
         resting_hr = _positive_int(reading.get("value"))
         if resting_hr is not None:
             return {"resting_hr_bpm": resting_hr}

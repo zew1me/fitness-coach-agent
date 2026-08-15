@@ -1,8 +1,9 @@
 # Garmin wellness export
 
 The Garmin sidecar can turn daily watch signals into a text block that the fitness coach can save as
-recovery data. This is a local, copy-and-paste workflow: the command reads Garmin Connect, prints to
-your terminal, and writes nothing to the fitness coach server or to disk.
+recovery data. This is a local, copy-and-paste workflow: the command reads Garmin Connect and prints
+the export to your terminal. It does not write exports to the fitness coach server or to disk, but
+authentication can update renewable Garmin tokens in the configured token store.
 
 Garmin Connect is not a supported public API. Garmin may change or block these calls without
 notice. See [the Garmin sidecar guide](garmin-sidecar.md) for installation, authentication, and token
