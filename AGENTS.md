@@ -28,7 +28,8 @@ bun run check    # lint + typecheck + test
 # Python backend and uv workspace tools
 uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
-uv run pytest tools/self-data-backup/tests/  # single workspace tool
+uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
+uv run pytest tools/self-data-backup/tests/  # backup workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
