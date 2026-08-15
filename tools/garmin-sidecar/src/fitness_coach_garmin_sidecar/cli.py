@@ -2,7 +2,7 @@
 
 Run with::
 
-    uv run --extra garmin python -m scripts.garmin_connect download \
+    uv run --package fitness-coach-garmin-sidecar garmin-sidecar download \
         2026-07-01 2026-07-31 --output-dir ./garmin-fit
 """
 
@@ -264,7 +264,7 @@ def _setup_error_message(exc: Exception) -> str:
 
 
 @app.callback()
-def main() -> None:
+def cli() -> None:
     """Run local Garmin Connect sidecar commands."""
 
 
@@ -342,5 +342,10 @@ def download(
         raise typer.Exit(code=1)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run the Typer application."""
     app()
+
+
+if __name__ == "__main__":
+    main()
