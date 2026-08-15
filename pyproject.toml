@@ -85,6 +85,7 @@ max-complexity = 8
   "PLR0913",
   "S101"
 ]
+# Workspace-tool tests use assertions, literal expected values, and explicit helper inputs too.
 "tools/*/tests/**/*.py" = [
   "PLR2004",
   "PLR0913",
