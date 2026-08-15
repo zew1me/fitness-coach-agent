@@ -598,8 +598,7 @@
   }
 
   .chipList {
-    flex-direction: row;
-    flex-wrap: wrap;
+    flex-flow: row wrap;
   }
 
   /* The cell border already marks today; the label overflows narrow cells. */
