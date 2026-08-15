@@ -113,6 +113,15 @@ describe("model tier compatibility", () => {
     expect(getRetryAfterMs(wrapped)).toBe(1_200);
   });
 
+  it("recognizes a status-less Responses stream rate limit", () => {
+    const error = new Error(
+      "Rate limit reached for gpt-5.6-luna on tokens per min. Please try again in 4.68s.",
+    );
+
+    expect(isRateLimitError(error)).toBe(true);
+    expect(getRetryAfterMs(error)).toBe(4_680);
+  });
+
   it("uses the configured OpenAI retry count for agent SDK calls", () => {
     vi.stubEnv("OPENAI_MAX_RETRIES", "6");
 

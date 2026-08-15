@@ -185,6 +185,15 @@ function rateLimitError(
   });
 }
 
+function responsesStreamRateLimitError(): Error {
+  // The Responses API can emit a provider error inside an otherwise-200 SSE
+  // stream. The SDK surfaces that as a plain Error, with the useful retry
+  // window only in the message and no numeric 429 status.
+  return new Error(
+    "Rate limit reached for gpt-5.6-luna in organization org-test on tokens per min: Limit 200000, Used 177605, Requested 37998. Please try again in 4.68s.",
+  );
+}
+
 function messages(): UIMessage[] {
   return [
     {
@@ -916,6 +925,62 @@ describe("streamCoachTurn", () => {
     expect(text).toContain("Please try again in about 2 minutes.");
     expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
     expect(sentryMocks.captureException).not.toHaveBeenCalled();
+  });
+
+  it("handles a status-less Responses stream rate limit after a tool", async () => {
+    orchestratorMocks.agentsRun.mockResolvedValueOnce({
+      completed: Promise.resolve(),
+      finalOutput: null,
+      output: [],
+      state: { usage: undefined },
+      async *[Symbol.asyncIterator]() {
+        await Promise.resolve();
+        yield {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "update_goals",
+              arguments: "{}",
+            },
+          },
+        };
+        yield {
+          type: "run_item_stream_event",
+          name: "tool_output",
+          item: {
+            rawItem: {
+              type: "function_call_result",
+              callId: "call-1",
+              name: "update_goals",
+            },
+            output: { updated: true },
+          },
+        };
+        throw responsesStreamRateLimitError();
+      },
+    } as never);
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    const text = await response.text();
+
+    expect(text).toContain("I'm tracking that as a goal of yours.");
+    expect(text).toContain("Please try again in about 5 seconds.");
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
+    expect(sentryMocks.captureMessage).toHaveBeenCalledWith(
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({ outcome: "exhausted" }),
+      }),
+    );
   });
 
   it("records an acknowledgement 429 without closing the model circuit", async () => {
