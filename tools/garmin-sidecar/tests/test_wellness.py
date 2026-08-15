@@ -60,8 +60,16 @@ class FakeWellnessClient:
     def get_user_summary(self, cdate: str) -> dict[str, Any]:
         self.calls.append(("daily_summary", cdate))
         if cdate == "2026-08-15":
-            return {"averageStressLevel": 28, "restingHeartRate": 99}
-        return {"averageStressLevel": 0, "restingHeartRate": 54}
+            return {
+                "calendarDate": cdate,
+                "averageStressLevel": 28,
+                "restingHeartRate": 99,
+            }
+        return {
+            "calendarDate": cdate,
+            "averageStressLevel": 0,
+            "restingHeartRate": 54,
+        }
 
 
 def test_collect_wellness_emits_supported_fields_newest_first_and_omits_missing() -> None:
@@ -124,7 +132,11 @@ def test_collect_wellness_does_not_use_metrics_returned_for_a_different_date() -
             }
 
         def get_user_summary(self, cdate: str) -> dict[str, Any]:
-            return {"averageStressLevel": 28}
+            return {
+                "calendarDate": "2026-08-14",
+                "averageStressLevel": 28,
+                "restingHeartRate": 47,
+            }
 
     summary = wellness.collect_wellness(
         WrongDateClient(),
@@ -134,6 +146,7 @@ def test_collect_wellness_does_not_use_metrics_returned_for_a_different_date() -
 
     assert "body_battery" not in summary.rows[0]
     assert "resting_hr_bpm" not in summary.rows[0]
+    assert "stress_score" not in summary.rows[0]
 
 
 def test_text_and_json_formatters_emit_the_same_rows() -> None:

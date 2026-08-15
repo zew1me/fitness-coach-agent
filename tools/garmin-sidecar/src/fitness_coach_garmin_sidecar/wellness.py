@@ -164,8 +164,10 @@ def _rhr_fields(payload: Any, *, log_date: date) -> WellnessRow:
     return {}
 
 
-def _summary_fields(payload: Any, *, include_resting_hr: bool) -> WellnessRow:
+def _summary_fields(payload: Any, *, log_date: date, include_resting_hr: bool) -> WellnessRow:
     summary = _mapping(payload)
+    if summary.get("calendarDate") != log_date.isoformat():
+        return {}
     fields: WellnessRow = {}
     stress = _bounded_number(summary.get("averageStressLevel"), minimum=0)
     if stress is not None:
@@ -239,7 +241,13 @@ def collect_wellness(
             metric="daily_summary",
             request=lambda cdate=cdate: client.get_user_summary(cdate),
         )
-        row.update(_summary_fields(daily_summary, include_resting_hr="resting_hr_bpm" not in row))
+        row.update(
+            _summary_fields(
+                daily_summary,
+                log_date=log_date,
+                include_resting_hr="resting_hr_bpm" not in row,
+            )
+        )
 
         summary.rows.append({key: row[key] for key in _WELLNESS_FIELD_ORDER if key in row})
         log_date -= timedelta(days=1)
