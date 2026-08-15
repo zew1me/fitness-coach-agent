@@ -56,13 +56,13 @@ uv run pytest
 
 ### Garmin FIT downloader
 
-An optional, local-only Typer CLI downloads original Garmin Connect activities by inclusive date
+A local-only Typer workspace CLI downloads original Garmin Connect activities by inclusive date
 window. It stores renewable Garmin tokens but never stores the user's password. See
 [`docs/garmin-sidecar.md`](docs/garmin-sidecar.md) for setup, security constraints, and live testing.
 
 ```bash
-uv sync --extra garmin
-uv run --extra garmin python -m scripts.garmin_connect download \
+uv sync --package fitness-coach-garmin-sidecar
+uv run --package fitness-coach-garmin-sidecar garmin-sidecar download \
   2026-07-01 2026-07-31 --output-dir downloads/garmin-fit
 ```
 
