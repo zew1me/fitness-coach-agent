@@ -52,6 +52,7 @@ class AuthService:
         "metrics:write",
     }
     _browser_session_cookie_name: ClassVar[str] = "coach_browser_session"
+    _browser_session_max_age_seconds: ClassVar[int] = 12 * 60 * 60
 
     def __init__(self, oauth_repo: OAuthRepository | None = None) -> None:
         self._oauth_repo = oauth_repo or OAuthRepository()
@@ -59,6 +60,10 @@ class AuthService:
     @property
     def browser_session_cookie_name(self) -> str:
         return self._browser_session_cookie_name
+
+    @property
+    def browser_session_max_age_seconds(self) -> int:
+        return self._browser_session_max_age_seconds
 
     def authorization_metadata(self) -> dict[str, object]:
         issuer = settings.base_url
@@ -293,7 +298,7 @@ class AuthService:
                 "email": session.email,
                 "typ": "browser_session",
                 "iat": datetime.now(UTC),
-                "exp": datetime.now(UTC) + timedelta(hours=12),
+                "exp": datetime.now(UTC) + timedelta(seconds=self.browser_session_max_age_seconds),
             },
             settings.app_jwt_secret,
             algorithm="HS256",
