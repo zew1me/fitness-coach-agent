@@ -28,7 +28,8 @@ bun run check    # lint + typecheck + test
 # Python backend and uv workspace tools
 uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
-uv run pytest tools/self-data-backup/tests/  # single workspace tool
+uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
+uv run pytest tools/self-data-backup/tests/  # backup workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
@@ -335,6 +336,7 @@ Runs in parallel on staged files only. Fixes are re-staged automatically (`stage
 | ---------------- | --------------------------------------------------------------------------------------------------------------- |
 | `eslint-fix`     | ESLint `--fix` on staged `*.{ts,tsx,js,mjs,cjs}`                                                                |
 | `prettier-write` | Prettier on staged `*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}`                                                     |
+| `stylelint-fix`  | Stylelint `--fix` on staged `*.css`                                                                             |
 | `ruff-fix`       | `ruff check --fix` on staged `*.py`                                                                             |
 | `ruff-format`    | `ruff format` on staged `*.py`                                                                                  |
 | `actionlint`     | Lints `.github/workflows/` files (only when they are staged); gracefully skips if `actionlint` is not installed |
@@ -348,6 +350,7 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | Step                | Command                                                                       |
 | ------------------- | ----------------------------------------------------------------------------- |
 | `lint`              | `bun run lint`                                                                |
+| `stylelint`         | `bun run lint:css`                                                            |
 | `ruff-check`        | `uv run ruff check .`                                                         |
 | `ruff-format-check` | `uv run ruff format --check .`                                                |
 | `typecheck`         | `bun run typecheck`                                                           |

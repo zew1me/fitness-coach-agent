@@ -76,6 +76,8 @@ declare const styles: {
   readonly shell: string;
   readonly starterButton: string;
   readonly starterRow: string;
+  readonly thinkingDot: string;
+  readonly thinkingIndicator: string;
   readonly topbar: string;
   readonly topbarActions: string;
   readonly uploadBadge: string;
