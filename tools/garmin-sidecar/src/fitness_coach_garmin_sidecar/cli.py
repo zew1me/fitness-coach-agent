@@ -27,10 +27,19 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
+from .wellness import (
+    collect_wellness,
+    format_wellness_json,
+    format_wellness_text,
+    local_timezone_name,
+)
+
 app = typer.Typer(
-    help="Download original Garmin Connect activities to local FIT files.",
+    help="Export local Garmin Connect activities and wellness data.",
     no_args_is_help=True,
 )
+wellness_app = typer.Typer(help="Export daily Garmin wellness signals.", no_args_is_help=True)
+app.add_typer(wellness_app, name="wellness")
 _TOKEN_FILENAME = "garmin_tokens.json"
 _ACTIVITY_ID_RE = re.compile(r"^[0-9]+$")
 _MIN_FIT_HEADER_LENGTH = 12
@@ -260,7 +269,7 @@ def _setup_error_message(exc: Exception) -> str:
         return f"Garmin authentication failed: {exc}"
     if isinstance(exc, GarminConnectConnectionError):
         return f"Garmin connection failed: {exc}"
-    return f"Download setup failed: {exc}"
+    return f"Garmin setup failed: {exc}"
 
 
 @app.callback()
@@ -339,6 +348,85 @@ def download(
         f"{len(summary.skipped)} skipped, {len(summary.failures)} failed."
     )
     if summary.failures:
+        raise typer.Exit(code=1)
+
+
+@wellness_app.command("export")
+def wellness_export(
+    start: Annotated[str, typer.Argument(help="Inclusive start date (YYYY-MM-DD).")],
+    end: Annotated[str, typer.Argument(help="Inclusive end date (YYYY-MM-DD).")],
+    output_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: text for chat paste or json for automation.",
+        ),
+    ] = "text",
+    token_store: Annotated[
+        Path,
+        typer.Option(
+            "--token-store",
+            help="Private python-garminconnect token directory.",
+        ),
+    ] = Path("~/.garminconnect"),
+    email: Annotated[
+        str | None,
+        typer.Option(
+            "--email",
+            envvar="GARMIN_EMAIL",
+            help="Garmin email. Passwords are always entered through a hidden prompt.",
+        ),
+    ] = None,
+) -> None:
+    """Export recovery fields for an inclusive date window."""
+    try:
+        start_date, end_date = parse_date_window(start, end)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("format must be 'text' or 'json'", param_hint="--format")
+
+    try:
+        client = authenticate(token_store=token_store, email=email)
+        summary = collect_wellness(
+            client,
+            start=start_date,
+            end=end_date,
+        )
+    except (
+        GarminConnectAuthenticationError,
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+    ) as exc:
+        typer.secho(_setup_error_message(exc), fg="red", err=True)
+        raise typer.Exit(code=2) from exc
+
+    if output_format == "json":
+        typer.echo(format_wellness_json(summary.rows))
+    else:
+        typer.echo(
+            format_wellness_text(
+                summary.rows,
+                start=start_date,
+                end=end_date,
+                timezone_name=local_timezone_name(),
+            )
+        )
+
+    for failure in summary.failures:
+        typer.secho(
+            f"failed {failure.log_date.isoformat()} {failure.metric}: {failure.message}",
+            fg="red",
+            err=True,
+        )
+    if summary.failures:
+        failed_days = len({failure.log_date for failure in summary.failures})
+        typer.secho(
+            f"Summary: {len(summary.rows)} days exported, {len(summary.failures)} "
+            f"metric requests failed across {failed_days} days.",
+            fg="red",
+            err=True,
+        )
         raise typer.Exit(code=1)
 
 
