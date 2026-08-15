@@ -521,6 +521,50 @@ function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): JSX.Element {
   );
 }
 
+/**
+ * Indeterminate "the coach is working" affordance for an in-flight assistant
+ * bubble that has no renderable content yet (issue #406).
+ *
+ * Visual only: `ComposerHint` already announces WAITING_STATUSES through an
+ * aria-live region while `sending`, so a second live region here would
+ * double-announce to screen readers.
+ */
+function ThinkingIndicator(): JSX.Element {
+  return (
+    <span
+      aria-hidden="true"
+      className={styles.thinkingIndicator}
+      data-testid="thinking-indicator"
+    >
+      <span className={styles.thinkingDot} />
+      <span className={styles.thinkingDot} />
+      <span className={styles.thinkingDot} />
+    </span>
+  );
+}
+
+/**
+ * The SDK pushes a `step-start` part (and reasoning parts) into a live assistant
+ * message before any text or tool part exists; `uiPartText` returns null for
+ * those, so the bubble would otherwise mount visibly empty (#406). The check is
+ * deliberately trigger-agnostic, so a future unrenderable part type is covered
+ * too.
+ *
+ * Scoped to the *streaming* message: persisted rows with no renderable content
+ * (e.g. an old tool-only turn) keep their timestamp-only appearance rather than
+ * pinning a permanent spinner into the transcript.
+ */
+function shouldShowThinking(
+  message: ChatMessage,
+  { hasRenderableContent }: Readonly<{ hasRenderableContent: boolean }>,
+): boolean {
+  if (hasRenderableContent) return false;
+  return (
+    message.role === "assistant" &&
+    message.metadata.message_kind === "streaming"
+  );
+}
+
 function MessageBubble({
   message,
 }: Readonly<{ message: ChatMessage }>): JSX.Element {
@@ -538,6 +582,10 @@ function MessageBubble({
   const fileParts = parts.filter(
     (part): part is FileUIPart => part.type === "file",
   );
+  const showThinking = shouldShowThinking(message, {
+    hasRenderableContent:
+      textBlocks.length > 0 || fileParts.length > 0 || Boolean(plan),
+  });
 
   return (
     <div className={rowClass}>
@@ -546,6 +594,7 @@ function MessageBubble({
         data-role={message.role}
         data-testid="chat-bubble"
       >
+        {showThinking ? <ThinkingIndicator /> : null}
         {textBlocks.map((text, idx) => (
           <p className={styles.messageText} key={`text-${idx}`}>
             {text}
