@@ -563,6 +563,9 @@
 
 .landingCard,
 .errorCard {
+  display: grid;
+  gap: 14px;
+  max-width: 720px;
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--surface-strong);
@@ -575,13 +578,6 @@
   place-items: center;
   min-height: calc(100vh - 56px);
   padding: 24px;
-}
-
-.landingCard,
-.errorCard {
-  display: grid;
-  gap: 14px;
-  max-width: 720px;
 }
 
 .landingTitle,

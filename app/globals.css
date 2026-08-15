@@ -1,5 +1,6 @@
 :root {
   color-scheme: light;
+
   --bg: #f8fafc;
   --surface: #ffffff;
   --surface-strong: rgba(255, 255, 255, 0.96);
@@ -35,6 +36,7 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
+
   --bg: #0b1220;
   --surface: #0f172a;
   --surface-strong: rgba(15, 23, 42, 0.96);
