@@ -44,6 +44,39 @@ function usageDetail(value: unknown, key: string): number {
   return typeof detail === "number" ? detail : 0;
 }
 
+export type TokenEstimateComparison = {
+  estimateMinusActualTokens: number;
+  estimateErrorPercent: number | null;
+  estimatedToActualRatio: number | null;
+};
+
+function roundCalibrationMetric(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+export function compareTokenEstimate(
+  estimatedTokens: number,
+  actualTokens: number,
+): TokenEstimateComparison {
+  const estimateMinusActualTokens = estimatedTokens - actualTokens;
+  if (actualTokens <= 0) {
+    return {
+      estimateMinusActualTokens,
+      estimateErrorPercent: null,
+      estimatedToActualRatio: null,
+    };
+  }
+  return {
+    estimateMinusActualTokens,
+    estimateErrorPercent: roundCalibrationMetric(
+      (estimateMinusActualTokens / actualTokens) * 100,
+    ),
+    estimatedToActualRatio: roundCalibrationMetric(
+      estimatedTokens / actualTokens,
+    ),
+  };
+}
+
 type OpenAICompactOptions = Partial<
   Pick<
     OpenAI.Responses.ResponseCompactParams,
@@ -164,6 +197,10 @@ function logCompactionTelemetry(params: {
   compacted: CompactResponse;
 }): void {
   const { trigger, before, after, latencyMs, casRetries, compacted } = params;
+  const tokenComparison = compareTokenEstimate(
+    before.estimatedTokens,
+    compacted.usage.input_tokens,
+  );
   Sentry.logger.info("coach compaction complete", {
     trigger,
     before_bytes: before.bytes,
@@ -176,6 +213,10 @@ function logCompactionTelemetry(params: {
     cas_retries: casRetries,
     request_count: 1,
     input_tokens: compacted.usage.input_tokens,
+    estimated_input_tokens: before.estimatedTokens,
+    estimate_minus_actual_tokens: tokenComparison.estimateMinusActualTokens,
+    estimate_error_percent: tokenComparison.estimateErrorPercent,
+    estimated_to_actual_ratio: tokenComparison.estimatedToActualRatio,
     cached_tokens: usageDetail(
       compacted.usage.input_tokens_details,
       "cached_tokens",

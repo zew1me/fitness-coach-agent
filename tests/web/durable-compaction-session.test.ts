@@ -4,8 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_AUTO_COMPACT_TOKENS,
   DurableCompactionSession,
+  compareTokenEstimate,
   estimateStoredContext,
 } from "../../lib/agent/durable-compaction-session";
+
+const sentryMocks = vi.hoisted(() => ({
+  logger: { info: vi.fn() },
+}));
+
+vi.mock("@sentry/nextjs", () => sentryMocks);
 
 const userItem = (text: string): AgentInputItem => ({
   role: "user",
@@ -61,6 +68,19 @@ describe("DurableCompactionSession", () => {
       }),
     );
     expect(result?.usage.totalTokens).toBe(12);
+    const estimatedInputTokens = estimateStoredContext([
+      userItem("old"),
+    ]).estimatedTokens;
+    expect(sentryMocks.logger.info).toHaveBeenCalledWith(
+      "coach compaction complete",
+      expect.objectContaining({
+        input_tokens: 10,
+        estimated_input_tokens: estimatedInputTokens,
+        estimate_minus_actual_tokens: estimatedInputTokens - 10,
+        estimate_error_percent: expect.any(Number),
+        estimated_to_actual_ratio: expect.any(Number),
+      }),
+    );
   });
 
   it("normalizes SDK function_call_result items to Responses API function_call_output for compact requests", async () => {
@@ -731,6 +751,29 @@ describe("DurableCompactionSession", () => {
       /refusing to wipe durable context/,
     );
     expect(underlying.replaceAll).not.toHaveBeenCalled();
+  });
+});
+
+describe("compareTokenEstimate", () => {
+  it("reports over- and under-estimates with a signed error", () => {
+    expect(compareTokenEstimate(1_000, 800)).toEqual({
+      estimateMinusActualTokens: 200,
+      estimateErrorPercent: 25,
+      estimatedToActualRatio: 1.25,
+    });
+    expect(compareTokenEstimate(600, 800)).toEqual({
+      estimateMinusActualTokens: -200,
+      estimateErrorPercent: -25,
+      estimatedToActualRatio: 0.75,
+    });
+  });
+
+  it("avoids dividing by zero when usage is unavailable", () => {
+    expect(compareTokenEstimate(100, 0)).toEqual({
+      estimateMinusActualTokens: 100,
+      estimateErrorPercent: null,
+      estimatedToActualRatio: null,
+    });
   });
 });
 
