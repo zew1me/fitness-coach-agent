@@ -263,6 +263,14 @@ function toSdkStructuredOutputContentPart(
   );
 }
 
+// The keys of a raw stored `function_call_output` that `toSdkFunctionCallResultItem`
+// consumes into a first-class field of the SDK's `FunctionCallResultItem`. Everything
+// *not* listed here is provider-attached metadata and is rehomed into `providerData`
+// by `rawFunctionOutputProviderData`. Contains both spellings of the two fields that
+// arrive under either — `call_id`/`callId` and `name`/`function_name` — depending on
+// whether the row was written from the Responses wire or from an SDK item; listing
+// only one spelling would copy the other into `providerData`, and the SDK would then
+// re-emit it as a stray snake-cased duplicate alongside the real field.
 const RAW_FUNCTION_OUTPUT_KEYS = new Set([
   "type",
   "id",
@@ -275,6 +283,13 @@ const RAW_FUNCTION_OUTPUT_KEYS = new Set([
   "output",
 ]);
 
+// The SDK requires a `name` on every `FunctionCallResultItem`, but a raw stored
+// `function_call_output` is not guaranteed to carry one — the Responses wire shape
+// identifies the call by `call_id` alone. Falling back to the call ID is safe rather
+// than cosmetic: converting `function_call_result` back to the wire emits only
+// `type`/`id`/`call_id`/`output`/`status` plus snake-cased provider data, so `name`
+// is dropped before the request and this fabricated value never reaches the model.
+// It exists solely to satisfy the SDK's required-field contract on replay.
 function sdkFunctionCallName(
   record: Record<string, unknown>,
   callId: string,
@@ -300,6 +315,23 @@ function sdkFunctionCallOutput(value: unknown): unknown {
     .filter((part): part is Record<string, unknown> => part !== null);
 }
 
+// Preserves provider-attached metadata across a compaction replay round-trip.
+//
+// A stored `function_call_output` row carries whatever the server stamped on it, which
+// is an open-ended set — so this is deliberately a *denylist* (the complement of
+// `RAW_FUNCTION_OUTPUT_KEYS`) rather than an allowlist of keys we recognise: a field
+// nobody has seen yet survives by default instead of being silently dropped. Dropping
+// is the real hazard, not a cosmetic one. Converting the resulting item back to the
+// wire emits only `type`/`id`/`call_id`/`output`/`status` plus the snake-cased
+// `providerData`, so any raw key that is neither consumed into a first-class field nor
+// rehomed here is deleted from the history permanently, on the first replay.
+//
+// Maintenance hazard: the SDK keeps its own near-identical reserved-key list for this
+// conversion (`type`, `id`, `call_id`, `output`, `status`, `namespace`). Ours is that
+// list plus `callId`, `name`, and `function_name`. The two are intentionally not the
+// same, so they cannot be kept in sync mechanically — when a new field is consumed in
+// `toSdkFunctionCallResultItem`, add it to `RAW_FUNCTION_OUTPUT_KEYS` too, or it will
+// be written into `providerData` as well as its own field and round-trip twice.
 function rawFunctionOutputProviderData(
   record: Record<string, unknown>,
 ): Record<string, unknown> {
