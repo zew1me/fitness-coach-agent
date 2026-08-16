@@ -89,7 +89,7 @@ export type StreamCoachTurnOptions = StreamCoachTurnBaseOptions &
   );
 
 const MAX_COACH_STEPS = 4;
-const LAZY_SEED_TOKEN_BUDGET = 200_000;
+const COLD_SEED_TOKEN_BUDGET = DEFAULT_AUTO_COMPACT_TOKENS;
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 export const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;
 const ACKNOWLEDGEMENT_PROMPT =
@@ -204,7 +204,7 @@ function trimBootstrapToBudget(
     const candidate = messages.slice(start);
     if (
       estimateStoredContext(prepareBootstrapItems(session, candidate))
-        .estimatedTokens <= LAZY_SEED_TOKEN_BUDGET
+        .estimatedTokens <= COLD_SEED_TOKEN_BUDGET
     ) {
       return candidate;
     }
@@ -253,7 +253,7 @@ async function initializeSessionFromTranscript(options: {
     const candidateItems = prepareBootstrapItems(options.session, candidate);
     if (
       estimateStoredContext(candidateItems).estimatedTokens >
-      LAZY_SEED_TOKEN_BUDGET
+      COLD_SEED_TOKEN_BUDGET
     ) {
       selected = trimBootstrapToBudget(options.session, candidate);
       break;

@@ -1,6 +1,11 @@
+import type { AgentInputItem } from "@openai/agents";
 import type { UIMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  DEFAULT_AUTO_COMPACT_TOKENS,
+  estimateStoredContext,
+} from "../../lib/agent/durable-compaction-session";
 import { modelCircuitBreaker } from "../../lib/agent/model-circuit-breaker";
 import {
   CHAT_TURN_LEASE_RENEW_INTERVAL_MS,
@@ -1388,7 +1393,7 @@ describe("streamCoachTurn", () => {
     expect(String(persistCall?.[1]?.body)).toContain("Coach is unavailable");
   });
 
-  it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {
+  it("bounds a partial cold seed to the compaction token threshold", async () => {
     const historyMessages = Array.from({ length: 60 }, (_, index) => ({
       id: `history-${index}`,
       parts: [{ type: "text", text: "x".repeat(20_000) }],
@@ -1480,6 +1485,9 @@ describe("streamCoachTurn", () => {
     };
     expect(body.items.length).toBeGreaterThan(0);
     expect(body.items.length).toBeLessThan(historyMessages.length);
+    expect(
+      estimateStoredContext(body.items as AgentInputItem[]).estimatedTokens,
+    ).toBeLessThanOrEqual(DEFAULT_AUTO_COMPACT_TOKENS);
   });
 
   it("releases a durable-session lease when the acquired lease response has malformed JSON", async () => {

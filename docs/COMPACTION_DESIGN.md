@@ -192,7 +192,8 @@ a per-environment data migration.
 ```text
 1. Acquire lease  →  POST /api/chat/model-state/lease
 2. Load state     →  GET  /api/chat/model-state
-3. Project token estimate for stored items + incoming messages
+3. On a cold session, seed only the newest transcript suffix that fits the
+   60 000-token compaction threshold, then project stored items + incoming messages
 4. Run the pre-turn compaction check on every turn
       ├─ force compaction if the projection is ≥ 60 000 estimated tokens
       ├─ otherwise compact when stored history has ≥ 40 non-user items
