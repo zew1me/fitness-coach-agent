@@ -1,0 +1,19 @@
+id: no-supabase-sdk-in-integration-tests
+language: TypeScript
+severity: error
+message: Keep the live-API integration suite free of Supabase SDK imports.
+note: |
+  tests/integration/ calls the real OpenAI Responses API and has no database. It replays
+  compacted history through the production sanitizer by constructing SupabaseAgentSession
+  with placeholder credentials, which is only sound because that class holds no Supabase SDK
+  dependency and prepareHistoryItemForModelInput performs no I/O (asserted in
+  tests/web/supabase-agent-session.test.ts). Importing the Supabase SDK here would put a real
+  database behind a suite that cannot provision one. Use the pure helpers in
+  lib/agent/responses-item-shapes.ts, or inject fetch via SessionOptions.
+files:
+  - tests/integration/**/*.ts
+rule:
+  kind: import_statement
+  has:
+    field: source
+    regex: ^["'`]@supabase/
