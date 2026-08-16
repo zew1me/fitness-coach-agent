@@ -456,7 +456,9 @@ async def oauth_browser_session_logout() -> Response:
         httponly=True,
         path="/",
         samesite="lax",
-        secure=settings.app_base_url.startswith("https://"),
+        # Mirror _set_browser_session_cookie: base_url is the effective URL, so the
+        # clearing cookie keeps its Secure attribute on Vercel where app_base_url is blank.
+        secure=settings.base_url.startswith("https://"),
     )
     return response
 

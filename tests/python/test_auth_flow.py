@@ -158,3 +158,29 @@ async def test_browser_session_logout_clears_cookie(
     cookie_header = response.headers["set-cookie"]
     assert "coach_browser_session=" in cookie_header
     assert "Max-Age=0" in cookie_header
+
+
+@pytest.mark.asyncio
+async def test_browser_session_cookies_are_secure_on_vercel_without_app_base_url(
+    auth_client: tuple[AsyncClient, AuthFlowFakeService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issuance and clearing must both derive Secure from the effective base URL.
+
+    On Vercel APP_BASE_URL is blank and settings.base_url falls back to VERCEL_URL, so
+    reading app_base_url directly would emit a non-Secure cookie over HTTPS.
+    """
+    client, _ = auth_client
+    monkeypatch.setattr(api_index.settings, "app_base_url", "")
+    monkeypatch.setenv("VERCEL_URL", "fitness-coach-agent.vercel.app")
+
+    issued = await client.post(
+        "/api/oauth/browser-session",
+        json={"access_token": "supabase-access-token"},
+    )
+    assert issued.status_code == 200
+    assert "Secure" in issued.headers["set-cookie"]
+
+    cleared = await client.post("/api/oauth/browser-session/logout", follow_redirects=False)
+    assert cleared.status_code == 303
+    assert "Secure" in cleared.headers["set-cookie"]
