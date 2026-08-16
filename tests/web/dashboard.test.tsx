@@ -120,7 +120,7 @@ describe("CoachChat", () => {
     expect(screen.queryByText("Checking your browser session…")).toBeNull();
   });
 
-  it("shows a login prompt when the browser session cannot mint a token", async () => {
+  it("shows a clear sign-in-again prompt when the browser session has ended", async () => {
     globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response("No browser session cookie is present.", { status: 401 }),
@@ -129,10 +129,12 @@ describe("CoachChat", () => {
 
     renderCoachChat();
 
-    await screen.findByText(/Continue with magic link/i);
     expect(
-      screen.getByText(/Sign in to start your coaching chat/i),
+      await screen.findByRole("link", { name: /Sign in again/i }),
     ).toBeTruthy();
+    expect(screen.getByText(/Sign in to keep coaching/i)).toBeTruthy();
+    expect(screen.getByText(/coaching history is safe/i)).toBeTruthy();
+    expect(screen.queryByText(/No browser session cookie/i)).toBeNull();
   });
 
   it("shows a bounded fallback error when the bootstrap request returns HTML", async () => {
@@ -1707,6 +1709,76 @@ describe("CoachChat", () => {
     ]);
     // ...and surfaces the failure inline.
     await screen.findByText(/network down/i);
+  });
+
+  it("replaces a failed-send error with sign-in guidance when the session expired", async () => {
+    // Gate the 401 on the send having failed, not on a request count:
+    // authorizedFetch mints a browser token per authorized call, so the number
+    // of bootstrap requests is incidental to what this test asserts.
+    let sessionExpired = false;
+    chatMocks.sendMessage.mockImplementationOnce(() => {
+      sessionExpired = true;
+      return Promise.reject(new Error("Unauthorized"));
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/oauth/browser-token") {
+        if (sessionExpired) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ detail: "Invalid browser session cookie." }),
+              {
+                status: 401,
+                headers: { "content-type": "application/json" },
+              },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "token-1",
+              expires_at: "2099-12-31T00:00:00Z",
+              scopes: ["profile:read"],
+              token_type: "Bearer",
+              user_id: "athlete-1",
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === "/api/chat/thread") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              attachments_enabled: false,
+              profile_complete: true,
+              thread: {
+                id: "thread-1",
+                user_id: "athlete-1",
+                state: {},
+                created_at: "2026-04-04T09:00:00Z",
+                updated_at: "2026-04-04T09:00:00Z",
+                messages: [],
+              },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
+
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    renderCoachChat();
+
+    const input = await screen.findByPlaceholderText(/Ask your coach/i);
+    fireEvent.change(input, { target: { value: "Keep this draft safe." } });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    expect(await screen.findByText(/Sign in to keep coaching/i)).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Sign in again/i })).toBeTruthy();
+    expect(screen.queryByText(/^Unauthorized$/i)).toBeNull();
   });
 
   it("shows a thread sync status while reloading after a sent message", async () => {
