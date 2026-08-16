@@ -260,6 +260,23 @@ Source fidelity rank, highest first:
 fit_upload  >  tcx_upload  >  gpx_upload  >  intervals_sync  >  text_extract / screenshot_extract  >  manual
 ```
 
+Fidelity is followed by a total, stable tie-break: earlier `created_at` wins, then
+lexicographically smaller `id` when timestamps are equal. The reconciler sorts the
+complete member set by this order before every merge or unmerge; it never uses
+call order or JSON iteration order. Device metrics and authoritative dates take
+the first non-null value. `activity_summary` is deep-merged from lowest to highest
+priority so the same winner overwrites a conflicting leaf. Athlete-authored
+conflicts still prefer the surviving row, whose first-created identity is stable.
+
+Every pair of distinct, non-null values in a selectable field group is recorded as
+`{field, chosen_member_id, other_member_id, chosen_value, other_value, reason}`.
+That includes equal-rank device metrics, authoritative dates, summary leaves, and
+athlete-authored values. Source/key differences use the existing provenance list
+rather than masquerading as conflicts; differences in catch-all fields are
+recorded with `reason = "field_not_mergeable"` and remain untouched. These rules
+make the output a pure function of the member set and therefore independent of
+merge and unmerge order.
+
 Worked example — the June 6 run from #397, a ZIP member merged with a FIT upload:
 
 ```text
@@ -298,12 +315,13 @@ against a base that the next merge moves:
 
 ```text
 A survives, avg_hr_bpm = null
-  merge B (fit, hr 150)   →  A.hr = 150,  pre_merge#1 = {hr: null}
-  merge C (fit, hr 152)   →  A.hr = 152,  pre_merge#2 = {hr: 150}
+  merge B (earlier fit, hr 150) → A.hr = 150, pre_merge#1 = {hr: null}
+  merge C (later fit, hr 152)   → A.hr = 150, pre_merge#2 = {hr: 150}
+                                  and the B/C conflict is audited
 
 unmerge C  → snapshot restore gives hr = 150 ✓
-unmerge B  → snapshot restore gives hr = null ✗  — but C is still merged in
-                                                   and supplied 152
+unmerge B  → snapshot restore gives hr = null ✗  — but C is still merged in;
+                                                   re-derivation gives hr = 152
 ```
 
 Restoring out of order silently discards a still-merged member's contribution. So
@@ -544,7 +562,7 @@ phases inherit a concrete target.
 | File                                               | What it should cover                                                                                                                                                                                                                                                  |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tests/python/test_activity_dedup.py`              | Pure scorer: Tier A/B boundaries at each threshold, null `started_at` or duration degradation, null distance skipped rather than penalised, both hard negative signals, group formation with three or more members                                                    |
-| `tests/python/test_activity_dedup.py` (merge half) | Field rules: device-metric fidelity ranking, athlete-authored fields never overwritten by a device file, conflict recorded, `tss` recomputed not copied, `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` snapshot completeness                 |
+| `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness |
 | `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                    |
 | `tests/python/test_supabase_repo.py`               | `merge_activity` / `unmerge_activity` RPC names and `p_*` argument dicts, mirroring `test_match_plan_workout_to_activity_uses_atomic_rpc`; `dedup_status` filtering present on the two list methods and **absent** on `get_activity` and `list_synced_intervals_keys` |
 | `tests/python/test_supabase_db.py`                 | RPC invariants reject cross-user ids, self-merges, invalid or already-merged targets, chains, and cycles; an exact retry remains idempotent                                                                                                                           |
