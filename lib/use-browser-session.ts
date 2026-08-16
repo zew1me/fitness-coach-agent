@@ -98,6 +98,11 @@ export function useBrowserSession(): BrowserSessionState {
           });
           return;
         }
+        // React may replay a state updater, so the Sentry reset is recorded
+        // inside and applied after the dispatch to keep the updater pure. The
+        // flag lives on an object because TypeScript's control-flow analysis
+        // does not track assignments made inside a callback to a plain `let`.
+        const outcome = { bootstrapFailed: false };
         setState((current) => {
           // A transient background failure should not throw an athlete out of
           // an otherwise valid session. Schedule a bounded retry series; focus
@@ -116,7 +121,7 @@ export function useBrowserSession(): BrowserSessionState {
               renewalRetryAttempt: current.renewalRetryAttempt + 1,
             };
           }
-          Sentry.setUser(null);
+          outcome.bootstrapFailed = true;
           return {
             authenticationRequired: false,
             token: null,
@@ -128,6 +133,9 @@ export function useBrowserSession(): BrowserSessionState {
             renewalRetryAttempt: 0,
           };
         });
+        if (outcome.bootstrapFailed) {
+          Sentry.setUser(null);
+        }
       }
     })();
 
