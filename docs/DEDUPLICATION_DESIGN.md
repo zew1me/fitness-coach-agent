@@ -441,10 +441,17 @@ newest row, not from the day before `since`. Two changes:
 1. **Seed at a date.** Add `get_load_snapshot_on_or_before(user_id, sport, on_date)`
    and seed `initial_ctl`/`initial_atl` from the day _before_ `since`, so a window
    rebuild is actually correct.
-2. **Recompute over `[affected activity_date, today]`** on merge and unmerge.
+2. **Recompute over `[rebuild_from, today]`** on merge and unmerge, where
+   `rebuild_from` is the earliest `activity_date` present in either side of the
+   transition: `min(pre_transition_active_dates ∪ post_transition_active_dates)`.
+   This includes both original member dates and the materialized survivor date.
+   A Tier-B pair can span two days, so using only the post-merge date would leave
+   the removed member's original daily snapshot inflated; unmerge uses the same
+   symmetric rule.
 
-**Bounded by a horizon.** Skip the recompute when the affected date is older than
-`_LOAD_RECOMPUTE_HORIZON_DAYS = 90` (≈ 2 × `CTL_DAYS`). A single session's residual
+**Bounded by a horizon.** Evaluate the horizon against `rebuild_from`, and skip the
+recompute when that date is older than `_LOAD_RECOMPUTE_HORIZON_DAYS = 90` (≈ 2 ×
+`CTL_DAYS`). A single session's residual
 contribution to today's CTL decays as `(41/42)^N`, since
 `ctl += (tss - ctl) / 42` (`backend/engine/training_load.py`):
 
@@ -455,9 +462,9 @@ contribution to today's CTL decays as `(41/42)^N`, since
 | 90 days              | ≈ 11%          | ≈ 0.27 — below noticeable, and below the snapshot's 0.1 rounding meaningfully |
 
 Beyond 90 days the correction costs a full window rebuild to move a number the
-athlete cannot see; the calendar's past window is 42 days anyway. When the
-recompute is skipped, say so in the merge result and the audit entry rather than
-staying silent about it.
+athlete cannot see; the calendar's past window is 42 days anyway. Persist
+`rebuild_from` in the audit. When the recompute is skipped, say so in the merge
+result and the audit entry rather than staying silent about it.
 
 ---
 
@@ -474,14 +481,14 @@ INGESTION (new activity arrives — upload, ZIP member, text, or Intervals sync)
  4. Plan-match the new row                             → _try_match_activity_to_plan
       (skipped when step 3 merged it away — detection runs BEFORE matching so the
        duplicate never steals the planned workout from the surviving row)
- 5. Recompute load over [activity_date, today]         → if within the 90-day horizon
+ 5. Recompute load over [earliest pre/post date, today] → if within the 90-day horizon
 
 BACKLOG CLEANUP (the athlete asks, or the coach suspects)
  1. Coach calls find_duplicate_activities              → returns Tier A + Tier B groups
  2. Coach presents the groups to the athlete           → in the athlete's own terms
  3. Athlete confirms                                   → REQUIRED for Tier B
  4. Coach calls merge_duplicate_activities             → merge_activity RPC per pair
- 5. Recompute load                                     → horizon-bounded, as above
+ 5. Recompute from the earliest pre/post member date   → horizon-bounded, as above
 
 READS (all of them, automatically)
    ... where dedup_status = 'active'          ← the only change to every consumer
@@ -594,7 +601,7 @@ phases inherit a concrete target.
 | `tests/python/test_supabase_repo.py`               | `merge_activity` / `unmerge_activity` RPC names and `p_*` argument dicts, mirroring `test_match_plan_workout_to_activity_uses_atomic_rpc`; `dedup_status` filtering present on the two list methods and **absent** on `get_activity` and `list_synced_intervals_keys`               |
 | `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version failures and conflicting or one-sided plan links; concurrent merges force a stale writer to re-read; merge transfers and unmerge restores both plan-link directions without clobbering reassignment; exact retries are idempotent |
 | `tests/python/test_api.py`                         | Detection runs before plan-matching in `_finalize_persisted_activity`; a Tier-A duplicate never acquires the planned workout                                                                                                                                                        |
-| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeding rebuilds a window correctly; horizon skip beyond 90 days                                                                                                                                                                                   |
+| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date                                                                                                      |
 | `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                                         |
 | `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                                |
 | `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                                        |
