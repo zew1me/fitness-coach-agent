@@ -252,7 +252,8 @@ any one file. That is exactly why the pre-merge snapshot and unmerge below exist
 | `started_at`, `activity_date`                                                                                                                                                                                               | The highest-fidelity member's — a FIT timestamp is authoritative, matching the existing `_date_edit_verdict` / `refused_authoritative` concept (`backend/services/activity_text.py:698`) |
 | `activity_summary` jsonb                                                                                                                                                                                                    | Deep-merged, mirroring `_merge_context_summary` (`backend/services/activity_text.py:488`)                                                                                                |
 | `source`, `source_file_key`                                                                                                                                                                                                 | The surviving row's are left alone; every member's source and key are recorded in the audit entry so provenance is not lost                                                              |
-| **Everything else** — `raw_extraction`, `summary_schema_version`, `planned_workout_id`, `user_id`, `id`, timestamps                                                                                                         | The surviving row's value is kept unchanged. This row is the catch-all: any column not named above is never taken from a merged-away member                                              |
+| **Everything else** — `raw_extraction`, `summary_schema_version`, `user_id`, `id`, timestamps                                                                                                                               | The surviving row's value is kept unchanged. This row is the catch-all: any column not named above is never taken from a merged-away member                                              |
+| `planned_workout_id`                                                                                                                                                                                                        | Not field-merged; the RPC validates and transitions the bidirectional plan link under lock as described below                                                                            |
 
 Source fidelity rank, highest first:
 
@@ -300,8 +301,8 @@ Each merge appends an entry to the surviving row's
 `raw_extraction.merged_from` — following the existing
 `raw_extraction["text_updates"]` convention (`backend/services/activity_text.py:904-912`)
 — carrying the merged-away row's id, `source`, `source_file_key`, the detection
-tier that produced the group, any field conflicts, and a `pre_merge` snapshot of
-every surviving-row value the merge overwrote.
+tier that produced the group, any field conflicts, the original plan-link owner,
+and a `pre_merge` snapshot of every surviving-row value the merge overwrote.
 
 **Unmerge is therefore first-class, and this is the strongest argument for the
 whole approach.** Because no row is ever deleted, reversing a merge is: clear the
@@ -348,14 +349,32 @@ by three service-role RPCs — and `unlink_plan_workout_from_activity` **raises
 `22023` when the two sides do not agree**
 (`supabase/migrations/20260806003910_unlink_plan_workout_from_activity_atomic.sql:51-58`).
 
-So the merge RPC re-points `plan_workouts.actual_activity_id` to the surviving row
-inside the same transaction, rather than having reads resolve through
-`merged_into_activity_id`. Read-time resolution would leave that assertion pointed
-at a merged-away row and start failing the unlink RPC. There is precedent for
-read-time mirrors of a write-time invariant in this codebase —
-`_scope_planned_workouts_to_active_plan` (`api/index.py`, issue #315) — but here
-the write side must own it, because another RPC already asserts on the stored
-state.
+The transition is fully bidirectional and validated inside the merge transaction:
+
+- If both activities name different plan workouts, reject with `22023`; detection's
+  hard negative is not treated as authorization for the write path.
+- For any non-null link, lock the `plan_workouts` row first (matching the existing
+  workout-then-activity lock order) and require its `user_id` and
+  `actual_activity_id` to point back to the activity. Any stale or one-sided link
+  is rejected rather than propagated.
+- If only the merged-away row owns workout W, set
+  `W.actual_activity_id = survivor`, set the survivor's `planned_workout_id = W`,
+  and clear the merged-away row's `planned_workout_id`. If the survivor already
+  owns W, keep that pair and clear no unrelated link. The prior owner and W's
+  status/completion source are recorded in the merge audit.
+- On unmerge, an audit entry that transferred W restores both directions:
+  `W.actual_activity_id = merged_row`, the merged row points to W, and the
+  survivor's reverse link is cleared. It does so only when W and the survivor
+  still have the post-merge link; a later reassignment causes `22023` so the
+  caller can resolve the current link explicitly rather than have unmerge clobber
+  it. A link originally owned by the survivor stays there.
+
+Read-time resolution through `merged_into_activity_id` is deliberately rejected:
+it would leave the stored pair inconsistent and start failing
+`unlink_plan_workout_from_activity`. There is precedent for read-time mirrors of a
+write-time invariant in this codebase — `_scope_planned_workouts_to_active_plan`
+(`api/index.py`, issue #315) — but here the write side must own the complete
+transition because another RPC already asserts on both stored directions.
 
 ### Ordering at ingestion: detect before matching
 
@@ -386,10 +405,10 @@ grant execute on function public.merge_activity(text, uuid, uuid, jsonb, jsonb)
   to service_role;
 ```
 
-| RPC                                                                                            | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `merge_activity(p_user_id, p_surviving_id, p_merged_id, p_expected_versions, p_merged_fields)` | Locks the survivor, its current merged members, and the merge target in id order; verifies that their exact id/`updated_at` set equals `p_expected_versions`; then marks the target merged and applies the reconciled fields/audit to the survivor. A version mismatch raises `40001`. Refuses self-merge (`22023`). Repeating an already-completed merge into the same survivor returns current state, following `unlink_plan_workout_from_activity`'s early-return pattern |
-| `unmerge_activity(p_user_id, p_merged_id, p_expected_versions, p_rederived_fields)`            | Derives and locks the survivor and its complete current member set, verifies the same version precondition, then clears the target's merge state, drops its audit entry, and applies fields re-derived from the remaining members. A version mismatch raises `40001`; an already-active target is an idempotent return                                                                                                                                                       |
+| RPC                                                                                            | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `merge_activity(p_user_id, p_surviving_id, p_merged_id, p_expected_versions, p_merged_fields)` | Pre-reads link ids, locks any plan workout first and then the survivor/current members/target in id order, and revalidates links plus the exact id/`updated_at` set. It atomically transfers both sides of a target-owned plan link, marks the target merged, and applies reconciled fields/audit. Version mismatch raises `40001`; invalid links or self-merge raise `22023`. An exact completed retry returns current state |
+| `unmerge_activity(p_user_id, p_merged_id, p_expected_versions, p_rederived_fields)`            | Derives the survivor and audited prior link, uses the same plan-first lock order, verifies versions and current post-merge link ownership, then restores both link directions when required, clears merge state/audit, and applies re-derived fields. Version mismatch raises `40001`; a conflicting later plan reassignment raises `22023`; an already-active target is an idempotent return                                 |
 
 Field merging itself happens in Python (`backend/services/activity_dedup.py`), not
 in SQL — the rules involve source-fidelity ranking, jsonb deep-merge, and load
@@ -567,20 +586,20 @@ collapses chips to 16px dots (`components/coach-calendar.module.css:558-608`,
 **Planned coverage — none of these exist yet.** Listed here so the implementation
 phases inherit a concrete target.
 
-| File                                               | What it should cover                                                                                                                                                                                                                                                  |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py`              | Pure scorer: Tier A/B boundaries at each threshold, null `started_at` or duration degradation, null distance skipped rather than penalised, both hard negative signals, group formation with three or more members                                                    |
-| `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness |
-| `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                    |
-| `tests/python/test_supabase_repo.py`               | `merge_activity` / `unmerge_activity` RPC names and `p_*` argument dicts, mirroring `test_match_plan_workout_to_activity_uses_atomic_rpc`; `dedup_status` filtering present on the two list methods and **absent** on `get_activity` and `list_synced_intervals_keys` |
-| `tests/python/test_supabase_db.py`                 | RPC invariants reject cross-user ids, self-merges, invalid or already-merged targets, chains, cycles, and stale member-version maps; concurrent merges allow one writer and force the other to re-read; an exact retry remains idempotent                             |
-| `tests/python/test_api.py`                         | Detection runs before plan-matching in `_finalize_persisted_activity`; a Tier-A duplicate never acquires the planned workout                                                                                                                                          |
-| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeding rebuilds a window correctly; horizon skip beyond 90 days                                                                                                                                                                     |
-| `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                           |
-| `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                  |
-| `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                          |
-| `tests/web/agent-tools.test.ts`                    | The three new tools' request shapes and the `coachToolDefinitions` surface snapshot                                                                                                                                                                                   |
-| `tests/ui/calendar.spec.ts`                        | The merged-from badge, including narrow-viewport dot mode                                                                                                                                                                                                             |
+| File                                               | What it should cover                                                                                                                                                                                                                                                                |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/python/test_activity_dedup.py`              | Pure scorer: Tier A/B boundaries at each threshold, null `started_at` or duration degradation, null distance skipped rather than penalised, both hard negative signals, group formation with three or more members                                                                  |
+| `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness               |
+| `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                                  |
+| `tests/python/test_supabase_repo.py`               | `merge_activity` / `unmerge_activity` RPC names and `p_*` argument dicts, mirroring `test_match_plan_workout_to_activity_uses_atomic_rpc`; `dedup_status` filtering present on the two list methods and **absent** on `get_activity` and `list_synced_intervals_keys`               |
+| `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version failures and conflicting or one-sided plan links; concurrent merges force a stale writer to re-read; merge transfers and unmerge restores both plan-link directions without clobbering reassignment; exact retries are idempotent |
+| `tests/python/test_api.py`                         | Detection runs before plan-matching in `_finalize_persisted_activity`; a Tier-A duplicate never acquires the planned workout                                                                                                                                                        |
+| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeding rebuilds a window correctly; horizon skip beyond 90 days                                                                                                                                                                                   |
+| `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                                         |
+| `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                                |
+| `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                                        |
+| `tests/web/agent-tools.test.ts`                    | The three new tools' request shapes and the `coachToolDefinitions` surface snapshot                                                                                                                                                                                                 |
+| `tests/ui/calendar.spec.ts`                        | The merged-from badge, including narrow-viewport dot mode                                                                                                                                                                                                                           |
 
 `@pytest.mark.db` tests are excluded from the default run
 (`addopts = "-m 'not db and not oai'"`); run them with `bun run test:db` against a
