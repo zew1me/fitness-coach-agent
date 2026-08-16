@@ -335,22 +335,29 @@ function SendIcon(): JSX.Element {
 }
 
 function LoggedOutLanding({
+  authenticationRequired,
   error,
-}: Readonly<{ error: string | null }>): JSX.Element {
+}: Readonly<{
+  authenticationRequired: boolean;
+  error: string | null;
+}>): JSX.Element {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.landingCard}>
-        <p className={styles.eyebrow}>Athlete Coach</p>
+        <p className={styles.eyebrow}>
+          {authenticationRequired ? "Session ended" : "Athlete Coach"}
+        </p>
         <h1 className={styles.landingTitle}>
-          A simpler coaching experience, built like chat.
+          {authenticationRequired
+            ? "Sign in to keep coaching."
+            : "A simpler coaching experience, built like chat."}
         </h1>
         <p className={styles.landingText}>
-          Sign in once, then use a single focused conversation for check-ins,
-          plan requests, and photo-backed coaching updates. The forms are gone
-          from the main surface so the experience feels closer to a modern chat
-          assistant than a dashboard.
+          {authenticationRequired
+            ? "Your browser sign-in has expired or is no longer available. Your coaching history is safe—sign in again to continue where you left off."
+            : "Sign in once, then use a single focused conversation for check-ins, plan requests, and photo-backed coaching updates. The forms are gone from the main surface so the experience feels closer to a modern chat assistant than a dashboard."}
         </p>
-        {error ? (
+        {error && !authenticationRequired ? (
           <p className={styles.landingHint}>
             Sign in to start your coaching chat. If the app feels slow to wake
             up, give it a moment and try again.
@@ -358,7 +365,9 @@ function LoggedOutLanding({
         ) : null}
         <div className={styles.actionRow}>
           <Link className={styles.primaryButton} href="/login?return_to=/">
-            Continue with magic link
+            {authenticationRequired
+              ? "Sign in again"
+              : "Continue with magic link"}
           </Link>
         </div>
       </section>
@@ -1324,14 +1333,25 @@ export function CoachChat(): JSX.Element {
     return <SessionLoading />;
   }
   if (session.token === null) {
-    return <LoggedOutLanding error={session.error} />;
+    return (
+      <LoggedOutLanding
+        authenticationRequired={session.authenticationRequired}
+        error={session.error}
+      />
+    );
   }
-  return <SignedInChat token={session.token} />;
+  return (
+    <SignedInChat refreshSession={session.refresh} token={session.token} />
+  );
 }
 
 function SignedInChat({
   token,
-}: Readonly<{ token: BrowserTokenResponse }>): JSX.Element {
+  refreshSession,
+}: Readonly<{
+  token: BrowserTokenResponse;
+  refreshSession: () => Promise<void>;
+}>): JSX.Element {
   const thread = useChatThread(token);
   const athleteProfile = useAthleteProfile(token);
   if (thread.loading) {
@@ -1347,6 +1367,7 @@ function SignedInChat({
       loadingOlder={thread.loadingOlder}
       olderAvailable={thread.olderAvailable}
       refetchThread={thread.refetch}
+      refreshSession={refreshSession}
       setThreadError={thread.setError}
       threadData={thread.data}
       threadError={thread.error}
@@ -1363,6 +1384,7 @@ function CoachChatBody({
   loadingOlder,
   olderAvailable,
   refetchThread,
+  refreshSession,
   setThreadError,
   athleteProfile,
 }: Readonly<{
@@ -1373,6 +1395,7 @@ function CoachChatBody({
   loadingOlder: boolean;
   olderAvailable: boolean;
   refetchThread: () => Promise<void>;
+  refreshSession: () => Promise<void>;
   setThreadError: (_error: string | null) => void;
   athleteProfile: AthleteProfileHook;
 }>): JSX.Element {
@@ -1727,6 +1750,10 @@ function CoachChatBody({
         removePreviewUrls(pendingAttachments);
       }
       setThreadError(errorMessage(error, "Unable to send your message."));
+      // A chat turn uses the cookie-backed Next.js route directly rather than
+      // authorizedFetch. Revalidate here so an expired cookie replaces the
+      // vague inline send error with the explicit sign-in-again screen.
+      void refreshSession();
     } finally {
       sendInFlightRef.current = false;
       setSending(false);

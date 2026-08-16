@@ -1,13 +1,13 @@
 .cache/
+# Local CodeGraph structural index
+/.codegraph/
 .coverage
 .coverage.*
 .hypothesis/
 .mypy_cache/
 .next/
-# Local CodeGraph structural index
-/.codegraph/
-.pi/remote-pi/
 .nox/
+.pi/remote-pi/
 .pyre/
 .pytest_cache/
 .python-version

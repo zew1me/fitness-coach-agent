@@ -112,6 +112,28 @@ async def test_otp_login_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_browser_token_renews_the_browser_session_cookie(
+    auth_client: tuple[AsyncClient, AuthFlowFakeService],
+) -> None:
+    client, service = auth_client
+    browser_session = BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    cookie = service.create_browser_session_token(browser_session)
+
+    response = await client.post(
+        "/api/oauth/browser-token",
+        cookies={"coach_browser_session": cookie},
+    )
+
+    assert response.status_code == 200
+    set_cookie = response.headers["set-cookie"]
+    assert "coach_browser_session=" in set_cookie
+    assert f"Max-Age={service.browser_session_max_age_seconds}" in set_cookie
+    assert "HttpOnly" in set_cookie
+    renewed_cookie = set_cookie.split("coach_browser_session=")[1].split(";", 1)[0]
+    assert service.get_browser_session_from_cookie(renewed_cookie) == browser_session
+
+
+@pytest.mark.asyncio
 async def test_browser_token_with_garbage_cookie_returns_401(
     auth_client: tuple[AsyncClient, AuthFlowFakeService],
 ) -> None:
@@ -121,6 +143,7 @@ async def test_browser_token_with_garbage_cookie_returns_401(
         cookies={"coach_browser_session": "not-a-valid-jwt"},
     )
     assert response.status_code == 401
+    assert "set-cookie" not in response.headers
 
 
 @pytest.mark.asyncio
@@ -135,3 +158,29 @@ async def test_browser_session_logout_clears_cookie(
     cookie_header = response.headers["set-cookie"]
     assert "coach_browser_session=" in cookie_header
     assert "Max-Age=0" in cookie_header
+
+
+@pytest.mark.asyncio
+async def test_browser_session_cookies_are_secure_on_vercel_without_app_base_url(
+    auth_client: tuple[AsyncClient, AuthFlowFakeService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issuance and clearing must both derive Secure from the effective base URL.
+
+    On Vercel APP_BASE_URL is blank and settings.base_url falls back to VERCEL_URL, so
+    reading app_base_url directly would emit a non-Secure cookie over HTTPS.
+    """
+    client, _ = auth_client
+    monkeypatch.setattr(api_index.settings, "app_base_url", "")
+    monkeypatch.setenv("VERCEL_URL", "fitness-coach-agent.vercel.app")
+
+    issued = await client.post(
+        "/api/oauth/browser-session",
+        json={"access_token": "supabase-access-token"},
+    )
+    assert issued.status_code == 200
+    assert "Secure" in issued.headers["set-cookie"]
+
+    cleared = await client.post("/api/oauth/browser-session/logout", follow_redirects=False)
+    assert cleared.status_code == 303
+    assert "Secure" in cleared.headers["set-cookie"]

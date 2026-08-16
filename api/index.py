@@ -56,6 +56,7 @@ from backend.models.athlete import (
     ThresholdRecalibrationCandidate,
 )
 from backend.models.auth import (
+    BrowserSessionContext,
     BrowserSessionRequest,
     BrowserTokenResponse,
     OAuthAuthorizeRequest,
@@ -418,6 +419,18 @@ async def oauth_revoke(payload: OAuthRevokeRequest) -> Mapping[str, bool]:
     return {"revoked": revoked}
 
 
+def _set_browser_session_cookie(response: Response, browser_session: BrowserSessionContext) -> None:
+    response.set_cookie(
+        key=auth_service.browser_session_cookie_name,
+        value=auth_service.create_browser_session_token(browser_session),
+        httponly=True,
+        max_age=auth_service.browser_session_max_age_seconds,
+        path="/",
+        samesite="lax",
+        secure=settings.base_url.startswith("https://"),
+    )
+
+
 @app.post("/api/oauth/browser-session")
 async def oauth_browser_session(
     payload: BrowserSessionRequest, response: Response
@@ -429,15 +442,7 @@ async def oauth_browser_session(
     except Exception as exc:
         logger.warning("browser session creation failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=401, detail="Unable to verify browser session.") from exc
-    response.set_cookie(
-        key=auth_service.browser_session_cookie_name,
-        value=auth_service.create_browser_session_token(session),
-        httponly=True,
-        max_age=12 * 60 * 60,
-        path="/",
-        samesite="lax",
-        secure=settings.base_url.startswith("https://"),
-    )
+    _set_browser_session_cookie(response, session)
     logger.info("browser session created user_id=%s", session.user_id)
     return {"ok": True}
 
@@ -451,13 +456,16 @@ async def oauth_browser_session_logout() -> Response:
         httponly=True,
         path="/",
         samesite="lax",
-        secure=settings.app_base_url.startswith("https://"),
+        # Mirror _set_browser_session_cookie: base_url is the effective URL, so the
+        # clearing cookie keeps its Secure attribute on Vercel where app_base_url is blank.
+        secure=settings.base_url.startswith("https://"),
     )
     return response
 
 
 @app.post("/api/oauth/browser-token")
 async def oauth_browser_token(
+    response: Response,
     coach_browser_session: str | None = Cookie(default=None),
 ) -> BrowserTokenResponse:
     try:
@@ -468,6 +476,9 @@ async def oauth_browser_token(
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     else:
+        # Sliding renewal keeps an actively used browser signed in while the
+        # 12-hour cookie still provides an inactivity timeout.
+        _set_browser_session_cookie(response, browser_session)
         logger.debug("browser token issued user_id=%s", browser_session.user_id)
         return token
 
