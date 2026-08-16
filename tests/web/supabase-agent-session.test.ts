@@ -477,4 +477,54 @@ describe("SupabaseAgentSession", () => {
       ],
     });
   });
+
+  // `tests/integration/oai-agents.test.ts` instantiates this class purely to run
+  // compacted history through the *production* sanitizer, and constructs it with
+  // placeholder credentials and no injected `fetch`. That is only sound while
+  // `prepareHistoryItemForModelInput` stays free of I/O — it must not read
+  // `options`, call the backend, or touch `/api/chat/model-state`. Despite the
+  // class name there is no Supabase SDK anywhere in this module's import graph;
+  // it is an HTTP client against the app's own route, and this method delegates
+  // to the pure helpers in `responses-item-shapes.ts`. If someone later makes the
+  // method fetch (say, to resolve an attachment link), the integration suite would
+  // start reaching the network with a bogus base URL instead of failing here.
+  it("prepares history items for model input without performing any I/O", () => {
+    const fetchSpy = vi.fn(() => {
+      throw new Error("prepareHistoryItemForModelInput must not perform I/O");
+    });
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: fetchSpy as unknown as typeof fetch,
+    });
+
+    const items: AgentInputItem[] = [
+      userItem("plain text"),
+      {
+        role: "user",
+        content: [
+          { type: "input_image", image: "https://files.example/photo.png" },
+          {
+            type: "input_file",
+            file: { url: "https://files.example/ride.fit" },
+          },
+        ],
+      } as unknown as AgentInputItem,
+      {
+        type: "function_call_output",
+        call_id: "call-1",
+        output: "done",
+      } as unknown as AgentInputItem,
+      {
+        type: "function_call_output",
+        output: "orphaned",
+      } as unknown as AgentInputItem,
+    ];
+
+    for (const item of items) {
+      expect(() => session.prepareHistoryItemForModelInput(item)).not.toThrow();
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
