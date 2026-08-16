@@ -471,6 +471,12 @@ then has to hand back. Running Tier-A detection **before** plan-matching means t
 duplicate is already merged away and never competes for the workout. This ordering
 is load-bearing, not incidental.
 
+The just-persisted row is always the **later-created** member, so ingestion passes
+the existing row as `p_surviving_id` and the new row as `p_merged_id` — never the
+reverse. That is the same direction the survivor rule above enforces, so the
+natural ingestion call is also the only one the RPC accepts; getting it backwards
+is a `22023`, not a silently different outcome.
+
 ### Merge RPCs
 
 Both follow the template in
@@ -560,6 +566,7 @@ INGESTION (new activity arrives — upload, ZIP member, text, or Intervals sync)
       (exclude the new id in SQL; no arbitrary result cap)
  3. Score the new row against them                     → activity_dedup scorer (pure)
       ├─ Tier A  → merge_activity RPC, then continue at step 5
+      │            (existing row survives; the just-created row is the merged id)
       ├─ Tier B  → record nothing; surfaced later by find_duplicate_activities
       └─ no match → continue at step 4
  4. Plan-match the new row                             → _try_match_activity_to_plan
