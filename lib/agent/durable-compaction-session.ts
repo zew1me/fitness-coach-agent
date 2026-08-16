@@ -191,14 +191,27 @@ type CompactResponse = Awaited<ReturnType<OpenAI["responses"]["compact"]>>;
 function logCompactionTelemetry(params: {
   trigger: CompactionTrigger;
   before: StoredContextEstimate;
+  preparedInput: StoredContextEstimate;
   after: StoredContextEstimate;
   latencyMs: number;
   casRetries: number;
   compacted: CompactResponse;
 }): void {
-  const { trigger, before, after, latencyMs, casRetries, compacted } = params;
-  const tokenComparison = compareTokenEstimate(
+  const {
+    trigger,
+    before,
+    preparedInput,
+    after,
+    latencyMs,
+    casRetries,
+    compacted,
+  } = params;
+  const storedTokenComparison = compareTokenEstimate(
     before.estimatedTokens,
+    compacted.usage.input_tokens,
+  );
+  const preparedTokenComparison = compareTokenEstimate(
+    preparedInput.estimatedTokens,
     compacted.usage.input_tokens,
   );
   Sentry.logger.info("coach compaction complete", {
@@ -213,10 +226,19 @@ function logCompactionTelemetry(params: {
     cas_retries: casRetries,
     request_count: 1,
     input_tokens: compacted.usage.input_tokens,
-    estimated_input_tokens: before.estimatedTokens,
-    estimate_minus_actual_tokens: tokenComparison.estimateMinusActualTokens,
-    estimate_error_percent: tokenComparison.estimateErrorPercent,
-    estimated_to_actual_ratio: tokenComparison.estimatedToActualRatio,
+    stored_estimated_input_tokens: before.estimatedTokens,
+    stored_estimate_minus_actual_tokens:
+      storedTokenComparison.estimateMinusActualTokens,
+    stored_estimate_error_percent: storedTokenComparison.estimateErrorPercent,
+    stored_estimated_to_actual_ratio:
+      storedTokenComparison.estimatedToActualRatio,
+    prepared_estimated_input_tokens: preparedInput.estimatedTokens,
+    prepared_estimate_minus_actual_tokens:
+      preparedTokenComparison.estimateMinusActualTokens,
+    prepared_estimate_error_percent:
+      preparedTokenComparison.estimateErrorPercent,
+    prepared_estimated_to_actual_ratio:
+      preparedTokenComparison.estimatedToActualRatio,
     cached_tokens: usageDetail(
       compacted.usage.input_tokens_details,
       "cached_tokens",
@@ -299,12 +321,16 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     }
 
     const trigger: CompactionTrigger = args.force === true ? "forced" : "auto";
+    const compactionInput = buildCompactionInput(items, (item) =>
+      this.prepareHistoryItemForModelInput(item),
+    );
+    const preparedInput = estimateStoredContext(
+      compactionInput as unknown as AgentInputItem[],
+    );
     const compacted = await this.getClient().responses.compact({
       ...toOpenAICompactOptions(args),
       model: this.options.model ?? "gpt-5.6-luna",
-      input: buildCompactionInput(items, (item) =>
-        this.prepareHistoryItemForModelInput(item),
-      ),
+      input: compactionInput,
     });
     const output = assertValidCompactionOutput(compacted.output);
     const after = estimateStoredContext(output);
@@ -317,6 +343,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     logCompactionTelemetry({
       trigger,
       before,
+      preparedInput,
       after,
       latencyMs: Math.round(performance.now() - startedAt),
       casRetries: this.options.underlyingSession.getLastCasRetries?.() ?? 0,

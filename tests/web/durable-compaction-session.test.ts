@@ -75,10 +75,14 @@ describe("DurableCompactionSession", () => {
       "coach compaction complete",
       expect.objectContaining({
         input_tokens: 10,
-        estimated_input_tokens: estimatedInputTokens,
-        estimate_minus_actual_tokens: estimatedInputTokens - 10,
-        estimate_error_percent: expect.any(Number),
-        estimated_to_actual_ratio: expect.any(Number),
+        stored_estimated_input_tokens: estimatedInputTokens,
+        stored_estimate_minus_actual_tokens: estimatedInputTokens - 10,
+        stored_estimate_error_percent: expect.any(Number),
+        stored_estimated_to_actual_ratio: expect.any(Number),
+        prepared_estimated_input_tokens: estimatedInputTokens,
+        prepared_estimate_minus_actual_tokens: estimatedInputTokens - 10,
+        prepared_estimate_error_percent: expect.any(Number),
+        prepared_estimated_to_actual_ratio: expect.any(Number),
       }),
     );
   });
@@ -560,6 +564,13 @@ describe("DurableCompactionSession", () => {
 
     const request = client.responses.compact.mock.calls[0]?.[0];
     expect(request?.input?.[0]).toEqual(userItem("x"));
+    const telemetry = sentryMocks.logger.info.mock.lastCall?.[1] as Record<
+      string,
+      number
+    >;
+    expect(telemetry["stored_estimated_input_tokens"]).toBeGreaterThan(
+      telemetry["prepared_estimated_input_tokens"] ?? 0,
+    );
   });
 
   it("strips provider metadata nested inside content parts", async () => {

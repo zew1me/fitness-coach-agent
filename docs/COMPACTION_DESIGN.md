@@ -146,13 +146,16 @@ context-window threshold would allow one turn to consume the quota several
 times over.
 
 `estimateStoredContext` currently estimates from serialized UTF-8 bytes. Every
-completed compaction compares that estimate with the API's authoritative
-`usage.input_tokens` and logs `estimate_minus_actual_tokens`,
-`estimate_error_percent`, and `estimated_to_actual_ratio`. Positive signed error
-means the estimate was conservative; negative means it under-counted. Collect
-at least seven days of production samples before applying a correction factor
-or replacing the estimator, then re-derive both the compaction and cold-seed
-budgets from the calibrated token count rather than guessing from JSON shape.
+completed compaction compares the API's authoritative `usage.input_tokens` with
+both the raw stored-item estimate (`stored_*`) used by the trigger and the
+sanitized Responses request estimate (`prepared_*`). Each series logs
+`*_estimate_minus_actual_tokens`, `*_estimate_error_percent`, and
+`*_estimated_to_actual_ratio`, so request-shape sanitization can be separated
+from token-estimation error. Positive signed error means the estimate was
+conservative; negative means it under-counted. Collect at least seven days of
+production samples before applying a correction factor or replacing the
+estimator, then re-derive both the compaction and cold-seed budgets from the
+calibrated token count rather than guessing from JSON shape.
 
 Safety guard: if `responses.compact` returns an empty array the method **throws**
 rather than replacing durable context with nothing. This prevents a model error
