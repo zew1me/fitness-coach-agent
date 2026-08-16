@@ -314,6 +314,7 @@ See `.env.example`. Required:
 `docs/` holds living design docs alongside point-in-time artifacts — know which is which before editing:
 
 - Changing the compaction/durable-session subsystem (`lib/agent/responses-item-shapes.ts`, `lib/agent/supabase-agent-session.ts`, `lib/agent/durable-compaction-session.ts`, `lib/agent/orchestrator.ts`) → update `docs/COMPACTION_DESIGN.md` in the same change.
+- Changing activity deduplication (`backend/services/activity_dedup.py`, the `dedup_status` / `merged_into_activity_id` columns and their merge RPCs, or the `dedup_status = 'active'` filter on `list_activities` / `list_activities_between`) → update `docs/DEDUPLICATION_DESIGN.md` in the same change.
 - Adding/changing a Supabase migration → update `docs/supabase-migration-history.md` (see the Database section above).
 - `docs/cli-tools/` contains progressive-disclosure briefs for external service CLIs; keep the relevant brief current when project-specific CLI workflows or safety constraints change.
 - `docs/github-issues/` is an archive of point-in-time issue proposals, not a living doc — don't update it as code changes.
