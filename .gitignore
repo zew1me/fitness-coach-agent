@@ -6,6 +6,7 @@
 .next/
 # Local CodeGraph structural index
 /.codegraph/
+.pi/remote-pi/
 .nox/
 .pyre/
 .pytest_cache/
