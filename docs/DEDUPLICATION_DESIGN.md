@@ -512,6 +512,18 @@ constraint; a companion (or the same file) defining `merge_activity` and
 change — Change / Why / Security note — and the file is appended to the canonical
 migration sequence, per the repo's Database convention.
 
+### Model — `backend/models/training.py`
+
+`Activity` gains `dedup_status: Literal["active", "merged"] = "active"` and
+`merged_into_activity_id: str | None = None`, matching the database nullability.
+Repository reads use `select("*")` followed by `Activity.model_validate`; Pydantic's
+current default would ignore unknown database columns rather than fail validation,
+but the state would then be inaccessible and omitted from API model dumps. The
+explicit fields make merge/unmerge results and any intentional API/frontend
+consumer observable. This PR remains the docs-only sign-off artifact; the model
+change ships with the implementation phase, after the migration contract is
+approved.
+
 ### Repo — `backend/repos/supabase_repo.py`
 
 - `list_activities` and `list_activities_between` gain
@@ -607,6 +619,7 @@ phases inherit a concrete target.
 | `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                                                         |
 | `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness               |
 | `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                                  |
+| `tests/python/test_training_models.py`             | `Activity` validates and serializes both dedup fields, including the default active/null state and a merged row                                                                                                                                                                     |
 | `tests/python/test_supabase_repo.py`               | RPC wrapper arguments; active filtering scope; `list_dedup_candidates` excludes the supplied id and has no 50-row cap; backlog discovery keyset-paginates; `get_activity` and `list_synced_intervals_keys` remain unfiltered                                                        |
 | `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version failures and conflicting or one-sided plan links; concurrent merges force a stale writer to re-read; merge transfers and unmerge restores both plan-link directions without clobbering reassignment; exact retries are idempotent |
 | `tests/python/test_api.py`                         | Detection excludes the newly persisted id, still finds a candidate after more than 50 unrelated rows, and runs before plan-matching so a Tier-A duplicate never acquires the planned workout                                                                                        |
