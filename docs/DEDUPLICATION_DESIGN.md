@@ -245,6 +245,18 @@ with no comparable duration **and** no comparable distance is not a group at all
 since same-sport-same-day on its own describes two genuinely different workouts
 just as well as it describes a duplicate.
 
+**Zero is a value, not a null, and gets its own rule.** Both tiers use one
+symmetric comparator — `|a − b| ≤ tol × max(a, b)`, with `tol` of 5% for Tier A
+and 10% for Tier B — so no percentage comparison ever divides. When
+`max(a, b) = 0` the pair has **no comparable metric** on that field. That is
+neither agreement nor mismatch: the field drops out exactly as a null does, and
+the pair must still find agreement elsewhere. Zero against a non-zero value is an
+ordinary mismatch. The distinction matters because a trainer ride or a pool swim
+legitimately records `distance_meters = 0` on both sides, and zero — unlike null —
+passes a "both rows carry it" test. Counting `(0, 0)` as agreement would let
+same-sport, same-day, both-distances-zero form a Tier-B group, which is precisely
+what the previous paragraph rules out.
+
 ### Hard negative signals
 
 Two rows are **never** grouped, at any tier, when either holds:
@@ -679,7 +691,7 @@ phases inherit a concrete target.
 
 | File                                               | What it should cover                                                                                                                                                                                                                                                                                                                                      |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                                                                                                                               |
+| `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, zero-metric boundaries — `(0, 0)` is no comparable metric rather than agreement, `(0, n)` is a mismatch — both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                     |
 | `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness                                                                                     |
 | `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                                                                                                        |
 | `tests/python/test_training_models.py`             | `Activity` validates and serializes both dedup fields, including the default active/null state and a merged row                                                                                                                                                                                                                                           |
