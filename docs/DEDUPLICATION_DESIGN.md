@@ -178,7 +178,9 @@ predicate collapses every view at once.
 The scorer lives in `backend/services/activity_dedup.py` and is **pure and
 side-effect-free**, mirroring `match_activities_to_workouts`
 (`backend/services/compliance.py:85-120`). It takes a set of the athlete's
-activities and returns proposed groups; it persists nothing.
+activities and returns proposed groups; it persists nothing. It also rejects a
+pair whose ids are equal as a defensive invariant, even though repository
+candidate queries exclude self.
 
 It is tiered, because the confidence genuinely differs and auto-merging an
 ambiguous pair silently deletes a real workout from the athlete's load.
@@ -473,7 +475,8 @@ result and the audit entry rather than staying silent about it.
 ```text
 INGESTION (new activity arrives — upload, ZIP member, text, or Intervals sync)
  1. Persist the row exactly as received                → repo.create_activity
- 2. Load the athlete's recent activities               → repo.list_activities (active only)
+ 2. Load other active rows in the ±1-day window        → repo.list_dedup_candidates
+      (exclude the new id in SQL; no arbitrary result cap)
  3. Score the new row against them                     → activity_dedup scorer (pure)
       ├─ Tier A  → merge_activity RPC, then continue at step 5
       ├─ Tier B  → record nothing; surfaced later by find_duplicate_activities
@@ -518,6 +521,12 @@ migration sequence, per the repo's Database convention.
 - New RPC wrappers for `merge_activity` and `unmerge_activity`, following the
   `match_plan_workout_to_activity` wrapper shape
   (`backend/repos/supabase_repo.py:893-911`).
+- New `list_dedup_candidates(user_id, activity_date, exclude_id)` selects active
+  rows in the scorer's bounded ±1-day date window, applies `id <> exclude_id` in
+  SQL, and has no arbitrary `limit=50`. The pure scorer still applies sport,
+  time, metric, and hard-negative rules. Backlog discovery keyset-paginates all
+  active rows rather than routing through `list_activities`' display-oriented
+  cap.
 - New `get_load_snapshot_on_or_before` for the load seeding fix.
 
 ### Services — `backend/services/activity_dedup.py` (new)
@@ -595,12 +604,12 @@ phases inherit a concrete target.
 
 | File                                               | What it should cover                                                                                                                                                                                                                                                                |
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py`              | Pure scorer: Tier A/B boundaries at each threshold, null `started_at` or duration degradation, null distance skipped rather than penalised, both hard negative signals, group formation with three or more members                                                                  |
+| `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                                                         |
 | `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness               |
 | `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                                  |
-| `tests/python/test_supabase_repo.py`               | `merge_activity` / `unmerge_activity` RPC names and `p_*` argument dicts, mirroring `test_match_plan_workout_to_activity_uses_atomic_rpc`; `dedup_status` filtering present on the two list methods and **absent** on `get_activity` and `list_synced_intervals_keys`               |
+| `tests/python/test_supabase_repo.py`               | RPC wrapper arguments; active filtering scope; `list_dedup_candidates` excludes the supplied id and has no 50-row cap; backlog discovery keyset-paginates; `get_activity` and `list_synced_intervals_keys` remain unfiltered                                                        |
 | `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version failures and conflicting or one-sided plan links; concurrent merges force a stale writer to re-read; merge transfers and unmerge restores both plan-link directions without clobbering reassignment; exact retries are idempotent |
-| `tests/python/test_api.py`                         | Detection runs before plan-matching in `_finalize_persisted_activity`; a Tier-A duplicate never acquires the planned workout                                                                                                                                                        |
+| `tests/python/test_api.py`                         | Detection excludes the newly persisted id, still finds a candidate after more than 50 unrelated rows, and runs before plan-matching so a Tier-A duplicate never acquires the planned workout                                                                                        |
 | `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date                                                                                                      |
 | `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                                         |
 | `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                                |
