@@ -451,6 +451,61 @@ describe("SupabaseAgentSession", () => {
     ]);
   });
 
+  // The whole lesson of the tool-result replay bug is that an item can look
+  // plausible as an intermediate object and still be rejected by SDK request
+  // conversion. This pins the gap directly rather than trusting the shape
+  // assertions above: the raw stored item the sanitizer receives is one the SDK
+  // refuses outright, and the item it produces is one the SDK accepts. Without
+  // that contrast the shape assertions only describe what we happen to emit —
+  // they never establish that the alternative is broken.
+  it("produces the only tool-result shape the SDK will convert to a request", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+    const raw = {
+      type: "function_call_output",
+      call_id: "call-1",
+      output: JSON.stringify({ status: "updated" }),
+      status: "completed",
+    } as unknown as AgentInputItem;
+    const model = new InspectableResponsesModel({} as never, "test-model");
+
+    expect(() => model.buildInput([raw])).toThrow(/Unsupported item/);
+
+    const prepared = session.prepareHistoryItemForModelInput(raw);
+    expect(model.buildInput([prepared])).toEqual([
+      {
+        type: "function_call_output",
+        id: undefined,
+        call_id: "call-1",
+        output: JSON.stringify({ status: "updated" }),
+        status: "completed",
+      },
+    ]);
+  });
+
+  // Same argument for the structured-output array: the legacy `text`/`image`/
+  // `file` discriminators this converter replaced are not merely a different
+  // spelling the SDK tolerates, they are a hard rejection. That is what makes
+  // the mapping assertion above load-bearing rather than decorative.
+  it("rejects the legacy structured tool output discriminators it replaced", () => {
+    const model = new InspectableResponsesModel({} as never, "test-model");
+    const legacy = {
+      type: "function_call_result",
+      callId: "call-1",
+      name: "get_weather",
+      status: "completed",
+      output: [{ type: "text", text: "18C, clear skies." }],
+    } as unknown as AgentInputItem;
+
+    expect(() => model.buildInput([legacy])).toThrow(
+      /Unsupported structured tool output/,
+    );
+  });
+
   it("degrades a malformed raw tool output without a call ID to replayable text", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
@@ -459,12 +514,12 @@ describe("SupabaseAgentSession", () => {
       fetch: vi.fn(),
     });
 
-    expect(
-      session.prepareHistoryItemForModelInput({
-        type: "function_call_output",
-        output: "orphaned",
-      } as unknown as AgentInputItem),
-    ).toEqual({
+    const prepared = session.prepareHistoryItemForModelInput({
+      type: "function_call_output",
+      output: "orphaned",
+    } as unknown as AgentInputItem);
+
+    expect(prepared).toEqual({
       role: "assistant",
       status: "completed",
       content: [
@@ -476,6 +531,30 @@ describe("SupabaseAgentSession", () => {
         },
       ],
     });
+
+    // The degraded item is built behind a bare `as AgentInputItem` cast, so the
+    // type system is silenced on exactly the shape that has never been checked
+    // against request conversion — and this branch fires on already-malformed
+    // history, the case most likely to be live. Assert the fallback is itself
+    // replayable rather than assuming it. (The prose above is a deliberate
+    // change-detector on athlete-visible copy; this is the behavioural half.)
+    const model = new InspectableResponsesModel({} as never, "test-model");
+    expect(model.buildInput([prepared])).toEqual([
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [
+          {
+            type: "output_text",
+            annotations: [],
+            text:
+              "Historical tool output could not be replayed because its call ID is missing. " +
+              "The visible chat transcript is preserved separately.",
+          },
+        ],
+      },
+    ]);
   });
 
   // `tests/integration/oai-agents.test.ts` instantiates this class purely to run
