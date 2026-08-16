@@ -183,11 +183,11 @@ activities and returns proposed groups; it persists nothing.
 It is tiered, because the confidence genuinely differs and auto-merging an
 ambiguous pair silently deletes a real workout from the athlete's load.
 
-| Tier  | Condition                                                                                                                                                    | Action                                   |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
-| **A** | Casefolded sport equality; both `started_at` present and within **±10 min**; duration within **±5%**; distance within **±5%** when both are present          | Auto-merge at ingestion                  |
-| **B** | Same sport; `activity_date` within **±1 day** (timezone slop); duration **or** distance within **±10%**, evaluated over whichever of the two both rows carry | Propose to the athlete, never auto-merge |
-| —     | Anything else                                                                                                                                                | Not a group                              |
+| Tier  | Condition                                                                                                                                                             | Action                                   |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| **A** | Casefolded sport equality; both `started_at` present and within **±10 min**; both durations present and within **±5%**; distance within **±5%** when both are present | Auto-merge at ingestion                  |
+| **B** | Same sport; `activity_date` within **±1 day** (timezone slop); duration **or** distance within **±10%**, evaluated over whichever of the two both rows carry          | Propose to the athlete, never auto-merge |
+| —     | Anything else                                                                                                                                                         | Not a group                              |
 
 Sport equality is exact and casefolded, matching `_pair_score`'s existing rule
 (`backend/services/compliance.py:53`). The ±1-day window matches
@@ -197,9 +197,10 @@ Sport equality is exact and casefolded, matching `_pair_score`'s existing rule
 actually reported in #397 are ZIP-plus-FIT pairs, and the ZIP side frequently has
 no `started_at` and no distance at all. A scorer that requires both sides to carry
 a start time would miss every duplicate the ticket was filed about. So: a missing
-`started_at` on either side drops the pair from Tier A to Tier B rather than
-disqualifying it, and a field that is null on one side is skipped rather than
-scored as a mismatch. Tier B still requires an actual metric agreement — a pair
+`started_at` **or `duration_seconds`** on either side prevents Tier A and sends the
+pair through Tier B evaluation instead. In Tier B, a field that is null on one side
+is skipped rather than scored as a mismatch. Tier B still requires an actual
+metric agreement — a pair
 with no comparable duration **and** no comparable distance is not a group at all,
 since same-sport-same-day on its own describes two genuinely different workouts
 just as well as it describes a duplicate.
@@ -542,7 +543,7 @@ phases inherit a concrete target.
 
 | File                                               | What it should cover                                                                                                                                                                                                                                                  |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py`              | Pure scorer: Tier A/B boundaries at each threshold, null `started_at` degradation, null distance skipped rather than penalised, both hard negative signals, group formation with three or more members                                                                |
+| `tests/python/test_activity_dedup.py`              | Pure scorer: Tier A/B boundaries at each threshold, null `started_at` or duration degradation, null distance skipped rather than penalised, both hard negative signals, group formation with three or more members                                                    |
 | `tests/python/test_activity_dedup.py` (merge half) | Field rules: device-metric fidelity ranking, athlete-authored fields never overwritten by a device file, conflict recorded, `tss` recomputed not copied, `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` snapshot completeness                 |
 | `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                    |
 | `tests/python/test_supabase_repo.py`               | `merge_activity` / `unmerge_activity` RPC names and `p_*` argument dicts, mirroring `test_match_plan_workout_to_activity_uses_atomic_rpc`; `dedup_status` filtering present on the two list methods and **absent** on `get_activity` and `list_synced_intervals_keys` |
