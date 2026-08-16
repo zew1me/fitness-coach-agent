@@ -139,10 +139,23 @@ Cascade is also the semantically correct pairing — a merged-away row without i
 survivor describes nothing.
 
 Note that `public.activities` has **RLS disabled and zero policies**; only
-`intervals_connections` and `agent_emails` carry policies. Tenant isolation is
-enforced in application code by `.eq("user_id", …)` on every query. Every new RPC
-below therefore takes `p_user_id` explicitly and is revoked from
-`public`/`anon`/`authenticated`.
+`intervals_connections` and `agent_emails` carry policies. The protected FastAPI
+handler derives the athlete id from `require_user_context()`; `p_user_id` is never
+accepted from a tool or request body. The repository then calls PostgREST with the
+service-role client, so `auth.uid()` inside the RPC would identify neither the
+athlete nor the app's custom bearer-token subject. The authenticated handler's id
+is the identity propagated to SQL.
+
+The RPC still enforces that identity as a database invariant: it is executable
+only by `service_role`, and every row lock and update includes
+`user_id = p_user_id`. An id belonging to another athlete is therefore
+indistinguishable from a missing id. Merge also rejects a self-merge, a survivor
+that is not active, a target already merged into a different survivor, and any
+state that would create a chain or cycle. Repeating the exact completed merge is
+the only idempotent exception. The unmerge RPC derives the survivor from the
+locked merged row and applies the same user predicate to it. Cross-user, self,
+invalid-target, chain, and cycle cases are negative database tests, rather than
+assumptions left to application callers.
 
 ### Read-filter scope, precisely
 
@@ -533,6 +546,7 @@ phases inherit a concrete target.
 | `tests/python/test_activity_dedup.py` (merge half) | Field rules: device-metric fidelity ranking, athlete-authored fields never overwritten by a device file, conflict recorded, `tss` recomputed not copied, `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` snapshot completeness                 |
 | `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                    |
 | `tests/python/test_supabase_repo.py`               | `merge_activity` / `unmerge_activity` RPC names and `p_*` argument dicts, mirroring `test_match_plan_workout_to_activity_uses_atomic_rpc`; `dedup_status` filtering present on the two list methods and **absent** on `get_activity` and `list_synced_intervals_keys` |
+| `tests/python/test_supabase_db.py`                 | RPC invariants reject cross-user ids, self-merges, invalid or already-merged targets, chains, and cycles; an exact retry remains idempotent                                                                                                                           |
 | `tests/python/test_api.py`                         | Detection runs before plan-matching in `_finalize_persisted_activity`; a Tier-A duplicate never acquires the planned workout                                                                                                                                          |
 | `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeding rebuilds a window correctly; horizon skip beyond 90 days                                                                                                                                                                     |
 | `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                           |
