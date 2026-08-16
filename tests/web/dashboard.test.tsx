@@ -1712,13 +1712,18 @@ describe("CoachChat", () => {
   });
 
   it("replaces a failed-send error with sign-in guidance when the session expired", async () => {
-    chatMocks.sendMessage.mockRejectedValueOnce(new Error("Unauthorized"));
-    let browserTokenRequests = 0;
+    // Gate the 401 on the send having failed, not on a request count:
+    // authorizedFetch mints a browser token per authorized call, so the number
+    // of bootstrap requests is incidental to what this test asserts.
+    let sessionExpired = false;
+    chatMocks.sendMessage.mockImplementationOnce(() => {
+      sessionExpired = true;
+      return Promise.reject(new Error("Unauthorized"));
+    });
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/oauth/browser-token") {
-        browserTokenRequests += 1;
-        if (browserTokenRequests >= 3) {
+        if (sessionExpired) {
           return Promise.resolve(
             new Response(
               JSON.stringify({ detail: "Invalid browser session cookie." }),
