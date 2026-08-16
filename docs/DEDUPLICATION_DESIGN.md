@@ -118,7 +118,7 @@ current tree, not only a policy this document adopts.
 
 ---
 
-## Database schema — two new columns on `activities`
+## Database schema — activity merge state and confirmations
 
 | Column                    | Type                                                             | Purpose                                          |
 | ------------------------- | ---------------------------------------------------------------- | ------------------------------------------------ |
@@ -156,6 +156,30 @@ the only idempotent exception. The unmerge RPC derives the survivor from the
 locked merged row and applies the same user predicate to it. Cross-user, self,
 invalid-target, chain, and cycle cases are negative database tests, rather than
 assumptions left to application callers.
+
+### Tier-B confirmation records
+
+Tier B consent is a server invariant, not a system-prompt promise. A small
+`activity_dedup_proposals` table stores a short-lived pending proposal scoped to
+`user_id`, the sorted activity ids and expected member versions, a random
+confirmation code, `expires_at`, `consumed_at`, and
+`confirmed_by_message_id`. `find_duplicate_activities` creates the proposal only
+after the pure scorer returns a Tier-B group and returns its code alongside the
+athlete-facing group.
+
+The coach asks the athlete to reply exactly `merge <code>`. The chat route already
+persists the current user turn before agent tools run. Orchestration injects that
+current user-message id into the engine request outside the model-visible tool
+schema. On merge, the handler loads the proposal for the authenticated athlete,
+re-fetches and re-scores the exact ids, and rejects a missing, expired, consumed,
+changed, or no-longer-Tier-B group. The merge RPC locks the pending proposal and
+requires the injected message to be a later `chat_messages` row for the same
+`user_id`, with `role = 'user'` and normalized text exactly matching the proposal
+code. It consumes the proposal in the same transaction as the merge. A model-
+supplied boolean, copied confirmation text, UUID shape, or prompt instruction is
+never accepted as evidence of consent. Tier A still requires current group
+revalidation but no proposal because it is the explicitly approved auto-merge
+tier.
 
 ### Read-filter scope, precisely
 
@@ -401,16 +425,18 @@ in a fixed lock order, `errcode 'P0002'` for not-found and `'22023'` for an
 invalid request, and the grants block verbatim:
 
 ```sql
-revoke all on function public.merge_activity(text, uuid, uuid, jsonb, jsonb)
-  from public, anon, authenticated;
-grant execute on function public.merge_activity(text, uuid, uuid, jsonb, jsonb)
-  to service_role;
+revoke all on function public.merge_activity(
+  text, uuid, uuid, jsonb, jsonb, uuid, uuid
+) from public, anon, authenticated;
+grant execute on function public.merge_activity(
+  text, uuid, uuid, jsonb, jsonb, uuid, uuid
+) to service_role;
 ```
 
-| RPC                                                                                            | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `merge_activity(p_user_id, p_surviving_id, p_merged_id, p_expected_versions, p_merged_fields)` | Pre-reads link ids, locks any plan workout first and then the survivor/current members/target in id order, and revalidates links plus the exact id/`updated_at` set. It atomically transfers both sides of a target-owned plan link, marks the target merged, and applies reconciled fields/audit. Version mismatch raises `40001`; invalid links or self-merge raise `22023`. An exact completed retry returns current state |
-| `unmerge_activity(p_user_id, p_merged_id, p_expected_versions, p_rederived_fields)`            | Derives the survivor and audited prior link, uses the same plan-first lock order, verifies versions and current post-merge link ownership, then restores both link directions when required, clears merge state/audit, and applies re-derived fields. Version mismatch raises `40001`; a conflicting later plan reassignment raises `22023`; an already-active target is an idempotent return                                 |
+| RPC                                                                                                                                      | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `merge_activity(p_user_id, p_surviving_id, p_merged_id, p_expected_versions, p_merged_fields, p_proposal_id, p_confirmation_message_id)` | For Tier B, locks and verifies an unexpired pending proposal plus its later exact-code user message; the two nullable confirmation args are injected by trusted orchestration, not the model. Then uses plan-first/activity-id lock order, revalidates links and exact member versions, transfers any plan link, applies fields/audit, and consumes the proposal atomically. Stale versions raise `40001`; invalid state raises `22023`. Tier A passes null confirmation args; an exact completed retry returns current state |
+| `unmerge_activity(p_user_id, p_merged_id, p_expected_versions, p_rederived_fields)`                                                      | Derives the survivor and audited prior link, uses the same plan-first lock order, verifies versions and current post-merge link ownership, then restores both link directions when required, clears merge state/audit, and applies re-derived fields. Version mismatch raises `40001`; a conflicting later plan reassignment raises `22023`; an already-active target is an idempotent return                                                                                                                                 |
 
 Field merging itself happens in Python (`backend/services/activity_dedup.py`), not
 in SQL — the rules involve source-fidelity ranking, jsonb deep-merge, and load
@@ -487,11 +513,13 @@ INGESTION (new activity arrives — upload, ZIP member, text, or Intervals sync)
  5. Recompute load over [earliest pre/post date, today] → if within the 90-day horizon
 
 BACKLOG CLEANUP (the athlete asks, or the coach suspects)
- 1. Coach calls find_duplicate_activities              → returns Tier A + Tier B groups
- 2. Coach presents the groups to the athlete           → in the athlete's own terms
- 3. Athlete confirms                                   → REQUIRED for Tier B
- 4. Coach calls merge_duplicate_activities             → merge_activity RPC per pair
- 5. Recompute from the earliest pre/post member date   → horizon-bounded, as above
+ 1. Coach calls find_duplicate_activities              → re-scores current groups;
+                                                          Tier B gets a pending code
+ 2. Coach presents the group and `merge <code>` phrase → in the athlete's own terms
+ 3. Athlete sends that exact phrase in a later turn    → REQUIRED for Tier B
+ 4. Orchestration injects that user-message id         → never model-supplied
+ 5. merge_duplicate_activities re-scores exact ids     → merge RPC verifies/consumes proof
+ 6. Recompute from the earliest pre/post member date   → horizon-bounded, as above
 
 READS (all of them, automatically)
    ... where dedup_status = 'active'          ← the only change to every consumer
@@ -506,11 +534,12 @@ REVERSAL
 
 ### Migration
 
-One timestamped migration adding the two columns, the index, and the check
-constraint; a companion (or the same file) defining `merge_activity` and
-`unmerge_activity`. `docs/supabase-migration-history.md` gets an entry in the same
-change — Change / Why / Security note — and the file is appended to the canonical
-migration sequence, per the repo's Database convention.
+One timestamped migration adds the two activity columns, index, check constraint,
+and `activity_dedup_proposals`; a companion (or the same file) defines
+`merge_activity` and `unmerge_activity`, including atomic proposal consumption.
+`docs/supabase-migration-history.md` gets an entry in the same change — Change /
+Why / Security note — and the file is appended to the canonical migration
+sequence, per the repo's Database convention.
 
 ### Model — `backend/models/training.py`
 
@@ -554,7 +583,10 @@ Conflicts it refuses to resolve are returned in the structured
 - Tier-A auto-merge wired into `_finalize_persisted_activity`, **before** the
   existing `_try_match_activity_to_plan` call at `api/index.py:2455`.
 - `POST /api/engine/find-duplicate-activities` and
-  `POST /api/engine/merge-duplicate-activities`, plus an unmerge endpoint.
+  `POST /api/engine/merge-duplicate-activities`, plus an unmerge endpoint. The
+  merge handler loads the exact user-scoped ids and re-runs the pure scorer; it
+  rejects unrelated or changed groups. Tier B additionally requires the pending
+  proposal and trusted current-user-message id described above.
 - `recompute_load_endpoint` switched to the seed-at-date lookup.
 
 ### Agent — `lib/agent/`
@@ -568,12 +600,15 @@ Conflicts it refuses to resolve are returned in the structured
   (`lib/agent/tools.ts:259-266`).
 - Routed through the existing `postEngine` table in
   `lib/agent/coach-tools.ts:290-320`.
-- `merge_duplicate_activities` takes a surviving id and a list of ids to merge
-  away, so the coach can only act after the athlete has confirmed.
+- `merge_duplicate_activities` takes the ids returned by the finder and a nullable
+  Tier-B `proposal_id`; it has no confirmation boolean or message-id field. The
+  trusted current user-message id is added by orchestration after schema
+  validation, so the model cannot fabricate it.
 - `lib/agent/system-prompt.ts` (`buildLeadCoachPrompt`) gains guidance replacing
   today's "I don't have a delete/merge tool" behaviour: call
   `find_duplicate_activities` when the athlete asks or duplicates are suspected,
-  present the groups plainly, and **confirm before merging anything from Tier B**.
+  present the groups plainly, and for Tier B ask for the exact server-issued
+  confirmation phrase before calling merge.
 
 ### Frontend — `components/coach-calendar.tsx`
 
@@ -614,21 +649,21 @@ collapses chips to 16px dots (`components/coach-calendar.module.css:558-608`,
 **Planned coverage — none of these exist yet.** Listed here so the implementation
 phases inherit a concrete target.
 
-| File                                               | What it should cover                                                                                                                                                                                                                                                                |
-| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                                                         |
-| `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness               |
-| `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                                  |
-| `tests/python/test_training_models.py`             | `Activity` validates and serializes both dedup fields, including the default active/null state and a merged row                                                                                                                                                                     |
-| `tests/python/test_supabase_repo.py`               | RPC wrapper arguments; active filtering scope; `list_dedup_candidates` excludes the supplied id and has no 50-row cap; backlog discovery keyset-paginates; `get_activity` and `list_synced_intervals_keys` remain unfiltered                                                        |
-| `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version failures and conflicting or one-sided plan links; concurrent merges force a stale writer to re-read; merge transfers and unmerge restores both plan-link directions without clobbering reassignment; exact retries are idempotent |
-| `tests/python/test_api.py`                         | Detection excludes the newly persisted id, still finds a candidate after more than 50 unrelated rows, and runs before plan-matching so a Tier-A duplicate never acquires the planned workout                                                                                        |
-| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date                                                                                                      |
-| `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                                         |
-| `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                                |
-| `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                                        |
-| `tests/web/agent-tools.test.ts`                    | The three new tools' request shapes and the `coachToolDefinitions` surface snapshot                                                                                                                                                                                                 |
-| `tests/ui/calendar.spec.ts`                        | The merged-from badge, including narrow-viewport dot mode                                                                                                                                                                                                                           |
+| File                                               | What it should cover                                                                                                                                                                                                                                                            |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                                                     |
+| `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness           |
+| `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                              |
+| `tests/python/test_training_models.py`             | `Activity` validates and serializes both dedup fields, including the default active/null state and a merged row                                                                                                                                                                 |
+| `tests/python/test_supabase_repo.py`               | RPC wrapper arguments; active filtering scope; `list_dedup_candidates` excludes the supplied id and has no 50-row cap; backlog discovery keyset-paginates; `get_activity` and `list_synced_intervals_keys` remain unfiltered                                                    |
+| `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version/link failures; concurrent merges force re-read; plan links transfer/restore safely; Tier-B proposal/message verification and consumption are atomic; exact retries are idempotent                                             |
+| `tests/python/test_api.py`                         | Detection excludes self/row caps and precedes plan matching; merge re-scores exact ids; Tier B rejects unrelated, changed, expired, consumed, wrong-user, wrong-message, and model-asserted confirmation, then accepts and atomically consumes a valid later user-message proof |
+| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date                                                                                                  |
+| `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                                     |
+| `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                            |
+| `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                                    |
+| `tests/web/agent-tools.test.ts`                    | The three tool schemas and surface snapshot; confirmation message id is absent from model input and injected from the persisted current user turn only                                                                                                                          |
+| `tests/ui/calendar.spec.ts`                        | The merged-from badge, including narrow-viewport dot mode                                                                                                                                                                                                                       |
 
 `@pytest.mark.db` tests are excluded from the default run
 (`addopts = "-m 'not db and not oai'"`); run them with `bun run test:db` against a
