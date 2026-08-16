@@ -15,8 +15,6 @@ const SESSION_REFRESH_RETRY_DELAYS_MS = [
   2 * 60_000,
   5 * 60_000,
 ] as const;
-const AUTHENTICATION_REQUIRED_MESSAGE =
-  "Your browser sign-in has ended. Sign in again to continue.";
 
 export type BrowserSessionState = {
   authenticationRequired: boolean;
@@ -92,7 +90,9 @@ export function useBrowserSession(): BrowserSessionState {
           setState({
             authenticationRequired: true,
             token: null,
-            error: AUTHENTICATION_REQUIRED_MESSAGE,
+            // The reauthentication screen owns this copy; carrying a parallel
+            // message here would duplicate it and leak the raw 401 detail.
+            error: null,
             loading: false,
             renewalRetryAttempt: 0,
           });

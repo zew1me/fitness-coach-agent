@@ -84,8 +84,9 @@ describe("useBrowserSession", () => {
     });
     expect(result.current.token).toBeNull();
     expect(result.current.authenticationRequired).toBe(true);
-    expect(result.current.error).toMatch(/sign in again/i);
-    expect(result.current.error).not.toMatch(/invalid browser session cookie/i);
+    // The expiry copy lives solely in the reauthentication screen, so this
+    // state carries no message — which also cannot leak the raw 401 detail.
+    expect(result.current.error).toBeNull();
   });
 
   it("renews the browser session when the tab regains focus", async () => {
