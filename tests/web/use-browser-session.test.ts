@@ -109,6 +109,44 @@ describe("useBrowserSession", () => {
     expect(fetchBrowserTokenMock).toHaveBeenCalledTimes(2);
   });
 
+  it("throttles repeated focus and visibility renewals", async () => {
+    vi.useFakeTimers();
+    // The far-future expiry clamps the scheduled renewal to the 10-minute
+    // maximum, so nothing but the lifecycle events moves the call count here.
+    fetchBrowserTokenMock.mockResolvedValue(browserToken("token-1"));
+
+    const { result } = renderHook(() => useBrowserSession());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.token?.access_token).toBe("token-1");
+    expect(fetchBrowserTokenMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(fetchBrowserTokenMock).toHaveBeenCalledTimes(2);
+
+    // A second focus and a visibility change inside the window are dropped.
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+    });
+    expect(fetchBrowserTokenMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(fetchBrowserTokenMock).toHaveBeenCalledTimes(3);
+  });
+
   it("moves to sign-in-required when a focus renewal finds an expired cookie", async () => {
     fetchBrowserTokenMock
       .mockResolvedValueOnce(browserToken("token-1"))

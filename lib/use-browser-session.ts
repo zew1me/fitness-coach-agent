@@ -15,6 +15,14 @@ const SESSION_REFRESH_RETRY_DELAYS_MS = [
   2 * 60_000,
   5 * 60_000,
 ] as const;
+// Focus and visibility events fire far more often than a session needs
+// renewing — alt-tabbing repeatedly would otherwise mint a browser token and
+// re-sign the session cookie per switch. Throttled on elapsed time only: the
+// token's distance from expiry is deliberately not consulted, because each
+// renewal is what slides the 12-hour inactivity window forward, and because
+// lifecycle events are the only recovery path once the bounded retry series
+// above is exhausted.
+const LIFECYCLE_REFRESH_THROTTLE_MS = 30_000;
 
 export type BrowserSessionState = {
   authenticationRequired: boolean;
@@ -51,6 +59,9 @@ export function useBrowserSession(): BrowserSessionState {
   const mountedRef = useRef(true);
   const establishedRef = useRef(false);
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  // Held in a ref, not the effect body: the effect re-runs on every token
+  // change, which would reset a local throttle on each successful renewal.
+  const lastLifecycleRefreshRef = useRef(0);
 
   const refresh = useCallback((): Promise<void> => {
     const activeRefresh = refreshInFlightRef.current;
@@ -170,12 +181,19 @@ export function useBrowserSession(): BrowserSessionState {
       },
       retryDelay ?? sessionRefreshDelay(state.token.expires_at),
     );
-    const refreshOnFocus = (): void => {
+    const refreshFromLifecycle = (): void => {
+      const now = Date.now();
+      if (now - lastLifecycleRefreshRef.current < LIFECYCLE_REFRESH_THROTTLE_MS)
+        return;
+      lastLifecycleRefreshRef.current = now;
       void refresh();
+    };
+    const refreshOnFocus = (): void => {
+      refreshFromLifecycle();
     };
     const refreshWhenVisible = (): void => {
       if (document.visibilityState === "visible") {
-        void refresh();
+        refreshFromLifecycle();
       }
     };
     window.addEventListener("focus", refreshOnFocus);
