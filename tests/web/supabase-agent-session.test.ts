@@ -323,7 +323,35 @@ describe("SupabaseAgentSession", () => {
     expect(prepared).not.toHaveProperty("call_id");
   });
 
-  it("rewrites raw Responses function_call_output items to assistant text before model replay", () => {
+  it("converts raw Responses function_call_output items back to SDK results for model replay", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+    const output = JSON.stringify({
+      error: "Coach is unavailable right now. Please try again.",
+    });
+
+    const prepared = session.prepareHistoryItemForModelInput({
+      id: "fco-1",
+      type: "function_call_output",
+      call_id: "call-1",
+      output,
+      status: "completed",
+    } as unknown as AgentInputItem) as Record<string, unknown>;
+
+    expect(prepared).toEqual({
+      id: "fco-1",
+      type: "function_call_result",
+      callId: "call-1",
+      output,
+      status: "completed",
+    });
+  });
+
+  it("restores raw Responses tool output content parts to SDK content shapes", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
       baseUrl: "http://localhost",
@@ -334,23 +362,38 @@ describe("SupabaseAgentSession", () => {
     const prepared = session.prepareHistoryItemForModelInput({
       type: "function_call_output",
       call_id: "call-1",
-      output: JSON.stringify({
-        error: "Coach is unavailable right now. Please try again.",
-      }),
+      output: [
+        { type: "input_text", text: "18C, clear skies." },
+        {
+          type: "input_image",
+          image_url: "https://files.example/weather.png",
+          detail: "high",
+        },
+        {
+          type: "input_file",
+          file_id: "file-abc123",
+          filename: "weather.txt",
+        },
+      ],
       status: "completed",
     } as unknown as AgentInputItem) as Record<string, unknown>;
 
     expect(prepared).toEqual({
-      role: "assistant",
-      status: "completed",
-      content: [
+      type: "function_call_result",
+      callId: "call-1",
+      output: [
+        { type: "text", text: "18C, clear skies." },
         {
-          type: "output_text",
-          text:
-            "Historical tool output omitted from model replay. " +
-            "The visible chat transcript is preserved separately.",
+          type: "image",
+          image: "https://files.example/weather.png",
+          detail: "high",
+        },
+        {
+          type: "file",
+          file: { id: "file-abc123", filename: "weather.txt" },
         },
       ],
+      status: "completed",
     });
   });
 });

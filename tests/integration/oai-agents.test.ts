@@ -37,6 +37,7 @@ import {
   specialistReportSchema,
   specialistReportWireSchema,
 } from "../../lib/agent/orchestration-types";
+import { SupabaseAgentSession } from "../../lib/agent/supabase-agent-session";
 import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
 import { coachToolDefinitions } from "../../lib/agent/tools";
 import { athleteContextFixture } from "../web/agent-fixtures";
@@ -477,9 +478,35 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
         .map((item) => item["call_id"])
         .filter((callId): callId is string => typeof callId === "string"),
     );
+    expect(remainingCallIds.size).toBeGreaterThan(0);
     expect(
       [...remainingCallIds].every((callId) => remainingOutputIds.has(callId)),
     ).toBe(true);
+
+    const replaySession = new SupabaseAgentSession({
+      accessToken: "unused",
+      baseUrl: "http://unused",
+      leaseId: "unused",
+    });
+    const replayedRecords = compacted.map(
+      (item) =>
+        replaySession.prepareHistoryItemForModelInput(
+          item,
+        ) as unknown as Record<string, unknown>,
+    );
+    expect(replayedRecords).toContainEqual(
+      expect.objectContaining({
+        type: "function_call",
+        callId: toolCallId,
+      }),
+    );
+    expect(replayedRecords).toContainEqual(
+      expect.objectContaining({
+        type: "function_call_result",
+        callId: toolCallId,
+        output: JSON.stringify({ status: "updated" }),
+      }),
+    );
   }, 60_000);
 
   it("compacts a real reasoning-model run's history, including provider-attached metadata, without a 400", async () => {

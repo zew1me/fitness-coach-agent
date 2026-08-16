@@ -95,8 +95,10 @@ Agents SDK item shapes and raw OpenAI Responses API shapes:
 
 - `unsupportedFileContentToText`, `prepareFunctionItemForModelInput` — run on
   **every model turn** (not just compaction) via
-  `prepareHistoryItemForModelInput()`, which is why this file isn't named
-  compaction-specific.
+  `prepareHistoryItemForModelInput()`. The latter restores raw compacted
+  `function_call_output` items to SDK `function_call_result` items, including
+  their call IDs and structured text/image/file output, so retained tool-call
+  pairs remain replayable. This is why the file isn't named compaction-specific.
 - `toResponsesCompactInputItem`, `sanitizeResponsesCompactInputItem` — used
   only by `DurableCompactionSession` to build the `responses.compact` request.
 

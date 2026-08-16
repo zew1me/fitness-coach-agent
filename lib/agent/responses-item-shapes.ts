@@ -183,19 +183,83 @@ export function sanitizeResponsesCompactInputItem(
   return stripProviderMetadata(item) as AgentInputItem;
 }
 
-function omittedToolOutputMessage(): AgentInputItem {
+function toSdkToolOutputImage(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const imageUrl = record["image_url"];
+  const fileId = record["file_id"];
+  const image =
+    typeof imageUrl === "string"
+      ? imageUrl
+      : typeof fileId === "string"
+        ? { fileId }
+        : undefined;
   return {
-    role: "assistant",
-    status: "completed",
-    content: [
-      {
-        type: "output_text",
-        text:
-          "Historical tool output omitted from model replay. " +
-          "The visible chat transcript is preserved separately.",
-      },
-    ],
-  } as AgentInputItem;
+    type: "image",
+    ...(image === undefined ? {} : { image }),
+    ...(typeof record["detail"] === "string"
+      ? { detail: record["detail"] }
+      : {}),
+  };
+}
+
+function toSdkToolOutputFile(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const filename =
+    typeof record["filename"] === "string" ? record["filename"] : undefined;
+  const fileUrl = record["file_url"];
+  const fileId = record["file_id"];
+  const fileData = record["file_data"];
+  const file =
+    typeof fileUrl === "string"
+      ? { url: fileUrl, ...(filename === undefined ? {} : { filename }) }
+      : typeof fileId === "string"
+        ? { id: fileId, ...(filename === undefined ? {} : { filename }) }
+        : fileData;
+  return {
+    type: "file",
+    ...(file === undefined ? {} : { file }),
+  };
+}
+
+const SDK_OUTPUT_CONTENT_TYPE_MAP: Record<
+  string,
+  (record: Record<string, unknown>) => Record<string, unknown>
+> = {
+  input_text: (record) => ({ type: "text", text: record["text"] }),
+  input_image: toSdkToolOutputImage,
+  input_file: toSdkToolOutputFile,
+};
+
+function toSdkToolOutputContentPart(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    SDK_OUTPUT_CONTENT_TYPE_MAP[record["type"] as string]?.(record) ?? value
+  );
+}
+
+function toSdkFunctionCallResultItem(
+  record: Record<string, unknown>,
+): AgentInputItem {
+  const callId = record["call_id"] ?? record["callId"];
+  if (typeof callId !== "string") {
+    return record as unknown as AgentInputItem;
+  }
+  const rawOutput = record["output"];
+  const result: Record<string, unknown> = {
+    type: "function_call_result",
+    callId,
+    output: Array.isArray(rawOutput)
+      ? rawOutput.map(toSdkToolOutputContentPart)
+      : rawOutput,
+  };
+  if (typeof record["id"] === "string") result["id"] = record["id"];
+  if (typeof record["status"] === "string") result["status"] = record["status"];
+  return result as unknown as AgentInputItem;
 }
 
 export function prepareFunctionItemForModelInput(
@@ -208,7 +272,7 @@ export function prepareFunctionItemForModelInput(
     return withCallIdField(record, "callId");
   }
   if (itemType === "function_call_output") {
-    return omittedToolOutputMessage();
+    return toSdkFunctionCallResultItem(record);
   }
   return item;
 }
