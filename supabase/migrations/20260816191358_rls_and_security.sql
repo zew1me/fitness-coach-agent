@@ -110,19 +110,14 @@ create policy "Users can view their own OAuth grants"
   for select
   using (auth.uid()::text = user_id);
 
--- oauth_authorization_codes: short-lived; no direct user access needed
+-- oauth_authorization_codes: server-side only; no client policies
 alter table public.oauth_authorization_codes enable row level security;
-create policy "Users can view their own authorization codes"
-  on public.oauth_authorization_codes
-  for select
-  using (auth.uid()::text = user_id);
 
--- oauth_refresh_tokens: no direct user access needed (server-side only)
+-- oauth_refresh_tokens: server-side only; no client policies
 alter table public.oauth_refresh_tokens enable row level security;
-create policy "Users can view their own refresh tokens"
-  on public.oauth_refresh_tokens
-  for select
-  using (auth.uid()::text = user_id);
+
+-- threshold_recalibration_candidates: server-side only; no client policies
+alter table public.threshold_recalibration_candidates enable row level security;
 
 -- chat_threads
 alter table public.chat_threads enable row level security;
@@ -147,3 +142,6 @@ create policy "Users can manage their own chat attachments"
   for all
   using (auth.uid()::text = user_id)
   with check (auth.uid()::text = user_id);
+
+-- chat_model_states: durable internal replay state; server-side only
+alter table public.chat_model_states enable row level security;
