@@ -85,6 +85,23 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("context-aware prompt to continue");
   });
 
+  it("uses the athlete browser timezone for dates and displayed activity times", () => {
+    const prompt = buildLeadCoachPrompt(
+      context,
+      [],
+      undefined,
+      "America/Los_Angeles",
+    );
+
+    expect(prompt).toContain(
+      "athlete's browser timezone (America/Los_Angeles)",
+    );
+    expect(prompt).toContain(
+      "activity_date and workout_date are athlete-local",
+    );
+    expect(prompt).toContain("started_at timestamps are UTC; convert them");
+  });
+
   it("routes Garmin wellness export blocks to recovery persistence", () => {
     const prompt = buildCoachSystemPrompt(context);
 

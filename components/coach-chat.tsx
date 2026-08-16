@@ -97,6 +97,10 @@ function onlyWelcomeMessage(messages: ChatMessage[]): boolean {
   );
 }
 
+function browserTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
 function readableTime(timestamp: string): string {
   return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
@@ -1458,6 +1462,9 @@ function CoachChatBody({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       credentials: "include",
+      headers: (): Record<string, string> => ({
+        "X-Athlete-Timezone": browserTimeZone(),
+      }),
       prepareSendMessagesRequest: ({
         messages,
       }): { body: Record<string, unknown> } => ({
