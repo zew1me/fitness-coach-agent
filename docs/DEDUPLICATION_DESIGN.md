@@ -2,7 +2,7 @@
 
 This document explains how the fitness-coach app will present one athlete-facing
 record per workout when the same session has been ingested several times, without
-deleting any of the rows it actually received.
+a deduplication operation deleting source rows while the athlete's account exists.
 
 **Status: proposed.** Nothing described here is implemented yet. Every reference
 to existing code is real and current; every reference to new code is a plan.
@@ -132,11 +132,15 @@ any `merged` row carries a non-null `merged_into_activity_id`.
 coexist: `set null` would blank a child's `merged_into_activity_id` while the row
 still reads `dedup_status = 'merged'`, firing the check constraint in the middle
 of the delete. Postgres cannot defer CHECK constraints, so the delete simply
-errors. No application path deletes activities today, but
-`activities.user_id references athlete_profiles(user_id) on delete cascade`
-(`supabase/migrations/0001_schema.sql:231`) means account deletion reaches this.
-Cascade is also the semantically correct pairing — a merged-away row without its
-survivor describes nothing.
+errors. No application path deletes an individual activity today, and this design
+adds none. `activities.user_id references athlete_profiles(user_id) on delete
+cascade` (`supabase/migrations/0001_schema.sql:231`) does mean that closing an
+athlete account intentionally deletes all of its activity rows; the proposal table
+uses the same account cascade. The self-FK cascade then guarantees that an
+otherwise-deleted survivor cannot leave merged-away children pointing at nothing.
+The preservation guarantee is for deduplication during the account's lifetime,
+not a promise to retain data after account deletion. Any future individual delete
+API must be group-aware; it cannot silently rely on this cascade.
 
 Note that `public.activities` has **RLS disabled and zero policies**; only
 `intervals_connections` and `agent_emails` carry policies. The protected FastAPI
@@ -278,7 +282,8 @@ any one file. That is exactly why the pre-merge snapshot and unmerge below exist
 | `started_at`, `activity_date`                                                                                                                                                                                               | The highest-fidelity member's — a FIT timestamp is authoritative, matching the existing `_date_edit_verdict` / `refused_authoritative` concept (`backend/services/activity_text.py:698`) |
 | `activity_summary` jsonb                                                                                                                                                                                                    | Deep-merged, mirroring `_merge_context_summary` (`backend/services/activity_text.py:488`)                                                                                                |
 | `source`, `source_file_key`                                                                                                                                                                                                 | The surviving row's are left alone; every member's source and key are recorded in the audit entry so provenance is not lost                                                              |
-| **Everything else** — `raw_extraction`, `summary_schema_version`, `user_id`, `id`, timestamps                                                                                                                               | The surviving row's value is kept unchanged. This row is the catch-all: any column not named above is never taken from a merged-away member                                              |
+| `raw_extraction`                                                                                                                                                                                                            | Preserve existing survivor keys and append `merged_from`; never copy or change the merged-away row's raw extraction                                                                      |
+| **Everything else** — `summary_schema_version`, `user_id`, `id`, timestamps                                                                                                                                                 | The surviving row's value is kept unchanged. This row is the catch-all: any column not named above is never taken from a merged-away member                                              |
 | `planned_workout_id`                                                                                                                                                                                                        | Not field-merged; the RPC validates and transitions the bidirectional plan link under lock as described below                                                                            |
 
 Source fidelity rank, highest first:
@@ -331,10 +336,10 @@ tier that produced the group, any field conflicts, the original plan-link owner,
 and a `pre_merge` snapshot of every surviving-row value the merge overwrote.
 
 **Unmerge is therefore first-class, and this is the strongest argument for the
-whole approach.** Because no row is ever deleted, reversing a merge is: clear the
-merged-away row's `dedup_status` and `merged_into_activity_id`, drop its audit
-entry, and recompute the surviving row's fields. A false-positive merge costs the
-athlete one conversation, not a workout.
+whole approach.** Deduplication never deletes a member row, so reversing a merge
+clears the merged-away row's dedup state, restores any audited plan link, drops its
+audit entry, and recomputes the surviving row's fields. A false-positive merge
+costs the athlete one conversation, not a workout.
 
 **Unmerge re-derives; it does not restore from the snapshot.** This matters as
 soon as a group has three members, because each `pre_merge` snapshot is a delta
@@ -630,10 +635,23 @@ collapses chips to 16px dots (`components/coach-calendar.module.css:558-608`,
 
 ## What this explicitly does not change
 
-- **No rows are hard-deleted, ever.** There is no `delete_activity` in the repo
-  today and this design does not add one. Every raw row the athlete sent us stays
-  exactly as received; only `dedup_status` and `merged_into_activity_id` are
-  written on it.
+- **Deduplication does not hard-delete activity rows.** There is no
+  `delete_activity` in the repo today and this design does not add one. While the
+  account exists, a merged-away row retains its ingested metrics, summaries,
+  source, key, and raw extraction; merge changes only its dedup state, the
+  bidirectional plan link when one must move, and trigger-managed timestamps.
+  Generic activity-update paths reject a row while it is merged so those retained
+  inputs stay stable until unmerge.
+- **The survivor is intentionally mutable.** Materialized metric/date/summary
+  fields and derived load values change under the documented reconciliation
+  rules, and `raw_extraction.merged_from` is appended for audit. Its pre-merge
+  values remain recoverable from the member rows and audit snapshots; it is not
+  described as an immutable copy of the first upload.
+- **Account deletion still deletes account data.** The existing athlete-profile
+  cascade removes active and merged activity rows, their in-row audit data, and
+  pending confirmation proposals. `merged_into_activity_id on delete cascade`
+  keeps the self-referential graph valid during that deletion; it is not an
+  ordinary deduplication path.
 - **Intervals-sync dedup is untouched.** The generated `intervals_source_file_key`
   column, its unique constraint, the `ignore_duplicates=True` upsert in
   `create_intervals_activity`, and the in-process key set in `intervals_sync` all
@@ -649,21 +667,21 @@ collapses chips to 16px dots (`components/coach-calendar.module.css:558-608`,
 **Planned coverage — none of these exist yet.** Listed here so the implementation
 phases inherit a concrete target.
 
-| File                                               | What it should cover                                                                                                                                                                                                                                                            |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                                                     |
-| `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness           |
-| `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                              |
-| `tests/python/test_training_models.py`             | `Activity` validates and serializes both dedup fields, including the default active/null state and a merged row                                                                                                                                                                 |
-| `tests/python/test_supabase_repo.py`               | RPC wrapper arguments; active filtering scope; `list_dedup_candidates` excludes the supplied id and has no 50-row cap; backlog discovery keyset-paginates; `get_activity` and `list_synced_intervals_keys` remain unfiltered                                                    |
-| `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version/link failures; concurrent merges force re-read; plan links transfer/restore safely; Tier-B proposal/message verification and consumption are atomic; exact retries are idempotent                                             |
-| `tests/python/test_api.py`                         | Detection excludes self/row caps and precedes plan matching; merge re-scores exact ids; Tier B rejects unrelated, changed, expired, consumed, wrong-user, wrong-message, and model-asserted confirmation, then accepts and atomically consumes a valid later user-message proof |
-| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date                                                                                                  |
-| `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                                     |
-| `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                            |
-| `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                                    |
-| `tests/web/agent-tools.test.ts`                    | The three tool schemas and surface snapshot; confirmation message id is absent from model input and injected from the persisted current user turn only                                                                                                                          |
-| `tests/ui/calendar.spec.ts`                        | The merged-from badge, including narrow-viewport dot mode                                                                                                                                                                                                                       |
+| File                                               | What it should cover                                                                                                                                                                                                                                                  |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/python/test_activity_dedup.py`              | Pure scorer: tier/null boundaries, both hard negatives, explicit self-id rejection, group formation with three or more members, and the same result regardless of whether a duplicate appears after 50 unrelated activities                                           |
+| `tests/python/test_activity_dedup.py` (merge half) | Field rules: fidelity/`created_at`/`id` ordering and equal-rank conflicts, athlete-authored fields never overwritten by a device file, `tss` recomputed not copied, deterministic `activity_summary` deep-merge, unlisted columns untouched, `pre_merge` completeness |
+| `tests/python/test_activity_dedup.py` (unmerge)    | Re-derivation is order-independent: in a three-member group, unmerging the **middle** member preserves the remaining member's contribution — the case a `pre_merge` snapshot restore would corrupt                                                                    |
+| `tests/python/test_training_models.py`             | `Activity` validates and serializes both dedup fields, including the default active/null state and a merged row                                                                                                                                                       |
+| `tests/python/test_supabase_repo.py`               | RPC wrapper arguments; active filtering scope; `list_dedup_candidates` excludes the supplied id and has no 50-row cap; backlog discovery keyset-paginates; `get_activity` and `list_synced_intervals_keys` remain unfiltered                                          |
+| `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version/link failures; concurrent merges force re-read; plan links transfer/restore safely; Tier-B proposal/message verification and consumption are atomic; exact retries are idempotent                                   |
+| `tests/python/test_api.py`                         | Detection excludes self/row caps and precedes matching; merged-away rows reject generic updates; merge re-scores exact ids; Tier B rejects invalid proposal/message states and atomically consumes valid proof                                                        |
+| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date                                                                                        |
+| `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                           |
+| `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                  |
+| `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                          |
+| `tests/web/agent-tools.test.ts`                    | The three tool schemas and surface snapshot; confirmation message id is absent from model input and injected from the persisted current user turn only                                                                                                                |
+| `tests/ui/calendar.spec.ts`                        | The merged-from badge, including narrow-viewport dot mode                                                                                                                                                                                                             |
 
 `@pytest.mark.db` tests are excluded from the default run
 (`addopts = "-m 'not db and not oai'"`); run them with `bun run test:db` against a
