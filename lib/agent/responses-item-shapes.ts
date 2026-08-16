@@ -183,62 +183,130 @@ export function sanitizeResponsesCompactInputItem(
   return stripProviderMetadata(item) as AgentInputItem;
 }
 
-function toSdkToolOutputImage(
+function unreplayableToolOutputMessage(): AgentInputItem {
+  return {
+    role: "assistant",
+    status: "completed",
+    content: [
+      {
+        type: "output_text",
+        text:
+          "Historical tool output could not be replayed because its call ID is missing. " +
+          "The visible chat transcript is preserved separately.",
+      },
+    ],
+  } as AgentInputItem;
+}
+
+function toSdkStructuredOutputImage(
   record: Record<string, unknown>,
-): Record<string, unknown> {
+): Record<string, unknown> | null {
   const imageUrl = record["image_url"];
   const fileId = record["file_id"];
   const image =
     typeof imageUrl === "string"
       ? imageUrl
       : typeof fileId === "string"
-        ? { fileId }
+        ? { id: fileId }
         : undefined;
+  if (image === undefined) return null;
   return {
-    type: "image",
-    ...(image === undefined ? {} : { image }),
+    type: "input_image",
+    image,
     ...(typeof record["detail"] === "string"
       ? { detail: record["detail"] }
       : {}),
   };
 }
 
-function toSdkToolOutputFile(
+function toSdkStructuredOutputFile(
   record: Record<string, unknown>,
 ): Record<string, unknown> {
-  const filename =
-    typeof record["filename"] === "string" ? record["filename"] : undefined;
   const fileUrl = record["file_url"];
   const fileId = record["file_id"];
   const fileData = record["file_data"];
   const file =
-    typeof fileUrl === "string"
-      ? { url: fileUrl, ...(filename === undefined ? {} : { filename }) }
-      : typeof fileId === "string"
-        ? { id: fileId, ...(filename === undefined ? {} : { filename }) }
+    typeof fileId === "string"
+      ? { id: fileId }
+      : typeof fileUrl === "string"
+        ? { url: fileUrl }
         : fileData;
   return {
-    type: "file",
+    // Preserve the raw structured-output discriminator; this is a tool result,
+    // not a user attachment bypassing the link-preserving text sanitizer.
+    type: record["type"],
     ...(file === undefined ? {} : { file }),
+    ...(typeof record["filename"] === "string"
+      ? { filename: record["filename"] }
+      : {}),
   };
 }
 
-const SDK_OUTPUT_CONTENT_TYPE_MAP: Record<
+const SDK_STRUCTURED_OUTPUT_TYPE_MAP: Record<
   string,
-  (record: Record<string, unknown>) => Record<string, unknown>
+  (record: Record<string, unknown>) => Record<string, unknown> | null
 > = {
-  input_text: (record) => ({ type: "text", text: record["text"] }),
-  input_image: toSdkToolOutputImage,
-  input_file: toSdkToolOutputFile,
+  input_text: (record) => ({ type: "input_text", text: record["text"] }),
+  input_image: toSdkStructuredOutputImage,
+  input_file: toSdkStructuredOutputFile,
 };
 
-function toSdkToolOutputContentPart(value: unknown): unknown {
+function toSdkStructuredOutputContentPart(
+  value: unknown,
+): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return value;
+    return null;
   }
   const record = value as Record<string, unknown>;
   return (
-    SDK_OUTPUT_CONTENT_TYPE_MAP[record["type"] as string]?.(record) ?? value
+    SDK_STRUCTURED_OUTPUT_TYPE_MAP[record["type"] as string]?.(record) ?? null
+  );
+}
+
+const RAW_FUNCTION_OUTPUT_KEYS = new Set([
+  "type",
+  "id",
+  "call_id",
+  "callId",
+  "name",
+  "function_name",
+  "namespace",
+  "status",
+  "output",
+]);
+
+function sdkFunctionCallName(
+  record: Record<string, unknown>,
+  callId: string,
+): string {
+  if (typeof record["name"] === "string") return record["name"];
+  if (typeof record["function_name"] === "string")
+    return record["function_name"];
+  return callId;
+}
+
+function sdkFunctionCallStatus(value: unknown): string {
+  return value === "in_progress" ||
+    value === "completed" ||
+    value === "incomplete"
+    ? value
+    : "completed";
+}
+
+function sdkFunctionCallOutput(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value
+    .map(toSdkStructuredOutputContentPart)
+    .filter((part): part is Record<string, unknown> => part !== null);
+}
+
+function rawFunctionOutputProviderData(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record).filter(
+      ([key]) => !RAW_FUNCTION_OUTPUT_KEYS.has(key),
+    ),
   );
 }
 
@@ -246,19 +314,21 @@ function toSdkFunctionCallResultItem(
   record: Record<string, unknown>,
 ): AgentInputItem {
   const callId = record["call_id"] ?? record["callId"];
-  if (typeof callId !== "string") {
-    return record as unknown as AgentInputItem;
-  }
-  const rawOutput = record["output"];
+  if (typeof callId !== "string") return unreplayableToolOutputMessage();
+
+  const providerData = rawFunctionOutputProviderData(record);
   const result: Record<string, unknown> = {
     type: "function_call_result",
     callId,
-    output: Array.isArray(rawOutput)
-      ? rawOutput.map(toSdkToolOutputContentPart)
-      : rawOutput,
+    name: sdkFunctionCallName(record, callId),
+    ...(typeof record["namespace"] === "string"
+      ? { namespace: record["namespace"] }
+      : {}),
+    status: sdkFunctionCallStatus(record["status"]),
+    output: sdkFunctionCallOutput(record["output"]),
+    ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
   };
   if (typeof record["id"] === "string") result["id"] = record["id"];
-  if (typeof record["status"] === "string") result["status"] = record["status"];
   return result as unknown as AgentInputItem;
 }
 

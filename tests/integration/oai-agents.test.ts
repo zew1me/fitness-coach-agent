@@ -504,7 +504,9 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       expect.objectContaining({
         type: "function_call_result",
         callId: toolCallId,
+        name: toolCallId,
         output: JSON.stringify({ status: "updated" }),
+        status: "completed",
       }),
     );
   }, 60_000);

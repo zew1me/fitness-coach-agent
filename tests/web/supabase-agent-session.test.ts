@@ -1,4 +1,8 @@
-import type { AgentInputItem } from "@openai/agents";
+import {
+  OpenAIResponsesModel,
+  type AgentInputItem,
+  type ModelRequest,
+} from "@openai/agents";
 import { describe, expect, it, vi } from "vitest";
 
 import { SupabaseAgentSession } from "../../lib/agent/supabase-agent-session";
@@ -7,6 +11,27 @@ const userItem = (text: string): AgentInputItem => ({
   role: "user",
   content: [{ type: "input_text", text }],
 });
+
+type FunctionCallResultItem = Extract<
+  AgentInputItem,
+  { type: "function_call_result" }
+>;
+
+class InspectableResponsesModel extends OpenAIResponsesModel {
+  buildInput(input: AgentInputItem[]): unknown {
+    const request: ModelRequest = {
+      input,
+      modelSettings: {},
+      tools: [],
+      outputType: "text",
+      handoffs: [],
+      tracing: false,
+    };
+    return this._buildResponsesCreateRequest(request, false).requestData[
+      "input"
+    ];
+  }
+}
 
 function response(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -346,6 +371,7 @@ describe("SupabaseAgentSession", () => {
       id: "fco-1",
       type: "function_call_result",
       callId: "call-1",
+      name: "call-1",
       output,
       status: "completed",
     });
@@ -362,6 +388,8 @@ describe("SupabaseAgentSession", () => {
     const prepared = session.prepareHistoryItemForModelInput({
       type: "function_call_output",
       call_id: "call-1",
+      function_name: "get_weather",
+      created_by: "model",
       output: [
         { type: "input_text", text: "18C, clear skies." },
         {
@@ -375,25 +403,78 @@ describe("SupabaseAgentSession", () => {
           filename: "weather.txt",
         },
       ],
-      status: "completed",
-    } as unknown as AgentInputItem) as Record<string, unknown>;
+    } as unknown as AgentInputItem) as FunctionCallResultItem;
 
     expect(prepared).toEqual({
       type: "function_call_result",
       callId: "call-1",
+      name: "get_weather",
       output: [
-        { type: "text", text: "18C, clear skies." },
+        { type: "input_text", text: "18C, clear skies." },
         {
-          type: "image",
+          type: "input_image",
           image: "https://files.example/weather.png",
           detail: "high",
         },
         {
-          type: "file",
-          file: { id: "file-abc123", filename: "weather.txt" },
+          type: "input_file",
+          file: { id: "file-abc123" },
+          filename: "weather.txt",
         },
       ],
+      providerData: { created_by: "model" },
       status: "completed",
+    });
+
+    const model = new InspectableResponsesModel({} as never, "test-model");
+    expect(model.buildInput([prepared])).toEqual([
+      {
+        type: "function_call_output",
+        id: undefined,
+        call_id: "call-1",
+        created_by: "model",
+        output: [
+          { type: "input_text", text: "18C, clear skies." },
+          {
+            type: "input_image",
+            image_url: "https://files.example/weather.png",
+            detail: "high",
+          },
+          {
+            type: "input_file",
+            file_id: "file-abc123",
+            filename: "weather.txt",
+          },
+        ],
+        status: "completed",
+      },
+    ]);
+  });
+
+  it("degrades a malformed raw tool output without a call ID to replayable text", () => {
+    const session = new SupabaseAgentSession({
+      accessToken: "token",
+      baseUrl: "http://localhost",
+      leaseId: "lease-1",
+      fetch: vi.fn(),
+    });
+
+    expect(
+      session.prepareHistoryItemForModelInput({
+        type: "function_call_output",
+        output: "orphaned",
+      } as unknown as AgentInputItem),
+    ).toEqual({
+      role: "assistant",
+      status: "completed",
+      content: [
+        {
+          type: "output_text",
+          text:
+            "Historical tool output could not be replayed because its call ID is missing. " +
+            "The visible chat transcript is preserved separately.",
+        },
+      ],
     });
   });
 });
