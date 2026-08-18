@@ -415,11 +415,36 @@ map above is what makes the sequence safe rather than merely convenient. Because
 reconciliation is a pure function of the member set, an interrupted sequence
 leaves a _consistent_ partially-merged group — every row written so far is
 correct for the members merged so far — and the next detection pass simply
-re-proposes what remains. Audit entries, plan-link transfers, and the load
-rebuild are per-transaction and therefore never half-applied. A single RPC that
+re-proposes what remains. Audit entries and plan-link transfers are written
+inside each merge transaction and so are never half-applied. A single RPC that
 merged an entire group in one statement was rejected on that basis: it would
 have to move field-merge policy into SQL to buy an atomicity the per-call version
 check already provides.
+
+**The load rebuild is deliberately outside that boundary, and must be recoverable
+rather than atomic.** `daily_load_snapshots` is recomputed after the merge
+commits — step 5 of the ingestion flow below — so a process crash, a timeout, or
+a failed snapshot write between commit and recomputation leaves correct rows and
+a stale, still-inflated load series. It cannot be folded into the merge
+transaction: recomputation reads every active activity from the rebuild date
+forward and rewrites a window of snapshots, which is far too much work to hold
+under the activity row locks. So the design owns the failure boundary instead of
+pretending it away:
+
+- Each merge and unmerge records `load_rebuild_pending` with its `rebuild_from`
+  date on the surviving row's audit entry, written **inside** the merge
+  transaction. Recomputation clears it.
+- Recomputation is idempotent — it derives snapshots from the activity rows for
+  `[rebuild_from, today]`, so re-running it is a no-op once it has succeeded, and
+  running it twice concurrently converges on the same values.
+- Any later merge, unmerge, or recompute for that athlete starts from the
+  **earliest** outstanding `rebuild_from`, so a dropped rebuild is absorbed by
+  the next one rather than needing a dedicated retry path.
+- A stale-pending sweep is the backstop for an athlete with no further activity.
+
+This is the one place where deduplication is eventually rather than immediately
+consistent, and the inconsistency is confined to a derived, recomputable table —
+never to the activity rows themselves.
 
 ### The plan-workout link is re-pointed at write time
 
@@ -733,7 +758,7 @@ phases inherit a concrete target.
 | `tests/python/test_supabase_repo.py`               | RPC wrapper arguments; active filtering scope; `list_dedup_candidates` excludes the supplied id and has no 50-row cap; backlog discovery keyset-paginates; `get_activity` and `list_synced_intervals_keys` remain unfiltered                                                                                                                                                                                                                                                                                                           |
 | `tests/python/test_supabase_db.py`                 | RPC invariants reject tenant/target/cycle/version/link failures and a reversed survivor, including the equal-`created_at` id tie-break; concurrent merges force re-read; a three-member group merges as two transactions with an unmerge of an earlier member forcing `40001`; plan links transfer/restore safely; Tier-B proposal/message verification and consumption are atomic, including phrase normalization (padding, case, and internal whitespace) and a near-miss phrase that must be rejected; exact retries are idempotent |
 | `tests/python/test_api.py`                         | Detection excludes self/row caps and precedes matching; merged-away rows reject generic updates; merge re-scores exact ids; Tier B rejects invalid proposal/message states and atomically consumes valid proof                                                                                                                                                                                                                                                                                                                         |
-| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date                                                                                                                                                                                                                                                                                                                                                         |
+| `tests/python/test_engine.py`                      | `get_load_snapshot_on_or_before` seeds a window correctly; merge and unmerge start at the minimum pre/post member date; the 90-day horizon is evaluated against that same date; a merge that commits without its rebuild leaves `load_rebuild_pending` and the next rebuild starts from the earliest outstanding `rebuild_from`; re-running a completed rebuild is a no-op                                                                                                                                                             |
 | `tests/python/test_compliance_api.py`              | A merged-away row no longer appears as an unplanned session                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `tests/python/test_calendar_api.py`                | Calendar returns only `dedup_status = 'active'` rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `tests/python/test_intervals_sync.py`              | Intervals dedup behaviour is unchanged, and a merged-away Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                                           |
