@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildCoachSystemPrompt,
@@ -53,6 +53,12 @@ const context: AthleteContextBundle = {
 };
 
 describe("buildCoachSystemPrompt", () => {
+  // Only the timezone tests fake the clock; restoring here keeps the real clock
+  // for every other test in this file.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("includes coaching philosophy, athlete context, and onboarding instructions", () => {
     const prompt = buildCoachSystemPrompt(context);
 
@@ -83,6 +89,46 @@ describe("buildCoachSystemPrompt", () => {
     expect(prompt).toContain("user-facing response");
     expect(prompt).toContain("Never end a turn with only tool calls");
     expect(prompt).toContain("context-aware prompt to continue");
+  });
+
+  it("uses the athlete browser timezone for dates and displayed activity times", () => {
+    // 07:30Z on Jan 2 is still 23:30 on Jan 1 in Los Angeles (UTC-8). Straddling
+    // midnight is the point: a mid-day UTC instant would pass even if the date
+    // were computed in UTC rather than the athlete's zone.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-02T07:30:00Z"));
+
+    const prompt = buildLeadCoachPrompt(
+      context,
+      [],
+      undefined,
+      "America/Los_Angeles",
+    );
+
+    expect(prompt).toContain("Current date: 2026-01-01");
+    expect(prompt).toContain(
+      "athlete's browser timezone (America/Los_Angeles)",
+    );
+    expect(prompt).toContain(
+      "activity_date and workout_date are athlete-local",
+    );
+    expect(prompt).toContain("started_at timestamps are UTC; convert them");
+  });
+
+  it("applies the athlete browser timezone to specialist prompts too", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-02T07:30:00Z"));
+
+    const prompt = buildSpecialistPrompt(
+      "recovery",
+      { recent_recovery: [] },
+      "America/Los_Angeles",
+    );
+
+    expect(prompt).toContain("Current date: 2026-01-01");
+    expect(prompt).toContain(
+      "athlete's browser timezone (America/Los_Angeles)",
+    );
   });
 
   it("routes Garmin wellness export blocks to recovery persistence", () => {

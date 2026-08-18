@@ -75,6 +75,9 @@ type StreamCoachTurnBaseOptions = {
   signal?: AbortSignal;
   streamErrorMessage?: string;
   tavilyMcpUrl?: string;
+  // Undefined is permitted explicitly because requests without this optional
+  // browser header still need the deterministic UTC prompt fallback.
+  timeZone?: string | undefined;
   useDurableSession?: boolean;
 };
 
@@ -567,6 +570,7 @@ export function streamCoachTurn({
   signal,
   streamErrorMessage = "Coach is unavailable right now. Please try again.",
   tavilyMcpUrl,
+  timeZone,
   useDurableSession = false,
 }: StreamCoachTurnOptions): Response {
   const selectedMessages = messagesAreModelSelected
@@ -782,6 +786,7 @@ export function streamCoachTurn({
                     coachingMemory,
                     onRateLimit: noteTurnRateLimit,
                     slices: buildContextSlices(context),
+                    timeZone,
                   });
                 } catch (error) {
                   Sentry.captureException(error, {
@@ -816,6 +821,7 @@ export function streamCoachTurn({
                               context,
                               reports,
                               oldestDueFollowUp(coachingMemory)?.statement,
+                              timeZone,
                             ),
                             model: tier.model,
                             modelSettings: buildModelSettings(tier),

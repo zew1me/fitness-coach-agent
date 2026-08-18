@@ -141,8 +141,39 @@ function loadLine(context: AthleteContextBundle): string {
     : "no current load snapshot";
 }
 
-function currentDateLine(): string {
-  return `Current date: ${new Date().toISOString().slice(0, 10)}. Do not guess the current date or age math; use this date when interpreting relative dates, birth years, and target timelines.`;
+function browserTimeContext(timeZone?: string): {
+  date: string;
+  timeZone: string;
+} {
+  let resolvedTimeZone = "UTC";
+  if (timeZone !== undefined && timeZone.length <= 64) {
+    try {
+      resolvedTimeZone = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+      }).resolvedOptions().timeZone;
+    } catch {
+      // A client header is untrusted; UTC remains a safe, deterministic fallback.
+    }
+  }
+
+  const dateParts = new Intl.DateTimeFormat("en-US", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: resolvedTimeZone,
+    year: "numeric",
+  }).formatToParts(new Date());
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    dateParts.find((item) => item.type === type)?.value ?? "00";
+
+  return {
+    date: `${part("year")}-${part("month")}-${part("day")}`,
+    timeZone: resolvedTimeZone,
+  };
+}
+
+function currentDateLine(timeZone?: string): string {
+  const context = browserTimeContext(timeZone);
+  return `Current date: ${context.date} in the athlete's browser timezone (${context.timeZone}). Do not guess the current date or age math; use this date when interpreting relative dates, birth years, and target timelines. activity_date and workout_date are athlete-local calendar dates. started_at timestamps are UTC; convert them to this browser timezone before stating a clock time to the athlete.`;
 }
 
 function buildContextualLines(context: AthleteContextBundle): string[] {
@@ -194,10 +225,11 @@ function roleLabel(role: InternalSpecialistRole): string {
 export function buildSpecialistPrompt(
   role: InternalSpecialistRole,
   contextSlice: unknown,
+  timeZone?: string,
 ): string {
   return [
     `${roleLabel(role)}.`,
-    currentDateLine(),
+    currentDateLine(timeZone),
     trainingModelSection({
       active_plan: null,
       computed_age: null,
@@ -234,6 +266,7 @@ export function buildLeadCoachPrompt(
   context: AthleteContextBundle,
   specialistReports: SpecialistReport[] = [],
   dueFollowUp?: string,
+  timeZone?: string,
 ): string {
   const sports = listOrFallback(context.profile.primary_sports, "unknown");
   const goals = context.goals.map(goalSummary).join("; ") || "none recorded";
@@ -244,7 +277,7 @@ export function buildLeadCoachPrompt(
 
   return [
     "You are the Lead coach for a sport-agnostic endurance coaching team.",
-    currentDateLine(),
+    currentDateLine(timeZone),
     trainingModelSection(context),
     "Be inclusive and ask about sex or hormone context only when it improves training-load guidance.",
     `Athlete: ${context.profile.display_name ?? context.profile.user_id}. Age: ${age}. Sports: ${sports}.`,
