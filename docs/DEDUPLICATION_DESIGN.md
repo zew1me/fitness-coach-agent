@@ -4,8 +4,27 @@ This document explains how the fitness-coach app will present one athlete-facing
 record per workout when the same session has been ingested several times, without
 a deduplication operation deleting source rows while the athlete's account exists.
 
-**Status: proposed.** Nothing described here is implemented yet. Every reference
-to existing code is real and current; every reference to new code is a plan.
+**Status: candidate, not approved.** Nothing described here is implemented yet.
+Every reference to existing code is real and current; every reference to new code
+is a plan.
+
+**A competing architecture is under active consideration and this document does
+not yet evaluate it** (PR #450 review discussion). That alternative treats
+ingested rows as strictly immutable — deleting only an exact duplicate with
+identical extracted data and identical provenance — and presents the athlete a
+**separate materialized view** rather than mutating a surviving row in place. It
+diverges substantially from what follows: this document's central choice is a
+mutable materialized survivor (see "The merge"), and the read-time-resolution
+alternative it rejects there is _not_ the same proposal, because it assumed one
+table and no separate athlete-facing projection.
+
+That comparison needs its own writeup — provenance, exact-duplicate deletion,
+unmerge, load rebuilding, API/UI read paths, and migration cost — and until both
+exist side by side, **treat everything below as one candidate design rather than
+the approved implementation contract.** The per-issue specifics it settles
+(tier thresholds, null and zero degradation, tenant isolation, consent, plan-link
+transfer, load-rebuild recovery) are largely architecture-independent and carry
+over to either model; the storage and read-path decisions do not.
 
 ## Motivation
 
