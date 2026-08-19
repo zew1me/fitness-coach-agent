@@ -89,7 +89,17 @@ export type StreamCoachTurnOptions = StreamCoachTurnBaseOptions &
   );
 
 const MAX_COACH_STEPS = 4;
-const COLD_SEED_TOKEN_BUDGET = DEFAULT_AUTO_COMPACT_TOKENS;
+// Seeding all the way to DEFAULT_AUTO_COMPACT_TOKENS makes a fresh session compact
+// on its very first turn: trimBootstrapToBudget accepts a suffix at exactly the
+// budget, and shouldTriggerCompaction fires at >= that same number. The seed is only
+// the stored history — the lead-coach system prompt plus tool definitions add ~10.4k
+// tokens on top of it before the athlete's message and any specialist reports, so a
+// 60k seed lands the first request around 70k and trips the threshold immediately.
+// Keep three quarters of the threshold so a cold seed has room for a turn.
+const COLD_SEED_BUDGET_FRACTION = 0.75;
+const COLD_SEED_TOKEN_BUDGET = Math.floor(
+  DEFAULT_AUTO_COMPACT_TOKENS * COLD_SEED_BUDGET_FRACTION,
+);
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 export const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;
 const ACKNOWLEDGEMENT_PROMPT =
