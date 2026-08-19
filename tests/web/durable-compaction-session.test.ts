@@ -568,8 +568,20 @@ describe("DurableCompactionSession", () => {
       string,
       number
     >;
+    // Both keys are required fields of the emitted telemetry. The index signature
+    // widens to `number | undefined`, and defaulting the prepared estimate to 0 to
+    // satisfy that would degrade the comparison into "stored estimate > 0" — a
+    // regression that drops the key would then pass silently. Narrow by throwing
+    // instead, so a missing key fails the test on its own terms.
+    const preparedTokens = telemetry["prepared_estimated_input_tokens"];
+    if (typeof preparedTokens !== "number") {
+      throw new Error(
+        "telemetry is missing prepared_estimated_input_tokens: " +
+          JSON.stringify(telemetry),
+      );
+    }
     expect(telemetry["stored_estimated_input_tokens"]).toBeGreaterThan(
-      telemetry["prepared_estimated_input_tokens"] ?? 0,
+      preparedTokens,
     );
   });
 
