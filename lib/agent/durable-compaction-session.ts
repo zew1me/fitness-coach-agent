@@ -24,10 +24,23 @@ export type StoredContextEstimate = {
   nonUserItemCount: number;
 };
 
+function serializedByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+// Token estimate for any JSON-serializable payload. The compaction request input is
+// a Responses `ResponseInput`, not `AgentInputItem[]`, and only its token size is
+// wanted — `itemCount`/`nonUserItemCount` do not carry the same meaning once items
+// are in wire shape, since the `role` check misreads them. Estimating it directly
+// avoids casting a `ResponseInput` through `estimateStoredContext` to reach one field.
+function estimateSerializedTokens(value: unknown): number {
+  return Math.ceil(serializedByteLength(value) / 4);
+}
+
 export function estimateStoredContext(
   items: AgentInputItem[],
 ): StoredContextEstimate {
-  const bytes = new TextEncoder().encode(JSON.stringify(items)).byteLength;
+  const bytes = serializedByteLength(items);
   return {
     bytes,
     estimatedTokens: Math.ceil(bytes / 4),
@@ -191,7 +204,7 @@ type CompactResponse = Awaited<ReturnType<OpenAI["responses"]["compact"]>>;
 function logCompactionTelemetry(params: {
   trigger: CompactionTrigger;
   before: StoredContextEstimate;
-  preparedInput: StoredContextEstimate;
+  preparedInputTokens: number;
   after: StoredContextEstimate;
   latencyMs: number;
   casRetries: number;
@@ -200,7 +213,7 @@ function logCompactionTelemetry(params: {
   const {
     trigger,
     before,
-    preparedInput,
+    preparedInputTokens,
     after,
     latencyMs,
     casRetries,
@@ -211,7 +224,7 @@ function logCompactionTelemetry(params: {
     compacted.usage.input_tokens,
   );
   const preparedTokenComparison = compareTokenEstimate(
-    preparedInput.estimatedTokens,
+    preparedInputTokens,
     compacted.usage.input_tokens,
   );
   Sentry.logger.info("coach compaction complete", {
@@ -232,7 +245,7 @@ function logCompactionTelemetry(params: {
     stored_estimate_error_percent: storedTokenComparison.estimateErrorPercent,
     stored_estimated_to_actual_ratio:
       storedTokenComparison.estimatedToActualRatio,
-    prepared_estimated_input_tokens: preparedInput.estimatedTokens,
+    prepared_estimated_input_tokens: preparedInputTokens,
     prepared_estimate_minus_actual_tokens:
       preparedTokenComparison.estimateMinusActualTokens,
     prepared_estimate_error_percent:
@@ -324,9 +337,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     const compactionInput = buildCompactionInput(items, (item) =>
       this.prepareHistoryItemForModelInput(item),
     );
-    const preparedInput = estimateStoredContext(
-      compactionInput as unknown as AgentInputItem[],
-    );
+    const preparedInputTokens = estimateSerializedTokens(compactionInput);
     const compacted = await this.getClient().responses.compact({
       ...toOpenAICompactOptions(args),
       model: this.options.model ?? "gpt-5.6-luna",
@@ -343,7 +354,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     logCompactionTelemetry({
       trigger,
       before,
-      preparedInput,
+      preparedInputTokens,
       after,
       latencyMs: Math.round(performance.now() - startedAt),
       casRetries: this.options.underlyingSession.getLastCasRetries?.() ?? 0,
