@@ -423,7 +423,7 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     expect(eventTypes.has("response.output_text.delta")).toBe(false);
   }, 60_000);
 
-  it("compacts with an Agents responseId without sending an unknown OpenAI parameter", async () => {
+  it("compacts in input mode despite an Agents responseId and continues from the canonical output", async () => {
     const client = new OpenAI();
     const previous = await client.responses.create({
       model: MODEL,
@@ -465,50 +465,43 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     expect(
       compacted.some((item) => "type" in item && item.type === "compaction"),
     ).toBe(true);
-    const compactedRecords = compacted as Record<string, unknown>[];
-    const remainingCallIds = new Set(
-      compactedRecords
-        .filter((item) => item["type"] === "function_call")
-        .map((item) => item["call_id"])
-        .filter((callId): callId is string => typeof callId === "string"),
-    );
-    const remainingOutputIds = new Set(
-      compactedRecords
-        .filter((item) => item["type"] === "function_call_output")
-        .map((item) => item["call_id"])
-        .filter((callId): callId is string => typeof callId === "string"),
-    );
-    expect(remainingCallIds.size).toBeGreaterThan(0);
-    expect(
-      [...remainingCallIds].every((callId) => remainingOutputIds.has(callId)),
-    ).toBe(true);
 
+    // OpenAI documents compacted.output as the canonical next context window.
+    // It may retain earlier items, but no particular message or tool pair is
+    // guaranteed to survive outside the opaque compaction item. Replay exactly
+    // what the endpoint returned, through the same pure shape preparation used
+    // by the production durable session, and prove a subsequent turn succeeds.
     const replaySession = new SupabaseAgentSession({
       accessToken: "unused",
       baseUrl: "http://unused",
       leaseId: "unused",
     });
-    const replayedRecords = compacted.map(
-      (item) =>
-        replaySession.prepareHistoryItemForModelInput(
-          item,
-        ) as unknown as Record<string, unknown>,
+    const replayed = compacted.map((item) =>
+      replaySession.prepareHistoryItemForModelInput(item),
     );
-    expect(replayedRecords).toContainEqual(
-      expect.objectContaining({
-        type: "function_call",
-        callId: toolCallId,
-      }),
+    const continuationAgent = new Agent({
+      name: "Compaction continuation probe",
+      instructions: "Reply with exactly CONTINUED.",
+      model: MODEL,
+    });
+    const continuation = await run(
+      continuationAgent,
+      [
+        ...replayed,
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "Continue from the compacted conversation.",
+            },
+          ],
+        },
+      ],
+      { maxTurns: 1 },
     );
-    expect(replayedRecords).toContainEqual(
-      expect.objectContaining({
-        type: "function_call_result",
-        callId: toolCallId,
-        name: toolCallId,
-        output: JSON.stringify({ status: "updated" }),
-        status: "completed",
-      }),
-    );
+    expect(continuation.finalOutput).toEqual(expect.any(String));
+    expect(String(continuation.finalOutput)).toMatch(/CONTINUED/i);
   }, 60_000);
 
   it("compacts a real reasoning-model run's history, including provider-attached metadata, without a 400", async () => {

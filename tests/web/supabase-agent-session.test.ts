@@ -451,40 +451,64 @@ describe("SupabaseAgentSession", () => {
     ]);
   });
 
-  // The whole lesson of the tool-result replay bug is that an item can look
-  // plausible as an intermediate object and still be rejected by SDK request
-  // conversion. This pins the gap directly rather than trusting the shape
-  // assertions above: the raw stored item the sanitizer receives is one the SDK
-  // refuses outright, and the item it produces is one the SDK accepts. Without
-  // that contrast the shape assertions only describe what we happen to emit —
-  // they never establish that the alternative is broken.
-  it("produces the only tool-result shape the SDK will convert to a request", () => {
+  // OpenAI may retain a raw tool pair in compacted.output even though it does
+  // not guarantee that any particular pair survives. Our stored canonical
+  // window therefore needs a deterministic raw→SDK adapter for the conditional
+  // case. A live compaction probe cannot force this output shape; this fixture
+  // can, and then exercises the locked SDK's real request conversion.
+  it("converts a synthetic retained raw tool pair into replayable SDK input", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
       baseUrl: "http://localhost",
       leaseId: "lease-1",
       fetch: vi.fn(),
     });
-    const raw = {
-      type: "function_call_output",
-      call_id: "call-1",
-      output: JSON.stringify({ status: "updated" }),
-      status: "completed",
-    } as unknown as AgentInputItem;
-    const model = new InspectableResponsesModel({} as never, "test-model");
-
-    expect(() => model.buildInput([raw])).toThrow(/Unsupported item/);
-
-    const prepared = session.prepareHistoryItemForModelInput(raw);
-    expect(model.buildInput([prepared])).toEqual([
+    const rawItems = [
+      {
+        type: "function_call",
+        call_id: "call-1",
+        name: "update_athlete_profile",
+        arguments: "{}",
+        status: "completed",
+      },
       {
         type: "function_call_output",
-        id: undefined,
         call_id: "call-1",
         output: JSON.stringify({ status: "updated" }),
         status: "completed",
       },
-    ]);
+    ] as unknown as AgentInputItem[];
+    const model = new InspectableResponsesModel({} as never, "test-model");
+
+    expect(() => model.buildInput([rawItems[1] as AgentInputItem])).toThrow(
+      /Unsupported item/,
+    );
+
+    const prepared = rawItems.map((item) =>
+      session.prepareHistoryItemForModelInput(item),
+    );
+    const requestInput = model.buildInput(prepared) as Record<
+      string,
+      unknown
+    >[];
+    expect(requestInput).toHaveLength(2);
+    expect(requestInput[0]).toEqual(
+      expect.objectContaining({
+        type: "function_call",
+        call_id: "call-1",
+        name: "update_athlete_profile",
+        arguments: "{}",
+        status: "completed",
+      }),
+    );
+    expect(requestInput[1]).toEqual(
+      expect.objectContaining({
+        type: "function_call_output",
+        call_id: "call-1",
+        output: JSON.stringify({ status: "updated" }),
+        status: "completed",
+      }),
+    );
   });
 
   // Same argument for the structured-output array: the legacy `text`/`image`/

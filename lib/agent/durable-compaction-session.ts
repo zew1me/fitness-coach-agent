@@ -343,6 +343,10 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
       model: this.options.model ?? "gpt-5.6-luna",
       input: compactionInput,
     });
+    // OpenAI defines compacted.output as the canonical replacement window.
+    // Persist it wholesale: individual prior messages or tool pairs are not
+    // guaranteed to be retained, so splicing input items back in would undo
+    // compaction and could create an invalid or duplicated conversation.
     const output = assertValidCompactionOutput(compacted.output);
     const after = estimateStoredContext(output);
 

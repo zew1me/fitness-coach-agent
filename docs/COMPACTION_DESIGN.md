@@ -157,6 +157,14 @@ production samples before applying a correction factor or replacing the
 estimator, then re-derive both the compaction and cold-seed budgets from the
 calibrated token count rather than guessing from JSON shape.
 
+`responses.compact` output is the **canonical replacement window**. OpenAI may
+retain prior messages or tool-call pairs alongside its opaque compaction item,
+but does not guarantee that any particular input item survives. The app stores
+the returned output wholesale with `replaceAll`; it never appends dropped input
+items or reconstructs the pre-compaction transcript. Splicing old items back in
+would undo compaction and could produce duplicate or otherwise invalid history.
+New turn items are appended normally only after this replacement is complete.
+
 Safety guard: if `responses.compact` returns an empty array the method **throws**
 rather than replacing durable context with nothing. This prevents a model error
 or API glitch from silently erasing the conversation.
@@ -275,10 +283,11 @@ Operations on `coaching_memory` go through
 
 | File                                           | What it covers                                                                                                                                                                                                                        |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, replaceAll, coaching memory isolation                                                                                                                                                                              |
-| `tests/web/durable-compaction-session.test.ts` | Unit: DurableCompactionSession trigger thresholds, provider-metadata stripping, compact API shape conversion, estimateStoredContext                                                                                                   |
+| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, exact `replaceAll`, coaching-memory isolation, and deterministic replay conversion for optionally retained raw tool pairs                                                                                          |
+| `tests/web/durable-compaction-session.test.ts` | Unit: canonical output replacement, trigger thresholds, provider-metadata stripping, compact API shape conversion, and `estimateStoredContext`                                                                                        |
 | `tests/web/orchestrator.test.ts`               | Turn-level: durable setup degrades to stateless on unreadable model state, unfetchable transcript, and failed required pre-turn compaction; wrapped post-tool 429s produce a deterministic acknowledgement; still aborts on 409/abort |
-| `tests/web/real-durable-session.test.ts`       | Integration: full turn round-trip with fake repo                                                                                                                                                                                      |
+| `tests/integration/oai-agents.test.ts`         | Live OpenAI: compaction API compatibility and continuation from the canonical compacted window; never assumes retention of a particular input item                                                                                    |
+| `tests/web/real-durable-session.test.ts`       | Optional live continuity probe with delegation and prior-detail recall                                                                                                                                                                |
 | `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                                                                                                                                |
 | `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                                                                                                                    |
 | `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                                                                                                                                |
