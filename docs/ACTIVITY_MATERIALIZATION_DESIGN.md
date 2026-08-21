@@ -212,6 +212,13 @@ create index activity_sources_fingerprint_idx
 create index activity_sources_activity_idx
   on public.activity_sources (activity_id) where retired_at is null;
 
+-- At most one live athlete override per activity. Retiring the prior override and
+-- inserting the new one is the writer's job; this index is what makes a writer that
+-- forgets fail loudly instead of silently resurrecting an older edit.
+create unique index activity_sources_one_live_override_idx
+  on public.activity_sources (activity_id)
+  where ingest_format = 'athlete_override' and retired_at is null;
+
 create trigger activity_sources_set_updated_at
 before update on public.activity_sources
 for each row execute function public.set_updated_at();
@@ -457,6 +464,17 @@ This is a second trigger in a schema that has only `set_updated_at`, and that is
 real cost. It is accepted because the alternative enforcement — column-level
 `revoke update (…) from service_role` — is bypassed by exactly the `security definer`
 RPCs that do all the writing, and would therefore enforce nothing where it matters.
+
+**One live override per activity is a constraint, not a convention.** The
+retire-then-insert rule below is exactly the kind of two-step a writer can half-apply
+— an error between the two statements, or a second writer racing the first, leaves two
+live rank-0 sources. The reconciler's tie-break prefers the _earlier_ `created_at`, so
+the athlete's **older** edit would win and their correction would appear to have been
+ignored. `activity_sources_one_live_override_idx` above turns that into a `23505` at
+the moment it happens. Note this is not a rejection key in the sense the scoping
+section forbids: it constrains a row the athlete's own edit created, on a path where
+the correct recovery is to retire the previous override and retry, and no ingested
+workout can be lost to it.
 
 **Athlete overrides are append-only too, and this corrects an earlier shorthand.** The
 override-source section below once described clearing an RPE as "just a jsonb update".
