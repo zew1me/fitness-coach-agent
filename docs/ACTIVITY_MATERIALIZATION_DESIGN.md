@@ -36,11 +36,16 @@ merged into one presented activity.
 
 ### Scope note
 
-A document describing a different (mutable in-place survivor) model exists on the
-`design-doc-dedupe` branch. This design was developed **independently** and does not
-inherit its decisions. Where the two reach similar conclusions on
-architecture-independent questions — tier thresholds, null and zero degradation, the
-load-rebuild boundary — that is convergence, not derivation.
+A competing model — a mutable in-place survivor — was proposed in PR #450
+(`design-doc-dedupe`). **That PR is now closed and this document is the design of
+record for #397.**
+
+This design was developed **independently** of it, and where the two reached similar
+conclusions on architecture-independent questions — tier thresholds, null and zero
+degradation, the load-rebuild boundary — that was convergence rather than derivation.
+Five further conclusions were **subsequently adopted** from it after comparison, and
+are listed under "Ported from the in-place design (PR #450)" so the inheritance is
+explicit rather than implied. Verified blocker C below also originates there.
 
 ---
 
@@ -101,7 +106,7 @@ the athlete and requires confirmation.
 
 ## Verified blockers found during exploration
 
-Both confirmed by reading source; both must be fixed as part of this work.
+All three confirmed by reading source; all three must be fixed as part of this work.
 
 **A. A backward load rebuild is structurally impossible today.**
 `recompute_load_endpoint` seeds `initial_ctl`/`initial_atl` from
@@ -117,6 +122,19 @@ seed-at-date lookup before any merge can correct load.
 dispatches on _content_type OR suffix_ while the source is derived from _suffix
 alone_ — so a file named `ride` sent as `application/vnd.garmin.fit` parses fine and
 then fails at insert with a 503. Fix while touching this code path.
+
+**C. The load rebuild reads through a display-capped query.**
+`recompute_load_endpoint` loads its candidates with
+`repo.list_activities(user_id, sport=…, since=since, limit=500)`
+(`api/index.py:1448`), and `list_activities` applies
+`.order("activity_date", desc=True).limit(limit)`
+(`backend/repos/supabase_repo.py:496-511`). Ordering newest-first and capping means
+any rebuild window holding more than 500 activities silently drops its **oldest**
+rows from `daily_tss` — precisely the rows a backward rebuild is walking forward
+from — and rebuilds every snapshot in the window on incomplete input. Recompute needs
+a dedicated unbounded, keyset-paginated query rather than a display-oriented one. This
+defect is independent of deduplication and was surfaced by the in-place design in
+PR #450; it is listed here because merging cannot correct load without it.
 
 ---
 
@@ -953,12 +971,9 @@ re-derived, and each is a gap in this document as it stands.
 2. **Consent is group-scoped and outlives the first pairwise operation.** An
    athlete confirmed _a group_, once; a multi-step sequence must not re-ask, and must
    consume the proposal exactly once, on the final step, in the same transaction.
-3. **The load rebuild must not use the display query.** `recompute_load_endpoint`
-   currently loads candidates via `repo.list_activities(..., limit=500)`, ordered
-   `activity_date desc`. Any rebuild window holding more than 500 activities silently
-   drops the oldest of them from `daily_tss` and rebuilds wrong snapshots. Recompute
-   needs a dedicated unbounded, keyset-paginated query. This is a live defect
-   independent of dedup, and belongs in Phase 0 alongside the seed-at-date fix.
+3. **The load rebuild must not use the display query.** Confirmed against source and
+   promoted to **verified blocker C** above; Phase 0 fixes it alongside the
+   seed-at-date lookup.
 4. **`list_dedup_candidates` is unbounded, keyset-paginated, and self-excluding in
    SQL** — not a `limit`-capped display query with the new row filtered out in Python.
    A duplicate lying beyond an arbitrary cap is exactly the one a backlog pass exists
