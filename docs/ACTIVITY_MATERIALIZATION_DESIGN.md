@@ -753,6 +753,22 @@ public.recompose_activity(
 - Skips athlete-owned columns unless the override source is in the map.
 - An identical repeat returns current state (idempotent).
 
+**A retry after an unseen commit resolves by re-reading, not by an idempotency key.**
+If the RPC commits and the response is lost to a timeout, the client's original
+`p_expected_source_versions` is now stale, so a blind resend raises `40001` and would
+loop until the retry budget ran out — reporting failure for work that succeeded. The
+existing rule already prevents that, but only because of a property worth stating
+outright: **the service re-reads and re-derives before each retry, and recompose is a
+pure function of the live source set.** So the retry recomputes byte-identical
+`p_fields` from the same sources, sends the _current_ versions, and the RPC applies a
+no-op and returns current state. Convergence, not luck.
+
+This is why no idempotency key or request id is introduced. One would add a table, an
+expiry policy, and a second thing to keep consistent, to reconstruct a result that
+re-derivation already produces exactly. The requirement it places on the
+implementation is narrow and testable: a retry must **never** resend a cached payload,
+and the retry loop must re-read inside the loop rather than above it.
+
 **Merge policy stays in Python**, in `activity_dedup.py`. The RPC owns atomic
 validation and persistence, not policy — matching how every other derived artifact in
 this schema is computed application-side.
