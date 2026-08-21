@@ -952,10 +952,33 @@ rows.
 `activities` columns, create the RPCs. Existing readers keep working untouched because
 `presentation_state` defaults to `'active'`.
 
-**Backfill.** One `activity_sources` row per existing `activities` row:
+**Backfill.** One `activity_sources` row per existing `activities` row. The source map
+is total over the current `activities_source_check` allow-list and is the only mapping
+the backfill may use:
+
+| existing `activities.source` | `activity_sources.provider` | `activity_sources.ingest_format` |
+| ---------------------------- | --------------------------- | -------------------------------- |
+| `manual`                     | `athlete`                   | `manual`                         |
+| `text_extract`               | `athlete`                   | `text`                           |
+| `gpx_upload`                 | `unknown`                   | `gpx`                            |
+| `fit_upload`                 | `unknown`                   | `fit`                            |
+| `tcx_upload`                 | `unknown`                   | `tcx`                            |
+| `screenshot_extract`         | `unknown`                   | `screenshot`                     |
+| `intervals_sync`             | `intervals`                 | `intervals_api`                  |
+
+`file_upload` is deliberately **not** mapped. It is the invalid application fallback
+in verified blocker B, not a permitted stored source. Before writing any source rows,
+a preflight groups all historical activities by `source` and requires the set to be a
+subset of the seven rows above; any other value, including a constraint-bypassed
+`file_upload`, aborts the whole backfill and must be repaired explicitly. The same
+preflight requires every `intervals_sync` key to parse as `intervals:{id}` and its
+parsed ids to be unique per user. Do not use a default branch — a newly permitted
+source without a reviewed mapping must fail before the first batch, not silently
+become `unknown`.
+
+Then populate:
 
 - `origin_activity_id` = `activity_id` = the existing row's id
-- `provider` / `ingest_format` derived from `source`
 - `object_key` ← `source_file_key`; `external_id` ← the id inside `intervals:{id}`
 - `fields` ← the row's own metric columns
 - `payload_fingerprint` computed from stored fields only when the canonical information
@@ -1007,11 +1030,14 @@ suffix saves instead of 503-ing; a rebuild window holding more than 500 activiti
 still includes the oldest of them in the rebuilt snapshots.
 
 **Phase 1 — schema.** Migration + backfill + `Activity` model fields + repo methods.
-No behaviour change. _Verifiable:_ `bun run db:reset` replays clean; **every
-`activities` row has exactly one non-retired source whose `fields` round-trip to the
-values the row already holds**; sparse historical rows fail the same fingerprint
-information gate as new ingests and therefore backfill with a NULL fingerprint —
-those invariants, not "existing tests still pass", are what catch a bad backfill.
+No behaviour change. _Verifiable:_ `bun run db:reset` replays clean; the preflight
+fails before inserting anything for an unmapped source (including `file_upload`) or a
+malformed/duplicate Intervals identity; **every `activities` row has exactly one
+non-retired source whose provider/format pair follows the mapping above and whose
+`fields` round-trip to the values the row already holds**; sparse historical rows fail
+the same fingerprint information gate as new ingests and therefore backfill with a
+NULL fingerprint — those invariants, not "existing tests still pass", catch a bad
+backfill.
 
 **Phase 2 — write path.** Every ingestion path writes `activity_sources` alongside
 `activities`. Hashing and fingerprinting wired in. Select-then-insert exact-duplicate
@@ -1221,7 +1247,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules **asserted at Tier A as well as Tier B** — specifically that a `0`-vs-positive distance blocks auto-merge for a pair agreeing on sport, start, and duration, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived) |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject cross-user source and supersession relationships; `fidelity_rank` is generated, cannot be supplied inconsistently, and cannot become NULL when the allow-list and rank map diverge; sparse backfill rows receive a NULL fingerprint under the same information gate as live ingestion; a second live `athlete_override` raises `23505`; the pending-rebuild CAS clears only an unchanged marker                                                                                                                                                              |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject cross-user source and supersession relationships; `fidelity_rank` is generated, consistent, and non-null; backfill maps all seven allowed legacy sources exactly, aborts before writes for `file_upload`/any unmapped source or malformed Intervals identity, and gives sparse rows a NULL fingerprint; a second live `athlete_override` raises `23505`; the pending-rebuild CAS clears only an unchanged marker                                                                                                                                             |
 | `tests/python/test_supabase_db.py` (evidence guard)                                     | The immutability trigger: updating `activity_id` or `retired_at` succeeds; updating `fields`, `content_hash`, `provider`, `fidelity_rank`, or `raw_extraction` raises `22023` — including from a `security definer` RPC, which is the caller the guard exists to bind. An athlete edit inserts a new `athlete_override` source and retires the prior one, leaving exactly one live override                                                                                                                                                                                       |
 | `tests/python/test_supabase_repo.py`                                                    | Extend `FakeSupabaseClient`/`FakeTableQuery` for `activity_sources` and add an `rpc()` handler for `recompose_activity` (an unknown RPC raises `AssertionError`). Assert `client.calls` exactly. Verify `response.data` is handled as a **dict** for the composite-row return. Confirm the `presentation_state` predicate applies to the two list methods and **not** to `get_activity` / `list_synced_intervals_keys`                                                                                                                                                            |
 | `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`; both identity indexes reject a concurrent duplicate, `provider = 'unknown'` never collides on `external_id`, and distinct ZIP members remain valid; a bridge **reparents the superseded activity's sources to the survivor**, asserting the survivor's post-bridge `source_count` and that a field only B carried reaches A                                                                       |
