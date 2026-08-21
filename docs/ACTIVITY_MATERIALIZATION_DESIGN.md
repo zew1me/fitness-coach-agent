@@ -84,9 +84,10 @@ nothing stored to un-merge afterwards. Fuzzy similarity therefore never gets to 
 uniqueness constraint. This is spelled out in "`payload_fingerprint` is candidate
 evidence, never a constraint" below.
 
-`content_hash` is scoped `(user_id, provider, content_hash)`. That scoping is what
-makes a Garmin FIT and the Intervals record of the same ride **merge** while a
-byte-identical re-upload of the same file **rejects**.
+`content_hash` is scoped `(user_id, content_hash)` — byte identity and nothing else,
+for the reasons in the scoping section below. That is what makes a Garmin FIT and the
+Intervals record of the same ride **merge** (different bytes) while a byte-identical
+re-upload of the same file **rejects**.
 
 **4. Exact duplicate → `409`, naming the existing activity.** "Exact" means an
 authoritative identifier matched — never a fingerprint match. The repo's central
@@ -152,8 +153,11 @@ create table public.activity_sources (
   updated_at timestamptz not null default timezone('utc', now())
 );
 
+-- Byte identity only. Deliberately not scoped by provider or ingest_format: both are
+-- inferred labels, and no inferred field belongs in the one key that can reject an
+-- athlete's upload. See "Scoping the one key that can reject".
 create unique index activity_sources_content_hash_idx
-  on public.activity_sources (user_id, provider, content_hash)
+  on public.activity_sources (user_id, content_hash)
   where content_hash is not null and retired_at is null;
 
 -- Deliberately NOT unique: payload_fingerprint is candidate-generation evidence,
@@ -189,24 +193,37 @@ Three cases these keys must get right:
 | Two distinct members of one ZIP | both stored             | Distinct bytes, distinct hashes                                                                                                                                                          |
 | Text extract                    | never rejected as exact | No bytes ⇒ `content_hash` NULL, and NULLs are distinct in a unique index. A fingerprint may still be computed — it just cannot reject                                                    |
 
-### Scoping: `ingest_format` is part of the dedup key, and this is load-bearing
+### Scoping the one key that can reject: `(user_id, content_hash)` and nothing else
 
-Both unique keys are scoped by **`(user_id, provider, ingest_format, …)`**, not by
-provider alone. This is not a refinement — without it the feature inverts.
+There is exactly one unique key in this design, and it is scoped
+**`(user_id, content_hash)`**. Neither `provider` nor `ingest_format` appears in it,
+and both omissions are deliberate.
 
-There is no `provider` column anywhere in the codebase today; every upload path
-derives only a _format_ from the filename suffix (`_activity_source_for_filename`,
-`api/index.py:1513`). So on day one of Phase 2 essentially every upload lands in
-`provider = 'unknown'`. Scoped by provider alone, two genuinely different devices'
-recordings of one ride would collide on fingerprint and the second would be
-**rejected instead of merged** — the exact opposite of the requirement.
+**Why not `ingest_format`.** Identical bytes cannot be two different recordings. If
+the same file arrives once named `ride.fit` and once named `ride.gpx`, the athlete has
+uploaded one file twice — rejecting the second is the correct answer, and scoping by
+format would turn that into two stored copies of one recording. This does not touch
+the genuine same-ride-two-formats case: a Garmin export produced as `.fit` and as
+`.gpx` contains **different bytes**, so it has a different hash, is never rejected, and
+is stored as two sources that merge on their fields. Byte identity and format are
+independent questions, and only byte identity is being asserted here.
 
-Including `ingest_format` also settles the same-ride-two-formats case in the merge
-direction: an athlete who exports one ride from Garmin Connect as both `.fit` and
-`.gpx` and uploads both separately gets **both stored and merged**, rather than having
-the lower-fidelity format silently rejected. Only a re-upload of _the same format from
-the same provider_ is a duplicate — which is the literal "same provenance" the
-requirement names.
+**Why not `provider`.** There is no `provider` column anywhere in the codebase today;
+every upload path derives only a _format_ from the filename suffix
+(`_activity_source_for_filename`, `api/index.py:1513`), so on day one of Phase 2
+essentially every upload lands in `provider = 'unknown'`. Including provider would
+mean the same bytes re-uploaded under a later, better-inferred label no longer collide
+with the earlier row and are silently stored — an inferred label quietly weakening a
+key whose entire job is byte identity. The same user's identical bytes are the same
+recording regardless of what the pipeline guessed about their origin, so provider adds
+nothing and can only cost recall.
+
+**The rule underneath both.** Narrowing a rejection key produces a missed duplicate;
+widening one produces a refused workout. `(user_id, content_hash)` is the widest scope
+that is still an identity claim, and **no field that is inferred rather than derived
+from the bytes may enter it**. That is what keeps `provider = 'unknown'` from being a
+correctness problem: the labels this pipeline guesses at are exactly the labels the key
+excludes.
 
 ### `payload_fingerprint` is candidate evidence, never a constraint
 
@@ -318,9 +335,11 @@ Steps 1–2 identical, then **select-then-insert**. Only authoritative identifie
 consulted here; `payload_fingerprint` is deliberately absent from this query, because
 this is the one path that can refuse to store an athlete's workout:
 
-1. `select activity_id from activity_sources where user_id = … and provider = … and
-content_hash = … and retired_at is null` (extended with `external_id` once a
-   provider supplies one).
+1. `select activity_id from activity_sources where user_id = … and content_hash = …
+and retired_at is null` — extended with a `provider`-scoped `external_id` match once
+   a provider supplies one. An external id is an identity claim only _within_ the
+   provider that issued it, which is exactly why it carries a scope that a byte hash
+   does not.
 2. If found → return **409** naming that `activity_id`.
 3. Otherwise insert. The partial unique indexes remain the **race backstop**: on a
    concurrent double-submit the insert raises `23505`, which is caught locally
