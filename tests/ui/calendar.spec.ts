@@ -322,8 +322,19 @@ test("opens the account menu and profile drawer from the calendar", async ({
   await expect(page.getByRole("menuitem", { name: /Sign out/i })).toBeVisible();
 
   await page.getByRole("menuitem", { name: /Profile/i }).click();
+  const drawer = page.getByRole("dialog", {
+    name: /Profile and preferences/i,
+  });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByRole("button", { name: /Close/i })).toBeFocused();
   await expect(page.getByRole("heading", { name: /Profile/i })).toBeVisible();
   await expect(page.getByLabel(/Display name/i)).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(drawer).not.toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Account menu/i }),
+  ).toBeFocused();
 });
 
 test("navigates chat → calendar → chat via the topbar toggles", async ({

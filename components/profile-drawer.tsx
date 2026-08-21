@@ -1,11 +1,41 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import type { JSX } from "react";
 
 import type { AthleteProfile } from "../lib/types";
 
 // Shared chat CSS keeps the drawer styling identical on chat and calendar.
 import styles from "./coach-chat.module.css";
+
+const DRAWER_FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[href]",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function trapDrawerFocus(
+  event: KeyboardEvent,
+  drawer: HTMLElement | null,
+): void {
+  const focusableElements = Array.from(
+    drawer?.querySelectorAll<HTMLElement>(DRAWER_FOCUSABLE_SELECTOR) ?? [],
+  );
+  const firstElement = focusableElements[0];
+  const lastElement = focusableElements.at(-1);
+  if (firstElement === undefined || lastElement === undefined) return;
+
+  if (event.shiftKey && document.activeElement === firstElement) {
+    event.preventDefault();
+    lastElement.focus();
+  } else if (!event.shiftKey && document.activeElement === lastElement) {
+    event.preventDefault();
+    firstElement.focus();
+  }
+}
 
 function ProfileDrawerFields({
   profile,
@@ -102,6 +132,40 @@ export function ProfileDrawer({
   status: string | null;
   onSave: () => void;
 }>): JSX.Element | null {
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    if (!open) return;
+
+    returnFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    closeButtonRef.current?.focus();
+
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key === "Tab") {
+        trapDrawerFocus(event, drawerRef.current);
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return (): void => {
+      document.removeEventListener("keydown", handleKeyDown);
+      returnFocusRef.current?.focus();
+      returnFocusRef.current = null;
+    };
+  }, [open]);
+
   if (!open) return null;
   return (
     <div
@@ -111,8 +175,11 @@ export function ProfileDrawer({
     >
       <aside
         aria-label="Profile and preferences"
+        aria-modal="true"
         className={styles.drawer}
         onClick={(event) => event.stopPropagation()}
+        ref={drawerRef}
+        role="dialog"
       >
         <div className={styles.drawerHeader}>
           <div>
@@ -124,6 +191,7 @@ export function ProfileDrawer({
           <button
             className={styles.drawerClose}
             onClick={onClose}
+            ref={closeButtonRef}
             type="button"
           >
             Close
