@@ -572,10 +572,13 @@ this is the one path that can refuse to store an athlete's workout:
    must not be guessed into one group.
 3. Otherwise insert. The two partial unique indexes remain the **race backstops**. On
    a concurrent double-submit the insert raises `23505`, which is caught locally
-   (documented at the catch site, per AGENTS.md); inspect the constraint name and
-   re-run the applicable identity lookups to recover the id. Any other database error
-   propagates unchanged. If the recovery lookups disagree, use the same conflicting-
-   identity 409 rather than selecting whichever index happened to fire first.
+   (documented at the catch site, per AGENTS.md). Recovery is allow-listed by
+   constraint name: only `activity_sources_content_hash_idx` and
+   `activity_sources_external_id_idx` trigger the corresponding identity lookup. A
+   `23505` from `activity_sources_one_live_override_idx`, or any unknown constraint or
+   other database error, propagates unchanged. If the two identity recovery lookups
+   disagree, use the same conflicting-identity 409 rather than selecting whichever
+   index happened to fire first.
 
 The lookup is required, not belt-and-braces: a `PostgRESTAPIError` for `23505` carries
 the constraint name and a detail string, **not** the colliding row — so the central
