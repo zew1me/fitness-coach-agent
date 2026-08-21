@@ -31,7 +31,12 @@ from httpx import ASGITransport, AsyncClient
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
-from backend.models.athlete import AthleteProfile, SportThreshold, ThresholdRecalibrationCandidate
+from backend.models.athlete import (
+    AthleteProfile,
+    RecoveryLog,
+    SportThreshold,
+    ThresholdRecalibrationCandidate,
+)
 from backend.models.auth import UserContext
 from backend.models.intervals import IntervalsConnectionCreate
 from backend.models.training import Goal, TrainingPlan
@@ -159,6 +164,41 @@ async def test_new_profile_row_has_null_specialization_pct_not_default_80(
     assert profile.specialization_pct is None, (
         "New rows must have NULL specialization_pct, not the old DEFAULT 80"
     )
+
+
+@pytest.mark.asyncio
+async def test_upsert_recovery_log_preserves_metric_and_source_on_partial_second_write(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """A partial recovery log upsert must preserve the stored metric and source.
+
+    Regression for issue #427: a second write that only adds notes must not clear the
+    original Garmin metric or source when it conflicts on (user_id, log_date).
+    """
+    await repo.upsert_athlete_profile(AthleteProfile(user_id=unique_user, coaching_state="active"))
+    log_date = date(2026, 7, 3)
+
+    first = await repo.upsert_recovery_log(
+        RecoveryLog(
+            user_id=unique_user,
+            log_date=log_date,
+            hrv_ms=48.0,
+            source="garmin_api",
+        )
+    )
+    second = await repo.upsert_recovery_log(
+        RecoveryLog(user_id=unique_user, log_date=log_date, notes="slept badly")
+    )
+    refetched = (await repo.list_recovery_logs(unique_user, since=log_date, limit=1))[0]
+
+    assert first.hrv_ms == 48.0
+    assert first.source == "garmin_api"
+    assert second.hrv_ms == 48.0
+    assert second.source == "garmin_api"
+    assert second.notes == "slept badly"
+    assert refetched.hrv_ms == 48.0
+    assert refetched.source == "garmin_api"
+    assert refetched.notes == "slept badly"
 
 
 @pytest.mark.asyncio
