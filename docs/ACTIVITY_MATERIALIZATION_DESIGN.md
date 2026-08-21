@@ -124,7 +124,9 @@ then fails at insert with a 503. Fix while touching this code path.
 
 ### New table: `activity_sources`
 
-One immutable row per ingested input. Migration file
+One row per ingested input, whose evidence fields are immutable and whose narrow
+lifecycle fields are not — the split is enumerated and enforced in "The evidence/state
+boundary" below. Migration file
 `supabase/migrations/<ts>_activity_sources.sql`, all-lowercase, prose header naming
 the issue — matching the house style in `20260708000000_intervals_connections.sql`.
 
@@ -291,6 +293,80 @@ Per AGENTS.md a GPX _recording_ always spans a positive interval, and a file tha
 spans none is classified as a course and never reaches `activities` at all, so files
 normally do carry one.
 
+### The evidence/state boundary, enumerated and enforced
+
+"One immutable row per ingested input" is too loose to build against on its own,
+because the same row also carries lifecycle fields that must change. Calling the whole
+record immutable while retiring, reparenting, and superseding it is exactly the kind of
+prose-only guarantee this design elsewhere refuses to rely on. So the boundary is
+enumerated, and it is enforced in the database rather than by convention.
+
+**Requirement.** Values received from an ingestion source are never rewritten in
+place. Every field that resolves, retires, supersedes, or overrides those values lives
+in the narrow mutable set below, and nowhere else.
+
+| Class                                                               | Fields                                                                                                                                                                                                           | Rule                                                                                  |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **Immutable evidence** — what this input said                       | `id`, `user_id`, `origin_activity_id`, `provider`, `ingest_format`, `fidelity_rank`, `external_id`, `object_key`, `content_hash`, `payload_fingerprint`, `fields`, `raw_extraction`, `recorded_at`, `created_at` | Written once at insert. **Any `UPDATE` that changes one is rejected by the database** |
+| **Mutable state** — how the system currently resolves that evidence | `activity_id` (group membership), `retired_at` (lifecycle)                                                                                                                                                       | Written only by the merge/bridge/retire RPCs, under the documented lock order         |
+| **Trigger-managed**                                                 | `updated_at`                                                                                                                                                                                                     | `set_updated_at`, as everywhere else in this schema                                   |
+
+Two mutable columns is the entire surface. If a future requirement needs a third, it
+gets added to this table and to the guard below in the same change, or it does not
+ship.
+
+**Enforcement.** A guard trigger, not a comment:
+
+```sql
+create or replace function public.activity_sources_reject_evidence_update()
+returns trigger language plpgsql
+set search_path = '' as $$
+begin
+  -- Evidence is what the ingested input said; only membership and lifecycle move.
+  if (to_jsonb(new) - 'activity_id' - 'retired_at' - 'updated_at')
+     is distinct from
+     (to_jsonb(old) - 'activity_id' - 'retired_at' - 'updated_at') then
+    raise exception 'activity_sources evidence fields are immutable'
+      using errcode = '22023';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger activity_sources_evidence_immutable
+before update on public.activity_sources
+for each row execute function public.activity_sources_reject_evidence_update();
+```
+
+Subtracting the mutable keys rather than listing the immutable ones is deliberate: a
+column added later is immutable by default, so forgetting to update the guard fails
+closed. A trigger fires regardless of the caller's privileges, so the `security
+definer` RPCs are bound by it too — which is the point, since they are the only
+writers.
+
+This is a second trigger in a schema that has only `set_updated_at`, and that is a
+real cost. It is accepted because the alternative enforcement — column-level
+`revoke update (…) from service_role` — is bypassed by exactly the `security definer`
+RPCs that do all the writing, and would therefore enforce nothing where it matters.
+
+**Athlete overrides are append-only too, and this corrects an earlier shorthand.** The
+override-source section below once described clearing an RPE as "just a jsonb update".
+Under this boundary it is not: an athlete edit **inserts a new `athlete_override`
+source and retires the previous one in the same transaction**, so at most one override
+source is ever live for an activity. Recompose is unchanged — it reads the live set —
+and the edit history comes free, in the same shape as every other source. It also
+removes an ordering hazard: all override sources share `fidelity_rank = 0`, and the
+reconciler's tie-break prefers the _earlier_ `created_at`, so two live overrides would
+resolve to the athlete's **oldest** edit rather than their newest. Retiring on insert
+means that tie never arises.
+
+**The accepted consequence.** `provider`, `ingest_format`, and `fidelity_rank` are
+evidence, so improving provider inference later cannot re-label rows in flight — it
+takes a backfill migration that recomputes them, reviewed as a migration. That is
+slower than an in-place rewrite and is the intended trade: a label that can silently
+change underneath a stored fidelity ordering is a label that can silently change which
+source won a field.
+
 ### Changes to `activities`
 
 ```sql
@@ -419,9 +495,11 @@ sources arrived or were retired.
 
 ### Athlete edits as an override source — and why recompose can't own those columns yet
 
-Modelling an athlete edit as an upserted `provider='athlete'` source row makes
-recompose a _total_ function over sources: one algorithm, no special-case branch, and
-"clear my RPE" is just a jsonb update. That is the target shape.
+Modelling an athlete edit as a `provider='athlete'` source row makes recompose a
+_total_ function over sources: one algorithm, no special-case branch. Per the
+evidence/state boundary above, an edit **inserts a new override source and retires the
+previous one**, rather than updating a row in place; clearing an RPE is an insert
+carrying a null. That is the target shape.
 
 But `activities.rpe` / `athlete_notes` are written directly **today** by
 `repo.update_activity` and by `merge_activity_text_update`
@@ -857,6 +935,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived)                                                                                                   |
+| `tests/python/test_supabase_db.py` (evidence guard)                                     | The immutability trigger: updating `activity_id` or `retired_at` succeeds; updating `fields`, `content_hash`, `provider`, `fidelity_rank`, or `raw_extraction` raises `22023` — including from a `security definer` RPC, which is the caller the guard exists to bind. An athlete edit inserts a new `athlete_override` source and retires the prior one, leaving exactly one live override                                                                                                                             |
 | `tests/python/test_supabase_repo.py`                                                    | Extend `FakeSupabaseClient`/`FakeTableQuery` for `activity_sources` and add an `rpc()` handler for `recompose_activity` (an unknown RPC raises `AssertionError`). Assert `client.calls` exactly. Verify `response.data` is handled as a **dict** for the composite-row return. Confirm the `presentation_state` predicate applies to the two list methods and **not** to `get_activity` / `list_synced_intervals_keys`                                                                                                  |
 | `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`, that the `content_hash` partial unique index fires on re-insert but not for distinct ZIP members, and that a bridge **reparents the superseded activity's sources to the survivor** — asserting the survivor's post-bridge `source_count` and that a field only B carried reaches A, which is the assertion a stranded-source bug fails |
 | `tests/python/test_api.py`                                                              | Exact duplicate returns 409 naming the existing activity; **a `payload_fingerprint` collision between two genuinely distinct sessions stores both and returns no 409** — the non-destructive-fingerprint requirement, asserted where it can actually be violated; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                                                                                                                        |
