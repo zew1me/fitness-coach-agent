@@ -7,6 +7,7 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.models.athlete import (
     AthleteProfile,
+    RecoveryLog,
     SportThreshold,
     ThresholdRecalibrationCandidate,
 )
@@ -227,6 +228,7 @@ class FakeSupabaseClient:
         daily_load_snapshot_rows: list[dict[str, object]] | None = None,
         goal_rows: list[dict[str, object]] | None = None,
         plan_workout_rows: list[dict[str, object]] | None = None,
+        recovery_rows: list[dict[str, object]] | None = None,
         training_plan_rows: list[dict[str, object]] | None = None,
         schedule_override_rows: list[dict[str, object]] | None = None,
         threshold_recalibration_candidate_rows: list[dict[str, object]] | None = None,
@@ -242,6 +244,7 @@ class FakeSupabaseClient:
             "chat_model_states": FakeTableQuery(chat_model_state_rows or []),
             "goals": FakeTableQuery(goal_rows or []),
             "plan_workouts": FakeTableQuery(plan_workout_rows or []),
+            "recovery_logs": FakeTableQuery(recovery_rows or []),
             "training_plans": FakeTableQuery(training_plan_rows or []),
             "schedule_overrides": FakeTableQuery(schedule_override_rows or []),
             "schedule_availability": FakeTableQuery([]),
@@ -378,6 +381,26 @@ def _plan_workout_row(**overrides: object) -> dict[str, object]:
         "status": "completed",
         "actual_activity_id": "00000000-0000-0000-0000-000000000012",
         "completion_source": "auto_matched",
+    }
+    row.update(overrides)
+    return row
+
+
+def _recovery_log_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "recovery-log-1",
+        "user_id": "athlete-1",
+        "log_date": "2026-07-03",
+        "sleep_duration_hours": 7.5,
+        "sleep_score": 82,
+        "sleep_consistency_pct": 91.0,
+        "hrv_ms": 47.0,
+        "resting_hr_bpm": 52,
+        "body_battery": 61,
+        "stress_score": 22,
+        "subjective_energy": 4,
+        "notes": "seeded from watch",
+        "source": "garmin",
     }
     row.update(overrides)
     return row
@@ -584,6 +607,56 @@ async def test_upsert_load_snapshots_handles_batch_payloads() -> None:
     assert [row["snapshot_date"] for row in rows] == ["2026-06-28", "2026-06-29"]
     assert all(row["user_id"] == "athlete-1" for row in rows)
     assert all(row["sport"] == "cycling" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_upsert_recovery_log_preserves_existing_fields_on_second_partial_write() -> None:
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    first = await repo.upsert_recovery_log(
+        RecoveryLog(user_id="athlete-1", log_date=date(2026, 7, 3), hrv_ms=48.0)
+    )
+    second = await repo.upsert_recovery_log(
+        RecoveryLog(user_id="athlete-1", log_date=date(2026, 7, 3), notes="slept badly")
+    )
+
+    assert first.hrv_ms == 48.0
+    assert second.hrv_ms == 48.0
+    assert second.notes == "slept badly"
+
+
+@pytest.mark.asyncio
+async def test_upsert_recovery_log_preserves_seeded_source_and_metrics() -> None:
+    client = FakeSupabaseClient(recovery_rows=[_recovery_log_row()])
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.upsert_recovery_log(
+        RecoveryLog(user_id="athlete-1", log_date=date(2026, 7, 3), notes="sleep got worse")
+    )
+
+    assert updated.source == "garmin"
+    assert updated.hrv_ms == 47.0
+    assert updated.sleep_duration_hours == 7.5
+    assert updated.notes == "sleep got worse"
+
+
+@pytest.mark.asyncio
+async def test_upsert_recovery_log_persists_an_explicit_source_update() -> None:
+    client = FakeSupabaseClient(recovery_rows=[_recovery_log_row(source="manual")])
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.upsert_recovery_log(
+        RecoveryLog(
+            user_id="athlete-1",
+            log_date=date(2026, 7, 3),
+            source="whoop_sync",
+            notes="imported from whoop",
+        )
+    )
+
+    assert updated.source == "whoop_sync"
+    assert updated.notes == "imported from whoop"
 
 
 @pytest.mark.asyncio
