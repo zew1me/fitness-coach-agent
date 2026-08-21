@@ -152,8 +152,18 @@ the issue — matching the house style in `20260708000000_intervals_connections.
 create table public.activity_sources (
   id uuid primary key default gen_random_uuid(),
   user_id text not null references public.athlete_profiles(user_id) on delete cascade,
-  activity_id uuid not null references public.activities(id) on delete cascade,
-  origin_activity_id uuid not null references public.activities(id) on delete cascade,
+
+  -- Composite FKs, not plain id references: they make "this source belongs to the
+  -- same athlete as its activity" a database invariant rather than an RPC habit.
+  -- Requires `alter table public.activities add constraint activities_id_user_id_key
+  -- unique (id, user_id);` (redundant to the PK, and that is the point — it is what
+  -- a composite FK can target). See "Cross-user references are closed by the schema".
+  activity_id uuid not null,
+  origin_activity_id uuid not null,
+  foreign key (activity_id, user_id)
+    references public.activities(id, user_id) on delete cascade,
+  foreign key (origin_activity_id, user_id)
+    references public.activities(id, user_id) on delete cascade,
 
   provider text not null check (provider in (
     'garmin','intervals','strava','wahoo','coros','polar','suunto','athlete','unknown'
@@ -195,6 +205,37 @@ create trigger activity_sources_set_updated_at
 before update on public.activity_sources
 for each row execute function public.set_updated_at();
 ```
+
+The same treatment applies to `activities.superseded_by_activity_id`, which otherwise
+lets one athlete's activity be superseded by another's:
+
+```sql
+alter table public.activities
+  add constraint activities_superseded_by_same_user
+  foreign key (superseded_by_activity_id, user_id)
+  references public.activities(id, user_id) on delete set null;
+```
+
+### Cross-user references are closed by the schema, not by the RPCs
+
+`user_id` and `activity_id` constrained independently permit a row that names one
+athlete and points at another athlete's activity. RLS does not close this: the owner
+policy tests `user_id` alone, so a mislabelled row is perfectly visible to the athlete
+it names while carrying someone else's data. Neither does the service-role write path
+— every RPC takes `p_user_id` from `require_user_context()` and never from a request
+body, but that is a property of code that must be re-established in each new RPC, and
+this design adds several.
+
+Composite foreign keys make it structural instead. `(activity_id, user_id)` can only
+resolve to a row of `activities` that carries the same `user_id`, so a cross-user
+reference is not rejected at review time or at request time — it is unrepresentable.
+The redundant `unique (id, user_id)` on `activities` exists solely to give those FKs a
+target.
+
+This is the same principle as the evidence guard below: where an invariant can be
+stated to Postgres, state it there. RPC-level owner checks remain (a caller must still
+be denied the _existence_ of another athlete's activity), but they are no longer the
+only thing standing between a bug and a tenancy leak.
 
 Plus `enable row level security` with the owner policy
 (`(select auth.uid())::text = user_id`), and the standard
