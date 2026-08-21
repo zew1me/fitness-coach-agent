@@ -582,10 +582,13 @@ the constraint name and a detail string, **not** the colliding row — so the ce
 handler alone can only produce a bare conflict, never _"you already logged this ride
 on June 1."_ Two round trips is the honest cost of a useful message.
 
-**Re-uploading after an un-merge succeeds, by design.** Both identity indexes are
-partial on `retired_at is null`, so a retired source neither collides nor is found by
-an identity lookup. An athlete who un-merges and then re-uploads gets a fresh source
-rather than a 409 telling them about a record they deliberately removed.
+**Un-merge does not make the same source ingestible again.** Ordinary un-bridge
+restores source membership and leaves the original sources live, so a byte-identical
+re-upload still returns 409 naming the restored activity. Both identity indexes are
+partial on `retired_at is null`, which permits a future explicit source-retirement
+flow to make re-ingestion possible, but this design exposes no such flow. If one is
+added, it must record who retired the source and why before relying on the partial-index
+semantics; un-merge alone is not retirement.
 
 ### N > 1 (merge)
 
