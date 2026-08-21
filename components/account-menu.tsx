@@ -34,12 +34,11 @@ function AccountMenu({
         const target = event.target;
         if (
           target instanceof HTMLElement &&
-          target.closest('[role="menuitem"]') !== null
+          target.closest("[data-menu-item]") !== null
         ) {
           onMenuItemClick();
         }
       }}
-      role="menu"
     >
       <div className={styles.accountSummary}>
         <span>Signed in</span>
@@ -50,8 +49,8 @@ function AccountMenu({
       </div>
       <button
         className={styles.menuItem}
+        data-menu-item
         onClick={onOpenProfile}
-        role="menuitem"
         type="button"
       >
         Profile
@@ -62,7 +61,7 @@ function AccountMenu({
         className={styles.menuForm}
         method="post"
       >
-        <button className={styles.menuItem} role="menuitem" type="submit">
+        <button className={styles.menuItem} data-menu-item type="submit">
           Sign out
         </button>
       </form>
@@ -86,7 +85,7 @@ export function AccountMenuButton({
     <div className={styles.accountMenuWrap}>
       <button
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-label="Account menu"
         className={styles.accountButton}
         onClick={() => setOpen((prev) => !prev)}

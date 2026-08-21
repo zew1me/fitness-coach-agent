@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import type { JSX } from "react";
 
 import type { AthleteProfile } from "../lib/types";
@@ -136,7 +136,10 @@ export function ProfileDrawer({
   const drawerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   const returnFocusRef = useRef<HTMLElement | null>(null);
-  onCloseRef.current = onClose;
+
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose;
+  });
 
   useEffect(() => {
     if (!open) return;
