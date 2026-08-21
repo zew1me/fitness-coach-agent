@@ -798,6 +798,116 @@ activity and two `general` sources may group. It is not a sport that can conflic
 
 ---
 
+## Tier-B consent is persisted and enforced
+
+A tool argument such as `confirmed: true` is not consent. Neither is confirmation text
+copied into a tool call by the model. Tier B uses a short-lived, group-scoped proposal
+and a separately persisted attestation of a later user message:
+
+```sql
+create table public.activity_merge_proposals (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null references public.athlete_profiles(user_id) on delete cascade,
+  expected_phrase text not null,
+  override_resolution jsonb,
+  expires_at timestamptz not null,
+  confirmed_message_id uuid,
+  consumed_at timestamptz,
+  created_at timestamptz not null default timezone('utc', now()),
+  unique (id, user_id),
+  check (expires_at > created_at),
+  check (expires_at <= created_at + interval '15 minutes'),
+  check ((confirmed_message_id is null) = (consumed_at is null))
+);
+
+create table public.activity_merge_proposal_members (
+  proposal_id uuid not null,
+  user_id text not null,
+  activity_id uuid not null,
+  expected_activity_updated_at timestamptz not null,
+  expected_source_versions jsonb not null,
+  primary key (proposal_id, activity_id),
+  foreign key (proposal_id, user_id)
+    references public.activity_merge_proposals(id, user_id) on delete cascade,
+  foreign key (activity_id, user_id)
+    references public.activities(id, user_id)
+);
+
+-- Stable attestation written by the trusted chat-persistence path before the model
+-- sees the turn; this avoids depending on the legacy chat_messages.content mirror.
+create table public.activity_merge_confirmation_messages (
+  message_id uuid primary key,
+  user_id text not null,
+  normalized_text text not null,
+  created_at timestamptz not null,
+  unique (message_id, user_id),
+  foreign key (message_id, user_id)
+    references public.chat_messages(id, user_id) on delete cascade
+);
+
+create unique index activity_merge_proposals_confirmation_once_idx
+  on public.activity_merge_proposals (confirmed_message_id)
+  where confirmed_message_id is not null;
+
+alter table public.activity_merge_proposals
+  add foreign key (confirmed_message_id, user_id)
+  references public.activity_merge_confirmation_messages(message_id, user_id);
+```
+
+The migration adds the redundant `unique (id, user_id)` target to `chat_messages`, as
+it does for `activities`. All three tables have owner RLS. Application roles can read
+their own proposal but cannot insert/update/delete proposal state or confirmation
+attestations; only the proposal-creation, chat-persistence, and merge definer RPCs
+write them. A guard permits only the merge RPC to set `confirmed_message_id` and
+`consumed_at` together; member rows and every other proposal field are immutable.
+
+**Issuing a proposal.** The server receives a scorer-produced group, sorts and
+deduplicates its activity ids, requires at least two active same-user members, and
+captures each activity's `updated_at` plus the complete live source-version map. It
+issues a cryptographically random code and stores an ASCII phrase of the form
+`merge activities <code>` after applying the canonical normalizer. `expires_at` is at
+most 15 minutes after `created_at`. If the group has multiple live athlete overrides,
+`override_resolution` contains the exact resolved athlete-field object shown to the
+athlete; otherwise it is NULL. Unknown keys are rejected and explicit nulls are
+preserved. The phrase shown to the athlete describes that resolution, so consent binds
+the group and the override choice together.
+
+**Attesting the later message.** When the chat route persists a user turn, trusted
+orchestration calls the confirmation-message RPC with the just-persisted message id
+and raw user text **before** model execution. The RPC verifies that `chat_messages`
+row has the same user and `role = 'user'`, then stores the normalized text and message
+timestamp. The canonical normalizer is deliberately implementable in SQL and shared
+by proposal issuance and attestation: trim, lowercase ASCII, and collapse every run of
+whitespace to one space. Server-issued phrases are ASCII, so Unicode case-fold
+ambiguity cannot change the comparison. Assistant messages and model tool arguments
+never reach this table.
+
+**Consuming it.** `merge_activity_group(p_user_id, p_proposal_id,
+p_confirmation_message_id)` receives `p_user_id` from auth and the message id from
+trusted run context; the message id is absent from the model-visible tool schema. In
+one transaction it:
+
+1. locks the proposal and sorted members, then follows the established
+   `plan_workouts → activities → activity_sources` lock order;
+2. rejects a wrong user, expired or already-consumed proposal, a confirmation created
+   before the proposal or after expiry, a non-user/missing attestation, or normalized
+   text unequal to `expected_phrase`, all before a merge write;
+3. requires the active group membership and every activity/source version to equal the
+   stored snapshot; any stale or substituted member raises `40001` without writing;
+4. applies every pairwise bridge needed to collapse the **entire stored group** inside
+   this transaction — callers cannot add or omit a member — including the stored
+   override resolution and append-only event for each bridge; and
+5. only after the final bridge leaves one survivor, sets `confirmed_message_id` and
+   `consumed_at` together and commits. Any failure rolls back the whole group, so no
+   externally visible half-consumed proposal exists.
+
+Group merging is internally pairwise but externally one atomic RPC. That satisfies the
+one-tool-call limit without making consent reusable between requests. A timeout after
+commit is recovered by reading merge events by `proposal_id`; the service does not
+re-consume the proposal. A second consumption, even with the same message, is rejected.
+
+---
+
 ## The recompose RPC
 
 Following `20260806003910_unlink_plan_workout_from_activity_atomic.sql`:
@@ -1000,8 +1110,10 @@ create table public.activity_merge_events (
     references public.activities(id, user_id),
   foreign key (reverses_event_id, user_id)
     references public.activity_merge_events(id, user_id),
+  foreign key (proposal_id, user_id)
+    references public.activity_merge_proposals(id, user_id),
   check (
-    (event_type = 'bridge' and reverses_event_id is null)
+    (event_type = 'bridge' and reverses_event_id is null and proposal_id is not null)
     or (event_type = 'unbridge' and reverses_event_id is not null)
   )
 );
@@ -1218,10 +1330,9 @@ workout from the surviving activity — this ordering is load-bearing), and the
 Intervals ride yields one calendar entry with the FIT's richer numbers; compliance
 stops reporting the phantom unplanned session.
 
-**Phase 5 — Tier B + bridging.** The server-side consent protocol in full (ported
-item 1: proposal record, server-issued normalized `expected_phrase`,
-orchestration-injected message id, group-scoped consumption), append-only merge-event
-schema and transactional bridge/un-bridge audit, coach tools
+**Phase 5 — Tier B + bridging.** The proposal/member/confirmation schema and atomic
+server-side consent protocol above, append-only merge-event schema and transactional
+bridge/un-bridge audit, coach tools
 (`find_duplicate_activities`, `merge_activities`, `unmerge_activity`) in
 `lib/agent/tools.ts` routed via `postEngine` in `lib/agent/coach-tools.ts`, system
 prompt guidance, bridging rules. _Verifiable:_ the coach can surface the backlog and
@@ -1316,19 +1427,13 @@ The alternative design on `design-doc-dedupe` reached these conclusions independ
 of its storage model, and they hold here unchanged. They are adopted rather than
 re-derived, and each is a gap in this document as it stands.
 
-1. **Tier-B consent is a server invariant, not a prompt promise.** A short-lived
-   proposal record scoped to `user_id`, holding the sorted member ids, expected member
-   versions, a server-issued confirmation code, the derived `expected_phrase` stored
-   already normalized, `expires_at`, and `consumed_at`. The merge RPC requires a later
-   `chat_messages` row for the same user with `role = 'user'` whose normalized text
-   equals `expected_phrase`; the message id is injected by trusted orchestration and is
-   absent from the model-visible tool schema. A model-supplied boolean, copied
-   confirmation text, or prompt instruction is never evidence of consent. Phase 5 of
-   this document currently covers all of that in one clause, which is a security gap
-   rather than a level-of-detail gap.
-2. **Consent is group-scoped and outlives the first pairwise operation.** An
-   athlete confirmed _a group_, once; a multi-step sequence must not re-ask, and must
-   consume the proposal exactly once, on the final step, in the same transaction.
+1. **Tier-B consent is a server invariant, not a prompt promise.** Implemented in the
+   proposal/member/confirmation contract above. A model-supplied boolean, copied
+   confirmation text, or prompt instruction is never evidence of consent.
+2. **Consent is group-scoped and atomic.** The athlete confirms the stored group and
+   optional override resolution once. All internal pairwise bridges and final
+   consumption happen in one transaction, so no member can be added, omitted, or left
+   half-merged.
 3. **The load rebuild must not use the display query.** Confirmed against source and
    promoted to **verified blocker C** above; Phase 0 fixes it alongside the
    seed-at-date lookup.
@@ -1347,7 +1452,7 @@ re-derived, and each is a gap in this document as it stands.
 
 | Area      | Files                                                                                                                                                                                                                                                                                                                 |
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Migration | `supabase/migrations/<ts>_activity_sources.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_events.sql`, `docs/supabase-migration-history.md`                                                                                                                                                            |
+| Migration | `supabase/migrations/<ts>_activity_sources.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_consent.sql`, `<ts>_activity_merge_events.sql`, `docs/supabase-migration-history.md`                                                                                                                         |
 | Model     | `backend/models/training.py` (`Activity` gains the new columns; new `ActivitySource`)                                                                                                                                                                                                                                 |
 | Repo      | `backend/repos/supabase_repo.py` — `presentation_state` predicate on `list_activities`/`list_activities_between`; move `list_synced_intervals_keys` to source identities; new `create_activity_with_source`, `list_activity_sources`, `list_dedup_candidates`, `recompose_activity`, `get_load_snapshot_on_or_before` |
 | Services  | `backend/services/activity_dedup.py` (new — pure scorer + reconciler); `backend/services/activity_text.py` (Phase 3)                                                                                                                                                                                                  |
@@ -1386,10 +1491,10 @@ default run). Before remote apply: `supabase migration list --linked` and
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability: membership/lifecycle updates succeed while evidence changes raise `22023`, including from a definer RPC. Projection ownership: application roles cannot update `activities` directly; every RPC changes only its enumerated columns; identity fields remain immutable even through a definer RPC. Retiring/restoring the winning provenance source deterministically changes/restores the entire legacy triplet, and no non-override source raises `22023`                                                                                          |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
 | `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/lock/retry checks, identity indexes, bridge reparenting and override resolution. Bridge inserts a complete event atomically; a forced event-insert failure rolls every transition back. Un-bridge rejects stale post-state, writes an inverse event without modifying history, restores sources/links/overrides exactly, and the partial unique index permits only one concurrent reversal. Application roles cannot update/delete events                                                                                                      |
-| `tests/python/test_api.py`                                                              | Exact duplicate by content hash or known-provider external id returns 409 naming the existing activity; concurrent external-id insertion recovers after `23505`; conflicting authoritative ids name both activities without storing; unknown-provider external ids do not reject; **a `payload_fingerprint` collision between distinct sessions stores both and returns no 409**; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                                                                  |
+| `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases above. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant, and non-matching confirmations without a write; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges every stored member atomically, consumes once, and a response-loss retry recovers by proposal-linked events rather than reusing consent                                                                                                    |
 | `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                                                                          |
-| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas (note `lib/agent/tools.ts:10-13`: nested object fields must be `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas; merge accepts a proposal id but exposes no confirmation message id, confirmation boolean/text, member replacement, or override-resolution argument (nested object fields remain `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                                                                                     |
 | `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 **End-to-end manual check** (`bun run dev:local`): upload a FIT file → confirm one
