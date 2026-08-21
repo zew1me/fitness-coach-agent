@@ -1106,6 +1106,10 @@ create table public.activity_merge_events (
   user_id text not null references public.athlete_profiles(user_id) on delete cascade,
   event_type text not null check (event_type in ('bridge','unbridge')),
   reverses_event_id uuid,
+  -- Makes the cross-row "only a bridge can be reversed" invariant FK-enforceable.
+  reverses_event_type text generated always as (
+    case when reverses_event_id is not null then 'bridge' end
+  ) stored,
   survivor_activity_id uuid not null,
   superseded_activity_id uuid not null,
   proposal_id uuid, -- FK to the Tier-B proposal table defined below
@@ -1115,17 +1119,18 @@ create table public.activity_merge_events (
   activity_transitions jsonb not null,
   created_at timestamptz not null default timezone('utc', now()),
   unique (id, user_id),
+  unique (id, user_id, event_type),
   foreign key (survivor_activity_id, user_id)
     references public.activities(id, user_id),
   foreign key (superseded_activity_id, user_id)
     references public.activities(id, user_id),
-  foreign key (reverses_event_id, user_id)
-    references public.activity_merge_events(id, user_id),
+  foreign key (reverses_event_id, user_id, reverses_event_type)
+    references public.activity_merge_events(id, user_id, event_type),
   foreign key (proposal_id, user_id)
     references public.activity_merge_proposals(id, user_id),
   check (
     (event_type = 'bridge' and reverses_event_id is null and proposal_id is not null)
-    or (event_type = 'unbridge' and reverses_event_id is not null)
+    or (event_type = 'unbridge' and reverses_event_id is not null and proposal_id is null)
   )
 );
 
@@ -1158,7 +1163,10 @@ the recorded rows, requires that it has no reversal and that current state equal
 recorded after-state; later edits or another bridge produce `40001` for re-read and
 athlete review rather than a destructive guess. It then applies the exact inverse,
 recomposes, and inserts an `unbridge` event whose transitions describe the reversal.
-The original event is never updated. This deliberately supports reversal only while
+That insert always carries `proposal_id = NULL`; consent belongs to the referenced
+bridge event, and copying it onto a reversal would misstate what the athlete approved.
+The generated-type composite FK rejects an attempt to reverse another unbridge before
+any state change. The original event is never updated. This deliberately supports reversal only while
 the recorded post-state is still current; reconstructing through arbitrary later
 merges is out of scope.
 
@@ -1502,7 +1510,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject cross-user source and supersession relationships; `fidelity_rank` is generated, consistent, and non-null; backfill maps all seven allowed legacy sources exactly, aborts before writes for `file_upload`/any unmapped source or malformed Intervals identity, and gives sparse rows a NULL fingerprint; a second live `athlete_override` raises `23505`; the pending-rebuild CAS clears only an unchanged marker                                                                                                                                             |
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields remain immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. Recompose and bridge/un-bridge can only widen `load_rebuild_pending_from` to the earliest pre/post date; they cannot clear or move it later. Recompute clears only by compare-and-swap, and a concurrent earlier invalidation survives. No non-override source raises `22023`                                                                                                     |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
-| `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/lock/retry checks, identity indexes, bridge reparenting and override resolution. Bridge inserts a complete event atomically; a forced event-insert failure rolls every transition back. Un-bridge rejects stale post-state, writes an inverse event without modifying history, restores sources/links/overrides exactly, and the partial unique index permits only one concurrent reversal. Application roles cannot update/delete events                                                                                                      |
+| `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/lock/retry checks, identity indexes, bridge reparenting and override resolution. Bridge events are atomic. Un-bridge rejects stale state, a non-null reversal `proposal_id`, and any `reverses_event_id` naming an unbridge before state changes; it writes an inverse event, restores sources/links/overrides, and permits one concurrent reversal. Application roles cannot mutate events                                                                                                                                                    |
 | `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases above. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant, and non-matching confirmations without a write; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges every stored member atomically, consumes once, and a response-loss retry recovers by proposal-linked events rather than reusing consent                                                                                                    |
 | `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                                                                          |
