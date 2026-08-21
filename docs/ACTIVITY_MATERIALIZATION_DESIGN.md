@@ -641,17 +641,17 @@ order every time and never relies on call order or JSON iteration order — whic
 what makes recompose a **pure function of the source set**, independent of the order
 sources arrived or were retired.
 
-| Field group                                                                                                                                                                                                             | Rule                                                                                                                             |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Device metrics — `duration_seconds`, `distance_meters`, `elevation_gain_meters`, `avg_hr_bpm`, `max_hr_bpm`, `avg_power_watts`, `normalized_power_watts`, `avg_pace_sec_per_km`, `avg_cadence_rpm`, `zone_distribution` | First non-null value in fidelity order                                                                                           |
-| `started_at`, `activity_date`                                                                                                                                                                                           | Highest-fidelity source that has one — a FIT timestamp is authoritative                                                          |
-| `sport`                                                                                                                                                                                                                 | Highest-fidelity source that declares a real sport. `"general"` is treated as _undeclared_, not as a conflicting value           |
-| Derived — `tss`, `intensity_factor`                                                                                                                                                                                     | **Recomputed** from the merged inputs, never copied from a source                                                                |
-| Athlete-authored — `rpe`, `athlete_notes`, `fatigue_notes`, `fueling_notes`                                                                                                                                             | Only ever written from the `athlete_override` source. **If no override source exists, recompose leaves these columns untouched** |
-| `activity_summary` jsonb                                                                                                                                                                                                | Deep-merged lowest→highest fidelity, so the winner overwrites a conflicting leaf                                                 |
-| `summary_schema_version`                                                                                                                                                                                                | Set to the reconciler's current `SUMMARY_SCHEMA_VERSION` whenever `activity_summary` is rebuilt                                  |
-| `source`, `source_file_key`, `raw_extraction`                                                                                                                                                                           | Copied as one triplet from the first live non-override source in the same total fidelity order; see below                        |
-| `planned_workout_id`                                                                                                                                                                                                    | Never field-merged. Transferred only by the explicit link RPC under lock                                                         |
+| Field group                                                                                                                                                                                                             | Rule                                                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Device metrics — `duration_seconds`, `distance_meters`, `elevation_gain_meters`, `avg_hr_bpm`, `max_hr_bpm`, `avg_power_watts`, `normalized_power_watts`, `avg_pace_sec_per_km`, `avg_cadence_rpm`, `zone_distribution` | First non-null value in fidelity order                                                                                 |
+| `started_at`, `activity_date`                                                                                                                                                                                           | Highest-fidelity source that has one — a FIT timestamp is authoritative                                                |
+| `sport`                                                                                                                                                                                                                 | Highest-fidelity source that declares a real sport. `"general"` is treated as _undeclared_, not as a conflicting value |
+| Derived — `tss`, `intensity_factor`                                                                                                                                                                                     | **Recomputed** from the merged inputs, never copied from a source                                                      |
+| Athlete-authored — `rpe`, `athlete_notes`, `fatigue_notes`, `fueling_notes`                                                                                                                                             | Exact four-key value from the one live `athlete_override`; all four become NULL when no live override exists           |
+| `activity_summary` jsonb                                                                                                                                                                                                | Deep-merged lowest→highest fidelity, so the winner overwrites a conflicting leaf                                       |
+| `summary_schema_version`                                                                                                                                                                                                | Set to the reconciler's current `SUMMARY_SCHEMA_VERSION` whenever `activity_summary` is rebuilt                        |
+| `source`, `source_file_key`, `raw_extraction`                                                                                                                                                                           | Copied as one triplet from the first live non-override source in the same total fidelity order; see below              |
+| `planned_workout_id`                                                                                                                                                                                                    | Never field-merged. Transferred only by the explicit link RPC under lock                                               |
 
 ### Projection ownership is exhaustive and RPC-enforced
 
@@ -688,8 +688,8 @@ direct `UPDATE` on `activities` from `service_role`, `authenticated`, and `anon`
 Updates then run only through the locked `security definer` RPCs above. Each RPC uses
 an explicit `SET` list limited to its writer class; `recompose_activity` owns the four
 projection/recompute/override/metadata rows of the table plus the set/widen half of
-`load_rebuild_pending_from`, and still conditionally omits athlete columns when no
-live override exists. Bridge/un-bridge may set/widen the same marker; only the
+`load_rebuild_pending_from`; its explicit set writes all four athlete columns on every
+call, using NULLs when no override exists. Bridge/un-bridge may set/widen the same marker; only the
 recompute RPC receives the compare-and-swap clear write. A guard trigger independently
 rejects changes to `id`, `user_id`, or `created_at`, including from a definer RPC.
 Table-owner migrations remain the only escape hatch and are reviewed as migrations.
@@ -701,33 +701,36 @@ Any new `activities` column must be added to this matrix, one RPC's explicit wri
 and the negative database tests in the same change. An unassigned column blocks the
 migration; it does not inherit an "untouched" default.
 
-### Athlete edits as an override source — and why recompose can't own those columns yet
+### Athlete edits as an override source — and the Phase-3 ownership gate
 
-Modelling an athlete edit as a `provider='athlete'` source row makes recompose a
-_total_ function over sources: one algorithm, no special-case branch. Per the
-evidence/state boundary above, an edit **inserts a new override source and retires the
-previous one**, rather than updating a row in place; clearing an RPE is an insert
-carrying a null. That is the target shape.
+Modelling an athlete edit as a `provider='athlete'` source row makes recompose a total
+function over sources. Per the evidence/state boundary above, an edit **inserts a new
+`athlete_override` source and retires the previous one**, rather than updating a row in
+place. Every override stores all four athlete fields, using explicit JSON nulls; a
+partial edit first carries forward the other three current values. Omission therefore
+never ambiguously means either "preserve" or "clear".
 
-But `activities.rpe` / `athlete_notes` are written directly **today** by
-`repo.update_activity` and by `merge_activity_text_update`
-(`backend/services/activity_text.py`). If recompose owned those columns before those
-writers were converted, the first device sync after an athlete note would silently
-erase the note.
+`activities.rpe` / `athlete_notes` are written directly **today** by
+`repo.update_activity` and `merge_activity_text_update`
+(`backend/services/activity_text.py`). Recompose cannot own those columns until that
+legacy state has provenance. Phase 3 first inserts one complete override for every
+activity with any non-null athlete field, including values emitted by
+`build_activity_from_text`; activities with no override must already have all four
+columns NULL. It then converts all three writers and verifies this invariant before
+revoking direct updates and enabling any general recompose path.
 
-So the rule above is load-bearing, not a hedge: **recompose writes an athlete-owned
-column only when an `athlete_override` source is present in the version map.**
+After that gate, recompose always owns all four columns: a live override supplies the
+exact four-key value, and no live override clears all four to SQL NULL. "Leave the
+projection untouched" is forbidden after Phase 3. Otherwise a one-sided override
+bridge would copy B's notes onto A, and un-bridge would return the source to B while
+leaving those notes stranded on A.
 
-**That rule protects athlete _columns_, but not the rest of the row — which forces
-the phase order.** `merge_activity_text_update` handles date corrections by calling
-`repo.update_activity`, which writes the whole `Activity` model — including derived
-and device fields — straight to the row, bypassing recompose entirely. If Tier-A
-auto-merge shipped first, the next recompose would silently revert the athlete's date
-correction.
-
-So the writer conversion must land **before** any recompose can run. That is why it is
-Phase 3 below and merging is Phase 4 — the ordering is a correctness constraint, not a
-preference.
+The ordering also protects the rest of the row. `merge_activity_text_update` handles
+date corrections today by calling `repo.update_activity`, which writes the whole
+`Activity` model — including derived and device fields — directly. If Tier-A merge
+shipped first, recompose could silently revert that correction. Phase 3 must therefore
+finish the provenance conversion and writer revocation before Phase 4 can run; this is
+a release gate, not a transitional fallback inside the reconciler.
 
 ---
 
@@ -950,7 +953,9 @@ public.recompose_activity(
   Bridge/un-bridge applies the same rule when presentation changes, across every
   affected row, because removing or restoring B changes the visible daily TSS even if
   A's composed values do not change.
-- Skips athlete-owned columns unless the override source is in the map.
+- Writes all four athlete-owned columns from the complete live override, or clears all
+  four to SQL NULL when none exists. Phase 3's provenance gate makes either state
+  authoritative; a stale projection value is never preserved by omission.
 - An identical repeat returns current state (idempotent).
 
 **A retry after an unseen commit resolves by re-reading, not by an idempotency key.**
@@ -1388,16 +1393,15 @@ rejecting the second**; and **two distinct sessions that collide on
 **Phase 3 — athlete overrides (must precede any recompose).** Convert
 `repo.update_activity`, `merge_activity_text_update`, **and
 `build_activity_from_text`** to write an `athlete_override` source and route through
-recompose, then revoke direct `activities` UPDATE from the application roles so only
-the enumerated definer RPCs can mutate it. The third writer is easy to miss and is not
-optional: it populates `rpe`,
+recompose. Before enabling that path, backfill every existing non-null athlete field
+into a complete four-key override, assert that every row without one has four NULL
+athlete columns, then revoke direct `activities` UPDATE so only the enumerated definer
+RPCs can mutate it. The third writer is easy to miss and is not optional: it populates `rpe`,
 `athlete_notes`, and `fueling_notes` directly on a `text_extract` activity today
 (`backend/services/activity_text.py:667-669`), so an athlete who describes a session
 in chat gets athlete-authored values on a source whose `ingest_format` is `text`, not
-`athlete_override`. Left unconverted, the merge rule below — athlete columns come only
-from an override source — would read those values as belonging to no override and
-leave them untouched on first recompose, then drop them the moment a real override
-source appeared and recompose began owning the columns. _Verifiable:_ an athlete note
+`athlete_override`. Left unconverted, the authoritative no-override rule would clear
+those values on first recompose. _Verifiable:_ an athlete note
 and a corrected date both survive a subsequent recompose, **including a note that
 originated from a chat text extract rather than an explicit edit**. See the writer-conversion
 note above — shipping merge before this silently reverts date corrections.
@@ -1564,18 +1568,18 @@ default run). Before remote apply: `supabase migration list --linked` and
 
 **New tests:**
 
-| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules **asserted at Tier A as well as Tier B** — specifically that a `0`-vs-positive distance blocks auto-merge for a pair agreeing on sport, start, and duration, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived) |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | FK/rank and seven-source mapping/preflight. Gap inserts and shadow RPC each get one source. Backfill failure before/after checkpoint, repeat execution, an existing matching row, and a conflicting deterministic id all prove restart behavior; an anti-join hole blocks completion. Trigger removal requires clean second pass plus direct-INSERT revoke. Override uniqueness and marker CAS remain covered                                                                                                                                                                     |
-| `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields remain immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. Recompose and bridge/un-bridge can only widen `load_rebuild_pending_from` to the earliest pre/post date; they cannot clear or move it later. Recompute clears only by compare-and-swap, and a concurrent earlier invalidation survives. No non-override source raises `22023`                                                                                                     |
-| `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
-| `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's ids/events; application roles cannot mutate events; definer RPC behavior remains owner-checked                                                                                                              |
-| `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases above. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant, and non-matching confirmations without a write; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges every stored member atomically, consumes once, and a response-loss retry recovers by proposal-linked events rather than reusing consent                                                                                                    |
-| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                                                                          |
-| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas; merge accepts a proposal id but exposes no confirmation message id, confirmation boolean/text, member replacement, or override-resolution argument (nested object fields remain `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                                                                                     |
-| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null/zero rules at both tiers, hard negatives, sport conflict, `general`. Reconciler: fidelity/tie order, exact four-key override including explicit nulls, all athlete columns cleared with no override, `tss` recomputed, order independence. Regression: bridge a B-only override onto A, then un-bridge; A clears all athlete fields while B regains its exact values                                                                    |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | FK/rank and seven-source mapping/preflight. Gap inserts and shadow RPC each get one source. Backfill failure before/after checkpoint, repeat execution, an existing matching row, and a conflicting deterministic id all prove restart behavior; an anti-join hole blocks completion. Trigger removal requires clean second pass plus direct-INSERT revoke. Override uniqueness and marker CAS remain covered                                                                  |
+| `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields remain immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. Recompose and bridge/un-bridge can only widen `load_rebuild_pending_from` to the earliest pre/post date; they cannot clear or move it later. Recompute clears only by compare-and-swap, and a concurrent earlier invalidation survives. No non-override source raises `22023`  |
+| `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                  |
+| `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's ids/events; application roles cannot mutate events; definer RPC behavior remains owner-checked           |
+| `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases above. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant, and non-matching confirmations without a write; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges every stored member atomically, consumes once, and a response-loss retry recovers by proposal-linked events rather than reusing consent |
+| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                             |
+| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                       |
+| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas; merge accepts a proposal id but exposes no confirmation message id, confirmation boolean/text, member replacement, or override-resolution argument (nested object fields remain `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                  |
+| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 **End-to-end manual check** (`bun run dev:local`): upload a FIT file → confirm one
 calendar entry; upload the identical file again → confirm 409 naming the first
