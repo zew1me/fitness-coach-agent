@@ -650,7 +650,15 @@ class SupabaseRepository:
 
     async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
         client = self._require_client()
-        payload = log.model_dump(mode="json", exclude={"created_at"})
+        # Partial recovery writes cannot clear a stored value back to null through this path;
+        # a future clear operation needs explicit design rather than accidental nulling.
+        payload = {
+            key: value
+            for key, value in log.model_dump(mode="json", exclude={"created_at"}).items()
+            if value is not None
+        }
+        if "source" not in log.model_fields_set:
+            payload.pop("source", None)
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = (
