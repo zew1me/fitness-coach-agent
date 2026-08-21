@@ -963,9 +963,18 @@ stores two sources rather than rejecting the second**; and **two distinct sessio
 collide on `payload_fingerprint` are both stored** — the fingerprint never rejects.
 
 **Phase 3 — athlete overrides (must precede any recompose).** Convert
-`repo.update_activity` and `merge_activity_text_update` to upsert an
-`athlete_override` source and route through recompose. _Verifiable:_ an athlete note
-and a corrected date both survive a subsequent recompose. See the writer-conversion
+`repo.update_activity`, `merge_activity_text_update`, **and
+`build_activity_from_text`** to write an `athlete_override` source and route through
+recompose. The third is easy to miss and is not optional: it populates `rpe`,
+`athlete_notes`, and `fueling_notes` directly on a `text_extract` activity today
+(`backend/services/activity_text.py:667-669`), so an athlete who describes a session
+in chat gets athlete-authored values on a source whose `ingest_format` is `text`, not
+`athlete_override`. Left unconverted, the merge rule below — athlete columns come only
+from an override source — would read those values as belonging to no override and
+leave them untouched on first recompose, then drop them the moment a real override
+source appeared and recompose began owning the columns. _Verifiable:_ an athlete note
+and a corrected date both survive a subsequent recompose, **including a note that
+originated from a chat text extract rather than an explicit edit**. See the writer-conversion
 note above — shipping merge before this silently reverts date corrections.
 
 **Phase 4 — materialization.** `activity_dedup.py` scorer + reconciler,
