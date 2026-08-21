@@ -133,6 +133,7 @@ create table public.activity_sources (
   id uuid primary key default gen_random_uuid(),
   user_id text not null references public.athlete_profiles(user_id) on delete cascade,
   activity_id uuid not null references public.activities(id) on delete cascade,
+  origin_activity_id uuid not null references public.activities(id) on delete cascade,
 
   provider text not null check (provider in (
     'garmin','intervals','strava','wahoo','coros','polar','suunto','athlete','unknown'
@@ -604,6 +605,36 @@ valid, reads drop it via the single predicate, the row remains fetchable by
   sides disagree (`20260806003910_…:51-58`), so a one-sided link must never be
   propagated.
 
+**4. The superseded activity's sources are reparented to the survivor, in the same
+transaction.** This is the rule that makes bridging actually merge anything, and
+omitting it is a silent-data-loss bug rather than a gap: `recompose_activity(A)`
+derives from _A's_ live source set, so if B's sources kept `activity_id = B` they
+would contribute nothing to the presented row. The athlete would see B disappear from
+the calendar and A keep exactly the numbers it already had — B's richer metrics
+dropped on the floor, with `source_count` understating the group. Marking B superseded
+without moving its sources hides a workout instead of merging it.
+
+So the bridge transaction sets `activity_id = A` on every non-retired source of B,
+then recomposes A from the combined set. Reparenting rather than traversing
+`superseded_by_activity_id` at read time is deliberate: recompose is defined as a pure
+function of the rows where `activity_id = <target> and retired_at is null`, and that
+definition holds only if membership is a stored fact. A recompose that had to chase a
+supersession chain would make its own input depend on the depth of that chain, and
+every future reader of `activity_sources` would inherit the same traversal.
+
+**This does not weaken the immutability of a source.** `activity_id` is _membership
+state_, not ingested evidence — which is why the source record carries both it and an
+`origin_activity_id`, set once at insert and never written again. The bytes, the
+extracted `fields`, the hashes, and `raw_extraction` are untouched by a bridge. See
+the evidence/state boundary section for the full split.
+
+**Reversal restores membership from `origin_activity_id`.** Un-bridging clears B's
+`presentation_state`/`superseded_by_activity_id`, returns each reparented source to
+its origin activity, and recomposes both rows. Because reparenting only ever moves a
+source _away_ from its origin and the origin is immutable, this is exact rather than
+reconstructed — the same reasoning that makes un-merge re-derive rather than replay a
+snapshot.
+
 ---
 
 ## Training load rebuild
@@ -649,6 +680,7 @@ rows.
 
 **Backfill.** One `activity_sources` row per existing `activities` row:
 
+- `origin_activity_id` = `activity_id` = the existing row's id
 - `provider` / `ingest_format` derived from `source`
 - `object_key` ← `source_file_key`; `external_id` ← the id inside `intervals:{id}`
 - `fields` ← the row's own metric columns
@@ -822,16 +854,16 @@ default run). Before remote apply: `supabase migration list --linked` and
 
 **New tests:**
 
-| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived)  |
-| `tests/python/test_supabase_repo.py`                                                    | Extend `FakeSupabaseClient`/`FakeTableQuery` for `activity_sources` and add an `rpc()` handler for `recompose_activity` (an unknown RPC raises `AssertionError`). Assert `client.calls` exactly. Verify `response.data` is handled as a **dict** for the composite-row return. Confirm the `presentation_state` predicate applies to the two list methods and **not** to `get_activity` / `list_synced_intervals_keys` |
-| `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`, and that the two partial unique indexes fire on re-insert but not for distinct ZIP members                                                                                                                                             |
-| `tests/python/test_api.py`                                                              | Exact duplicate returns 409 naming the existing activity; **a `payload_fingerprint` collision between two genuinely distinct sessions stores both and returns no 409** — the non-destructive-fingerprint requirement, asserted where it can actually be violated; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                       |
-| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                     |
-| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                               |
-| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas (note `lib/agent/tools.ts:10-13`: nested object fields must be `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                                            |
-| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                      |
+| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived)                                                                                                   |
+| `tests/python/test_supabase_repo.py`                                                    | Extend `FakeSupabaseClient`/`FakeTableQuery` for `activity_sources` and add an `rpc()` handler for `recompose_activity` (an unknown RPC raises `AssertionError`). Assert `client.calls` exactly. Verify `response.data` is handled as a **dict** for the composite-row return. Confirm the `presentation_state` predicate applies to the two list methods and **not** to `get_activity` / `list_synced_intervals_keys`                                                                                                  |
+| `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`, that the `content_hash` partial unique index fires on re-insert but not for distinct ZIP members, and that a bridge **reparents the superseded activity's sources to the survivor** — asserting the survivor's post-bridge `source_count` and that a field only B carried reaches A, which is the assertion a stranded-source bug fails |
+| `tests/python/test_api.py`                                                              | Exact duplicate returns 409 naming the existing activity; **a `payload_fingerprint` collision between two genuinely distinct sessions stores both and returns no 409** — the non-destructive-fingerprint requirement, asserted where it can actually be violated; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                                                                                                                        |
+| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                      |
+| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                |
+| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas (note `lib/agent/tools.ts:10-13`: nested object fields must be `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                                                                                                                                             |
+| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 **End-to-end manual check** (`bun run dev:local`): upload a FIT file → confirm one
 calendar entry; upload the identical file again → confirm 409 naming the first
