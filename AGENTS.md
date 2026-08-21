@@ -315,6 +315,7 @@ See `.env.example`. Required:
 
 - Changing the compaction/durable-session subsystem (`lib/agent/responses-item-shapes.ts`, `lib/agent/supabase-agent-session.ts`, `lib/agent/durable-compaction-session.ts`, `lib/agent/orchestrator.ts`) → update `docs/COMPACTION_DESIGN.md` in the same change.
 - Adding/changing a Supabase migration → update `docs/supabase-migration-history.md` (see the Database section above).
+- `docs/ACTIVITY_MATERIALIZATION_DESIGN.md` is a **proposed, not-yet-implemented** design for storing each ingested activity input immutably and presenting a merged projection. Nothing in it is built; treat it as a contract to execute against, not a description of current behaviour.
 - `docs/cli-tools/` contains progressive-disclosure briefs for external service CLIs; keep the relevant brief current when project-specific CLI workflows or safety constraints change.
 - `docs/github-issues/` is an archive of point-in-time issue proposals, not a living doc — don't update it as code changes.
 
