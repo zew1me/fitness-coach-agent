@@ -183,7 +183,7 @@ export function sanitizeResponsesCompactInputItem(
   return stripProviderMetadata(item) as AgentInputItem;
 }
 
-function omittedToolOutputMessage(): AgentInputItem {
+function unreplayableToolOutputMessage(): AgentInputItem {
   return {
     role: "assistant",
     status: "completed",
@@ -191,11 +191,177 @@ function omittedToolOutputMessage(): AgentInputItem {
       {
         type: "output_text",
         text:
-          "Historical tool output omitted from model replay. " +
+          "Historical tool output could not be replayed because its call ID is missing. " +
           "The visible chat transcript is preserved separately.",
       },
     ],
   } as AgentInputItem;
+}
+
+function toSdkStructuredOutputImage(
+  record: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const imageUrl = record["image_url"];
+  const fileId = record["file_id"];
+  const image =
+    typeof imageUrl === "string"
+      ? imageUrl
+      : typeof fileId === "string"
+        ? { id: fileId }
+        : undefined;
+  if (image === undefined) return null;
+  return {
+    type: "input_image",
+    image,
+    ...(typeof record["detail"] === "string"
+      ? { detail: record["detail"] }
+      : {}),
+  };
+}
+
+function toSdkStructuredOutputFile(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const fileUrl = record["file_url"];
+  const fileId = record["file_id"];
+  const fileData = record["file_data"];
+  const file =
+    typeof fileId === "string"
+      ? { id: fileId }
+      : typeof fileUrl === "string"
+        ? { url: fileUrl }
+        : fileData;
+  return {
+    // Preserve the raw structured-output discriminator; this is a tool result,
+    // not a user attachment bypassing the link-preserving text sanitizer.
+    type: record["type"],
+    ...(file === undefined ? {} : { file }),
+    ...(typeof record["filename"] === "string"
+      ? { filename: record["filename"] }
+      : {}),
+  };
+}
+
+const SDK_STRUCTURED_OUTPUT_TYPE_MAP: Record<
+  string,
+  (record: Record<string, unknown>) => Record<string, unknown> | null
+> = {
+  input_text: (record) => ({ type: "input_text", text: record["text"] }),
+  input_image: toSdkStructuredOutputImage,
+  input_file: toSdkStructuredOutputFile,
+};
+
+function toSdkStructuredOutputContentPart(
+  value: unknown,
+): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    SDK_STRUCTURED_OUTPUT_TYPE_MAP[record["type"] as string]?.(record) ?? null
+  );
+}
+
+// The keys of a raw stored `function_call_output` that `toSdkFunctionCallResultItem`
+// consumes into a first-class field of the SDK's `FunctionCallResultItem`. Everything
+// *not* listed here is provider-attached metadata and is rehomed into `providerData`
+// by `rawFunctionOutputProviderData`. Contains both spellings of the two fields that
+// arrive under either — `call_id`/`callId` and `name`/`function_name` — depending on
+// whether the row was written from the Responses wire or from an SDK item; listing
+// only one spelling would copy the other into `providerData`, and the SDK would then
+// re-emit it as a stray snake-cased duplicate alongside the real field.
+const RAW_FUNCTION_OUTPUT_KEYS = new Set([
+  "type",
+  "id",
+  "call_id",
+  "callId",
+  "name",
+  "function_name",
+  "namespace",
+  "status",
+  "output",
+]);
+
+// The SDK requires a `name` on every `FunctionCallResultItem`, but a raw stored
+// `function_call_output` is not guaranteed to carry one — the Responses wire shape
+// identifies the call by `call_id` alone. Falling back to the call ID is safe rather
+// than cosmetic: converting `function_call_result` back to the wire emits only
+// `type`/`id`/`call_id`/`output`/`status` plus snake-cased provider data, so `name`
+// is dropped before the request and this fabricated value never reaches the model.
+// It exists solely to satisfy the SDK's required-field contract on replay.
+function sdkFunctionCallName(
+  record: Record<string, unknown>,
+  callId: string,
+): string {
+  if (typeof record["name"] === "string") return record["name"];
+  if (typeof record["function_name"] === "string")
+    return record["function_name"];
+  return callId;
+}
+
+function sdkFunctionCallStatus(value: unknown): string {
+  return value === "in_progress" ||
+    value === "completed" ||
+    value === "incomplete"
+    ? value
+    : "completed";
+}
+
+function sdkFunctionCallOutput(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value
+    .map(toSdkStructuredOutputContentPart)
+    .filter((part): part is Record<string, unknown> => part !== null);
+}
+
+// Preserves provider-attached metadata across a compaction replay round-trip.
+//
+// A stored `function_call_output` row carries whatever the server stamped on it, which
+// is an open-ended set — so this is deliberately a *denylist* (the complement of
+// `RAW_FUNCTION_OUTPUT_KEYS`) rather than an allowlist of keys we recognise: a field
+// nobody has seen yet survives by default instead of being silently dropped. Dropping
+// is the real hazard, not a cosmetic one. Converting the resulting item back to the
+// wire emits only `type`/`id`/`call_id`/`output`/`status` plus the snake-cased
+// `providerData`, so any raw key that is neither consumed into a first-class field nor
+// rehomed here is deleted from the history permanently, on the first replay.
+//
+// Maintenance hazard: the SDK keeps its own near-identical reserved-key list for this
+// conversion (`type`, `id`, `call_id`, `output`, `status`, `namespace`). Ours is that
+// list plus `callId`, `name`, and `function_name`. The two are intentionally not the
+// same, so they cannot be kept in sync mechanically — when a new field is consumed in
+// `toSdkFunctionCallResultItem`, add it to `RAW_FUNCTION_OUTPUT_KEYS` too, or it will
+// be written into `providerData` as well as its own field and round-trip twice.
+function rawFunctionOutputProviderData(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record).filter(
+      ([key]) => !RAW_FUNCTION_OUTPUT_KEYS.has(key),
+    ),
+  );
+}
+
+function toSdkFunctionCallResultItem(
+  record: Record<string, unknown>,
+): AgentInputItem {
+  const callId = record["call_id"] ?? record["callId"];
+  if (typeof callId !== "string") return unreplayableToolOutputMessage();
+
+  const providerData = rawFunctionOutputProviderData(record);
+  const result: Record<string, unknown> = {
+    type: "function_call_result",
+    callId,
+    name: sdkFunctionCallName(record, callId),
+    ...(typeof record["namespace"] === "string"
+      ? { namespace: record["namespace"] }
+      : {}),
+    status: sdkFunctionCallStatus(record["status"]),
+    output: sdkFunctionCallOutput(record["output"]),
+    ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
+  };
+  if (typeof record["id"] === "string") result["id"] = record["id"];
+  return result as unknown as AgentInputItem;
 }
 
 export function prepareFunctionItemForModelInput(
@@ -208,7 +374,7 @@ export function prepareFunctionItemForModelInput(
     return withCallIdField(record, "callId");
   }
   if (itemType === "function_call_output") {
-    return omittedToolOutputMessage();
+    return toSdkFunctionCallResultItem(record);
   }
   return item;
 }

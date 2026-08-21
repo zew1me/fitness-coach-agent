@@ -24,10 +24,23 @@ export type StoredContextEstimate = {
   nonUserItemCount: number;
 };
 
+function serializedByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+// Token estimate for any JSON-serializable payload. The compaction request input is
+// a Responses `ResponseInput`, not `AgentInputItem[]`, and only its token size is
+// wanted — `itemCount`/`nonUserItemCount` do not carry the same meaning once items
+// are in wire shape, since the `role` check misreads them. Estimating it directly
+// avoids casting a `ResponseInput` through `estimateStoredContext` to reach one field.
+function estimateSerializedTokens(value: unknown): number {
+  return Math.ceil(serializedByteLength(value) / 4);
+}
+
 export function estimateStoredContext(
   items: AgentInputItem[],
 ): StoredContextEstimate {
-  const bytes = new TextEncoder().encode(JSON.stringify(items)).byteLength;
+  const bytes = serializedByteLength(items);
   return {
     bytes,
     estimatedTokens: Math.ceil(bytes / 4),
@@ -42,6 +55,39 @@ function usageDetail(value: unknown, key: string): number {
   if (value === null || typeof value !== "object") return 0;
   const detail = (value as Record<string, unknown>)[key];
   return typeof detail === "number" ? detail : 0;
+}
+
+export type TokenEstimateComparison = {
+  estimateMinusActualTokens: number;
+  estimateErrorPercent: number | null;
+  estimatedToActualRatio: number | null;
+};
+
+function roundCalibrationMetric(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+export function compareTokenEstimate(
+  estimatedTokens: number,
+  actualTokens: number,
+): TokenEstimateComparison {
+  const estimateMinusActualTokens = estimatedTokens - actualTokens;
+  if (actualTokens <= 0) {
+    return {
+      estimateMinusActualTokens,
+      estimateErrorPercent: null,
+      estimatedToActualRatio: null,
+    };
+  }
+  return {
+    estimateMinusActualTokens,
+    estimateErrorPercent: roundCalibrationMetric(
+      (estimateMinusActualTokens / actualTokens) * 100,
+    ),
+    estimatedToActualRatio: roundCalibrationMetric(
+      estimatedTokens / actualTokens,
+    ),
+  };
 }
 
 type OpenAICompactOptions = Partial<
@@ -158,12 +204,29 @@ type CompactResponse = Awaited<ReturnType<OpenAI["responses"]["compact"]>>;
 function logCompactionTelemetry(params: {
   trigger: CompactionTrigger;
   before: StoredContextEstimate;
+  preparedInputTokens: number;
   after: StoredContextEstimate;
   latencyMs: number;
   casRetries: number;
   compacted: CompactResponse;
 }): void {
-  const { trigger, before, after, latencyMs, casRetries, compacted } = params;
+  const {
+    trigger,
+    before,
+    preparedInputTokens,
+    after,
+    latencyMs,
+    casRetries,
+    compacted,
+  } = params;
+  const storedTokenComparison = compareTokenEstimate(
+    before.estimatedTokens,
+    compacted.usage.input_tokens,
+  );
+  const preparedTokenComparison = compareTokenEstimate(
+    preparedInputTokens,
+    compacted.usage.input_tokens,
+  );
   Sentry.logger.info("coach compaction complete", {
     trigger,
     before_bytes: before.bytes,
@@ -176,6 +239,19 @@ function logCompactionTelemetry(params: {
     cas_retries: casRetries,
     request_count: 1,
     input_tokens: compacted.usage.input_tokens,
+    stored_estimated_input_tokens: before.estimatedTokens,
+    stored_estimate_minus_actual_tokens:
+      storedTokenComparison.estimateMinusActualTokens,
+    stored_estimate_error_percent: storedTokenComparison.estimateErrorPercent,
+    stored_estimated_to_actual_ratio:
+      storedTokenComparison.estimatedToActualRatio,
+    prepared_estimated_input_tokens: preparedInputTokens,
+    prepared_estimate_minus_actual_tokens:
+      preparedTokenComparison.estimateMinusActualTokens,
+    prepared_estimate_error_percent:
+      preparedTokenComparison.estimateErrorPercent,
+    prepared_estimated_to_actual_ratio:
+      preparedTokenComparison.estimatedToActualRatio,
     cached_tokens: usageDetail(
       compacted.usage.input_tokens_details,
       "cached_tokens",
@@ -258,13 +334,19 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     }
 
     const trigger: CompactionTrigger = args.force === true ? "forced" : "auto";
+    const compactionInput = buildCompactionInput(items, (item) =>
+      this.prepareHistoryItemForModelInput(item),
+    );
+    const preparedInputTokens = estimateSerializedTokens(compactionInput);
     const compacted = await this.getClient().responses.compact({
       ...toOpenAICompactOptions(args),
       model: this.options.model ?? "gpt-5.6-luna",
-      input: buildCompactionInput(items, (item) =>
-        this.prepareHistoryItemForModelInput(item),
-      ),
+      input: compactionInput,
     });
+    // OpenAI defines compacted.output as the canonical replacement window.
+    // Persist it wholesale: individual prior messages or tool pairs are not
+    // guaranteed to be retained, so splicing input items back in would undo
+    // compaction and could create an invalid or duplicated conversation.
     const output = assertValidCompactionOutput(compacted.output);
     const after = estimateStoredContext(output);
 
@@ -276,6 +358,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     logCompactionTelemetry({
       trigger,
       before,
+      preparedInputTokens,
       after,
       latencyMs: Math.round(performance.now() - startedAt),
       casRetries: this.options.underlyingSession.getLastCasRetries?.() ?? 0,

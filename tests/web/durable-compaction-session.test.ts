@@ -4,8 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_AUTO_COMPACT_TOKENS,
   DurableCompactionSession,
+  compareTokenEstimate,
   estimateStoredContext,
 } from "../../lib/agent/durable-compaction-session";
+
+const sentryMocks = vi.hoisted(() => ({
+  logger: { info: vi.fn() },
+}));
+
+vi.mock("@sentry/nextjs", () => sentryMocks);
 
 const userItem = (text: string): AgentInputItem => ({
   role: "user",
@@ -61,6 +68,23 @@ describe("DurableCompactionSession", () => {
       }),
     );
     expect(result?.usage.totalTokens).toBe(12);
+    const estimatedInputTokens = estimateStoredContext([
+      userItem("old"),
+    ]).estimatedTokens;
+    expect(sentryMocks.logger.info).toHaveBeenCalledWith(
+      "coach compaction complete",
+      expect.objectContaining({
+        input_tokens: 10,
+        stored_estimated_input_tokens: estimatedInputTokens,
+        stored_estimate_minus_actual_tokens: estimatedInputTokens - 10,
+        stored_estimate_error_percent: expect.any(Number),
+        stored_estimated_to_actual_ratio: expect.any(Number),
+        prepared_estimated_input_tokens: estimatedInputTokens,
+        prepared_estimate_minus_actual_tokens: estimatedInputTokens - 10,
+        prepared_estimate_error_percent: expect.any(Number),
+        prepared_estimated_to_actual_ratio: expect.any(Number),
+      }),
+    );
   });
 
   it("normalizes SDK function_call_result items to Responses API function_call_output for compact requests", async () => {
@@ -540,6 +564,25 @@ describe("DurableCompactionSession", () => {
 
     const request = client.responses.compact.mock.calls[0]?.[0];
     expect(request?.input?.[0]).toEqual(userItem("x"));
+    const telemetry = sentryMocks.logger.info.mock.lastCall?.[1] as Record<
+      string,
+      number
+    >;
+    // Both keys are required fields of the emitted telemetry. The index signature
+    // widens to `number | undefined`, and defaulting the prepared estimate to 0 to
+    // satisfy that would degrade the comparison into "stored estimate > 0" — a
+    // regression that drops the key would then pass silently. Narrow by throwing
+    // instead, so a missing key fails the test on its own terms.
+    const preparedTokens = telemetry["prepared_estimated_input_tokens"];
+    if (typeof preparedTokens !== "number") {
+      throw new Error(
+        "telemetry is missing prepared_estimated_input_tokens: " +
+          JSON.stringify(telemetry),
+      );
+    }
+    expect(telemetry["stored_estimated_input_tokens"]).toBeGreaterThan(
+      preparedTokens,
+    );
   });
 
   it("strips provider metadata nested inside content parts", async () => {
@@ -731,6 +774,29 @@ describe("DurableCompactionSession", () => {
       /refusing to wipe durable context/,
     );
     expect(underlying.replaceAll).not.toHaveBeenCalled();
+  });
+});
+
+describe("compareTokenEstimate", () => {
+  it("reports over- and under-estimates with a signed error", () => {
+    expect(compareTokenEstimate(1_000, 800)).toEqual({
+      estimateMinusActualTokens: 200,
+      estimateErrorPercent: 25,
+      estimatedToActualRatio: 1.25,
+    });
+    expect(compareTokenEstimate(600, 800)).toEqual({
+      estimateMinusActualTokens: -200,
+      estimateErrorPercent: -25,
+      estimatedToActualRatio: 0.75,
+    });
+  });
+
+  it("avoids dividing by zero when usage is unavailable", () => {
+    expect(compareTokenEstimate(100, 0)).toEqual({
+      estimateMinusActualTokens: 100,
+      estimateErrorPercent: null,
+      estimatedToActualRatio: null,
+    });
   });
 });
 
