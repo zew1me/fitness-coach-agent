@@ -84,7 +84,11 @@ describe("toAgentInputItems", () => {
     expect(toAgentInputItems(messages)).toEqual([]);
   });
 
-  it("converts a non-image file attachment to input_file", () => {
+  it("converts an unsupported (non-image) file attachment to a text reference that preserves the public_url link", () => {
+    // OpenAI cannot ingest activity files (.fit/.gpx); sending them as
+    // `input_file` is rejected and poisons the durable session.  They must
+    // become text — but the link to the actual uploaded file (public_url /
+    // object_key) must survive so the coach can still reach the content.
     const messages: UIMessage[] = [
       {
         id: "message-1",
@@ -105,9 +109,48 @@ describe("toAgentInputItems", () => {
         role: "user",
         content: [
           {
-            type: "input_file",
-            file: { url: "https://files.example/activity.gpx" },
-            filename: "activity.gpx",
+            type: "input_text",
+            text:
+              "Uploaded file: activity.gpx\n" +
+              "content_type=application/gpx+xml\n" +
+              "public_url=https://files.example/activity.gpx\n" +
+              "object_key=activity.gpx",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("converts a .zip file attachment to a link-preserving text reference so the coach can unpack it", () => {
+    // A .zip is non-image, so it must become text (never input_file) while
+    // preserving the object_key/public_url the coach passes to
+    // process_uploaded_file for server-side unpacking.
+    const messages: UIMessage[] = [
+      {
+        id: "message-1",
+        role: "user",
+        parts: [
+          {
+            type: "file",
+            filename: "garmin-export.zip",
+            mediaType: "application/zip",
+            url: "https://files.example/garmin-export.zip",
+          },
+        ],
+      },
+    ];
+
+    expect(toAgentInputItems(messages)).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text:
+              "Uploaded file: garmin-export.zip\n" +
+              "content_type=application/zip\n" +
+              "public_url=https://files.example/garmin-export.zip\n" +
+              "object_key=garmin-export.zip",
           },
         ],
       },

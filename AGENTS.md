@@ -6,14 +6,9 @@ This file provides guidance to agents when working with code in this repository.
 
 A ChatGPT like experience for endurance coaching. Athletes log in via magic link, manage their fitness profiles, and submit check-ins, and get plans.
 
-Two runtimes:
-
-- **Next.js 15 frontend** (TypeScript, Supabase Auth, App Router)
-- **Python FastAPI backend** running on Vercel Functions (`api/index.py` entrypoint)
-
 ## Commands
 
-**Package manager: Bun**
+### Package manager: Bun
 
 ```bash
 # Local dev (local Supabase + Next.js in one command)
@@ -30,15 +25,89 @@ bun run typecheck  # tsc + Next.js typegen
 bun run test     # Vitest unit tests (tests/web/)
 bun run check    # lint + typecheck + test
 
-# Python backend
-uv run pytest tests/python/          # all Python tests
-uv run pytest tests/python/test_api.py  # single test file
+# Python backend and uv workspace tools
+uv run pytest                         # all Python and workspace-tool tests
+uv run pytest tests/python/test_api.py  # single application test file
+uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
+uv run pytest tools/self-data-backup/tests/  # backup workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
+uv run ty check                      # type checking
+uv run vulture                       # dead-code detection
 ```
 
+## Scripts and local tools
+
+Before adding or expanding repository automation, read [SCRIPTS.md](SCRIPTS.md). Keep narrow,
+one-shot repository glue in `scripts/`; build durable, configurable, dependency-owning, or
+user-facing Python CLIs as Typer packages under `tools/` in the uv workspace. Update the shared
+lockfile and root checks whenever a workspace tool is added.
+
+## ast-grep guardrails
+
+Use the locally pinned `ast-grep` CLI to discover and preserve repository-specific structural
+contracts; it complements, but does not replace, ESLint, Ruff, or type checking.
+
+- Before an unfamiliar change, use an AST query from [`docs/ast-grep.md`](docs/ast-grep.md) to find
+  existing implementation patterns rather than relying on text matches.
+- After an edit, run `bun run ast-grep:changed`; before handing work off, run
+  `bun run ast-grep:check`.
+- Add a rule only for a demonstrated review, regression, or incident pattern. Each rule needs
+  valid and invalid cases under `.ast-grep/rule-tests/`; keep it narrowly scoped and free of
+  false positives. Use a tested interactive rewrite for mechanical migrations.
+
+## External Service CLI Tools
+
+Use these CLIs when they match the task. Verify availability before use:
+
+```sh
+command -v <tool>
+```
+
+| Tool       | Use it for                                                                 | Progressive-disclosure brief                               |
+| ---------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `vercel`   | Deployments, runtime logs, project settings, and environment variables     | [`docs/cli-tools/vercel.md`](docs/cli-tools/vercel.md)     |
+| `supabase` | Local services, migrations, database checks, and hosted project operations | [`docs/cli-tools/supabase.md`](docs/cli-tools/supabase.md) |
+| `sentry`   | Issues, events, traces, logs, releases, and Sentry API access              | [`docs/cli-tools/sentry.md`](docs/cli-tools/sentry.md)     |
+
+Do not load every brief preemptively. Select the relevant tool, then read its brief before an
+unfamiliar, destructive, externally visible, or organization-specific operation. The catalog and
+loading order live in [`docs/cli-tools/README.md`](docs/cli-tools/README.md).
+
+### CodeGraph
+
+Local structural code graph for navigating unfamiliar or large repositories. It relies on a
+generated local `.codegraph/` index. Invoke the local development dependency with
+`bunx --no-install codegraph`.
+
+Use when you need to:
+
+- locate symbols and their definitions
+- understand callers, callees, imports, or inheritance
+- trace relationships between multiple symbols
+- estimate the blast radius of a change
+- identify tests likely affected by changed files
+- orient within a large repository without repeatedly scanning it
+
+Prefer ordinary `rg`, `fd`, file reads, or LSP for simple exact lookups. Before structural queries,
+generate or update the local `.codegraph/` index.
+
+Read: [`docs/cli-tools/codegraph.md`](docs/cli-tools/codegraph.md)
+
+Prefer repository-defined commands over hand-built equivalents, deterministic non-interactive
+execution, bounded output, and machine-readable output when supported. Use this discovery order:
+
+1. Read the tool's project brief.
+2. Run `<tool> --help`, then the command group's or exact command's `--help`.
+3. Consult upstream documentation only if the brief and installed CLI help are insufficient.
+
 ## Architecture
+
+### Runtimes
+
+- **Next.js 15 frontend** (TypeScript, Supabase Auth, App Router)
+- **Python FastAPI backend** running on Vercel Functions (`api/index.py` entrypoint)
 
 ### Frontend (`app/`, `components/`, `lib/`)
 
@@ -48,6 +117,7 @@ Next.js 15 App Router. Key pages:
 - `app/auth/callback/page.tsx` — Supabase auth callback
 - `app/consent/page.tsx` — OAuth consent UI (POSTs to `/api/oauth/authorize/decision`)
 - `app/profile/page.tsx` — athlete profile management
+- `app/calendar/page.tsx` — read-only training calendar (past 42 days + upcoming 8 weeks of planned workouts and recorded activities via `GET /api/calendar`; issue #212 MVP)
 
 `lib/` contains shared TS utilities: Supabase browser client (`supabase.ts`), Zod schemas (`schemas.ts`), TypeScript types (`types.ts`), and site config (`site.ts`).
 
@@ -59,6 +129,62 @@ Next.js 15 App Router. Key pages:
 - `backend/models/` — Pydantic models: `auth.py` (OAuth + JWT), `planning.py` (plans), `storage.py` (R2)
 - `backend/repos/` — Supabase persistence: `oauth_repo.py` (grants/codes/refresh tokens), `supabase_repo.py` (athlete profiles + check-ins)
 - `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `planner.py` (14-day plan composition), `r2.py` (Cloudflare R2 presigned URLs)
+
+`api/index.py` has a centralized `PostgRESTAPIError` exception handler that maps
+Postgres SQLSTATE codes to the shared 409/422/503 response contract. Route handlers
+should normally let `PostgRESTAPIError` propagate to it and catch only transport-level
+`httpx.HTTPError`. Catch `PostgRESTAPIError` locally only when an endpoint intentionally
+requires a different response contract, and document that exception at the catch site.
+
+### Plan lifecycle & adjust semantics
+
+There is **one active plan** per athlete, and it is the source of truth for the
+calendar (`GET /api/calendar`) and compliance (`get-compliance-summary`), both of
+which read the single canonical `plan_workouts` table. The calendar read enforces
+this invariant directly (`_scope_planned_workouts_to_active_plan` in
+`api/index.py`, issue #315): it drops future, `status='scheduled'`, unmatched rows
+belonging to non-active plans at read time — the read-time mirror of
+`delete_future_scheduled_workouts` — so correctness no longer depends solely on
+the generate-time cleanup side-effect. History (past/completed/matched rows) from
+superseded plans is preserved.
+
+- **Generate** (`POST /api/engine/generate-plan-structure`) = _new plan_. It inserts a
+  new `training_plans` row, supersedes the prior active plan (status flip), and then
+  **cleans up** the superseded plan's future scheduled workouts via
+  `delete_future_scheduled_workouts` so the calendar shows a single coherent timeline.
+  A genuinely new goal is allowed to start compliance fresh; completed/matched workouts
+  stay on the superseded plan and are no longer counted because compliance reads only
+  the active plan, so the percentage resets. Prefer adjust over regenerate when you
+  want to preserve history.
+- **Adjust** (`POST /api/engine/adjust-plan {plan_id, reason}`) = _edit future in place_.
+  It never spawns a new plan; it recomposes only the remaining weeks (`from today+1`) on
+  the **same** `plan_id` from the plan's stored `phases` skeleton, preserving the TSS ramp.
+  Completed/matched workouts are never touched, so compliance history (and %) is intact.
+  Each adjust appends an audit entry to `training_plans.generation_context.adjustments`.
+- **Cleanup primitive:** `delete_future_scheduled_workouts` only removes _future,
+  `status='scheduled'`, unmatched_ rows — completed/matched rows carry
+  `actual_activity_id`/`completion_source` and are history. Both generate-cleanup and
+  adjust reuse it.
+- **Schedule feeds composition (#232):** `compose_plan_workouts` honors the weekly pattern
+  _and_ dated `schedule_overrides` (unavailable date ⇒ forced rest; `max_hours` caps that
+  day's TSS). `update-schedule` merge semantics: `weekly_pattern` = full replacement;
+  `overrides` = per-date upsert on `(user_id, override_date)`.
+
+No new tables were introduced for this lifecycle work (all app-level).
+
+### OpenAI model resilience
+
+Coach turns use the model ladder defined in `lib/agent/model-tiers.ts`: `gpt-5.6-luna`
+(medium), then `gpt-5.4-mini` (medium), then `gpt-5.6-terra` (low). SDK calls retry
+429/503/network failures before the orchestrator falls back to the next model. The
+module-scope circuit breaker opens after three consecutive rate-limited turns,
+allows one lazy half-open probe after its cooldown, and automatically closes on
+success. Breaker state is per serverless instance, not org-global; the first request
+after cooldown is its heartbeat because Vercel may freeze instances between requests.
+
+Reasoning effort is a fail-closed compatibility boundary. Every configured effort
+must pass through `clampEffort()` before reaching `modelSettings`; update
+`MODEL_SUPPORTED_EFFORTS` only after confirming the model's documented support.
 
 ### OAuth Flow
 
@@ -78,8 +204,7 @@ Migrations in `supabase/migrations/`:
 
 - `0001_schema.sql` — initial schema (athlete profiles, check-ins, OAuth tables, chat tables, etc.)
 - `0002_nutrition.sql` — nutrition tracking
-- `0003_fitness_thresholds.sql` — sport-specific threshold source metadata
-- `0004_chat_messages_parts.sql` — adopts AI SDK `UIMessage.parts` JSON shape on `chat_messages` (see "Chat persistence" below)
+- ... see dir for more.
 
 When introducing a new migration, update `docs/supabase-migration-history.md`
 in the same change so migration ordering and any environment-specific repair
@@ -93,11 +218,86 @@ Use separate Supabase projects per environment (development (local) / preview / 
 
 The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
 
-### Storage — current reality vs. intent
+#### Compaction
 
-**Intent.** Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
+See [COMPACTION_DESIGN.md](COMPACTION_DESIGN.md).
 
-**Current reality.** Chat image attachments are now persisted to `chat_messages.parts` as R2 `public_url` references (issue #163 fix). The client refuses to send a message whose attachment lacks a `public_url`, so any base64 `data:` URL in `parts[i].url` is a stale row from before the fix landed. Whether R2 is referenced by anything else in the running app is **issue #164**.
+### Storage
+
+Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
+
+### Courses versus recorded activities (uploaded GPX/FIT/TCX)
+
+An upload is a **course** — something the athlete plans to do — only when the file's own
+evidence says so; anything carrying recording evidence is an activity and takes the normal
+persistence path. Once classified as a course, it must never reach `activities`. Persisting
+one credits the athlete with a workout they have not done, dates it today (a course has no
+real start time), and lets it compete to satisfy a planned workout.
+
+Classification is **from the file only**; there is deliberately no model-judged override
+and no `treat_as` parameter, because the file answers the question definitively and
+tool-selection ambiguity is already a known failure mode (#336). Each format offers
+different evidence, so each is tested separately (`backend/engine/gpx_parser.py`):
+
+| Format | Course when                                                    | Why not the others' test                                                                    |
+| ------ | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| GPX    | the track/route spans no **elapsed** time                      | GPX has no course marker of its own                                                         |
+| FIT    | no `session`, plus a `course` message or `file_id.type=course` | FIT course timestamps are synthetic, so absence-of-time would misfire                       |
+| TCX    | no `Activity` anywhere, but a `Course` exists                  | `<Activities>` vs `<Courses>` is structural; Course trackpoints legitimately carry `<Time>` |
+
+**Elapsed time, not the presence of `<time>` — and this is a GPX rule only.** Route
+builders stamp synthetic timestamps, one on the first point or the same instant on
+every point, so testing for absence-of-any-timestamp let those through as recordings.
+A GPX recording always spans a positive interval; a GPX course never does. That also
+covers empty and waypoint-only files, where reporting a zero-distance course beats
+writing a phantom workout dated today.
+
+**Do not generalise it to the other two formats.** FIT and TCX say what they are
+structurally, and their course files legitimately carry timestamps — a FIT course
+message writes synthetic ones, and a TCX Course trackpoint carries a real `<Time>`.
+Applying the elapsed-time test to either would classify genuine courses as recordings
+and put them straight back into `activities`, which is the bug this whole section
+exists to prevent. Each format uses the evidence in its own row of the table above.
+
+Each format checks the _recording_ evidence first: TCX looks for `Activity` before
+`Course`, and FIT for `session` before either course signal, so a file carrying both —
+a ride that embeds the course it followed — stays an activity. For TCX that also means
+every file which parses today is unaffected; only the case that used to raise
+`ValueError` changes.
+
+The parsers return `ParsedActivity | ParsedCourse`; both upload endpoints
+(`process-uploaded-file` and the per-member zip path) branch on it. A course is analyzed
+by `backend/services/course.py` — terrain from `backend/engine/course_profile.py`, pacing
+from `backend/engine/course_analyzer.py` using the athlete's own FTP/weight/threshold
+pace — and returned with `kind: "course"`, **writing nothing**. Saved activities carry
+`kind: "activity"`. Missing athlete data degrades to terrain plus
+`analysis_unavailable_reason`; it never fails the upload.
+
+Sport resolves in three steps: the file's declared type (`<type>`, FIT `course.sport`)
+via `_canonical_sport`, then pace inference, then `"general"`. A declared type wins over
+pace inference for recordings too — pace misreads a stop-heavy ride as a run, and the
+file simply says which it is.
+
+**Never reintroduce a hardcoded sport fallback.** Pace inference needs elapsed time,
+which a course has none of, so the old `"running"` default labelled every uploaded ride
+a run. That is not cosmetic: sport is a hard equality gate in
+`match_activities_to_workouts` (`backend/services/compliance.py`), so a wrong label makes
+an activity silently fail to match its planned workout — and potentially match someone
+else's. `"general"` is the honest answer when the file does not say, and the coach is
+instructed to ask.
+
+### Unsupported file attachments → text (do not send to the model as `input_file`)
+
+OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
+
+**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards both `/api/chat/attachments/presign` and `/api/files/presign-upload` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`. Everything else (including PDFs) returns 400 with a message telling the athlete to paste content as text.
+
+Contract: every non-image, non-rejected file part (i.e. `.fit` / `.gpx` activity files) is converted to an `input_text` description that **preserves the link** (`public_url` / `object_key`) so the coach can still resolve it — files are never dropped silently. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
+
+**Durable session caveat.** The durable model state (`chat_model_states.items`, used when `COACH_CONTEXT_STRATEGY` ≠ `full_history`) replays every stored item each turn, so one poisoned `input_file` breaks the thread permanently. Two defenses, both required:
+
+- `SupabaseAgentSession.prepareHistoryItemForModelInput` (`lib/agent/supabase-agent-session.ts`) strips `input_image` and rewrites any already-stored `input_file` → link-preserving text. The SDK applies this to history before every model turn, so old threads self-heal on the run path.
+- The delegation planner reads `getItems()` **raw**, so legacy poisoned rows also need a one-time data rewrite of `chat_model_states.items` (per environment — preview and production are separate Supabase projects).
 
 ## Environment Variables
 
@@ -109,11 +309,20 @@ See `.env.example`. Required:
 - `OPENAI_API_KEY` — plan generation
 - `R2_*` — file uploads
 
+## Documentation
+
+`docs/` holds living design docs alongside point-in-time artifacts — know which is which before editing:
+
+- Changing the compaction/durable-session subsystem (`lib/agent/responses-item-shapes.ts`, `lib/agent/supabase-agent-session.ts`, `lib/agent/durable-compaction-session.ts`, `lib/agent/orchestrator.ts`) → update `docs/COMPACTION_DESIGN.md` in the same change.
+- Adding/changing a Supabase migration → update `docs/supabase-migration-history.md` (see the Database section above).
+- `docs/cli-tools/` contains progressive-disclosure briefs for external service CLIs; keep the relevant brief current when project-specific CLI workflows or safety constraints change.
+- `docs/github-issues/` is an archive of point-in-time issue proposals, not a living doc — don't update it as code changes.
+
 ## Tests
 
 - Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
-- Python tests: `tests/python/` — pytest with `asyncio_mode = "auto"`
-- Python test config: `conftest.py` for fixtures
+- Python tests: `tests/python/` plus co-located `tools/*/tests/` workspace-tool tests — pytest with `asyncio_mode = "auto"`
+- Python test config: `conftest.py` for application fixtures; workspace tools should keep tool-specific fixtures local
 
 ## Local hooks (lefthook)
 
@@ -127,6 +336,7 @@ Runs in parallel on staged files only. Fixes are re-staged automatically (`stage
 | ---------------- | --------------------------------------------------------------------------------------------------------------- |
 | `eslint-fix`     | ESLint `--fix` on staged `*.{ts,tsx,js,mjs,cjs}`                                                                |
 | `prettier-write` | Prettier on staged `*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}`                                                     |
+| `stylelint-fix`  | Stylelint `--fix` on staged `*.css`                                                                             |
 | `ruff-fix`       | `ruff check --fix` on staged `*.py`                                                                             |
 | `ruff-format`    | `ruff format` on staged `*.py`                                                                                  |
 | `actionlint`     | Lints `.github/workflows/` files (only when they are staged); gracefully skips if `actionlint` is not installed |
@@ -140,10 +350,12 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | Step                | Command                                                                       |
 | ------------------- | ----------------------------------------------------------------------------- |
 | `lint`              | `bun run lint`                                                                |
+| `stylelint`         | `bun run lint:css`                                                            |
 | `ruff-check`        | `uv run ruff check .`                                                         |
 | `ruff-format-check` | `uv run ruff format --check .`                                                |
 | `typecheck`         | `bun run typecheck`                                                           |
 | `ty`                | `uv run ty check`                                                             |
+| `vulture`           | `uv run vulture`                                                              |
 | `vitest`            | `bun run test`                                                                |
 | `pytest`            | `uv run pytest`                                                               |
 | `cpd`               | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
@@ -174,7 +386,8 @@ You MUST pass hooks all of the time!
 ## Code Conventions
 
 - TypeScript strict mode; ESLint zero-warnings policy
-- Python: Ruff linting + formatting, 100-char line length, `ty` for type checking
+- Python: Ruff linting + formatting, 100-char line length, `ty` for type checking, `vulture` for dead-code detection
+- Every tool suppression or ignore (including config entries and inline directives) must have a nearby, easy-to-understand comment explaining why the rule does not apply; do not merely restate the rule
 - Zod schemas in `lib/schemas.ts` for all API validation boundaries
 - All Python async handlers use `async def`
 - Bearer token auth: clients pass `Authorization: Bearer <jwt>`; server validates via `require_user_context()`

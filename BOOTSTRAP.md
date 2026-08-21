@@ -6,7 +6,7 @@ This document covers how to provision preview and production infrastructure for 
 
 `.env.bootstrap` holds your **platform admin credentials** — the tokens used to manage infrastructure. These are shared across environments. The `--env` flag determines which environment is being provisioned.
 
-```
+```text
 .env.bootstrap          → who you are (admin tokens, shared app secrets)
 --env preview|prod      → which environment to operate on
 .state.{env}.json       → generated secrets for that env (Supabase DB password, R2 token, JWT secret)

@@ -5,10 +5,13 @@ description = "ChatGPT-first endurance coaching app with Python planning service
 requires-python = ">=3.12"
 dependencies = [
   "boto3>=1.37.18,<2.0.0",
+  "cryptography>=46.0.5,<47.0.0",
   "fastapi>=0.115.12,<0.116.0",
   "fitparse>=1.2.0",
   "gpxpy>=1.6.2",
   "httpx>=0.28.1,<0.29.0",
+  "httpx-retries>=0.6.0,<0.7.0",
+  "openai>=1.99.0,<2.0.0",
   "pydantic>=2.10.6,<3.0.0",
   "pydantic-settings>=2.8.1,<3.0.0",
   "pyjwt>=2.10.1,<3.0.0",
@@ -20,11 +23,21 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "fitness-coach-garmin-sidecar",
+  "fitness-coach-self-data-backup",
   "pytest>=8.3.5,<9.0.0",
   "pytest-asyncio>=0.25.3,<0.26.0",
   "ruff>=0.11.0,<0.12.0",
-  "ty>=0.0.1a4"
+  "ty>=0.0.1a4",
+  "vulture>=2.14,<3.0",
 ]
+
+[tool.uv.sources]
+fitness-coach-garmin-sidecar = { workspace = true }
+fitness-coach-self-data-backup = { workspace = true }
+
+[tool.uv.workspace]
+members = ["tools/*"]
 
 [tool.ruff]
 line-length = 100
@@ -50,6 +63,8 @@ select = [
   "W"
 ]
 ignore = [
+  # API and repository errors intentionally carry context-specific messages at each raise site;
+  # dedicated exception classes for every message would add indirection without reuse.
   "TRY003"
 ]
 
@@ -57,9 +72,21 @@ ignore = [
 max-complexity = 8
 
 [tool.ruff.lint.per-file-ignores]
+# FastAPI uses Depends() and File() calls in parameter defaults to declare request injection.
 "api/**/*.py" = ["B008"]
+# Each parameter is a user-facing Typer argument or option, so keeping the command signature flat
+# is clearer than wrapping its six CLI inputs in an internal configuration object.
+"tools/garmin-sidecar/src/fitness_coach_garmin_sidecar/cli.py" = ["PLR0913"]
+# Vercel requires this bracketed route filename and its sole import exists to export the ASGI app.
 "api/[...route].py" = ["F401", "N999"]
+# Pytest assertions, literal expected values, and explicit fixture/helper inputs are clearest in tests.
 "tests/python/**/*.py" = [
+  "PLR2004",
+  "PLR0913",
+  "S101"
+]
+# Workspace-tool tests use assertions, literal expected values, and explicit helper inputs too.
+"tools/*/tests/**/*.py" = [
   "PLR2004",
   "PLR0913",
   "S101"
@@ -70,8 +97,23 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.ty.src]
-include = ["api", "backend", "tests/python"]
+include = ["api", "backend", "scripts", "tests/python", "tools"]
+
+[tool.vulture]
+paths = ["api", "backend", "scripts", "tests/python", "tools"]
+min_confidence = 80
+# `activitytype` and `dl_fmt` retain python-garminconnect's keyword names so Garmin satisfies our
+# Protocol and keyword calls type-check; Vulture sees only their stub declarations. `cls` is the
+# conventional receiver name for class-level validators.
+ignore_names = ["activitytype", "cls", "dl_fmt"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/python"]
+testpaths = ["tests/python", "tools/*/tests"]
 asyncio_mode = "auto"
+# Workspace tools intentionally reuse tests/test_cli.py; importlib mode avoids module-name clashes.
+# Live OpenAI and DB integration tests are opt-in, excluded from the default run.
+addopts = "--import-mode=importlib -m 'not db and not oai'"
+markers = [
+  "db: integration tests that require a live Supabase connection (run with: uv run pytest -m db)",
+  "oai: live OpenAI API calls; excluded by default, run with `uv run pytest -m oai`",
+]

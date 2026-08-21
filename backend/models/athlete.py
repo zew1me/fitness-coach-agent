@@ -1,12 +1,34 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Source of truth for a single fitness metric value.
 # "user" = athlete typed it; "file" = extracted from GPX/FIT/screenshot;
 # "estimated" = derived by the system from workout patterns.
 ThresholdSource = Literal["user", "file", "estimated"]
+RecalibrationCandidateStatus = Literal[
+    "pending", "accepted", "kept_current", "manual_entered", "superseded"
+]
+
+_FALSY_STRINGS = frozenset({"false", "0", "no", "off", ""})
+_TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
+
+
+def _coerce_bool(val: object) -> bool | None:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        lower = val.strip().lower()
+        if lower in _FALSY_STRINGS:
+            return False
+        if lower in _TRUTHY_STRINGS:
+            return True
+    if isinstance(val, int | float):
+        return bool(val)
+    return bool(val)
 
 
 class ThresholdValue(BaseModel):
@@ -40,8 +62,8 @@ class AthleteProfile(BaseModel):
     primary_sports: list[str] = Field(default_factory=list)
     weekly_available_hours: float | None = None
     coaching_state: str = "onboarding"
-    specialization_pct: int = 80
-    onboarding_collected: dict[str, bool] = Field(default_factory=dict)
+    specialization_pct: int | None = None
+    onboarding_collected: dict[str, bool | None] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
     injuries_rehab: list[str] = Field(default_factory=list)
     notes: str | None = None
@@ -63,6 +85,13 @@ class AthleteProfile(BaseModel):
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_validator("onboarding_collected", mode="before")
+    @classmethod
+    def _coerce_onboarding_collected(cls, v: object) -> dict[str, bool | None]:
+        if not isinstance(v, dict):
+            return {}
+        return {str(k): _coerce_bool(val) for k, val in v.items()}
 
     @property
     def age(self) -> int | None:
@@ -144,6 +173,23 @@ class SportThreshold(BaseModel):
         )
 
 
+class ThresholdRecalibrationCandidate(BaseModel):
+    id: str | None = None
+    user_id: str
+    sport: str
+    status: RecalibrationCandidateStatus = "pending"
+    confidence: Literal["low", "medium", "high"]
+    evidence_activity_id: str | None = None
+    evidence_reason: str | None = None
+    explanation: str
+    candidate_threshold: SportThreshold
+    manual_threshold: SportThreshold | None = None
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    decided_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class RecoveryLog(BaseModel):
     id: str | None = None
     user_id: str
@@ -162,9 +208,27 @@ class RecoveryLog(BaseModel):
     source: str = "manual"
 
 
+_MAX_HOURS_PER_DAY = 24.0
+
+
+class ScheduleDayAvailability(BaseModel):
+    """One weekday's availability entry inside ``weekly_pattern``.
+
+    ``available`` is nullable to mirror the coach tool schema (the model treats a
+    missing/None value as available); ``max_hours`` is validated to a sane
+    ``[0, 24]`` window so a bad value is rejected at the request boundary (422).
+    """
+
+    available: bool | None = True
+    max_hours: float | None = Field(default=None, ge=0, le=_MAX_HOURS_PER_DAY)
+    notes: str | None = None
+
+
 class ScheduleAvailability(BaseModel):
     id: str | None = None
     user_id: str
+    # Persisted as an opaque jsonb map of weekday -> ScheduleDayAvailability shape;
+    # validation of individual entries happens at the request boundary.
     weekly_pattern: dict = Field(default_factory=dict)
 
 
@@ -173,5 +237,5 @@ class ScheduleOverride(BaseModel):
     user_id: str
     override_date: date
     available: bool = False
-    max_hours: float | None = None
+    max_hours: float | None = Field(default=None, ge=0, le=_MAX_HOURS_PER_DAY)
     reason: str | None = None

@@ -1,16 +1,122 @@
 import * as Sentry from "@sentry/nextjs";
 
-import { athleteProfileSchema, uploadRequestSchema } from "./schemas";
+import {
+  athleteProfileSchema,
+  type CalendarPlannedWorkout,
+  type CalendarResponse,
+  calendarResponseSchema,
+  chatMessagePageSchema,
+  chatThreadResponseSchema,
+  chatTurnLeaseStatusSchema,
+  intervalsAuthorizeResponseSchema,
+  intervalsConnectionStatusSchema,
+  intervalsSyncRequestSchema,
+  intervalsSyncResponseSchema,
+  type ParsedChatMessagePage,
+  type ParsedChatThreadResponse,
+  type ParsedChatTurnLeaseStatus,
+  resolvePlanWorkoutResponseSchema,
+  uploadRequestSchema,
+} from "./schemas";
 import type {
   AthleteProfile,
   BrowserTokenResponse,
-  ChatThreadResponse,
   FitnessMetrics,
+  IntervalsConnectionStatus,
+  IntervalsSyncResponse,
   PresignUploadRequest,
   PresignUploadResponse,
 } from "./types";
 
 type FetchLike = typeof fetch;
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export function isAuthenticationError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
+
+// Backoff schedule for transient fetch drops. iOS WebKit aborts an in-flight
+// fetch (tab suspended, cell↔Wi-Fi handoff, low-memory kill) with a TypeError
+// whose message is "Load failed"; a single silent retry recovers the request
+// before the user ever sees the Coach Unavailable card.
+const TRANSIENT_FETCH_RETRY_DELAYS_MS = [300, 900];
+
+function isTransientFetchError(error: unknown): boolean {
+  // Heuristic: WebKit emits `TypeError: Load failed` and other engines emit
+  // `TypeError: Failed to fetch` for a network-level abort, so we retry on the
+  // TypeError *type* rather than brittle message matching. The tradeoff is that
+  // a genuine client-side TypeError (a programming bug) is also retried before
+  // surfacing — acceptable since it is still re-thrown after retries, just
+  // delayed. HTTP errors surface as plain Errors and are left alone so real
+  // outages still propagate immediately.
+  return error instanceof TypeError;
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  for (
+    let attempt = 0;
+    attempt <= TRANSIENT_FETCH_RETRY_DELAYS_MS.length;
+    attempt += 1
+  ) {
+    try {
+      return await operation();
+    } catch (error) {
+      const backoffMs = TRANSIENT_FETCH_RETRY_DELAYS_MS[attempt];
+      if (
+        backoffMs === undefined ||
+        signal?.aborted ||
+        !isTransientFetchError(error)
+      ) {
+        throw error;
+      }
+      // Recovery is silent for the user, so leave a breadcrumb — otherwise a
+      // rising retry rate (frequent WebKit drops or a flaky backend) stays
+      // invisible to monitoring while requests still appear healthy.
+      Sentry.logger.debug("transient fetch retry", {
+        attempt: attempt + 1,
+        backoff_ms: backoffMs,
+      });
+      await delay(backoffMs, signal);
+      // An abort that lands mid-backoff should stop here rather than burn
+      // another token + thread fetch.
+      if (signal?.aborted) {
+        throw error;
+      }
+    }
+  }
+  // Unreachable: the loop always returns or throws above.
+  throw new Error("withRetry exhausted without resolution");
+}
 
 function normalizeErrorText(detail: string): string {
   const trimmed = detail.trim();
@@ -59,7 +165,10 @@ async function readJson<T>(response: Response): Promise<T> {
       status: response.status,
       url: response.url,
     });
-    throw new Error(detail || `Request failed with status ${response.status}`);
+    throw new ApiError(
+      response.status,
+      detail || `Request failed with status ${response.status}`,
+    );
   }
   return (await response.json()) as T;
 }
@@ -101,12 +210,24 @@ async function authorizedFetch<T>(
   return readJson<T>(response);
 }
 
-export async function loadProfile(
+type AthleteSummaryResponse = {
+  profile: AthleteProfile;
+  fitness_metrics: FitnessMetrics;
+};
+
+type AthleteSummary = {
+  profile: AthleteProfile;
+  fitnessMetrics: FitnessMetrics;
+};
+
+// `/api/engine/get-athlete-summary` returns both the profile and the fitness
+// metrics in one payload. Callers that need both (e.g. the profile page) should
+// use this loader so the endpoint is hit once instead of twice.
+export async function loadAthleteSummary(
   userId: string,
   fetchImpl: FetchLike = fetch,
-): Promise<AthleteProfile> {
-  type SummaryResponse = { profile: AthleteProfile };
-  const summary = await authorizedFetch<SummaryResponse>(
+): Promise<AthleteSummary> {
+  const summary = await authorizedFetch<AthleteSummaryResponse>(
     "/api/engine/get-athlete-summary",
     {
       method: "POST",
@@ -114,6 +235,14 @@ export async function loadProfile(
     },
     fetchImpl,
   );
+  return { profile: summary.profile, fitnessMetrics: summary.fitness_metrics };
+}
+
+export async function loadProfile(
+  userId: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<AthleteProfile> {
+  const summary = await loadAthleteSummary(userId, fetchImpl);
   return summary.profile;
 }
 
@@ -121,16 +250,54 @@ export async function loadFitnessMetrics(
   userId: string,
   fetchImpl: FetchLike = fetch,
 ): Promise<FitnessMetrics> {
-  type SummaryResponse = { fitness_metrics: FitnessMetrics };
-  const summary = await authorizedFetch<SummaryResponse>(
-    "/api/engine/get-athlete-summary",
-    {
-      method: "POST",
-      body: JSON.stringify({ user_id: userId }),
-    },
+  const summary = await loadAthleteSummary(userId, fetchImpl);
+  return summary.fitnessMetrics;
+}
+
+export async function loadIntervalsStatus(
+  fetchImpl: FetchLike = fetch,
+): Promise<IntervalsConnectionStatus> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/status",
+    { method: "GET" },
     fetchImpl,
   );
-  return summary.fitness_metrics;
+  return intervalsConnectionStatusSchema.parse(raw);
+}
+
+export async function startIntervalsAuthorization(
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/authorize",
+    { method: "POST" },
+    fetchImpl,
+  );
+  return intervalsAuthorizeResponseSchema.parse(raw).redirect_url;
+}
+
+export async function disconnectIntervals(
+  fetchImpl: FetchLike = fetch,
+): Promise<IntervalsConnectionStatus> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/connection",
+    { method: "DELETE" },
+    fetchImpl,
+  );
+  return intervalsConnectionStatusSchema.parse(raw);
+}
+
+export async function syncIntervals(
+  days = 14,
+  fetchImpl: FetchLike = fetch,
+): Promise<IntervalsSyncResponse> {
+  const payload = intervalsSyncRequestSchema.parse({ days });
+  const raw = await authorizedFetch<unknown>(
+    "/api/intervals/sync",
+    { method: "POST", body: JSON.stringify(payload) },
+    fetchImpl,
+  );
+  return intervalsSyncResponseSchema.parse(raw);
 }
 
 export async function confirmSportThreshold(
@@ -180,17 +347,84 @@ export async function saveProfile(
 
 export async function loadChatThread(
   fetchImpl: FetchLike = fetch,
-): Promise<ChatThreadResponse> {
-  const thread = await authorizedFetch<ChatThreadResponse>(
-    "/api/chat/thread",
-    { method: "GET" },
-    fetchImpl,
+  signal?: AbortSignal,
+): Promise<ParsedChatThreadResponse> {
+  const raw = await withRetry(
+    () =>
+      authorizedFetch<unknown>(
+        "/api/chat/thread",
+        { method: "GET", signal: signal ?? null },
+        fetchImpl,
+      ),
+    signal,
   );
+  const thread = chatThreadResponseSchema.parse(raw);
   Sentry.logger.debug("chat thread loaded", {
     message_count: thread.thread.messages.length,
     thread_id: thread.thread.id,
   });
   return thread;
+}
+
+export async function loadChatMessages(
+  before: string,
+  fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
+): Promise<ParsedChatMessagePage> {
+  const params = new URLSearchParams({ before, limit: "50" });
+  const page = await authorizedFetch<unknown>(
+    `/api/chat/messages?${params.toString()}`,
+    { method: "GET", signal: signal ?? null },
+    fetchImpl,
+  );
+  return chatMessagePageSchema.parse(page);
+}
+
+export async function loadChatTurnLeaseStatus(
+  fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
+): Promise<ParsedChatTurnLeaseStatus> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/chat/model-state/lease",
+    { cache: "no-store", method: "GET", signal: signal ?? null },
+    fetchImpl,
+  );
+  return chatTurnLeaseStatusSchema.parse(raw);
+}
+
+export async function loadCalendar(
+  start: string,
+  end: string,
+  fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
+): Promise<CalendarResponse> {
+  const params = new URLSearchParams({ start, end });
+  const raw = await authorizedFetch<unknown>(
+    `/api/calendar?${params.toString()}`,
+    { method: "GET", signal: signal ?? null },
+    fetchImpl,
+  );
+  return calendarResponseSchema.parse(raw);
+}
+
+export async function resolvePlannedWorkout(
+  planWorkoutId: string,
+  outcome: "completed" | "skipped",
+  fetchImpl: FetchLike = fetch,
+): Promise<CalendarPlannedWorkout> {
+  const raw = await authorizedFetch<unknown>(
+    "/api/engine/resolve-plan-workout",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        outcome,
+        plan_workout_id: planWorkoutId,
+        source: "athlete",
+      }),
+    },
+    fetchImpl,
+  );
+  return resolvePlanWorkoutResponseSchema.parse(raw).workout;
 }
 
 export async function createChatUploadIntent(

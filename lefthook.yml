@@ -12,6 +12,10 @@ pre-commit:
       glob: "*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}"
       run: ./node_modules/.bin/prettier --write {staged_files}
       stage_fixed: true
+    stylelint-fix:
+      glob: "*.css"
+      run: ./node_modules/.bin/stylelint --fix {staged_files}
+      stage_fixed: true
     ruff-fix:
       glob: "*.py"
       run: uv run ruff check --fix {staged_files}
@@ -32,6 +36,10 @@ pre-push:
   commands:
     lint:
       run: bun run lint
+    stylelint:
+      run: bun run lint:css
+    ast-grep:
+      run: bun run ast-grep:check
     ruff-check:
       run: uv run ruff check .
     ruff-format-check:
@@ -40,6 +48,8 @@ pre-push:
       run: bun run typecheck
     ty:
       run: uv run ty check
+    vulture:
+      run: uv run vulture
     vitest:
       run: bun run test
     pytest:

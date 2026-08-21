@@ -3,6 +3,7 @@ import * as Sentry from "@sentry/nextjs";
 import type { UIMessageStreamWriter } from "ai";
 
 type StreamState = {
+  lastToolName?: string;
   textId: string;
   textStarted: boolean;
 };
@@ -69,6 +70,7 @@ function handleModelDelta(
 function handleRunItem(
   event: Extract<RunStreamEvent, { type: "run_item_stream_event" }>,
   writer: UIMessageStreamWriter,
+  state: StreamState,
 ): void {
   const rawItem = record(event.item.rawItem);
   if (rawItem === null) return;
@@ -76,6 +78,7 @@ function handleRunItem(
   if (identity === null) return;
 
   if (event.name === "tool_called") {
+    state.lastToolName = identity.name;
     writer.write({
       type: "tool-input-available",
       toolCallId: identity.callId,
@@ -99,7 +102,7 @@ export function writeAgentStreamEvent(
   if (event.type === "raw_model_stream_event") {
     handleModelDelta(event, writer, state);
   } else if (event.type === "run_item_stream_event") {
-    handleRunItem(event, writer);
+    handleRunItem(event, writer, state);
   }
 }
 

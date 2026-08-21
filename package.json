@@ -2,6 +2,9 @@
   "name": "exercise-training-plan-gpt",
   "private": true,
   "packageManager": "bun@1.2.4",
+  "trustedDependencies": [
+    "@ast-grep/cli"
+  ],
   "engines": {
     "node": "24.x"
   },
@@ -12,10 +15,16 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
+    "lint:css": "stylelint '**/*.css'",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
-    "check": "bun run lint && bun run typecheck && bun run test",
+    "ast-grep": "ast-grep scan --config sgconfig.yml --error",
+    "ast-grep:changed": "bash scripts/ast-grep-changed.sh",
+    "ast-grep:test": "ast-grep test --config sgconfig.yml",
+    "ast-grep:check": "bun run ast-grep:test && bun run ast-grep",
+    "check": "bun run lint && bun run lint:css && bun run typecheck && bun run test && bun run ast-grep:check",
     "test:oai": "vitest run --config vitest.oai.config.ts",
+    "test:db": "RUN_DB_TESTS=1 uv run pytest -m db tests/python/",
     "test:ui": "playwright test",
     "format": "prettier --write .",
     "shrink:gpx": "bun scripts/shrink-gpx.ts",
@@ -31,19 +40,23 @@
     "@sentry/nextjs": "^10.58.0",
     "@supabase/ssr": "^0.10.0",
     "@supabase/supabase-js": "^2.49.1",
+    "@tanstack/react-query": "^5.101.1",
     "@vercel/analytics": "^2.0.1",
     "@vercel/speed-insights": "^2.0.0",
     "ai": "^6.0.168",
     "next": "^15.2.2",
+    "openai": "^6.44.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@ast-grep/cli": "0.45.0",
+    "@colbymchenry/codegraph": "^1.5.0",
     "@eslint/eslintrc": "^3.3.5",
     "@eslint/js": "^9.22.0",
     "@next/eslint-plugin-next": "^15.2.2",
-    "@playwright/test": "^1.59.1",
+    "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",
     "@types/node": "^22.13.14",
@@ -64,6 +77,9 @@
     "lefthook": "^2.1.9",
     "prettier": "^3.5.3",
     "simplify-js": "^1.2.4",
+    "stylelint": "^17.14.1",
+    "stylelint-config-css-modules": "^4.6.0",
+    "stylelint-config-standard": "^40.0.0",
     "typescript": "^5.8.2",
     "vitest": "^3.0.8"
   }

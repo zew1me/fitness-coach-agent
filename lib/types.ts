@@ -31,6 +31,21 @@ export type BrowserTokenResponse = {
   user_id: string;
 };
 
+export type IntervalsConnectionStatus = {
+  connected: boolean;
+  connected_at?: string | null | undefined;
+  intervals_athlete_id?: string | null | undefined;
+  intervals_athlete_name?: string | null | undefined;
+  scopes: string[];
+};
+
+export type IntervalsSyncResponse = {
+  activities: Record<string, unknown>[];
+  skipped_duplicates: number;
+  skipped_invalid: number;
+  synced: number;
+};
+
 export type AthleteProfile = {
   coaching_state: string;
   dietary_restrictions?: string[];
@@ -103,6 +118,7 @@ export type ChatThread = {
 
 export type ChatThreadResponse = {
   attachments_enabled: boolean;
+  next_cursor?: string | null;
   profile_complete: boolean;
   thread: ChatThread;
 };

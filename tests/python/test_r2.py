@@ -24,6 +24,55 @@ def test_build_object_key_scopes_to_user_and_purpose() -> None:
     assert object_key.endswith(".png")
 
 
+def test_build_object_key_public_method_scopes_to_user_and_purpose() -> None:
+    # build_object_key is called directly by the zip-image re-upload path (there is
+    # no PresignUploadRequest for that flow), so it needs its own coverage beyond
+    # the _build_object_key wrapper above.
+    service = R2Service()
+
+    object_key = service.build_object_key(
+        user_id="user-123", filename="shot.PNG", purpose="chat-attachment"
+    )
+
+    assert object_key.startswith("users/user-123/chat-attachment/")
+    assert object_key.endswith(".png")
+
+
+def test_build_object_key_public_method_sanitizes_purpose_and_generates_unique_names() -> None:
+    service = R2Service()
+
+    first = service.build_object_key(
+        user_id="user-123", filename="run.gpx", purpose="Zip Activity Member!"
+    )
+    second = service.build_object_key(
+        user_id="user-123", filename="run.gpx", purpose="Zip Activity Member!"
+    )
+
+    assert "/zip-activity-member/" in first
+    assert first != second
+
+
+def test_build_object_key_public_method_matches_wrapper_shape() -> None:
+    # _build_object_key is now a thin wrapper around build_object_key; both must
+    # produce keys with the same scoping/extension shape for the same inputs.
+    service = R2Service()
+    request = PresignUploadRequest(
+        filename="race.fit",
+        content_type="application/vnd.garmin.fit",
+        content_length=2048,
+        purpose="chat-attachment",
+    )
+
+    via_wrapper = service._build_object_key(user_id="user-123", request=request)
+    via_public_method = service.build_object_key(
+        user_id="user-123", filename="race.fit", purpose="chat-attachment"
+    )
+
+    assert via_wrapper.rsplit("/", 1)[0] == via_public_method.rsplit("/", 1)[0]
+    assert via_wrapper.endswith(".fit")
+    assert via_public_method.endswith(".fit")
+
+
 def test_public_url_uses_configured_base(monkeypatch) -> None:
     service = R2Service()
     monkeypatch.setattr(
@@ -34,6 +83,74 @@ def test_public_url_uses_configured_base(monkeypatch) -> None:
     public_url = service._build_public_url("users/u/check-in-image/file.png")
 
     assert public_url == "https://cdn.example.com/training/users/u/check-in-image/file.png"
+
+
+def test_resolve_object_key_prefers_public_url_over_mangled_key(monkeypatch) -> None:
+    # The model reliably transcribes the distinctive public_url but corrupts the
+    # long opaque object_key (splices the user-UUID head onto the file-UUID tail),
+    # which then fails the per-user scope check with a 403. The public_url wins.
+    service = R2Service()
+    monkeypatch.setattr(
+        "backend.services.r2.settings.r2_public_base_url",
+        "https://pub-abc.r2.dev",
+    )
+    correct_key = (
+        "users/c3b8909b-ea1b-4b55-86cd-6679c232edad/chat-attachment/2026/07/08/f7fad21d.fit"
+    )
+    mangled_key = "users/c3b8909b-ea1b-4bc8-ba17-7706c5e34e44.fit"
+
+    resolved = service.resolve_object_key(
+        object_key=mangled_key,
+        public_url=f"https://pub-abc.r2.dev/{correct_key}",
+    )
+
+    assert resolved == correct_key
+
+
+def test_resolve_object_key_handles_base_with_path(monkeypatch) -> None:
+    service = R2Service()
+    monkeypatch.setattr(
+        "backend.services.r2.settings.r2_public_base_url",
+        "https://cdn.example.com/training",
+    )
+    key = "users/u/chat-attachment/2026/07/08/file.fit"
+
+    resolved = service.resolve_object_key(
+        object_key="mangled",
+        public_url=f"https://cdn.example.com/training/{key}",
+    )
+
+    assert resolved == key
+
+
+def test_resolve_object_key_falls_back_when_public_url_absent(monkeypatch) -> None:
+    service = R2Service()
+    monkeypatch.setattr(
+        "backend.services.r2.settings.r2_public_base_url",
+        "https://pub-abc.r2.dev",
+    )
+    key = "users/u/chat-attachment/2026/07/08/file.fit"
+
+    assert service.resolve_object_key(object_key=key, public_url=None) == key
+    assert service.resolve_object_key(object_key=key, public_url="  ") == key
+
+
+def test_resolve_object_key_falls_back_for_url_outside_configured_base(monkeypatch) -> None:
+    # A public_url that isn't under the trusted R2 base is not authoritative;
+    # keep the model-supplied object_key rather than deriving from a stray host.
+    service = R2Service()
+    monkeypatch.setattr(
+        "backend.services.r2.settings.r2_public_base_url",
+        "https://pub-abc.r2.dev",
+    )
+    key = "users/u/chat-attachment/2026/07/08/file.fit"
+
+    resolved = service.resolve_object_key(
+        object_key=key,
+        public_url="https://evil.example.com/users/other/file.fit",
+    )
+
+    assert resolved == key
 
 
 def test_object_key_log_ref_does_not_expose_storage_path() -> None:

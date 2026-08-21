@@ -38,11 +38,16 @@ function uiMessageStream(messageId: string, text: string): string {
     { type: "finish-step" },
     { type: "finish" },
   ];
-  return chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+  return (
+    chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
+    "data: [DONE]\n\n"
+  );
 }
 
 test.describe("chat round-trip dedup (#158 / #162)", () => {
-  test("a single user→assistant exchange renders exactly one bubble per turn", async ({ page }) => {
+  test("a single user→assistant exchange renders exactly one bubble per turn", async ({
+    page,
+  }) => {
     await mockAuthenticatedSession(page);
 
     let capturedUserId: string | null = null;
@@ -54,7 +59,9 @@ test.describe("chat round-trip dedup (#158 / #162)", () => {
       const body = route.request().postDataJSON() as {
         messages?: Array<{ id?: string; role?: string }>;
       };
-      const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === "user");
+      const lastUser = [...(body.messages ?? [])]
+        .reverse()
+        .find((m) => m.role === "user");
       capturedUserId = lastUser?.id ?? null;
 
       await route.fulfill({
@@ -102,11 +109,16 @@ test.describe("chat round-trip dedup (#158 / #162)", () => {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
+          attachments_enabled: true,
+          next_cursor: null,
+          profile_complete: false,
           thread: {
             id: "thread-test-1",
             messages,
+            state: {},
             created_at: "2026-01-01T00:00:00Z",
             updated_at: "2026-01-01T00:00:02Z",
+            user_id: "test-user-123",
           },
         }),
       });
@@ -132,7 +144,11 @@ test.describe("chat round-trip dedup (#158 / #162)", () => {
     await expect(page.getByText(ASSISTANT_REPLY)).toBeVisible();
 
     // The crux: no duplicate bubbles for either role after the reload settles.
-    await expect(page.locator('[data-testid="chat-bubble"][data-role="user"]')).toHaveCount(1);
-    await expect(page.locator('[data-testid="chat-bubble"][data-role="assistant"]')).toHaveCount(1);
+    await expect(
+      page.locator('[data-testid="chat-bubble"][data-role="user"]'),
+    ).toHaveCount(1);
+    await expect(
+      page.locator('[data-testid="chat-bubble"][data-role="assistant"]'),
+    ).toHaveCount(1);
   });
 });

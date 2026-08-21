@@ -105,8 +105,21 @@
 .accountButton {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  padding: 10px;
   font-weight: 700;
+}
+
+.accountIcon {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.menuThemeRow {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 6px;
 }
 
 .accountMenu {
@@ -209,35 +222,12 @@
   padding: 24px 0 8px;
 }
 
-.emptyCard {
-  display: grid;
-  gap: 18px;
-  max-width: 720px;
-  text-align: center;
-}
-
 .eyebrow {
   color: var(--accent-strong);
   font-size: 0.83rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-.emptyTitle {
-  margin: 0;
-  color: var(--text);
-  font-size: 3.2rem;
-  letter-spacing: 0;
-  line-height: 1;
-}
-
-.emptyText {
-  margin: 0 auto;
-  max-width: 56ch;
-  color: var(--text-muted);
-  font-size: 1.02rem;
-  line-height: 1.6;
 }
 
 .starterRow {
@@ -569,11 +559,58 @@
   font-weight: 700;
 }
 
+/* Indeterminate progress dots for an in-flight assistant bubble (#406). */
+.thinkingIndicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 0;
+}
+
+.thinkingDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+.thinkingDot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.thinkingDot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes thinking-pulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinkingDot {
+    animation: none;
+    opacity: 0.55;
+  }
+}
+
 /* ── Logged-out / error states ───────────────────────────── */
 
-.statusBanner,
 .landingCard,
 .errorCard {
+  display: grid;
+  gap: 14px;
+  max-width: 720px;
   border: 1px solid var(--border);
   border-radius: 24px;
   background: var(--surface-strong);
@@ -586,13 +623,6 @@
   place-items: center;
   min-height: calc(100vh - 56px);
   padding: 24px;
-}
-
-.landingCard,
-.errorCard {
-  display: grid;
-  gap: 14px;
-  max-width: 720px;
 }
 
 .landingTitle,
@@ -735,44 +765,6 @@
   line-height: 1.6;
 }
 
-/* ── Theme picker ────────────────────────────────────────── */
-
-.themeRow {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 18px;
-}
-
-.themeOption {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  justify-content: center;
-  padding: 10px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  background: var(--surface);
-  color: var(--text-muted);
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    background 140ms ease,
-    color 140ms ease,
-    border-color 140ms ease;
-}
-
-.themeOption:has(input:checked) {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent-strong);
-}
-
-.themeOption input[type="radio"] {
-  display: none;
-}
-
 /* ── Hidden file input ───────────────────────────────────── */
 
 .hiddenInput {
@@ -815,11 +807,6 @@
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
-  }
-
-  .emptyTitle {
-    font-size: 2.2rem;
-    line-height: 1.05;
   }
 
   .sendButton {

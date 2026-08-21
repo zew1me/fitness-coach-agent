@@ -1,17 +1,24 @@
 import base64
 import logging
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from hashlib import sha256
-from typing import Any, TypedDict, cast
+from pathlib import Path
+from typing import Any, Literal, TypedDict, cast
 
+import botocore.exceptions
+import httpx
 import pytest
-from httpx import ASGITransport, AsyncClient
+from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient, HTTPError
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
 from backend.models.athlete import (
     AthleteProfile,
     RecoveryLog,
     ScheduleAvailability,
+    ScheduleOverride,
     SportThreshold,
 )
 from backend.models.auth import (
@@ -21,8 +28,10 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.training import Activity, DailyLoadSnapshot, Goal
+from backend.models.chat import ChatModelState, ChatModelStateReplaceRequest, ChatTurnLeaseStatus
+from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
+from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfiguredError
 from backend.services.auth import AuthService
 
 
@@ -115,9 +124,7 @@ class EngineRepository:
             tsb=-8,
         )
 
-    async def list_recovery_logs(
-        self, user_id: str, *, since=None, limit: int = 14
-    ) -> list[RecoveryLog]:
+    async def list_recovery_logs(self, user_id: str, *, limit: int = 14) -> list[RecoveryLog]:
         return [
             RecoveryLog(
                 id="recovery-1",
@@ -138,11 +145,132 @@ class EngineRepository:
     async def get_active_plan(self, user_id: str):
         return None
 
-    async def list_activities(self, user_id: str, *, sport=None, since=None, limit: int = 50):
+    async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
         return []
+
+    async def create_activity(self, activity: Activity) -> Activity:
+        return activity.model_copy(update={"id": "activity-1"})
+
+    async def list_plan_workouts_between(self, user_id: str, *, start, end) -> list[PlanWorkout]:
+        return []
+
+    async def list_schedule_overrides_between(self, user_id: str, *, start, end):
+        return []
+
+    async def delete_future_scheduled_workouts(self, user_id: str, plan_id: str, from_date) -> int:
+        return 0
+
+    async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+        return plan.model_copy(update={"id": "plan-1"})
+
+    async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+        return [
+            w.model_copy(update={"id": f"workout-{i}"}) for i, w in enumerate(workouts, start=1)
+        ]
+
+    async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+        return Activity(
+            id=activity_id,
+            user_id=user_id,
+            sport="cycling",
+            activity_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            source="fit_upload",
+            activity_summary={
+                "schema": "activity_summary_v1",
+                "session": {"sport": "cycling"},
+                "fueling": {},
+                "subjective": {},
+                "data_quality": {"source": "fit_upload"},
+            },
+            raw_extraction={"filename": "race.fit"},
+        )
+
+    async def update_activity(self, activity: Activity) -> Activity:
+        return activity
+
+    async def unlink_plan_workout_from_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+    ) -> Activity:
+        activity = await self.get_activity(user_id, activity_id)
+        return activity.model_copy(update={"planned_workout_id": None})
+
+    async def match_plan_workout_to_activity(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        activity_id: str,
+        completion_source: Literal["auto_matched", "athlete_confirmed", "coach_confirmed"],
+    ) -> PlanWorkout:
+        return PlanWorkout(
+            id=workout_id,
+            plan_id="plan-1",
+            user_id=user_id,
+            workout_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            day_of_week=5,
+            week_number=1,
+            sport="cycling",
+            title="Matched ride",
+            workout_type="endurance",
+            status="completed",
+            actual_activity_id=activity_id,
+            completion_source=completion_source,
+        )
+
+    async def resolve_plan_workout_atomic(
+        self,
+        *,
+        user_id: str,
+        workout_id: str,
+        outcome: str,
+        activity_id: str | None,
+        source: Literal["athlete", "coach"],
+    ) -> PlanWorkout:
+        return PlanWorkout(
+            id=workout_id,
+            plan_id="plan-1",
+            user_id=user_id,
+            workout_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+            day_of_week=5,
+            week_number=1,
+            sport="cycling",
+            title="Resolved ride",
+            workout_type="endurance",
+            status=outcome,
+            actual_activity_id=activity_id,
+            completion_source=cast(
+                Literal["athlete_confirmed", "coach_confirmed"], f"{source}_confirmed"
+            ),
+        )
 
     async def upsert_load_snapshots(self, user_id: str, snapshots: list[dict], sport=None) -> None:
         self.snapshots = snapshots
+
+
+_DEPENDENCY_OVERRIDE_MISSING = object()
+
+
+def _override_require_user_context(user_context: UserContext):
+    previous = api_index.app.dependency_overrides.get(
+        api_index.require_user_context,
+        _DEPENDENCY_OVERRIDE_MISSING,
+    )
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: user_context
+
+    def restore() -> None:
+        if previous is _DEPENDENCY_OVERRIDE_MISSING:
+            api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
+        else:
+            api_index.app.dependency_overrides[api_index.require_user_context] = cast(
+                Callable[..., Any],
+                previous,
+            )
+
+    return restore
 
 
 class InMemoryOAuthRepository:
@@ -292,6 +420,74 @@ class InMemoryOAuthRepository:
         return True
 
 
+class ModelStateChatService:
+    def __init__(self) -> None:
+        now = datetime(2026, 6, 20, tzinfo=UTC)
+        self.state = ChatModelState(
+            created_at=now,
+            thread_id="thread-1",
+            updated_at=now,
+            user_id="athlete-1",
+            version=2,
+        )
+
+    async def get_model_state(self, user_id: str) -> ChatModelState:
+        assert user_id == "athlete-1"
+        return self.state
+
+    async def get_turn_lease_status(self, user_id: str) -> ChatTurnLeaseStatus:
+        assert user_id == "athlete-1"
+        return ChatTurnLeaseStatus(
+            in_flight=self.state.lease_id is not None,
+            expires_at=(datetime(2026, 7, 10, tzinfo=UTC) if self.state.lease_id else None),
+        )
+
+    async def replace_model_state(
+        self, user_id: str, replacement: ChatModelStateReplaceRequest
+    ) -> ChatModelState:
+        assert user_id == "athlete-1"
+        if replacement.lease_id != self.state.lease_id:
+            raise ValueError("Chat turn lease is no longer owned by this request.")
+        if replacement.expected_version != self.state.version:
+            raise ValueError("Chat model state version conflict.")
+        self.state = self.state.model_copy(
+            update={
+                "items": replacement.items,
+                "coaching_memory": replacement.coaching_memory,
+                "compaction_metadata": replacement.compaction_metadata,
+                "version": self.state.version + 1,
+            }
+        )
+        return self.state
+
+    async def acquire_turn_lease(
+        self, user_id: str, lease_id: str, *, ttl_seconds: int
+    ) -> ChatModelState:
+        assert user_id == "athlete-1"
+        assert ttl_seconds == 60
+        self.state = self.state.model_copy(
+            update={"lease_id": lease_id, "version": self.state.version + 1}
+        )
+        return self.state
+
+    async def renew_turn_lease(
+        self, user_id: str, lease_id: str, *, ttl_seconds: int
+    ) -> ChatModelState:
+        assert user_id == "athlete-1"
+        assert lease_id == self.state.lease_id
+        assert ttl_seconds == 60
+        self.state = self.state.model_copy(
+            update={"lease_expires_at": datetime(2026, 7, 10, tzinfo=UTC)}
+        )
+        return self.state
+
+    async def release_turn_lease(self, user_id: str, lease_id: str) -> ChatModelState:
+        assert user_id == "athlete-1"
+        assert lease_id == self.state.lease_id
+        self.state = self.state.model_copy(update={"lease_id": None})
+        return self.state
+
+
 class FakeAuthService(AuthService):
     def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
         if supabase_access_token != "supabase-access-token":
@@ -326,6 +522,685 @@ async def test_chat_attachments_presign_requires_bearer_token() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/pdf",
+        "text/plain",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ],
+)
+async def test_chat_attachments_presign_rejects_unsupported_type(content_type: str) -> None:
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["profile:read"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/chat/attachments/presign",
+                json={
+                    "filename": "file",
+                    "content_type": content_type,
+                    "content_length": 1024,
+                    "purpose": "chat-attachment",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 400
+    assert content_type in response.json()["detail"]
+
+
+_ZIP_TEST_USER = UserContext(
+    user_id="athlete-1",
+    scopes=["profile:read"],
+    client_id="test-client",
+    grant_id="grant-1",
+)
+
+_SAMPLE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+_SAMPLE_TCX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+  <Activities>
+    <Activity Sport="Running">
+      <Id>2026-04-19T10:00:00Z</Id>
+      <Lap StartTime="2026-04-19T10:00:00Z">
+        <TotalTimeSeconds>60</TotalTimeSeconds>
+        <DistanceMeters>200</DistanceMeters>
+      </Lap>
+    </Activity>
+  </Activities>
+</TrainingCenterDatabase>"""
+
+
+def _make_zip(members: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+async def _post_process_zip(zip_bytes: bytes, monkeypatch) -> dict[str, Any]:
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return zip_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    # Zip activities persist like the single-file path, so create_activity must resolve;
+    # EngineRepository stubs it (id "activity-1") and returns no plannable matches.
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+    assert response.status_code == 200
+    return response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", ["application/zip", "application/x-zip-compressed"])
+async def test_chat_attachments_presign_accepts_zip(content_type: str, monkeypatch) -> None:
+    from backend.models.storage import PresignUploadResponse
+
+    def mock_create_presigned_upload(*, user_id: str, request) -> PresignUploadResponse:
+        return PresignUploadResponse(
+            upload_url="https://r2.example.com/upload",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
+            public_url="https://cdn.example.com/export.zip",
+            headers={"Content-Type": content_type},
+        )
+
+    monkeypatch.setattr(
+        "api.index.r2_service.create_presigned_upload", mock_create_presigned_upload
+    )
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/chat/attachments/presign",
+                json={
+                    "filename": "export.zip",
+                    "content_type": content_type,
+                    "content_length": 1024,
+                    "purpose": "chat-attachment",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["object_key"].endswith("export.zip")
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_parses_single_gpx_ignoring_junk(monkeypatch) -> None:
+    zip_bytes = _make_zip(
+        {
+            "activities/run.gpx": _SAMPLE_GPX,
+            "__MACOSX/activities/._run.gpx": b"apple double junk",
+            ".DS_Store": b"finder junk",
+            "notes.txt": b"discard me",
+        }
+    )
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    entry = body["processed"][0]
+    assert entry["kind"] == "activity"
+    # Persisted like the single-file path: saved to the log, not merely surfaced.
+    assert entry["status"] == "saved"
+    assert entry["activity"]["id"] == "activity-1"
+    assert entry["activity"]["sport"] == "running"
+    assert entry["activity"]["source"] == "gpx_upload"
+    # __MACOSX junk, .DS_Store, and notes.txt are all discarded.
+    assert body["skipped_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_processes_multiple_activities(monkeypatch) -> None:
+    zip_bytes = _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 2
+    assert all(entry["kind"] == "activity" for entry in body["processed"])
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_persists_each_activity(monkeypatch) -> None:
+    created: list[Activity] = []
+
+    class RecordingRepo(EngineRepository):
+        async def create_activity(self, activity: Activity) -> Activity:
+            created.append(activity)
+            return activity.model_copy(update={"id": f"activity-{len(created)}"})
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    monkeypatch.setattr(api_index, "repo", RecordingRepo())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(created) == 2
+    assert {e["activity"]["id"] for e in body["processed"]} == {"activity-1", "activity-2"}
+    assert all(e["status"] == "saved" for e in body["processed"])
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_isolates_persist_failure_per_member(monkeypatch) -> None:
+    # A create_activity failure for one member must not abort a valid sibling: the
+    # failing member is skipped best-effort while the other still saves.
+    class FlakyRepo(EngineRepository):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("write conflict")
+            return activity.model_copy(update={"id": "activity-2"})
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    monkeypatch.setattr(api_index, "repo", FlakyRepo())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["activity"]["id"] == "activity-2"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_isolates_postgrest_persist_failure(monkeypatch) -> None:
+    # A raw PostgRESTAPIError from persistence must not abort the archive. It is not an
+    # HTTPException, so it would otherwise propagate to the global handler and 500 the
+    # whole zip; the per-member catch must swallow it and skip only that member.
+    class PostgrestFailingRepo(EngineRepository):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.calls += 1
+            if self.calls == 1:
+                raise PostgRESTAPIError(
+                    {
+                        "message": "deadlock detected",
+                        "code": "40P01",
+                        "hint": None,
+                        "details": None,
+                    }
+                )
+            return activity.model_copy(update={"id": "activity-2"})
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    monkeypatch.setattr(api_index, "repo", PostgrestFailingRepo())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["activity"]["id"] == "activity-2"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_processes_activity_and_image(monkeypatch) -> None:
+    from backend.models.screenshot import ExtractionResult
+    from backend.models.storage import PresignUploadResponse
+
+    async def mock_upload_file(**kwargs) -> PresignUploadResponse:
+        return PresignUploadResponse(
+            upload_url="",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/shot.png",
+            public_url="https://cdn.example.com/shot.png",
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+
+    async def mock_analyze_screenshot(image_url: str) -> ExtractionResult:
+        return ExtractionResult(
+            screenshot_type="activity_single",
+            data={"distance_km": 10},
+            raw_response="{}",
+        )
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+    monkeypatch.setattr("backend.services.screenshot.analyze_screenshot", mock_analyze_screenshot)
+
+    zip_bytes = _make_zip(
+        {"run.gpx": _SAMPLE_GPX, "shot.png": b"fake png bytes", "readme.md": b"discard"}
+    )
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    kinds = sorted(entry["kind"] for entry in body["processed"])
+    assert kinds == ["activity", "image_analysis"]
+    image_entry = next(e for e in body["processed"] if e["kind"] == "image_analysis")
+    assert image_entry["screenshot_type"] == "activity_single"
+    assert image_entry["public_url"] == "https://cdn.example.com/shot.png"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_no_processable_when_only_unknown(monkeypatch) -> None:
+    zip_bytes = _make_zip({"notes.txt": b"nothing here", "data.csv": b"a,b,c"})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+    assert body["skipped_count"] == 2
+    assert "zip" in body["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_no_processable_when_empty(monkeypatch) -> None:
+    body = await _post_process_zip(_make_zip({}), monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_oversized_member(monkeypatch) -> None:
+    monkeypatch.setattr("api.index._ZIP_MEMBER_MAX_BYTES", 8)
+    zip_bytes = _make_zip({"run.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_resolves_mangled_object_key(monkeypatch) -> None:
+    # The coach can corrupt the opaque object_key while transcribing public_url
+    # correctly; the zip endpoint must resolve from public_url like the single-file
+    # path (else a valid upload 500s on the scope/download check). The resolved key
+    # is also what gets stamped as each activity's source_file_key.
+    correct_key = "users/athlete-1/chat-attachment/2026/07/08/export.zip"
+    mangled_key = "users/athlete-1/chat-attachment/deadbeef.zip"
+    monkeypatch.setattr("backend.services.r2.settings.r2_public_base_url", "https://pub-abc.r2.dev")
+
+    downloaded_keys: list[str] = []
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        downloaded_keys.append(object_key)
+        return _make_zip({"run.gpx": _SAMPLE_GPX})
+
+    created: list[Activity] = []
+
+    class RecordingRepo(EngineRepository):
+        async def create_activity(self, activity: Activity) -> Activity:
+            created.append(activity)
+            return activity.model_copy(update={"id": "activity-1"})
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    monkeypatch.setattr(api_index, "repo", RecordingRepo())
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": mangled_key,
+                    "public_url": f"https://pub-abc.r2.dev/{correct_key}",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert downloaded_keys == [correct_key]
+    assert len(created) == 1
+    assert created[0].source_file_key == correct_key
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_handles_corrupt_archive(monkeypatch) -> None:
+    body = await _post_process_zip(b"this is definitely not a zip file", monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_parses_tcx_member(monkeypatch) -> None:
+    body = await _post_process_zip(_make_zip({"ride.tcx": _SAMPLE_TCX}), monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    entry = body["processed"][0]
+    assert entry["kind"] == "activity"
+    assert entry["activity"]["source"] == "tcx_upload"
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_unparseable_activity_without_aborting(
+    monkeypatch,
+) -> None:
+    # A member with an activity suffix but garbage bytes must be skipped best-effort,
+    # while a valid sibling activity still processes.
+    zip_bytes = _make_zip({"good.gpx": _SAMPLE_GPX, "broken.gpx": b"not valid gpx at all"})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_respects_processed_member_cap(monkeypatch) -> None:
+    monkeypatch.setattr("api.index._ZIP_MAX_PROCESSED_MEMBERS", 1)
+    zip_bytes = _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_cap_counts_failed_member_attempts(monkeypatch) -> None:
+    # The work cap counts *attempts*, not successes: an archive of corrupt members
+    # (which never land in `processed`) must not make us read/parse every one, or the
+    # cap could be bypassed by uploading many unparseable files.
+    monkeypatch.setattr("api.index._ZIP_MAX_PROCESSED_MEMBERS", 2)
+
+    attempts = 0
+
+    async def counting_entry(**_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+
+    monkeypatch.setattr(api_index, "_zip_activity_entry", counting_entry)
+
+    zip_bytes = _make_zip({f"broken{i}.gpx": b"not valid gpx at all" for i in range(5)})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["processed"] == []
+    # Only the first two members were read/attempted; the cap declined the remaining
+    # three before touching them, even though none succeeded.
+    assert attempts == 2
+    assert body["skipped_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_directory_entries_without_counting(
+    monkeypatch,
+) -> None:
+    # Explicit directory entries (as real macOS/Windows archives carry) are skipped
+    # and must not inflate skipped_count.
+    zip_bytes = _make_zip({"activities/": b"", "activities/run.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_zip_member_counts_read_failure_as_skipped(monkeypatch) -> None:
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(_make_zip({"run.gpx": _SAMPLE_GPX}))) as archive:
+        member = archive.infolist()[0]
+
+        def fail_to_read_member(_member: zipfile.ZipInfo) -> bytes:
+            raise zipfile.BadZipFile("corrupt member")
+
+        monkeypatch.setattr(archive, "read", fail_to_read_member)
+        result = await api_index._process_zip_member(
+            archive=archive,
+            member=member,
+            user_id=_ZIP_TEST_USER.user_id,
+            zip_object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
+            attempted_count=0,
+        )
+
+    assert result.entry is None
+    assert result.counts_as_skipped is True
+    # A read failure is still a processable candidate we attempted, so it must
+    # consume the work budget — otherwise a corrupt-heavy archive bypasses the cap.
+    assert result.counts_as_attempt is True
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_image_when_reupload_has_no_public_url(
+    monkeypatch,
+) -> None:
+    from backend.models.storage import PresignUploadResponse
+
+    async def mock_upload_file(**kwargs) -> PresignUploadResponse:
+        # R2 public base URL unset → no fetchable URL for the vision model.
+        return PresignUploadResponse(
+            upload_url="",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/shot.png",
+            public_url=None,
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+
+    body = await _post_process_zip(_make_zip({"shot.png": b"fake png"}), monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_image_when_reupload_raises(monkeypatch) -> None:
+    async def mock_upload_file(**kwargs):
+        raise RuntimeError("R2 unavailable")
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+
+    # A failed image upload must not abort a valid sibling activity.
+    zip_bytes = _make_zip({"run.gpx": _SAMPLE_GPX, "shot.png": b"fake png"})
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["kind"] == "activity"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_image_when_analysis_raises(monkeypatch) -> None:
+    from backend.models.storage import PresignUploadResponse
+
+    async def mock_upload_file(**kwargs) -> PresignUploadResponse:
+        return PresignUploadResponse(
+            upload_url="",
+            object_key="users/athlete-1/chat-attachment/2024/01/01/shot.png",
+            public_url="https://cdn.example.com/shot.png",
+            headers={"Content-Type": "image/png"},
+            method="POST",
+        )
+
+    async def mock_analyze_screenshot(image_url: str):
+        raise RuntimeError("vision model rate limited")
+
+    monkeypatch.setattr("api.index.r2_service.upload_file", mock_upload_file)
+    monkeypatch.setattr("backend.services.screenshot.analyze_screenshot", mock_analyze_screenshot)
+
+    # A flaky vision call on one image must not abort a valid sibling activity.
+    zip_bytes = _make_zip({"run.gpx": _SAMPLE_GPX, "shot.png": b"fake png"})
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["kind"] == "activity"
+    assert body["skipped_count"] == 1
+
+
+def test_check_upload_content_type_rejects_message_mentions_zip_archives() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        api_index._check_upload_content_type("application/pdf")
+
+    assert exc_info.value.status_code == 400
+    assert ".zip archives of those" in exc_info.value.detail
+    assert "application/pdf" in exc_info.value.detail
+
+
+def test_check_upload_content_type_accepts_zip_variants() -> None:
+    # Must not raise for either zip content type accepted by the presign endpoint.
+    api_index._check_upload_content_type("application/zip")
+    api_index._check_upload_content_type("application/x-zip-compressed")
+
+
+def test_is_zip_junk_member_detects_macosx_ds_store_and_appledouble() -> None:
+    assert api_index._is_zip_junk_member("__MACOSX/activities/._run.gpx", "._run.gpx")
+    assert api_index._is_zip_junk_member(".DS_Store", ".DS_Store")
+    assert api_index._is_zip_junk_member("activities/._run.gpx", "._run.gpx")
+    assert not api_index._is_zip_junk_member("activities/run.gpx", "run.gpx")
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_skips_appledouble_disguised_activity_file(
+    monkeypatch,
+) -> None:
+    # An AppleDouble sidecar file (macOS metadata for "run.gpx") carries the same
+    # .gpx suffix but must be discarded as junk rather than parsed as a broken
+    # activity.
+    zip_bytes = _make_zip(
+        {"activities/run.gpx": _SAMPLE_GPX, "activities/._run.gpx": b"apple double junk"}
+    )
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["kind"] == "activity"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_matches_extension_case_insensitively(
+    monkeypatch,
+) -> None:
+    body = await _post_process_zip(_make_zip({"RUN.GPX": _SAMPLE_GPX}), monkeypatch)
+
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["processed"][0]["kind"] == "activity"
+    assert body["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_activity_member_omits_public_url_and_stamps_zip_key(
+    monkeypatch,
+) -> None:
+    # Zip activity members are re-derived server-side, not fetched from a public
+    # URL, and every member shares the archive's own object key as its
+    # source_file_key rather than a per-member key.
+    body = await _post_process_zip(_make_zip({"run.gpx": _SAMPLE_GPX}), monkeypatch)
+
+    activity = body["processed"][0]["activity"]
+    assert activity["raw_extraction"]["public_url"] is None
+    assert activity["source_file_key"] == "users/athlete-1/chat-attachment/2024/01/01/export.zip"
+
+
+@pytest.mark.asyncio
 async def test_chat_attachments_upload_requires_bearer_token() -> None:
     transport = ASGITransport(app=api_index.app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -342,7 +1217,7 @@ async def test_chat_attachments_upload_validates_object_key_scope(
     # Mock R2 service to avoid actual S3 calls
     from backend.models.storage import PresignUploadResponse
 
-    async def mock_upload_file(*args, **kwargs):
+    async def mock_upload_file(**kwargs):
         return PresignUploadResponse(
             upload_url="",
             object_key="users/athlete-1/chat-attachment/2024/01/01/file.png",
@@ -391,7 +1266,7 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
     object_key = "users/athlete-1/chat-attachment/2024/01/01/file.png"
     public_url = "https://cdn.example.com/file.png"
 
-    async def mock_upload_file(*args, **kwargs):
+    async def mock_upload_file(**kwargs):
         return PresignUploadResponse(
             upload_url="",
             object_key=object_key,
@@ -432,6 +1307,32 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
     assert body["public_url"] == public_url
 
 
+def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) -> None:
+    from backend.engine.gpx_parser import ParsedActivity
+
+    parsed = ParsedActivity(
+        sport="cycling",
+        activity_date=datetime(2026, 7, 5, tzinfo=UTC).date(),
+        started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
+        utc_offset_seconds=-25200,
+    )
+    monkeypatch.setattr(api_index, "_parse_uploaded_activity_file", lambda *_args: parsed)
+
+    activity = api_index._build_uploaded_activity_or_course(
+        user_id="athlete-1",
+        filename="ride.fit",
+        content_type="application/vnd.garmin.fit",
+        object_key="users/athlete-1/ride.fit",
+        public_url="https://cdn.example.com/ride.fit",
+        file_bytes=b"fit bytes",
+    )
+
+    assert isinstance(activity, Activity)
+    assert activity.raw_extraction is not None
+    assert activity.raw_extraction["utc_offset_seconds"] == -25200
+    assert activity.raw_extraction["activity_date_source"] == "fit_local_timestamp"
+
+
 @pytest.mark.asyncio
 async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     auth_service_fixture, monkeypatch, caplog
@@ -439,6 +1340,8 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     object_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
     sensitive_filename = "Secret Race Notes\nInjected.gpx"
     captured: dict[str, str] = {}
+
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
         captured["user_id"] = user_id
@@ -488,9 +1391,135 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
     assert body["activity"]["sport"] == "running"
     assert body["activity"]["source_file_key"] == object_key
     assert body["activity"]["source"] == "gpx_upload"
+    assert body["activity"]["summary_schema_version"] == 1
+    assert body["activity"]["activity_summary"]["schema"] == "activity_summary_v1"
+    assert body["activity"]["activity_summary"]["session"]["sport"] == "running"
+    assert body["activity"]["activity_summary"]["data_quality"]["has_gps"] is True
+    assert body["activity"]["raw_extraction"]["activity_date_source"] == "utc_fallback"
+    assert body["activity"]["raw_extraction"]["utc_offset_seconds"] is None
     assert captured == {"user_id": "athlete-1", "object_key": object_key}
     assert sensitive_filename not in caplog.text
     assert "filename_suffix=.gpx" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_file_recovers_key_from_public_url(
+    auth_service_fixture, monkeypatch
+) -> None:
+    # Regression for issue #325: the coach reliably transcribes the distinctive
+    # public_url but corrupts the long opaque object_key (splicing the user-UUID
+    # head onto the file-UUID tail). The endpoint must derive the authoritative
+    # key from public_url so both the R2 download and stored source_file_key are
+    # correct — otherwise every future re-read of the activity 403s.
+    correct_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
+    mangled_key = "users/athlete-1/6679c232edad.gpx"
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+    monkeypatch.setattr("backend.services.r2.settings.r2_public_base_url", "https://pub-abc.r2.dev")
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        captured["object_key"] = object_key
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/gpx+xml",
+                "filename": "run.gpx",
+                "object_key": mangled_key,
+                "public_url": f"https://pub-abc.r2.dev/{correct_key}",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    # The download used the recovered key, not the mangled one the model sent.
+    assert captured["object_key"] == correct_key
+    assert body["activity"]["source_file_key"] == correct_key
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_file_persists_activity(auth_service_fixture, monkeypatch) -> None:
+    object_key = "users/athlete-1/chat-attachment/2024/01/01/run.gpx"
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_activity: Activity | None = None
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.created_activity = activity
+            return activity.model_copy(update={"id": "activity-1"})
+
+    activity_repo = ActivityRepository()
+    monkeypatch.setattr(api_index, "repo", activity_repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>10</ele><time>2026-04-19T10:00:00Z</time></trkpt>
+    <trkpt lat="37.0" lon="-122.001"><ele>12</ele><time>2026-04-19T10:01:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        cookie_header = session_response.headers["set-cookie"]
+        cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
+        token_response = await client.post(
+            "/api/oauth/browser-token",
+            cookies={"coach_browser_session": cookie_value},
+        )
+        token_body = token_response.json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/gpx+xml",
+                "filename": "run.gpx",
+                "object_key": object_key,
+                "public_url": "https://cdn.example.com/run.gpx",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "saved"
+    assert body["activity"]["id"] == "activity-1"
+    assert activity_repo.created_activity is not None
+    assert activity_repo.created_activity.user_id == "athlete-1"
+    assert activity_repo.created_activity.source_file_key == object_key
 
 
 @pytest.mark.asyncio
@@ -498,6 +1527,8 @@ async def test_process_uploaded_file_parses_tcx_with_hrv_metadata(
     auth_service_fixture, monkeypatch
 ) -> None:
     object_key = "users/athlete-1/chat-attachment/2024/01/01/run.tcx"
+
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
         return b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -559,6 +1590,9 @@ async def test_process_uploaded_file_parses_tcx_with_hrv_metadata(
     body = response.json()
     assert body["activity"]["source"] == "tcx_upload"
     assert body["activity"]["avg_hr_bpm"] == 142
+    assert body["activity"]["activity_summary"]["schema"] == "activity_summary_v1"
+    assert body["activity"]["activity_summary"]["heart_rate"]["avg_bpm"] == 142
+    assert body["activity"]["activity_summary"]["data_quality"]["has_rr_intervals"] is True
     assert body["activity"]["raw_extraction"]["rr_interval_count"] == 4
     assert body["activity"]["raw_extraction"]["hrv"]["quality"] == "insufficient_rr_intervals"
 
@@ -1192,7 +2226,7 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_get_recent_activities_returns_normalized_activity_list(monkeypatch) -> None:
     class ActivityRepository(EngineRepository):
-        async def list_activities(self, user_id: str, *, sport=None, since=None, limit: int = 50):
+        async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
             assert user_id == "athlete-1"
             assert sport == "running"
             assert limit == 2
@@ -1235,6 +2269,1521 @@ async def test_get_recent_activities_returns_normalized_activity_list(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_update_goals_validation_errors_return_422(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created: Goal | None = None
+
+        async def create_goal(self, goal: Goal) -> Goal:
+            self.created = goal
+            return goal
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "create", "goal": {"goal_type": "event"}},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.created is None
+    assert any(
+        error["loc"] == ["title"] and error["type"] == "missing"
+        for error in response.json()["detail"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_goals_create_rejects_unsupported_goal_type(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created: Goal | None = None
+
+        async def create_goal(self, goal: Goal) -> Goal:
+            self.created = goal
+            return goal
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "create",
+                    "goal": {"goal_type": "triathlon", "title": "A race"},
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.created is None
+    assert any(
+        error["loc"] == ["goal_type"] and error["type"] == "literal_error"
+        for error in response.json()["detail"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_goals_create_normalizes_race_goal_type_to_event(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_goal: Goal | None = None
+
+        async def create_goal(self, goal: Goal) -> Goal:
+            self.created_goal = goal
+            return goal
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "create",
+                    "goal": {
+                        "goal_type": "race",
+                        "sport": "running",
+                        "target_date": "2026-08-29",
+                        "title": "Aug 29 Half Marathon",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["goal_type"] == "event"
+    assert repository.created_goal is not None
+    assert repository.created_goal.goal_type == "event"
+
+
+@pytest.mark.asyncio
+async def test_update_goals_contract_errors_return_400(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            missing_goal_id = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "complete"},
+            )
+            unknown_action = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "pause", "goal_id": "goal-1"},
+            )
+    finally:
+        restore_override()
+
+    assert missing_goal_id.status_code == 400
+    assert unknown_action.status_code == 400
+    assert repository.update_call is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized(
+    monkeypatch,
+) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(
+                id=goal_id,
+                user_id=user_id,
+                goal_type="event",
+                title=str(updates.get("title", "Updated goal")),
+            )
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {
+                        "id": "other-goal",
+                        "user_id": "other-user",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-02T00:00:00Z",
+                        "title": "Updated goal",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.update_call == ("goal-1", "athlete-1", {"title": "Updated goal"})
+
+
+@pytest.mark.asyncio
+async def test_update_goals_complete_allows_omitted_goal(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Updated goal")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "complete", "goal_id": "goal-1"},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.update_call == ("goal-1", "athlete-1", {"status": "completed"})
+
+
+@pytest.mark.asyncio
+async def test_update_goals_create_rejects_malformed_target_date(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created: Goal | None = None
+
+        async def create_goal(self, goal: Goal) -> Goal:
+            self.created = goal
+            return goal
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "create",
+                    "goal": {
+                        "goal_type": "event",
+                        "title": "Race",
+                        "target_date": "summer 2026",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.created is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_rejects_malformed_target_date(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {"target_date": "2026-13-99"},
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.update_call is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_rejects_unsupported_goal_type(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {"goal_type": "triathlon"},
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.update_call is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_requires_non_empty_fields(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "update", "goal_id": "goal-1", "goal": {}},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.update_call is None
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_omits_null_fields_and_normalizes_alias(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_calls: list[tuple[str, str, dict[str, object]]] = []
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_calls.append((goal_id, user_id, updates))
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            null_response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {"goal_type": None, "sport": None, "title": "Updated race"},
+                },
+            )
+            alias_response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {"goal_type": "race"},
+                },
+            )
+    finally:
+        restore_override()
+
+    assert null_response.status_code == 200
+    assert alias_response.status_code == 200
+    assert repository.update_calls == [
+        ("goal-1", "athlete-1", {"title": "Updated race"}),
+        ("goal-1", "athlete-1", {"goal_type": "event"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_merges_notes_when_profile_is_null(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.notes_call: tuple[str, str, str] | None = None
+
+        async def update_goal_course_profile_notes(
+            self, goal_id: str, user_id: str, notes: str
+        ) -> Goal:
+            self.notes_call = (goal_id, user_id, notes)
+            return Goal(
+                id=goal_id,
+                user_id=user_id,
+                goal_type="event",
+                title="Hill climb race",
+                course_profile={
+                    "aid_stations": 3,
+                    "notes": notes,
+                    "terrain": "trail",
+                },
+            )
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {
+                        "course_profile": None,
+                        "course_profile_notes": "Steep final mile.",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.notes_call == ("goal-1", "athlete-1", "Steep final mile.")
+
+
+@pytest.mark.asyncio
+async def test_update_goals_update_merges_notes_into_provided_course_profile(monkeypatch) -> None:
+    class GoalRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_call: tuple[str, str, dict[str, object]] | None = None
+
+        async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
+            self.update_call = (goal_id, user_id, updates)
+            return Goal(id=goal_id, user_id=user_id, goal_type="event", title="Hill climb race")
+
+    repository = GoalRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={
+                    "action": "update",
+                    "goal_id": "goal-1",
+                    "goal": {
+                        "course_profile": {"aid_stations": 3, "terrain": "trail"},
+                        "course_profile_notes": "Steep final mile.",
+                    },
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert repository.update_call == (
+        "goal-1",
+        "athlete-1",
+        {
+            "course_profile": {
+                "aid_stations": 3,
+                "notes": "Steep final mile.",
+                "terrain": "trail",
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_goals_returns_503_when_repository_unconfigured(monkeypatch) -> None:
+    class UnconfiguredRepository(EngineRepository):
+        async def create_goal(self, goal: Goal) -> Goal:
+            raise RepositoryNotConfiguredError("Supabase is not configured.")
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["goals:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", UnconfiguredRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-goals",
+                json={"action": "create", "goal": {"goal_type": "event", "title": "Race"}},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Supabase is not configured."}
+
+
+@pytest.mark.asyncio
+async def test_update_schedule_validation_errors_return_422(monkeypatch) -> None:
+    class ScheduleRepository(EngineRepository):
+        async def upsert_schedule(self, schedule: ScheduleAvailability) -> ScheduleAvailability:
+            return schedule
+
+        async def upsert_schedule_override(self, override: ScheduleOverride) -> ScheduleOverride:
+            return override
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["schedule:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ScheduleRepository())
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/update-schedule",
+                json={"overrides": [{"override_date": "not-a-date", "available": True}]},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+
+
+@pytest.fixture
+def recovery_user_context():
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["recovery:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    try:
+        yield
+    finally:
+        restore_override()
+
+
+class RecoveryRepository(EngineRepository):
+    def __init__(self) -> None:
+        self.saved: list[RecoveryLog] = []
+
+    async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+        self.saved.append(log)
+        return log.model_copy(update={"id": f"recovery-{len(self.saved)}"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_persists_entries(monkeypatch) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={
+                "entries": [
+                    {
+                        "log_date": "2026-05-30",
+                        "hrv_ms": 48,
+                        "sleep_duration_hours": 7.5,
+                        "subjective_energy": 4,
+                        "notes": None,
+                        "user_id": "ignored-client-user",
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 1
+    assert body["saved"][0]["id"] == "recovery-1"
+    assert len(repository.saved) == 1
+    saved = repository.saved[0]
+    # user_id is always derived from the bearer token, never the client payload.
+    assert saved.user_id == "athlete-1"
+    assert saved.log_date.isoformat() == "2026-05-30"
+    assert saved.hrv_ms == 48
+    assert saved.sleep_duration_hours == 7.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_defaults_missing_log_date_to_today(monkeypatch) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"hrv_ms": 51}]},
+        )
+
+    assert response.status_code == 200
+    assert repository.saved[0].log_date == datetime.now(UTC).date()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_repo_not_configured_returns_503(monkeypatch) -> None:
+    class UnconfiguredRepository(EngineRepository):
+        async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
+            raise RepositoryNotConfiguredError("Supabase is not configured.")
+
+    monkeypatch.setattr(api_index, "repo", UnconfiguredRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"hrv_ms": 51, "log_date": "2026-05-30"}]},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Supabase is not configured."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_rejects_malformed_entry_without_partial_write(
+    monkeypatch,
+) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={
+                "entries": [
+                    {"log_date": "2026-05-30", "hrv_ms": 48},
+                    {"log_date": "not-a-date", "hrv_ms": 51},
+                ]
+            },
+        )
+
+    assert response.status_code == 422
+    # The valid first entry must not be persisted when a later entry is malformed.
+    assert repository.saved == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_requires_at_least_one_entry(monkeypatch) -> None:
+    monkeypatch.setattr(api_index, "repo", EngineRepository())
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": []},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_persists_summary_and_estimates(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import (
+        ActivityTextExtraction,
+        AdditionalImportantData,
+        NutritionEstimate,
+    )
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_activity: Activity | None = None
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.created_activity = activity
+            return activity.model_copy(update={"id": "activity-1"})
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-06-13",
+            activity_date_confidence=0.9,
+            additional_important_data=[
+                AdditionalImportantData(key="race_context", value="blew up", confidence=0.8)
+            ],
+            avg_hr_bpm=183,
+            avg_hr_bpm_confidence=0.95,
+            avg_power_watts=198,
+            avg_power_watts_confidence=0.95,
+            elapsed_duration_seconds=2700,
+            elapsed_duration_seconds_confidence=0.8,
+            food_items=[],
+            max_hr_bpm=193,
+            max_hr_bpm_confidence=0.95,
+            moving_duration_seconds=1140,
+            moving_duration_seconds_confidence=0.86,
+            normalized_power_watts=243,
+            normalized_power_watts_confidence=0.95,
+            nutrition_estimates=[
+                NutritionEstimate(
+                    calories_kcal=412,
+                    calories_kcal_confidence=0.9,
+                    carbs_g=103,
+                    carbs_g_confidence=0.95,
+                    item_name="reported CHO",
+                    source_title=None,
+                    source_url=None,
+                )
+            ],
+            sport="cycling",
+            sport_confidence=0.86,
+            sub_sport="criterium",
+            sub_sport_confidence=0.84,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={
+                    "text": (
+                        "Volunteer Park crit, Sat 13 Jun 2026 — 45 min race start at "
+                        "~12:56-13:00. Report: in race ~19 minutes then blew up; "
+                        "avg HR 183 bpm, max 193 bpm; avg power 198 W, NP 243 W; "
+                        "CHO used ~103 g; short high-power surges up to ~450 W for "
+                        "8-15s; felt competitive for first 19 minutes."
+                    )
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "saved"
+    assert body["activity"]["id"] == "activity-1"
+    assert body["activity"]["source"] == "text_extract"
+    assert body["activity"]["activity_summary"]["estimates"]["estimated_duration_moving_s"] == 1140
+    assert body["activity"]["activity_summary"]["thresholds_used"]["ftp_w"] == 250
+    assert body["activity"]["activity_summary"]["fueling"]["carbs_g"] == 103
+    assert repository.created_activity is not None
+    assert repository.created_activity.tss == 29.9
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_fails_when_openai_extraction_unavailable(
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtractionUnavailable
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.create_called = False
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.create_called = True
+            return activity
+
+    async def failing_extract_activity_text(_text: str):
+        raise ActivityTextExtractionUnavailable("OpenAI activity text extraction unavailable.")
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", failing_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"text": "Ran yesterday and ate a gel."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "OpenAI activity text extraction unavailable."
+    assert repository.create_called is False
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_updates_existing_activity(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction, NutritionEstimate
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.updated_activity: Activity | None = None
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.updated_activity = activity
+            return activity
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            food_items=[],
+            gut_comfort_1_10=8,
+            gut_comfort_1_10_confidence=0.8,
+            nutrition_estimates=[
+                NutritionEstimate(
+                    calories_kcal=200,
+                    calories_kcal_confidence=0.5,
+                    carbs_g=50,
+                    carbs_g_confidence=0.5,
+                    item_name="2 generic energy gels",
+                    source_title=None,
+                    source_url=None,
+                )
+            ],
+            overdid_it_flag=True,
+            overdid_it_flag_confidence=0.9,
+            rpe=9,
+            rpe_confidence=0.8,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={
+                    "activity_id": "activity-1",
+                    "text": "Add that I took 2 gels, gut felt 8/10, RPE 9, and I overdid it.",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "updated"
+    assert body["rejected_updates"] == []
+    assert body["activity"]["source"] == "fit_upload"
+    assert body["activity"]["rpe"] == 9
+    assert body["activity"]["activity_summary"]["subjective"]["overdid_it_flag"] is True
+    assert repository.updated_activity is not None
+    assert repository.updated_activity.source == "fit_upload"
+
+
+@pytest.mark.asyncio
+async def test_activity_date_update_unlinks_old_workout_and_matches_new_date(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.unlink_calls: list[tuple[str, str, str]] = []
+            self.workout_actual_activity_id: str | None = "activity-1"
+            self.matched_workout_ids: list[str] = []
+            self.match_windows: list[tuple[date, date]] = []
+            self.updated_activity: Activity | None = None
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            return Activity(
+                id=activity_id,
+                user_id=user_id,
+                sport="cycling",
+                activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+                started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
+                duration_seconds=3600,
+                planned_workout_id="old-workout",
+                source="fit_upload",
+                raw_extraction={"filename": "ride.fit"},
+            )
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.updated_activity = activity
+            return activity
+
+        async def unlink_plan_workout_from_activity(
+            self,
+            *,
+            user_id: str,
+            workout_id: str,
+            activity_id: str,
+        ) -> Activity:
+            self.unlink_calls.append((user_id, workout_id, activity_id))
+            assert self.workout_actual_activity_id == activity_id
+            self.workout_actual_activity_id = None
+            assert self.updated_activity is not None
+            assert self.updated_activity.id == activity_id
+            return self.updated_activity.model_copy(update={"planned_workout_id": None})
+
+        async def list_plan_workouts_between(
+            self, user_id: str, *, start: date, end: date
+        ) -> list[PlanWorkout]:
+            self.match_windows.append((start, end))
+            return [
+                PlanWorkout(
+                    id="new-workout",
+                    plan_id="plan-1",
+                    user_id=user_id,
+                    workout_date=datetime(2026, 7, 5, tzinfo=UTC).date(),
+                    day_of_week=6,
+                    week_number=1,
+                    sport="cycling",
+                    title="Correct-day ride",
+                    workout_type="endurance",
+                )
+            ]
+
+        async def match_plan_workout_to_activity(
+            self,
+            *,
+            user_id: str,
+            workout_id: str,
+            activity_id: str,
+            completion_source: Literal["auto_matched", "athlete_confirmed", "coach_confirmed"],
+        ) -> PlanWorkout:
+            self.matched_workout_ids.append(workout_id)
+            assert self.updated_activity is not None
+            self.updated_activity = self.updated_activity.model_copy(
+                update={"planned_workout_id": workout_id}
+            )
+            return await super().match_plan_workout_to_activity(
+                user_id=user_id,
+                workout_id=workout_id,
+                activity_id=activity_id,
+                completion_source=completion_source,
+            )
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Move this ride to July 5."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["activity"]["activity_date"] == "2026-07-05"
+    assert body["activity"]["planned_workout_id"] == "new-workout"
+    assert body["matched_plan_workout"]["plan_workout_id"] == "new-workout"
+    assert repository.unlink_calls == [("athlete-1", "old-workout", "activity-1")]
+    assert repository.workout_actual_activity_id is None
+    assert repository.matched_workout_ids == ["new-workout"]
+    assert len(repository.match_windows) == 1
+    match_start, match_end = repository.match_windows[0]
+    assert match_start <= date(2026, 7, 5) <= match_end
+    assert repository.updated_activity is not None
+    assert repository.updated_activity.planned_workout_id == "new-workout"
+
+
+@pytest.mark.asyncio
+async def test_activity_date_update_preserves_both_links_when_atomic_unlink_fails(
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.stored_activity = Activity(
+                id="activity-1",
+                user_id="athlete-1",
+                sport="cycling",
+                activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+                planned_workout_id="old-workout",
+                source="fit_upload",
+            )
+            self.workout_actual_activity_id: str | None = "activity-1"
+            self.unlink_should_fail = True
+            self.unlink_attempts = 0
+            self.match_attempts = 0
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            assert user_id == self.stored_activity.user_id
+            assert activity_id == self.stored_activity.id
+            return self.stored_activity
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.stored_activity = activity
+            return activity
+
+        async def unlink_plan_workout_from_activity(self, **_kwargs) -> Activity:
+            self.unlink_attempts += 1
+            if self.unlink_should_fail:
+                raise RuntimeError("unlink unavailable")
+            self.workout_actual_activity_id = None
+            self.stored_activity = self.stored_activity.model_copy(
+                update={"planned_workout_id": None}
+            )
+            return self.stored_activity
+
+        async def list_plan_workouts_between(self, *_args, **_kwargs) -> list[PlanWorkout]:
+            self.match_attempts += 1
+            return []
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Move this ride to July 5."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["activity"]["activity_date"] == "2026-07-05"
+    assert response.json()["activity"]["planned_workout_id"] == "old-workout"
+    assert repository.stored_activity.planned_workout_id == "old-workout"
+    assert repository.workout_actual_activity_id == "activity-1"
+    assert repository.unlink_attempts == 1
+    assert repository.match_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_non_date_activity_update_does_not_touch_plan_workouts(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.plan_workout_calls = 0
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            activity = await super().get_activity(user_id, activity_id)
+            return activity.model_copy(update={"planned_workout_id": "existing-workout"})
+
+        async def update_plan_workout_fields(self, *_args, **_kwargs) -> PlanWorkout:
+            self.plan_workout_calls += 1
+            raise AssertionError("non-date updates must not touch plan workouts")
+
+        async def list_plan_workouts_between(self, *_args, **_kwargs) -> list[PlanWorkout]:
+            self.plan_workout_calls += 1
+            raise AssertionError("non-date updates must not attempt plan matching")
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(rpe=2, rpe_confidence=0.99)
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "RPE was 2."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["activity"]["rpe"] == 2
+    assert repository.plan_workout_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_activity_date_update_swallows_outer_plan_matching_failure(monkeypatch) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextExtraction
+
+    class ActivityRepository(EngineRepository):
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            return Activity(
+                id=activity_id,
+                user_id=user_id,
+                sport="cycling",
+                activity_date=datetime(2026, 7, 6, tzinfo=UTC).date(),
+                started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
+                source="fit_upload",
+                raw_extraction={"filename": "ride.fit"},
+            )
+
+    async def fake_extract_activity_text(_text: str) -> ActivityTextExtraction:
+        return ActivityTextExtraction(
+            activity_date="2026-07-05",
+            activity_date_confidence=0.99,
+        )
+
+    match_attempts = 0
+
+    async def fail_plan_match(_user_id: str, _activity: Activity) -> None:
+        nonlocal match_attempts
+        match_attempts += 1
+        raise RuntimeError("matching unavailable")
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+    monkeypatch.setattr(activity_text, "extract_activity_text", fake_extract_activity_text)
+    monkeypatch.setattr(api_index, "_try_match_activity_to_plan", fail_plan_match)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Move this ride to July 5."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    assert response.json()["activity"]["activity_date"] == "2026-07-05"
+    assert "matched_plan_workout" not in response.json()
+    assert match_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_rejects_blank_activity_id(monkeypatch) -> None:
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.create_called = False
+            self.update_called = False
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            self.create_called = True
+            return activity
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.update_called = True
+            return activity
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "   ", "text": "Add RPE 9."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+    assert repository.create_called is False
+    assert repository.update_called is False
+
+
+@pytest.mark.asyncio
+async def test_save_activity_from_text_update_missing_activity_returns_404(monkeypatch) -> None:
+    class ActivityRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.update_called = False
+
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            raise RecordNotFoundError(
+                f"No activity found for user '{user_id}' and id '{activity_id}'."
+            )
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            self.update_called = True
+            return activity
+
+    repository = ActivityRepository()
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "missing-activity", "text": "Add RPE 9."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Activity not found."
+    assert repository.update_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_method", "expected_detail"),
+    [
+        ("get_athlete_profile", "Failed to load athlete profile."),
+        ("get_active_thresholds", "Failed to load athlete thresholds."),
+        ("create_activity", "Failed to save activity."),
+    ],
+)
+async def test_save_activity_from_text_create_maps_repository_failures_to_503(
+    failing_method: str,
+    expected_detail: str,
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+    from backend.services.activity_text import ActivityTextBuildResult
+
+    class ActivityRepository(EngineRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            if failing_method == "get_athlete_profile":
+                raise HTTPError("profile unavailable")
+            return await super().get_athlete_profile(user_id)
+
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            if failing_method == "get_active_thresholds":
+                raise HTTPError("thresholds unavailable")
+            return await super().get_active_thresholds(user_id)
+
+        async def create_activity(self, activity: Activity) -> Activity:
+            if failing_method == "create_activity":
+                raise HTTPError("insert unavailable")
+            return activity
+
+    async def fake_build_activity_from_text(*_args, **_kwargs) -> ActivityTextBuildResult:
+        return ActivityTextBuildResult(
+            activity=Activity(
+                user_id="athlete-1",
+                sport="cycling",
+                activity_date=datetime.fromisoformat("2026-06-13T00:00:00+00:00").date(),
+                source="text_extract",
+            ),
+            missing=[],
+            raw_extraction={},
+        )
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+    monkeypatch.setattr(activity_text, "build_activity_from_text", fake_build_activity_from_text)
+
+    try:
+        transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"text": "Rode hard yesterday."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == expected_detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_method", "expected_detail"),
+    [
+        ("get_activity", "Failed to load activity."),
+        ("update_activity", "Failed to update activity."),
+    ],
+)
+async def test_save_activity_from_text_update_maps_repository_failures_to_503(
+    failing_method: str,
+    expected_detail: str,
+    monkeypatch,
+) -> None:
+    from backend.services import activity_text
+
+    class ActivityRepository(EngineRepository):
+        async def get_activity(self, user_id: str, activity_id: str) -> Activity:
+            if failing_method == "get_activity":
+                raise HTTPError("activity load unavailable")
+            return await super().get_activity(user_id, activity_id)
+
+        async def update_activity(self, activity: Activity) -> Activity:
+            if failing_method == "update_activity":
+                raise HTTPError("activity update unavailable")
+            return activity
+
+    async def fake_merge_activity_text_update(
+        existing: Activity,
+        _text: str,
+        *,
+        profile: AthleteProfile,
+        thresholds: list[SportThreshold],
+    ):
+        from backend.services.activity_text import ActivityTextUpdateResult
+
+        assert profile.user_id == existing.user_id
+        assert thresholds
+        return ActivityTextUpdateResult(
+            activity=existing.model_copy(update={"rpe": 9}),
+            rejected_updates=[],
+        )
+
+    restore_override = _override_require_user_context(
+        UserContext(
+            user_id="athlete-1",
+            scopes=["activities:write"],
+            client_id="test-client",
+            grant_id="grant-1",
+        )
+    )
+    monkeypatch.setattr(api_index, "repo", ActivityRepository())
+    monkeypatch.setattr(
+        activity_text, "merge_activity_text_update", fake_merge_activity_text_update
+    )
+
+    try:
+        transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/save-activity-from-text",
+                json={"activity_id": "activity-1", "text": "Add RPE 9."},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == expected_detail
+
+
+@pytest.mark.asyncio
 async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
         user_id="athlete-1",
@@ -1258,6 +3807,408 @@ async def test_generate_plan_structure_uses_goal_and_load(monkeypatch) -> None:
     assert body["target_goal"]["title"] == "Hill climb race"
     assert body["starting_weekly_tss"] == 294
     assert body["phases"]
+    assert body["plan_id"] == "plan-1"
+    assert body["sport"] == "running"
+    assert body["workouts_created"] == body["total_weeks"] * 7
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_persists_plan_and_workouts(monkeypatch) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            profile = await super().get_athlete_profile(user_id)
+            # Put a non-goal sport first so the assertion below proves the
+            # goal sport (running) wins over profile ordering.
+            return profile.model_copy(update={"primary_sports": ["cycling", "running"]})
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.status == "active"
+    assert recording_repo.created_plan.target_goal_id == "goal-1"
+    workouts = recording_repo.created_workouts
+    assert workouts
+    assert all(w.plan_id == "plan-1" for w in workouts)
+    assert all(w.user_id == "athlete-1" for w in workouts)
+    # Goal sport (running) wins over profile ordering.
+    assert {w.sport for w in workouts} == {"running"}
+    assert all(w.status == "scheduled" for w in workouts)
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_persists_explicit_mixed_sport_schedule(
+    monkeypatch,
+) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-explicit"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return list(reversed(workouts))
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    workouts = [
+        {
+            "description": "Keep this easy after travel.",
+            "phase_name": "Run build",
+            "sport": "running",
+            "target_distance_meters": None,
+            "target_duration_minutes": 45,
+            "target_tss": None,
+            "title": "Easy trail run",
+            "workout_date": "2026-07-14",
+            "workout_type": "endurance",
+        },
+        {
+            "description": "Planned bike intensity; running remains the priority.",
+            "phase_name": "Run build",
+            "sport": "cycling",
+            "target_distance_meters": None,
+            "target_duration_minutes": 165,
+            "target_tss": None,
+            "title": "Ride with criterium",
+            "workout_date": "2026-07-16",
+            "workout_type": "race",
+        },
+        {
+            "description": "Primary trail-running goal event.",
+            "phase_name": "Race",
+            "sport": "running",
+            "target_distance_meters": 21_097,
+            "target_duration_minutes": None,
+            "target_tss": None,
+            "title": "Coldwater Lake half marathon",
+            "workout_date": "2026-08-29",
+            "workout_type": "race",
+        },
+    ]
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={
+                "goal_id": "goal-1",
+                "title": "Half-marathon-first plan",
+                "training_model": "performance",
+                "workouts": workouts,
+            },
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["plan_mode"] == "explicit"
+    assert body["plan_id"] == "plan-explicit"
+    assert body["start_date"] == "2026-07-14"
+    assert body["end_date"] == "2026-08-29"
+    assert body["workouts_created"] == 3
+    assert body["scheduled_workouts"] == [
+        {
+            "day_name": "Tuesday",
+            "sport": "running",
+            "title": "Easy trail run",
+            "workout_date": "2026-07-14",
+        },
+        {
+            "day_name": "Thursday",
+            "sport": "cycling",
+            "title": "Ride with criterium",
+            "workout_date": "2026-07-16",
+        },
+        {
+            "day_name": "Saturday",
+            "sport": "running",
+            "title": "Coldwater Lake half marathon",
+            "workout_date": "2026-08-29",
+        },
+    ]
+
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.title == "Half-marathon-first plan"
+    assert recording_repo.created_plan.start_date.isoformat() == "2026-07-14"
+    assert recording_repo.created_plan.end_date.isoformat() == "2026-08-29"
+    assert recording_repo.created_plan.target_goal_id == "goal-1"
+    # Explicit plans carry no generated training model — only the plan_mode marker.
+    assert recording_repo.created_plan.generation_context == {"plan_mode": "explicit"}
+    assert body["training_model"] is None
+    assert recording_repo.created_plan.weekly_hours_target is None
+    assert recording_repo.created_plan.weekly_tss_target is None
+    assert {workout.sport for workout in recording_repo.created_workouts} == {
+        "cycling",
+        "running",
+    }
+    assert [workout.day_of_week for workout in recording_repo.created_workouts] == [1, 3, 5]
+    assert [workout.week_number for workout in recording_repo.created_workouts] == [1, 1, 7]
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_rejects_unknown_goal_for_explicit_schedule(
+    monkeypatch,
+) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.create_called: bool = False
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.create_called = True
+            return plan
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={
+                "goal_id": "missing-goal",
+                "workouts": [
+                    {
+                        "description": None,
+                        "phase_name": None,
+                        "sport": "running",
+                        "target_distance_meters": None,
+                        "target_duration_minutes": 30,
+                        "target_tss": None,
+                        "title": "Easy run",
+                        "workout_date": "2026-07-14",
+                        "workout_type": "endurance",
+                    }
+                ],
+            },
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == ("goal_id does not match an active goal for this athlete.")
+    assert recording_repo.create_called is False
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_accepts_training_model_policy(monkeypatch) -> None:
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={"training_model": "longevity"},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["training_model"] == "longevity"
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.generation_context == {
+        "training_model": "longevity",
+        "training_model_source": "explicit",
+    }
+    first_week = [w for w in recording_repo.created_workouts if w.week_number == 1]
+    quality = [w for w in first_week if w.workout_type in {"tempo", "threshold", "vo2max"}]
+    assert len(quality) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_supersedes_partial_plan_on_workout_failure(
+    monkeypatch,
+) -> None:
+    class FailingWorkoutRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            raise RuntimeError("insert failed")
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    failing_repo = FailingWorkoutRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", failing_repo)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert failing_repo.status_updates == [("plan-1", "superseded")]
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_survives_superseded_cleanup_failure(monkeypatch) -> None:
+    """A benign failure cleaning up the *prior* plan's future workouts must not
+
+    supersede the freshly-persisted plan: the new plan + workouts are already
+    durable, the calendar read scopes to the active plan anyway (#315), so the
+    request must still succeed and leave the new plan active.
+    """
+
+    class CleanupFailingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def get_active_plan(self, user_id: str):
+            return TrainingPlan(
+                id="plan-prior",
+                user_id=user_id,
+                title="Prior plan",
+                plan_type="weekly",
+                start_date=datetime(2026, 1, 1, tzinfo=UTC).date(),
+                end_date=datetime(2026, 3, 1, tzinfo=UTC).date(),
+            )
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-new"})
+
+        async def delete_future_scheduled_workouts(self, user_id, plan_id, from_date) -> int:
+            raise RuntimeError("cleanup failed")
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    cleanup_repo = CleanupFailingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", cleanup_repo)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert response.json()["plan_id"] == "plan-new"
+    # The persisted plan must NOT be superseded by the benign cleanup failure.
+    assert cleanup_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_structure_maps_composer_valueerror_to_503(monkeypatch) -> None:
+    from backend.services import plan_composer
+
+    class RecordingCleanupRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.status_updates: list[tuple[str, str]] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            return plan.model_copy(update={"id": "plan-1"})
+
+        async def update_training_plan_status(
+            self, user_id: str, plan_id: str, status: str
+        ) -> None:
+            self.status_updates.append((plan_id, status))
+
+    def broken_compose(*args, **kwargs):
+        raise ValueError("Plan skeleton has no phase covering week 3")
+
+    cleanup_repo = RecordingCleanupRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", cleanup_repo)
+    monkeypatch.setattr(plan_composer, "compose_plan_workouts", broken_compose)
+
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/generate-plan-structure", json={})
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert cleanup_repo.status_updates == [("plan-1", "superseded")]
 
 
 @pytest.mark.asyncio
@@ -1404,3 +4355,754 @@ async def test_get_athlete_summary_includes_nutrition_fields(monkeypatch) -> Non
     body = response.json()
     assert body["profile"]["dietary_restrictions"] == ["vegetarian"]
     assert body["profile"]["nutrition_notes"] == "Avoid dairy on race morning"
+
+
+@pytest.fixture
+def model_state_chat_service_fixture():
+    original = api_index.chat_service
+    service = ModelStateChatService()
+    api_index.chat_service = cast(Any, service)
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1", scopes=[]
+    )
+    try:
+        yield service
+    finally:
+        api_index.chat_service = original
+        api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
+
+
+@pytest.mark.asyncio
+async def test_chat_model_state_get_and_replace_are_authenticated_private_endpoints(
+    model_state_chat_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        initial = await client.get("/api/chat/model-state")
+        await client.post(
+            "/api/chat/model-state/lease", json={"lease_id": "lease-1", "ttl_seconds": 60}
+        )
+        replaced = await client.put(
+            "/api/chat/model-state",
+            json={
+                "expected_version": 3,
+                "lease_id": "lease-1",
+                "items": [{"role": "user", "content": "hello"}],
+                "coaching_memory": [],
+                "compaction_metadata": {"reason": "seed"},
+            },
+        )
+
+    assert initial.status_code == 200
+    assert initial.json()["version"] == 2
+    assert replaced.status_code == 200
+    assert replaced.json()["items"] == [{"role": "user", "content": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_lease_status_hides_private_model_state(
+    model_state_chat_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        initial = await client.get("/api/chat/model-state/lease")
+        await client.post(
+            "/api/chat/model-state/lease", json={"lease_id": "lease-1", "ttl_seconds": 60}
+        )
+        active = await client.get("/api/chat/model-state/lease")
+
+    assert initial.json() == {"expires_at": None, "in_flight": False}
+    assert active.json() == {
+        "expires_at": "2026-07-10T00:00:00Z",
+        "in_flight": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_model_state_replace_rejects_stale_version(
+    model_state_chat_service_fixture,
+) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        await client.post(
+            "/api/chat/model-state/lease", json={"lease_id": "lease-1", "ttl_seconds": 60}
+        )
+        response = await client.put(
+            "/api/chat/model-state",
+            json={
+                "expected_version": 1,
+                "lease_id": "lease-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+        )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "json"),
+    [
+        ("GET", "/api/chat/model-state", None),
+        ("GET", "/api/chat/model-state/lease", None),
+        (
+            "PUT",
+            "/api/chat/model-state",
+            {"expected_version": 0, "lease_id": "lease-1"},
+        ),
+        ("POST", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+        ("PATCH", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+        ("DELETE", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+    ],
+)
+async def test_chat_model_state_endpoints_require_authentication(
+    method: str, path: str, json: dict[str, object] | None
+) -> None:
+    api_index.app.dependency_overrides.pop(api_index.require_user_context, None)
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.request(method, path, json=json)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "json"),
+    [
+        ("GET", "/api/chat/messages", None),
+        ("GET", "/api/chat/model-state", None),
+        ("GET", "/api/chat/model-state/lease", None),
+        (
+            "PUT",
+            "/api/chat/model-state",
+            {
+                "expected_version": 0,
+                "lease_id": "lease-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+        ),
+        ("POST", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+        ("DELETE", "/api/chat/model-state/lease", {"lease_id": "lease-1"}),
+    ],
+)
+async def test_private_chat_state_endpoints_map_repository_configuration_errors_to_503(
+    method: str,
+    path: str,
+    json: dict[str, object] | None,
+    model_state_chat_service_fixture,
+) -> None:
+    service = model_state_chat_service_fixture
+
+    async def unavailable(*_args, **_kwargs):
+        raise RepositoryNotConfiguredError("Supabase unavailable")
+
+    service.list_messages = unavailable
+    service.get_model_state = unavailable
+    service.get_turn_lease_status = unavailable
+    service.replace_model_state = unavailable
+    service.acquire_turn_lease = unavailable
+    service.renew_turn_lease = unavailable
+    service.release_turn_lease = unavailable
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.request(method, path, json=json)
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "json", "service_method", "exception", "expected_detail"),
+    [
+        # httpx transport errors are still handled locally by the endpoint, which keeps
+        # its own message.
+        (
+            "GET",
+            "/api/chat/messages",
+            None,
+            "list_messages",
+            HTTPError("connection reset"),
+            "Chat session service unavailable",
+        ),
+        (
+            "GET",
+            "/api/chat/model-state",
+            None,
+            "get_model_state",
+            HTTPError("timeout"),
+            "Chat session service unavailable",
+        ),
+        (
+            "GET",
+            "/api/chat/model-state/lease",
+            None,
+            "get_turn_lease_status",
+            HTTPError("connection reset"),
+            "Chat session service unavailable",
+        ),
+        # A PostgREST schema-cache miss now flows to the centralized handler, which maps
+        # it to 503 with the shared generic detail.
+        (
+            "PUT",
+            "/api/chat/model-state",
+            {
+                "expected_version": 0,
+                "lease_id": "lease-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+            "replace_model_state",
+            PostgRESTAPIError(
+                {
+                    "message": "schema cache unavailable",
+                    "code": "PGRST205",
+                    "hint": None,
+                    "details": None,
+                }
+            ),
+            "Service temporarily unavailable.",
+        ),
+    ],
+)
+async def test_private_chat_state_endpoints_map_transient_storage_errors_to_503(
+    method: str,
+    path: str,
+    json: dict[str, object] | None,
+    service_method: str,
+    exception: Exception,
+    expected_detail: str,
+    model_state_chat_service_fixture,
+) -> None:
+    service = model_state_chat_service_fixture
+
+    async def unavailable(*_args, **_kwargs):
+        raise exception
+
+    setattr(service, service_method, unavailable)
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.request(method, path, json=json)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == expected_detail
+
+
+@pytest.mark.asyncio
+async def test_chat_lease_status_delegates_postgrest_conflicts_to_shared_handler(
+    model_state_chat_service_fixture,
+) -> None:
+    async def conflict(*_args, **_kwargs):
+        raise PostgRESTAPIError(
+            {
+                "message": "lease conflict",
+                "code": "23505",
+                "hint": None,
+                "details": None,
+            }
+        )
+
+    model_state_chat_service_fixture.get_turn_lease_status = conflict
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/chat/model-state/lease")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Conflicts with existing data."}
+
+
+@pytest.mark.asyncio
+async def test_private_chat_state_endpoints_do_not_mask_programming_errors(
+    model_state_chat_service_fixture,
+) -> None:
+    service = model_state_chat_service_fixture
+
+    async def broken_replace(*_args, **_kwargs):
+        raise TypeError("programming error")
+
+    service.replace_model_state = broken_replace
+    transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.put(
+            "/api/chat/model-state",
+            json={
+                "chat_id": "thread-1",
+                "expected_version": 0,
+                "lease_id": "lease-1",
+                "items": [],
+                "coaching_memory": [],
+                "compaction_metadata": {},
+            },
+        )
+
+    assert response.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_lease_acquire_and_release(model_state_chat_service_fixture) -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        acquired = await client.post(
+            "/api/chat/model-state/lease",
+            json={"lease_id": "lease-1", "ttl_seconds": 60},
+        )
+        renewed = await client.patch(
+            "/api/chat/model-state/lease",
+            json={"lease_id": "lease-1", "ttl_seconds": 60},
+        )
+        released = await client.request(
+            "DELETE",
+            "/api/chat/model-state/lease",
+            json={"lease_id": "lease-1"},
+        )
+
+    assert acquired.status_code == 200
+    assert acquired.json()["lease_id"] == "lease-1"
+    assert renewed.status_code == 200
+    assert renewed.json()["lease_expires_at"] == "2026-07-10T00:00:00Z"
+    assert released.status_code == 200
+    assert released.json()["lease_id"] is None
+
+
+def _make_no_such_key_error() -> botocore.exceptions.ClientError:
+    return botocore.exceptions.ClientError(
+        {"Error": {"Code": "NoSuchKey", "Message": "The specified key does not exist."}},
+        "GetObject",
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_file_returns_404_on_no_such_key(
+    auth_service_fixture, monkeypatch
+) -> None:
+    async def mock_download_raises(*, user_id: str, object_key: str) -> bytes:
+        raise _make_no_such_key_error()
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_raises)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        set_cookie = session_response.headers["set-cookie"]
+        cookie_value = set_cookie.split("coach_browser_session=")[1].split(";")[0]
+        token_body = (
+            await client.post(
+                "/api/oauth/browser-token",
+                cookies={"coach_browser_session": cookie_value},
+            )
+        ).json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-file",
+            json={
+                "content_type": "application/vnd.garmin.fit",
+                "filename": "ride.fit",
+                "object_key": "users/athlete-1/chat-attachment/2024/01/01/ride.fit",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "Could not resolve the file reference" in detail
+    # Must steer the coach away from retrying: its tools are all disabled for
+    # the rest of the turn once one has run, so a retry is unfollowable and
+    # strands the model until maxTurns throws (Sentry 7633993901).
+    assert "Do not retry" in detail
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_returns_404_on_no_such_key(
+    auth_service_fixture, monkeypatch
+) -> None:
+    async def mock_download_raises(*, user_id: str, object_key: str) -> bytes:
+        raise _make_no_such_key_error()
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_raises)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        session_response = await client.post(
+            "/api/oauth/browser-session",
+            json={"access_token": "supabase-access-token"},
+        )
+        set_cookie = session_response.headers["set-cookie"]
+        cookie_value = set_cookie.split("coach_browser_session=")[1].split(";")[0]
+        token_body = (
+            await client.post(
+                "/api/oauth/browser-token",
+                cookies={"coach_browser_session": cookie_value},
+            )
+        ).json()
+
+        response = await client.post(
+            "/api/engine/process-uploaded-zip",
+            json={
+                "content_type": "application/zip",
+                "filename": "rides.zip",
+                "object_key": "users/athlete-1/chat-attachment/2024/01/01/rides.zip",
+            },
+            headers={"Authorization": f"Bearer {token_body['access_token']}"},
+        )
+
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "Could not resolve the file reference" in detail
+    # Must steer the coach away from retrying: its tools are all disabled for
+    # the rest of the turn once one has run, so a retry is unfollowable and
+    # strands the model until maxTurns throws (Sentry 7633993901).
+    assert "Do not retry" in detail
+
+
+# --- Course uploads ------------------------------------------------------------
+#
+# A course is a route the athlete plans to ride or run. It must never reach the
+# training log as a completed activity — see backend/services/course.py.
+
+_SAMPLE_COURSE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><type>cycling</type><name>Schotterfest Long</name><trkseg>
+    <trkpt lat="37.0" lon="-122.0"><ele>100</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.01"><ele>160</ele></trkpt>
+    <trkpt lat="37.0" lon="-122.02"><ele>140</ele></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+
+class _CourseRepository(EngineRepository):
+    """EngineRepository plus a body weight, so cycling analysis can actually run.
+
+    Also records every create_activity call, because "no activity was written" is
+    the assertion this whole change exists for and it must be checked directly
+    rather than inferred from the response body.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.created: list[Activity] = []
+
+    async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+        profile = await super().get_athlete_profile(user_id)
+        return profile.model_copy(update={"weight_kg": 72.0})
+
+    async def create_activity(self, activity: Activity) -> Activity:
+        self.created.append(activity)
+        return activity.model_copy(update={"id": "activity-1"})
+
+
+# The production mapping, not a copy: a newly supported suffix should reach these
+# helpers automatically rather than silently missing test coverage.
+_ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS = api_index._ACTIVITY_SUFFIX_TO_CONTENT_TYPE
+
+
+async def _post_uploaded_zip_archive(
+    monkeypatch, zip_bytes: bytes, repo: _CourseRepository | None = None
+) -> tuple[dict[str, Any], _CourseRepository]:
+    """POST one archive to process-uploaded-zip and hand back the body and the repo."""
+    repo = repo if repo is not None else _CourseRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return zip_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-zip",
+                json={
+                    "content_type": "application/zip",
+                    "filename": "export.zip",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/export.zip",
+                    "public_url": "https://cdn.example.com/export.zip",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    return response.json(), repo
+
+
+async def _post_uploaded_file(
+    monkeypatch,
+    file_bytes: bytes,
+    filename: str = "course.gpx",
+    repo: _CourseRepository | None = None,
+    public_url: str | None = None,
+    content_type: str | None = None,
+) -> tuple[dict[str, Any], _CourseRepository]:
+    """POST one file to process-uploaded-file and hand back the body and the repo.
+
+    Used for recordings as well as courses — the point is that the caller asserts on
+    what the repository recorded, so the helper must not presuppose either outcome.
+    """
+    repo = repo if repo is not None else _CourseRepository()
+    # Derived rather than hardcoded: passing a .fit through with a GPX content type
+    # would fail in a way that looks like a parser bug rather than a test bug.
+    content_type = (
+        content_type or _ACTIVITY_SUFFIX_TO_CONTENT_TYPE_FOR_TESTS[Path(filename).suffix.lower()]
+    )
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return file_bytes
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": content_type,
+                    "filename": filename,
+                    "object_key": f"users/athlete-1/chat-attachment/2024/01/01/{filename}",
+                    "public_url": public_url,
+                },
+            )
+    finally:
+        restore_override()
+    assert response.status_code == 200
+    return response.json(), repo
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_never_writes_an_activity(monkeypatch) -> None:
+    body, repo = await _post_uploaded_file(monkeypatch, _SAMPLE_COURSE_GPX)
+
+    # The load-bearing assertion of this entire change.
+    assert repo.created == []
+    assert "activity" not in body
+    assert body["kind"] == "course"
+    assert body["status"] == "analyzed"
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_returns_terrain_and_analysis(monkeypatch) -> None:
+    body, _ = await _post_uploaded_file(monkeypatch, _SAMPLE_COURSE_GPX)
+
+    course = body["course"]
+    assert course["sport"] == "cycling"
+    assert course["name"] == "Schotterfest Long"
+    assert course["distance_meters"] > 0
+    assert course["elevation_gain_meters"] == 60.0
+    assert course["source_file_key"].endswith("course.gpx")
+
+    # EngineRepository has a cycling FTP and _CourseRepository adds a weight, so
+    # the cycling model runs end to end.
+    assert body["analysis_unavailable_reason"] is None
+    assert body["analysis"]["primary_training_emphasis"] == "climbing_power"
+    assert body["analysis"]["vam_target"] > 0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_degrades_when_thresholds_are_missing(
+    monkeypatch,
+) -> None:
+    # Losing the whole upload because an athlete has not given us an FTP would be a
+    # worse answer than terrain plus an explanation.
+    class _NoThresholdRepository(_CourseRepository):
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            return []
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_NoThresholdRepository()
+    )
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert body["analysis"] is None
+    assert "FTP" in body["analysis_unavailable_reason"]
+    # Terrain survives even when the model doesn't.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_analyzes_a_course_member_without_saving_it(
+    monkeypatch,
+) -> None:
+    body, repo = await _post_uploaded_zip_archive(
+        monkeypatch, _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
+    )
+    processed = body["processed"]
+    kinds = sorted(entry["kind"] for entry in processed)
+    assert kinds == ["activity", "course"]
+    # The recorded run is saved; the course is not.
+    assert len(repo.created) == 1
+    assert repo.created[0].source == "gpx_upload"
+
+    # The archive path must carry the same analysis as a single-file upload, not
+    # just the discriminator — a course entry stripped of its terrain would satisfy
+    # the kind assertion above while telling the coach nothing.
+    course_entry = next(entry for entry in processed if entry["kind"] == "course")
+    assert course_entry["course"]["sport"] == "cycling"
+    assert course_entry["course"]["elevation_gain_meters"] == 60.0
+    assert course_entry["analysis"]["primary_training_emphasis"] == "climbing_power"
+
+
+@pytest.mark.asyncio
+async def test_saved_activity_response_carries_the_activity_kind_discriminator(
+    monkeypatch,
+) -> None:
+    # Pairs with kind: "course". Additive, so nothing that reads "activity" or
+    # "status" today has to change.
+    body, repo = await _post_uploaded_file(monkeypatch, _SAMPLE_GPX, filename="run.gpx")
+
+    assert body["kind"] == "activity"
+    assert body["status"] == "saved"
+    assert len(repo.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_admits_a_lookup_failure_instead_of_blaming_the_athlete(
+    monkeypatch,
+) -> None:
+    # During an outage both fetches come back empty. Telling the athlete to supply an
+    # FTP they already gave us, on every upload, would be a falsehood.
+    class _BrokenRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise httpx.ConnectError("supabase unreachable")
+
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            raise httpx.ConnectError("supabase unreachable")
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_BrokenRepository()
+    )
+    # The invariant has to hold on the degraded path too — an outage must not become
+    # a route in the training log.
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert "FTP" not in body["analysis_unavailable_reason"]
+    assert "couldn't be read" in body["analysis_unavailable_reason"]
+    # Terrain is unaffected by the outage.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_survives_an_athlete_with_no_profile_row(
+    monkeypatch,
+) -> None:
+    # get_athlete_profile raises RecordNotFoundError rather than returning None, and
+    # RecordNotFoundError is a LookupError caught by no DB-fault class and no
+    # registered exception handler. Sharing one try with the threshold fetch turned a
+    # brand-new athlete's first course upload into a 500 — losing the upload the
+    # degradation path exists to protect, for exactly the people most likely to be
+    # uploading a goal event's course file.
+    class _NoProfileRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_NoProfileRepository()
+    )
+    assert repo.created == []
+    assert body["kind"] == "course"
+    assert body["course"]["elevation_gain_meters"] == 60.0
+    # No profile means no body weight, so the cycling model can't run — but that is
+    # reported, not raised.
+    assert "body weight" in body["analysis_unavailable_reason"]
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_degrades_when_the_database_is_unavailable(
+    monkeypatch,
+) -> None:
+    # The catch in _athlete_context_for_course deliberately departs from the
+    # AGENTS.md rule that PostgRESTAPIError reaches the centralized handler. Without
+    # a test, a future narrowing of that except tuple turns a transient DB blip into
+    # a 5xx that loses the athlete's upload.
+    class _BrokenRepository(_CourseRepository):
+        async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
+            raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
+
+        async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
+            raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
+
+    body, repo = await _post_uploaded_file(
+        monkeypatch, _SAMPLE_COURSE_GPX, repo=_BrokenRepository()
+    )
+    assert repo.created == []
+    # Terrain is unaffected by the outage.
+    assert body["course"]["elevation_gain_meters"] == 60.0
+    # And the athlete is not told to re-enter an FTP they already gave us.
+    reason = body["analysis_unavailable_reason"]
+    assert "couldn't be read" in reason
+    assert "FTP" not in reason
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_survives_a_course_member_that_cannot_be_analyzed(
+    monkeypatch,
+) -> None:
+    # The course branch's broad catch decides whether one unanalyzable route kills a
+    # 20-member archive. _athlete_context_for_course only absorbs DB faults, so
+    # anything else — a pydantic ValidationError on a malformed sport_thresholds row,
+    # say — lands here instead of in the degrade path. The sibling activity must
+    # still be processed and the failure counted as a skip, not a 500.
+    def explode(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise ValueError("malformed threshold row")
+
+    monkeypatch.setattr(api_index, "build_course_payload", explode)
+
+    body, repo = await _post_uploaded_zip_archive(
+        monkeypatch, _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
+    )
+
+    # The recorded run survives; the course is skipped rather than saved.
+    assert [entry["kind"] for entry in body["processed"]] == ["activity"]
+    assert body["skipped_count"] == 1
+    assert len(repo.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_course_surfaces_an_analysis_failure_on_the_single_file_path(
+    monkeypatch,
+) -> None:
+    # Deliberately unlike the zip path, which skips a failing member so the rest of
+    # the archive survives. A single-file upload has nothing else to salvage, and
+    # build_course_payload is the only thing that produces the terrain — if it raises,
+    # there is no partial answer to give, so the failure is surfaced rather than
+    # dressed up as an empty success.
+    repo = _CourseRepository()
+    monkeypatch.setattr(api_index, "repo", repo)
+
+    def explode(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise ValueError("malformed threshold row")
+
+    monkeypatch.setattr(api_index, "build_course_payload", explode)
+
+    async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
+        return _SAMPLE_COURSE_GPX
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/process-uploaded-file",
+                json={
+                    "content_type": "application/gpx+xml",
+                    "filename": "course.gpx",
+                    "object_key": "users/athlete-1/chat-attachment/2024/01/01/course.gpx",
+                    "public_url": None,
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 500
+    # Whatever the outcome, nothing was written — the branch runs before any persist.
+    assert repo.created == []

@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 import os
-from collections.abc import AsyncIterator, Mapping
+import zipfile
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import date
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Literal, cast
 from urllib.parse import urlencode
+from uuid import UUID
 
+import botocore.exceptions
+import httpx
 import sentry_sdk
 from fastapi import (
     Cookie,
@@ -18,21 +27,36 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Request,
     Response,
     UploadFile,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from postgrest.exceptions import APIError as PostgRESTAPIError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import settings
+from backend.engine.gpx_parser import (
+    ParsedActivity,
+    ParsedCourse,
+    parse_fit,
+    parse_gpx,
+    parse_tcx,
+)
 from backend.logging_config import configure_logging
 from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
 )
 from backend.models.athlete import (
+    RecoveryLog,
+    ScheduleAvailability,
+    ScheduleDayAvailability,
+    ScheduleOverride,
     SportThreshold,
+    ThresholdRecalibrationCandidate,
 )
 from backend.models.auth import (
+    BrowserSessionContext,
     BrowserSessionRequest,
     BrowserTokenResponse,
     OAuthAuthorizeRequest,
@@ -40,14 +64,22 @@ from backend.models.auth import (
     OAuthTokenRequest,
     UserContext,
 )
-from backend.models.chat import ChatPersistRequest
+from backend.models.chat import (
+    ChatModelState,
+    ChatModelStateReplaceRequest,
+    ChatPersistRequest,
+    ChatTurnLeaseReleaseRequest,
+    ChatTurnLeaseRequest,
+)
 from backend.models.storage import PresignUploadRequest
-from backend.models.training import Activity
+from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
+from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
 from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
     SupabaseRepository,
+    build_activity_summary_from_fields,
 )
 from backend.services.auth import (
     AuthService,
@@ -57,7 +89,29 @@ from backend.services.auth import (
     OAuthLoginRequiredError,
 )
 from backend.services.chat import ChatService, ChatUnavailableError
+from backend.services.course import AthleteCourseContext, build_course_payload
+from backend.services.goal_service import (
+    GoalService,
+    InvalidGoalPayloadError,
+    UnknownGoalActionError,
+)
+from backend.services.intervals import (
+    IntervalsConfigurationError,
+    IntervalsNotConnectedError,
+    IntervalsOAuthExchangeError,
+    IntervalsOAuthService,
+    IntervalsStateError,
+    IntervalsSyncError,
+    map_intervals_activity,
+)
 from backend.services.r2 import R2Service
+
+ActivityPersistenceEndpoint = Literal[
+    "process_uploaded_file",
+    "save_activity_from_text",
+    "process_uploaded_zip",
+    "intervals_sync",
+]
 
 configure_logging(debug=settings.app_env == "development")
 
@@ -75,6 +129,46 @@ else:
     logging.getLogger(__name__).info("SENTRY_DSN is not set; server-side Sentry is disabled.")
 
 logger = logging.getLogger(__name__)
+MAX_CHAT_MESSAGE_PAGE_SIZE = 100
+
+
+def _postgrest_http_status(exc: PostgRESTAPIError) -> int:
+    """Map a PostgREST/Postgres error to the HTTP status a client should see.
+
+    PostgREST surfaces the underlying Postgres SQLSTATE on ``APIError.code`` (a
+    5-char string like ``"22P02"``; PostgREST's own faults instead use ``PGRSTxxx``).
+    We branch on the SQLSTATE because the *same* exception type covers both "you
+    sent bad data" and "the database is unreachable" — only the code distinguishes
+    them. Origin story: a coach-sent non-UUID ``plan_workout_id`` reached Postgres,
+    raised ``22P02``, and surfaced as a spurious 503 "service unavailable".
+
+    Per-code decisions and rationale:
+
+    - ``23505`` unique_violation → **409 Conflict**. The request was well-formed but
+      collides with a row that already exists; "conflict" is the honest status, not
+      "invalid" (422) and not "outage" (503).
+    - ``23502`` not_null_violation → **503**. A missing NOT NULL column almost always
+      means *server* code omitted a field, not that the client sent bad input — so a
+      422 blaming the client would mislead. Treat it as an internal fault.
+    - Any other class ``23`` (integrity constraint), e.g. ``23503`` foreign_key or
+      ``23514`` check_violation → **422**. These reflect client-supplied values that
+      violate a constraint (unknown FK id, out-of-range value).
+    - Class ``22`` (data exception), e.g. ``22P02`` invalid uuid syntax or ``22007``
+      invalid datetime → **422**. Malformed client input that Postgres could not parse.
+    - Everything else — connectivity errors, PostgREST schema-cache misses
+      (``PGRST205`` and friends), permission errors (``42501``), internal faults, or a
+      missing/non-string code → **503**. Not attributable to client input.
+    """
+    code = getattr(exc, "code", None)
+    if not isinstance(code, str):
+        return 503
+    if code == "23505":  # unique_violation → the row already exists
+        return 409
+    if code == "23502":  # not_null_violation → server omitted a column, not client input
+        return 503
+    if code[:2] in ("22", "23"):  # data exception / integrity violation from client input
+        return 422
+    return 503  # PGRSTxxx schema-cache, connectivity, permissions, internal faults
 
 
 async def log_startup() -> None:
@@ -104,8 +198,79 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
+
+# Client-facing 4xx/5xx detail per status. Deliberately generic: the specific
+# SQLSTATE and request path go to logs/Sentry (below), never to the client, so we
+# don't leak DB internals. Shape mirrors FastAPI's default HTTPException body
+# (``{"detail": ...}``) for a consistent envelope across the API.
+_POSTGREST_STATUS_DETAIL = {
+    409: "Conflicts with existing data.",
+    422: "Invalid request.",
+    503: "Service temporarily unavailable.",
+}
+
+
+@app.exception_handler(PostgRESTAPIError)
+async def _handle_postgrest_error(request: Request, exc: PostgRESTAPIError) -> JSONResponse:
+    """Centralized PostgREST → HTTP mapping for *every* endpoint.
+
+    Any ``PostgRESTAPIError`` that a route handler does not catch locally lands here
+    (see ``_postgrest_http_status`` for the per-SQLSTATE decisions). This is the
+    single point that classifies DB errors, so individual endpoints no longer need
+    to blanket-map them to 503 — and endpoints with no local try/except (which used
+    to leak a raw 500) are now covered too.
+    """
+    status = _postgrest_http_status(exc)
+    code = getattr(exc, "code", None)
+    safe_path = request.url.path.encode("unicode_escape").decode("ascii")
+    if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+        # exc_info=exc so Sentry's logging integration still captures the outage:
+        # returning a Response marks the exception "handled", so it won't be
+        # auto-reported otherwise.
+        logger.error(
+            "PostgREST error path=%s code=%s -> %s",
+            safe_path,
+            code,
+            status,
+            exc_info=exc,
+        )
+    else:
+        # Client fault (bad input / conflict): expected, not an incident — log at info.
+        logger.info("PostgREST client-fault path=%s code=%s -> %s", safe_path, code, status)
+    return JSONResponse(status_code=status, content={"detail": _POSTGREST_STATUS_DETAIL[status]})
+
+
+@app.exception_handler(botocore.exceptions.ClientError)
+async def _handle_s3_client_error(
+    request: Request, exc: botocore.exceptions.ClientError
+) -> JSONResponse:
+    error_code = exc.response.get("Error", {}).get("Code", "")
+    safe_path = request.url.path.encode("unicode_escape").decode("ascii")
+    if error_code == "NoSuchKey":
+        logger.warning("R2 NoSuchKey path=%s", safe_path, exc_info=exc)
+        return JSONResponse(
+            status_code=HTTPStatus.NOT_FOUND,
+            content={
+                # No retry instruction: the caller's coach tools are all disabled
+                # for the remainder of the turn once one has run, so advising a
+                # retry only strands the model against its turn limit.
+                "detail": (
+                    "Could not resolve the file reference in storage. "
+                    "Do not retry this file; report it to the athlete."
+                ),
+            },
+        )
+    logger.error("R2 ClientError path=%s code=%s", safe_path, error_code, exc_info=exc)
+    return JSONResponse(
+        status_code=HTTPStatus.BAD_GATEWAY,
+        content={"detail": "File storage is temporarily unavailable."},
+    )
+
+
 auth_service = AuthService()
 chat_service = ChatService()
+goal_service = GoalService()
+intervals_service = IntervalsOAuthService()
 repo = SupabaseRepository()
 r2_service = R2Service()
 
@@ -128,6 +293,25 @@ def require_user_context(authorization: str | None = Header(default=None)) -> Us
     except Exception as exc:
         logger.warning("bearer auth failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=401, detail="Invalid bearer token") from exc
+
+
+async def _run_chat_model_state_operation(
+    operation: Callable[[], Awaitable[ChatModelState]],
+    *,
+    failure_log_message: str,
+) -> Mapping[str, object]:
+    try:
+        state = await operation()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError is intentionally *not* caught here: it propagates to the
+    # centralized _handle_postgrest_error handler, which classifies it by SQLSTATE.
+    except httpx.HTTPError as exc:
+        logger.exception(failure_log_message, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return state.model_dump(mode="json")
 
 
 # ── Health ────────────────────────────────────────────────────
@@ -235,6 +419,18 @@ async def oauth_revoke(payload: OAuthRevokeRequest) -> Mapping[str, bool]:
     return {"revoked": revoked}
 
 
+def _set_browser_session_cookie(response: Response, browser_session: BrowserSessionContext) -> None:
+    response.set_cookie(
+        key=auth_service.browser_session_cookie_name,
+        value=auth_service.create_browser_session_token(browser_session),
+        httponly=True,
+        max_age=auth_service.browser_session_max_age_seconds,
+        path="/",
+        samesite="lax",
+        secure=settings.base_url.startswith("https://"),
+    )
+
+
 @app.post("/api/oauth/browser-session")
 async def oauth_browser_session(
     payload: BrowserSessionRequest, response: Response
@@ -246,15 +442,7 @@ async def oauth_browser_session(
     except Exception as exc:
         logger.warning("browser session creation failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=401, detail="Unable to verify browser session.") from exc
-    response.set_cookie(
-        key=auth_service.browser_session_cookie_name,
-        value=auth_service.create_browser_session_token(session),
-        httponly=True,
-        max_age=12 * 60 * 60,
-        path="/",
-        samesite="lax",
-        secure=settings.base_url.startswith("https://"),
-    )
+    _set_browser_session_cookie(response, session)
     logger.info("browser session created user_id=%s", session.user_id)
     return {"ok": True}
 
@@ -268,13 +456,16 @@ async def oauth_browser_session_logout() -> Response:
         httponly=True,
         path="/",
         samesite="lax",
-        secure=settings.app_base_url.startswith("https://"),
+        # Mirror _set_browser_session_cookie: base_url is the effective URL, so the
+        # clearing cookie keeps its Secure attribute on Vercel where app_base_url is blank.
+        secure=settings.base_url.startswith("https://"),
     )
     return response
 
 
 @app.post("/api/oauth/browser-token")
 async def oauth_browser_token(
+    response: Response,
     coach_browser_session: str | None = Cookie(default=None),
 ) -> BrowserTokenResponse:
     try:
@@ -285,8 +476,151 @@ async def oauth_browser_token(
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     else:
+        # Sliding renewal keeps an actively used browser signed in while the
+        # 12-hour cookie still provides an inactivity timeout.
+        _set_browser_session_cookie(response, browser_session)
         logger.debug("browser token issued user_id=%s", browser_session.user_id)
         return token
+
+
+# ── Intervals.icu OAuth ───────────────────────────────────────
+
+
+@app.post("/api/intervals/authorize")
+async def intervals_authorize(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        response = intervals_service.build_authorization_url(user_context.user_id)
+    except IntervalsConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response.model_dump(mode="json")
+
+
+@app.get("/api/intervals/callback")
+async def intervals_callback(
+    code: str | None = None,
+    error: str | None = None,
+    state: str | None = None,
+) -> RedirectResponse:
+    profile_base_url = f"{settings.base_url.rstrip('/')}/profile"
+    profile_error_url = f"{profile_base_url}?intervals=error"
+    if error is not None:
+        logger.info("intervals callback denied error=%s", error)
+        return RedirectResponse(profile_error_url, status_code=302)
+    if not code or not state:
+        logger.warning("intervals callback missing required parameters")
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    try:
+        await intervals_service.exchange_code_for_connection(code=code, state=state)
+    except (
+        IntervalsConfigurationError,
+        IntervalsOAuthExchangeError,
+        IntervalsRepositoryNotConfiguredError,
+        IntervalsStateError,
+    ) as exc:
+        logger.warning("intervals callback failed error_type=%s", type(exc).__name__)
+        return RedirectResponse(profile_error_url, status_code=302)
+
+    logger.info("intervals callback completed")
+    return RedirectResponse(f"{profile_base_url}?intervals=connected", status_code=302)
+
+
+@app.get("/api/intervals/status")
+async def intervals_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = intervals_service.get_status(user_context.user_id)
+    except IntervalsRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
+
+
+@app.delete("/api/intervals/connection")
+async def intervals_disconnect(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = intervals_service.disconnect(user_context.user_id)
+    except IntervalsRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status.model_dump(mode="json")
+
+
+class IntervalsSyncRequest(BaseModel):
+    days: int = Field(default=14, ge=1, le=90)
+
+
+@app.post("/api/intervals/sync")
+async def intervals_sync(  # noqa: C901
+    payload: IntervalsSyncRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    try:
+        auth = intervals_service.resolve_auth(user_id)
+    except IntervalsNotConnectedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (
+        IntervalsConfigurationError,
+        IntervalsOAuthExchangeError,
+        IntervalsRepositoryNotConfiguredError,
+    ) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    newest = datetime.now(UTC).date()
+    oldest = newest - timedelta(days=payload.days - 1)
+    try:
+        items = await intervals_service.fetch_recent_activities(
+            auth,
+            oldest=oldest,
+            newest=newest,
+        )
+    except IntervalsSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    existing_keys = await _activity_repo_call(
+        repo.list_synced_intervals_keys(user_id),
+        detail="Failed to load synced Intervals activities.",
+        log_message=f"list_synced_intervals_keys failed for user_id={user_id}",
+    )
+    synced_activities: list[object] = []
+    skipped_duplicates = 0
+    skipped_invalid = 0
+    for item in items:
+        activity = map_intervals_activity(user_id, item)
+        if activity is None:
+            skipped_invalid += 1
+            continue
+        if activity.source_file_key in existing_keys:
+            skipped_duplicates += 1
+            continue
+        persisted_activity = await _activity_repo_call(
+            repo.create_intervals_activity(activity),
+            detail="Failed to save activity.",
+            log_message=f"create_intervals_activity failed for user_id={user_id}",
+        )
+        if persisted_activity is None:
+            # Another overlapping sync inserted it after the initial key lookup.
+            skipped_duplicates += 1
+            continue
+        persisted = await _finalize_persisted_activity(
+            user_id,
+            persisted_activity,
+            calling_endpoint="intervals_sync",
+        )
+        synced_activities.append(persisted["activity"])
+        if activity.source_file_key is not None:
+            existing_keys.add(activity.source_file_key)
+
+    return {
+        "synced": len(synced_activities),
+        "skipped_duplicates": skipped_duplicates,
+        "skipped_invalid": skipped_invalid,
+        "activities": synced_activities,
+    }
 
 
 @app.post("/api/oauth/authorize/decision")
@@ -387,11 +721,142 @@ async def persist_chat_message(
     return message.model_dump(mode="json")
 
 
+@app.get("/api/chat/messages")
+async def list_chat_messages(
+    limit: int = 50,
+    before: str | None = None,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    if limit < 1 or limit > MAX_CHAT_MESSAGE_PAGE_SIZE:
+        raise HTTPException(
+            status_code=422,
+            detail=f"limit must be between 1 and {MAX_CHAT_MESSAGE_PAGE_SIZE}",
+        )
+    try:
+        page = await chat_service.list_messages(user_context.user_id, limit=limit, before=before)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("chat messages list failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return page.model_dump(mode="json")
+
+
+@app.get("/api/chat/model-state")
+async def get_chat_model_state(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        state = await chat_service.get_model_state(user_context.user_id)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("chat model state get failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return state.model_dump(mode="json")
+
+
+@app.put("/api/chat/model-state")
+async def replace_chat_model_state(
+    payload: ChatModelStateReplaceRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.replace_model_state(user_context.user_id, payload),
+        failure_log_message="chat model state replace failed error_type=%s",
+    )
+
+
+@app.get("/api/chat/model-state/lease")
+async def get_chat_turn_lease_status(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    try:
+        status = await chat_service.get_turn_lease_status(user_context.user_id)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("chat lease status get failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Chat session service unavailable") from exc
+    return status.model_dump(mode="json")
+
+
+@app.post("/api/chat/model-state/lease")
+async def acquire_chat_turn_lease(
+    payload: ChatTurnLeaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.acquire_turn_lease(
+            user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
+        ),
+        failure_log_message="chat lease acquire failed error_type=%s",
+    )
+
+
+@app.patch("/api/chat/model-state/lease")
+async def renew_chat_turn_lease(
+    payload: ChatTurnLeaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.renew_turn_lease(
+            user_context.user_id, payload.lease_id, ttl_seconds=payload.ttl_seconds
+        ),
+        failure_log_message="chat lease renew failed error_type=%s",
+    )
+
+
+@app.delete("/api/chat/model-state/lease")
+async def release_chat_turn_lease(
+    payload: ChatTurnLeaseReleaseRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    return await _run_chat_model_state_operation(
+        lambda: chat_service.release_turn_lease(user_context.user_id, payload.lease_id),
+        failure_log_message="chat lease release failed error_type=%s",
+    )
+
+
+_ALLOWED_UPLOAD_TYPES: frozenset[str] = frozenset(
+    {
+        # Images — sent to the model as input_image via the Responses API
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        # Activity files — parsed server-side or described as text for the coach
+        "application/gpx+xml",
+        "application/vnd.garmin.fit",
+        "application/vnd.garmin.tcx+xml",
+        # Zip archives — unpacked server-side; contained activities/images are processed
+        # and everything else is discarded (see /api/engine/process-uploaded-zip).
+        "application/zip",
+        "application/x-zip-compressed",
+    }
+)
+
+
+def _check_upload_content_type(content_type: str) -> None:
+    if content_type not in _ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Uploading {content_type} files is not supported. "
+                "Supported types: images (GIF, JPEG, PNG, WebP), "
+                "activity files (.gpx, .fit, .tcx), and .zip archives of those."
+            ),
+        )
+
+
 @app.post("/api/chat/attachments/presign")
 async def presign_chat_upload(
     payload: PresignUploadRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    _check_upload_content_type(payload.content_type)
     try:
         presigned_upload = r2_service.create_presigned_upload(
             user_id=user_context.user_id, request=payload
@@ -411,6 +876,7 @@ async def presign_chat_upload(
 async def presign_upload(
     payload: PresignUploadRequest, user_context: UserContext = Depends(require_user_context)
 ) -> Mapping[str, object]:
+    _check_upload_content_type(payload.content_type)
     try:
         presigned_upload = r2_service.create_presigned_upload(
             user_id=user_context.user_id, request=payload
@@ -451,6 +917,122 @@ async def upload_chat_attachment(
         object_key[-12:],
     )
     return upload_result.model_dump(mode="json")
+
+
+# Guards the calendar endpoint against unbounded scans; the UI window is
+# ~15 weeks (42 days back + 8 weeks ahead), so this leaves generous headroom.
+_CALENDAR_MAX_RANGE_DAYS = 200
+
+
+def _scope_planned_workouts_to_active_plan(
+    planned: list[PlanWorkout],
+    active_plan_id: str | None,
+    today: date,
+) -> list[PlanWorkout]:
+    """Drop stale future scheduled workouts belonging to superseded plans.
+
+    Enforces the "one active plan is the source of truth" invariant at read
+    time so the calendar no longer depends solely on the generate-time
+    ``delete_future_scheduled_workouts`` cleanup side-effect (issue #315). The
+    exclusion predicate is the exact read-time mirror of that cleanup primitive:
+    a workout is dropped only when it is *future* (``workout_date >= today``),
+    ``status == 'scheduled'``, unmatched (``actual_activity_id is None``), and
+    owned by a *non-active* plan.
+
+    Every other row is explicitly retained — active-plan rows of any status, and
+    any non-active-plan rows that are past-dated, completed/skipped/modified, or
+    matched — so historical and past-dated "unconfirmed" (still-scheduled)
+    workouts from superseded plans remain visible.
+
+    When there is no active plan (``active_plan_id is None``) the exclusion is
+    skipped entirely and the planned list is returned unchanged, so we never
+    hide legitimate rows for an athlete who has no active plan.
+    """
+    if active_plan_id is None:
+        return planned
+    return [
+        workout
+        for workout in planned
+        if not (
+            workout.plan_id != active_plan_id
+            and workout.status == "scheduled"
+            and workout.actual_activity_id is None
+            and workout.workout_date >= today
+        )
+    ]
+
+
+@app.get("/api/calendar")
+async def get_calendar(
+    start: date,
+    end: date,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Planned workouts and recorded activities for the agenda/calendar view."""
+    if start > end:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
+    if (end - start).days > _CALENDAR_MAX_RANGE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"date range too large; maximum is {_CALENDAR_MAX_RANGE_DAYS} days",
+        )
+
+    today = datetime.now(UTC).date()
+    planned, activities, active_plan = await asyncio.gather(
+        repo.list_plan_workouts_between(user_context.user_id, start=start, end=end),
+        repo.list_activities_between(user_context.user_id, start=start, end=end),
+        repo.get_active_plan(user_context.user_id),
+    )
+    # Scope planned reads to the active plan so superseded plans with lingering
+    # future scheduled rows never double-show alongside the active timeline.
+    planned = _scope_planned_workouts_to_active_plan(
+        planned, active_plan.id if active_plan else None, today
+    )
+    logger.debug(
+        "calendar user_id=%s start=%s end=%s planned=%d activities=%d",
+        user_context.user_id,
+        start,
+        end,
+        len(planned),
+        len(activities),
+    )
+    # Map each active-plan week to its fueling focus (issue #53) so the calendar can
+    # show a per-week nutrition line. Focus lives on the plan's phases jsonb, not on
+    # the workout rows, and only applies to workouts belonging to the active plan.
+    focus_by_week = _nutrition_focus_by_week(active_plan)
+    active_plan_id = active_plan.id if active_plan else None
+    planned_payload: list[dict[str, object]] = []
+    for workout in planned:
+        dumped = workout.model_dump(mode="json")
+        if workout.plan_id == active_plan_id:
+            dumped["nutrition_focus"] = focus_by_week.get(workout.week_number, "")
+        planned_payload.append(dumped)
+
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "planned_workouts": planned_payload,
+        "activities": [activity.model_dump(mode="json") for activity in activities],
+    }
+
+
+def _nutrition_focus_by_week(plan: TrainingPlan | None) -> dict[int, str]:
+    """Build a ``week_number → nutrition_focus`` map from a plan's phases jsonb."""
+    if plan is None:
+        return {}
+    mapping: dict[int, str] = {}
+    for phase in plan.phases:
+        focus = str(phase.get("nutrition_focus", "") or "")
+        if not focus:
+            continue
+        try:
+            start_week = int(phase["start_week"])
+            end_week = int(phase["end_week"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for week in range(start_week, end_week + 1):
+            mapping[week] = focus
+    return mapping
 
 
 # ── Engine endpoints ──────────────────────────────────────────
@@ -584,6 +1166,271 @@ async def estimate_thresholds_endpoint(
     raise HTTPException(status_code=400, detail="Insufficient data for threshold estimation.")
 
 
+class RecalibrateThresholdsRequest(BaseModel):
+    pass
+
+
+class ManualThresholdInput(BaseModel):
+    lt1_power_watts: int | None = None
+    lt1_pace_sec_per_km: int | None = None
+    lt1_hr_bpm: int | None = None
+    lt2_power_watts: int | None = None
+    lt2_pace_sec_per_km: int | None = None
+    lt2_hr_bpm: int | None = None
+    css_sec_per_100: int | None = None
+
+
+class RecalibrationCandidateDecisionRequest(BaseModel):
+    candidate_id: str
+    decision: Literal["accept_candidate", "keep_current", "manual_threshold"]
+    manual_threshold: ManualThresholdInput | None = None
+
+
+@app.post("/api/engine/recalibrate-thresholds")
+async def recalibrate_thresholds_endpoint(
+    payload: RecalibrateThresholdsRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Re-estimate thresholds from recent athlete-owned performance evidence.
+
+    Persists a candidate only when the evaluation returns status
+    "recalibrated"; every other status (insufficient_evidence,
+    already_user_confirmed, no_change) is a non-mutating response.
+    """
+    from backend.services.recalibration import (
+        ESTIMABLE_SPORTS,
+        RECALIBRATION_LOOKBACK_DAYS,
+        evaluate_all,
+        recalibration_cadence_gate,
+    )
+
+    user_id = user_context.user_id
+    since = date.today() - timedelta(days=RECALIBRATION_LOOKBACK_DAYS)
+
+    current_thresholds = await _activity_repo_call(
+        repo.get_active_thresholds(user_id),
+        detail="Failed to load thresholds.",
+        log_message=f"get_active_thresholds failed for user_id={user_id}",
+    )
+    current_by_sport = {}
+    for threshold in current_thresholds:
+        current_by_sport.setdefault(threshold.sport, threshold)
+
+    activities_by_sport = {}
+    for sport in ESTIMABLE_SPORTS:
+        activities_by_sport[sport] = await _activity_repo_call(
+            repo.list_activities(user_id, sport=sport, since=since, limit=200),
+            detail="Failed to load activities.",
+            log_message=f"list_activities failed for user_id={user_id} sport={sport}",
+        )
+
+    results = evaluate_all(activities_by_sport, current_by_sport, user_id)
+    response_results: list[dict[str, object]] = []
+    for result in results:
+        if result.status == "recalibrated" and result.candidate is not None:
+            candidate_confidence = cast(
+                Literal["low", "medium", "high"], result.confidence or "low"
+            )
+            latest_candidate = await _activity_repo_call(
+                repo.get_latest_recalibration_candidate(user_id, result.sport),
+                detail="Failed to load recalibration candidate history.",
+                log_message=(
+                    "get_latest_recalibration_candidate failed for "
+                    f"user_id={user_id} sport={result.sport}"
+                ),
+            )
+            next_eligible_date = recalibration_cadence_gate(
+                candidate_confidence,
+                latest_candidate.generated_at.date() if latest_candidate else None,
+            )
+            if next_eligible_date is not None:
+                logger.info(
+                    "threshold recalibration cadence gated user_id=%s sport=%s confidence=%s "
+                    "next_eligible_date=%s",
+                    user_id,
+                    result.sport,
+                    result.confidence,
+                    next_eligible_date,
+                )
+                response_results.append(
+                    {
+                        "sport": result.sport,
+                        "status": "cadence_gated",
+                        "confidence": result.confidence,
+                        "explanation": result.explanation,
+                        "evidence_activity_id": result.evidence_activity_id,
+                        "next_eligible_date": next_eligible_date.isoformat(),
+                    }
+                )
+                continue
+
+            candidate = await _activity_repo_call(
+                repo.create_recalibration_candidate(
+                    ThresholdRecalibrationCandidate(
+                        user_id=user_id,
+                        sport=result.sport,
+                        confidence=candidate_confidence,
+                        evidence_activity_id=result.evidence_activity_id,
+                        evidence_reason=result.evidence_reason,
+                        explanation=result.explanation,
+                        candidate_threshold=result.candidate,
+                    )
+                ),
+                detail="Failed to queue recalibration candidate.",
+                log_message=(
+                    f"create_recalibration_candidate failed for user_id={user_id} "
+                    f"sport={result.sport}"
+                ),
+            )
+            logger.info(
+                "threshold recalibration candidate queued user_id=%s sport=%s confidence=%s "
+                "candidate_id=%s",
+                user_id,
+                result.sport,
+                result.confidence,
+                candidate.id,
+            )
+            response_results.append(
+                {
+                    "sport": result.sport,
+                    "status": "candidate_queued",
+                    "confidence": result.confidence,
+                    "explanation": result.explanation,
+                    "evidence_activity_id": result.evidence_activity_id,
+                    "candidate_id": candidate.id,
+                }
+            )
+        else:
+            logger.info(
+                "threshold recalibration skipped user_id=%s sport=%s status=%s",
+                user_id,
+                result.sport,
+                result.status,
+            )
+            response_results.append(
+                {
+                    "sport": result.sport,
+                    "status": result.status,
+                    "confidence": result.confidence,
+                    "explanation": result.explanation,
+                    "evidence_activity_id": result.evidence_activity_id,
+                }
+            )
+
+    return {"results": response_results}
+
+
+def _manual_threshold_from_candidate(
+    candidate: ThresholdRecalibrationCandidate,
+    manual_threshold: ManualThresholdInput,
+    *,
+    today: date,
+) -> SportThreshold:
+    from backend.engine.zones import compute_zones
+
+    updates = manual_threshold.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="manual_threshold must include a value.")
+
+    threshold = candidate.candidate_threshold.model_copy(
+        update={
+            **updates,
+            "confidence": "high",
+            "effective_from": today,
+            "estimation_method": "manual",
+            "estimation_source": f"manual_threshold_decision:{candidate.id}",
+            "id": None,
+            "source": "user",
+            "superseded_at": None,
+            "user_id": candidate.user_id,
+            "sport": candidate.sport,
+        }
+    )
+    threshold.zones = [
+        z.to_dict()
+        for z in compute_zones(
+            threshold.sport,
+            ftp_watts=threshold.lt2_power_watts,
+            lt1_power_watts=threshold.lt1_power_watts,
+            lt2_pace_sec_km=threshold.lt2_pace_sec_per_km,
+            lt1_pace_sec_km=threshold.lt1_pace_sec_per_km,
+            max_hr=None,
+            lt2_hr=threshold.lt2_hr_bpm,
+            lt1_hr=threshold.lt1_hr_bpm,
+        )
+    ]
+    return threshold
+
+
+@app.post("/api/engine/recalibration-candidate-decision")
+async def decide_recalibration_candidate(
+    payload: RecalibrationCandidateDecisionRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    candidate = await _activity_repo_call(
+        repo.get_recalibration_candidate(user_id, payload.candidate_id),
+        detail="Failed to load recalibration candidate.",
+        log_message=(
+            f"get_recalibration_candidate failed for user_id={user_id} "
+            f"candidate_id={payload.candidate_id}"
+        ),
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Recalibration candidate not found.")
+    if candidate.status != "pending":
+        raise HTTPException(status_code=409, detail="Recalibration candidate is already decided.")
+
+    threshold: SportThreshold | None = None
+    if payload.decision == "accept_candidate":
+        threshold = candidate.candidate_threshold.model_copy(
+            update={"id": None, "superseded_at": None, "user_id": user_id}
+        )
+        status = "accepted"
+    elif payload.decision == "keep_current":
+        status = "kept_current"
+    else:
+        if payload.manual_threshold is None:
+            raise HTTPException(status_code=400, detail="manual_threshold is required.")
+        threshold = _manual_threshold_from_candidate(
+            candidate,
+            payload.manual_threshold,
+            today=date.today(),
+        )
+        status = "manual_entered"
+
+    try:
+        decided, saved_threshold = await _activity_repo_call(
+            repo.decide_recalibration_candidate(
+                user_id=user_id,
+                candidate_id=payload.candidate_id,
+                status=status,
+                threshold=threshold,
+            ),
+            detail="Failed to apply recalibration candidate decision.",
+            log_message=(
+                f"decide_recalibration_candidate failed for user_id={user_id} "
+                f"candidate_id={payload.candidate_id}"
+            ),
+        )
+    except RecordNotFoundError as exc:
+        # We just confirmed status == "pending" above, so a missing row here means
+        # a concurrent request already decided this candidate first.
+        raise HTTPException(
+            status_code=409, detail="Recalibration candidate is already decided."
+        ) from exc
+    logger.info(
+        "threshold recalibration candidate decided user_id=%s candidate_id=%s status=%s",
+        user_id,
+        payload.candidate_id,
+        status,
+    )
+    return {
+        "candidate": decided.model_dump(mode="json"),
+        "threshold": saved_threshold.model_dump(mode="json") if saved_threshold else None,
+    }
+
+
 class RecomputeLoadRequest(BaseModel):
     since: date | None = None
     sport: str | None = None
@@ -653,7 +1500,7 @@ async def analyze_screenshot_endpoint(
     payload: AnalyzeScreenshotRequest,
     _: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    from backend.engine.screenshot_analyzer import analyze_screenshot
+    from backend.services.screenshot import analyze_screenshot
 
     result = await analyze_screenshot(payload.image_url)
     return {
@@ -674,9 +1521,9 @@ def _activity_source_for_filename(filename: str) -> str:
     return "file_upload"
 
 
-def _parse_uploaded_activity_file(filename: str, content_type: str, file_bytes: bytes):
-    from backend.engine.gpx_parser import parse_fit, parse_gpx, parse_tcx
-
+def _parse_uploaded_activity_file(
+    filename: str, content_type: str, file_bytes: bytes
+) -> ParsedActivity | ParsedCourse:
     suffix = Path(filename).suffix.lower()
     if content_type == "application/gpx+xml" or suffix == ".gpx":
         parser = parse_gpx
@@ -696,6 +1543,82 @@ def _parse_uploaded_activity_file(filename: str, content_type: str, file_bytes: 
         return parser(tmp.name)
 
 
+# PLR0913: seven keyword-only parameters, deliberately not bundled. Each is a
+# distinct fact about one upload that both call sites already hold separately, and
+# every one is keyword-only, so the call reads as a labelled list rather than a
+# positional puzzle. A parameter object here would only move the same seven names
+# somewhere else and add a construction step at each site.
+def _build_uploaded_activity_or_course(  # noqa: PLR0913
+    *,
+    user_id: str,
+    filename: str,
+    content_type: str,
+    object_key: str,
+    public_url: str | None,
+    file_bytes: bytes,
+) -> Activity | ParsedCourse:
+    """Parse an upload's bytes into a summarized ``Activity`` — or a ``ParsedCourse``.
+
+    Shared by the single-file and zip upload endpoints so both derive the same
+    ``source``/``source_file_key``/``raw_extraction`` shape from the parsed metrics.
+
+    A course is a route the athlete plans to do, not one they have done, so it is
+    returned unchanged for the caller to report rather than being coerced into an
+    ``Activity``. Callers must branch; persisting a course would put a workout the
+    athlete never did into their training log.
+    """
+    parsed = _parse_uploaded_activity_file(filename, content_type, file_bytes)
+    if isinstance(parsed, ParsedCourse):
+        logger.info(
+            "course parsed user_id=%s sport=%s distance_m=%.0f gain_m=%.0f",
+            user_id,
+            parsed.sport,
+            parsed.profile.distance_meters,
+            parsed.profile.elevation_gain_meters,
+        )
+        return parsed
+
+    activity = Activity(
+        user_id=user_id,
+        sport=parsed.sport,
+        activity_date=parsed.activity_date,
+        started_at=parsed.started_at,
+        duration_seconds=parsed.duration_seconds,
+        distance_meters=parsed.distance_meters,
+        elevation_gain_meters=parsed.elevation_gain_meters,
+        avg_hr_bpm=parsed.avg_hr_bpm,
+        max_hr_bpm=parsed.max_hr_bpm,
+        avg_power_watts=parsed.avg_power_watts,
+        avg_cadence_rpm=parsed.avg_cadence_rpm,
+        source=_activity_source_for_filename(filename),
+        source_file_key=object_key,
+        raw_extraction={
+            "activity_date_source": (
+                "fit_local_timestamp"
+                if parsed.utc_offset_seconds is not None and parsed.started_at is not None
+                else "utc_fallback"
+            ),
+            "content_type": content_type,
+            "filename": filename,
+            "hrv": parsed.hrv_summary,
+            "public_url": public_url,
+            "rr_interval_count": len(parsed.rr_intervals_ms or []),
+            "utc_offset_seconds": parsed.utc_offset_seconds,
+        },
+    )
+    activity = activity.model_copy(
+        update={"activity_summary": build_activity_summary_from_fields(activity)}
+    )
+    logger.info(
+        "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
+        user_id,
+        parsed.sport,
+        parsed.activity_date,
+        parsed.distance_meters or 0,
+    )
+    return activity
+
+
 @app.post("/api/engine/process-uploaded-file")
 async def process_uploaded_file_endpoint(
     payload: ProcessUploadedFileRequest,
@@ -707,41 +1630,368 @@ async def process_uploaded_file_endpoint(
         Path(payload.filename).suffix.lower()[:16] or "none",
         payload.content_type,
     )
+    object_key = r2_service.resolve_object_key(
+        object_key=payload.object_key,
+        public_url=payload.public_url,
+    )
     file_bytes = await r2_service.download_file_bytes(
         user_id=user_context.user_id,
-        object_key=payload.object_key,
+        object_key=object_key,
     )
-    parsed = _parse_uploaded_activity_file(payload.filename, payload.content_type, file_bytes)
-    activity = Activity(
+    parsed = _build_uploaded_activity_or_course(
         user_id=user_context.user_id,
-        sport=parsed.sport,
-        activity_date=parsed.activity_date,
-        started_at=parsed.started_at,
-        duration_seconds=parsed.duration_seconds,
-        distance_meters=parsed.distance_meters,
-        elevation_gain_meters=parsed.elevation_gain_meters,
-        avg_hr_bpm=parsed.avg_hr_bpm,
-        max_hr_bpm=parsed.max_hr_bpm,
-        avg_power_watts=parsed.avg_power_watts,
-        avg_cadence_rpm=parsed.avg_cadence_rpm,
-        source=_activity_source_for_filename(payload.filename),
-        source_file_key=payload.object_key,
-        raw_extraction={
-            "content_type": payload.content_type,
-            "filename": payload.filename,
-            "hrv": parsed.hrv_summary,
-            "public_url": payload.public_url,
-            "rr_interval_count": len(parsed.rr_intervals_ms or []),
-        },
+        filename=payload.filename,
+        content_type=payload.content_type,
+        object_key=object_key,
+        public_url=payload.public_url,
+        file_bytes=file_bytes,
     )
+    if isinstance(parsed, ParsedCourse):
+        return await _build_course_response(
+            user_context.user_id,
+            parsed,
+            object_key=object_key,
+            public_url=payload.public_url,
+        )
+    return await _persist_extracted_activity(
+        user_context.user_id, parsed, calling_endpoint="process_uploaded_file"
+    )
+
+
+async def _build_course_response(
+    user_id: str,
+    course: ParsedCourse,
+    *,
+    object_key: str,
+    public_url: str | None,
+) -> Mapping[str, object]:
+    """Analyze a course and return it. Deliberately writes nothing.
+
+    The athlete has not done this route, so there is no activity to save and no
+    plan workout to match. The coach gets the terrain and, where the athlete's
+    thresholds allow it, a pacing estimate.
+    """
+    athlete = await _athlete_context_for_course(user_id)
+    logger.info("course analyzed user_id=%s sport=%s", user_id, course.sport)
+    return build_course_payload(
+        course,
+        athlete=athlete,
+        source_file_key=object_key,
+        public_url=public_url,
+    )
+
+
+# Infrastructure faults worth degrading over rather than failing the upload. A missing
+# profile row is deliberately *not* here: absence is normal for a new athlete and is
+# handled as missing data, not as a fault.
+_COURSE_CONTEXT_FAULTS = (PostgRESTAPIError, httpx.HTTPError, RepositoryNotConfiguredError)
+
+
+async def _athlete_context_for_course(user_id: str) -> AthleteCourseContext:
+    """Fetch the athlete's profile and thresholds, tolerating their absence.
+
+    These only sharpen the estimate — the terrain is useful without them. A DB
+    problem here is caught rather than propagated (unlike the usual contract in
+    AGENTS.md, which lets ``PostgRESTAPIError`` reach the centralized handler)
+    because failing the whole upload over a missing FTP would be a worse answer
+    than returning distance and vertical with a note explaining the gap.
+
+    The two fetches are independent on purpose. Sharing one ``try`` meant a new
+    athlete with no ``athlete_profiles`` row never reached the threshold query at
+    all, and it also let ``RecordNotFoundError`` — a ``LookupError``, caught by
+    none of the DB fault classes and by no registered exception handler — escape as
+    a 500, losing the very upload this function exists to protect.
+
+    ``lookup_failed`` reports whether a *fault* occurred, so the coach can tell the
+    athlete "we couldn't read your profile just now" instead of wrongly insisting
+    they never supplied an FTP.
+    """
+    lookup_failed = False
+
+    profile: _AthleteProfile | None = None
+    try:
+        profile = await repo.get_athlete_profile(user_id)
+    except RecordNotFoundError:
+        # Normal for an athlete who hasn't onboarded yet — not a fault.
+        logger.info("course analysis: no athlete profile user_id=%s", user_id)
+    except _COURSE_CONTEXT_FAULTS:
+        # error, not warning: a RepositoryNotConfiguredError here is a permanent
+        # deployment fault that would silently degrade every course upload.
+        lookup_failed = True
+        logger.error("course analysis: profile fetch failed user_id=%s", user_id, exc_info=True)
+
+    thresholds: list[SportThreshold] = []
+    try:
+        thresholds = await repo.get_active_thresholds(user_id)
+    except _COURSE_CONTEXT_FAULTS:
+        lookup_failed = True
+        logger.error("course analysis: threshold fetch failed user_id=%s", user_id, exc_info=True)
+
+    return AthleteCourseContext(profile=profile, thresholds=thresholds, lookup_failed=lookup_failed)
+
+
+# Activity/image members inside an uploaded .zip are processed; every other member is
+# discarded. See /api/engine/process-uploaded-zip.
+_ACTIVITY_SUFFIX_TO_CONTENT_TYPE: Mapping[str, str] = {
+    ".fit": "application/vnd.garmin.fit",
+    ".gpx": "application/gpx+xml",
+    ".tcx": "application/vnd.garmin.tcx+xml",
+}
+_IMAGE_SUFFIX_TO_CONTENT_TYPE: Mapping[str, str] = {
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+# Lightweight MVP guards. Full zip-bomb / decompression-ratio hardening is deferred.
+_ZIP_MEMBER_MAX_BYTES = 25 * 1024 * 1024
+_ZIP_MAX_PROCESSED_MEMBERS = 20
+
+
+@dataclass(frozen=True)
+class _ZipMemberResult:
+    """Outcome of examining one archive member."""
+
+    entry: dict[str, object] | None = None
+    counts_as_skipped: bool = False
+    # True when this member was a processable candidate we actually read and
+    # attempted to parse/upload (success *or* failure). Used to bound total work:
+    # the per-archive cap counts attempts, not just successes, so an archive full
+    # of corrupt members cannot make us read every one of them.
+    counts_as_attempt: bool = False
+
+
+def _is_zip_junk_member(name: str, basename: str) -> bool:
+    """OS/archiver noise (macOS ``__MACOSX``/AppleDouble, ``.DS_Store``) — never useful."""
+    return name.startswith("__MACOSX/") or basename == ".DS_Store" or basename.startswith("._")
+
+
+def _empty_zip_result(skipped_count: int = 0) -> dict[str, object]:
+    return {
+        "processed": [],
+        "skipped_count": skipped_count,
+        "status": "no_processable_files",
+        "detail": ("I couldn't find any activity files or images I can read inside that zip."),
+    }
+
+
+async def _zip_activity_entry(
+    *, user_id: str, filename: str, content_type: str, zip_object_key: str, member_bytes: bytes
+) -> dict[str, object] | None:
+    try:
+        parsed = _build_uploaded_activity_or_course(
+            user_id=user_id,
+            filename=filename,
+            content_type=content_type,
+            # Every persisted member shares the archive's key as its source_file_key —
+            # we store only the uploaded zip, not per-member extracts.
+            object_key=zip_object_key,
+            public_url=None,
+            file_bytes=member_bytes,
+        )
+    except Exception:  # best-effort per member; a bad file must not abort the whole zip
+        logger.exception("failed to parse activity from zip member user_id=%s", user_id)
+        return None
+
+    if isinstance(parsed, ParsedCourse):
+        # A course inside an archive is still a course: analyze it, save nothing.
+        try:
+            return dict(
+                await _build_course_response(
+                    user_id, parsed, object_key=zip_object_key, public_url=None
+                )
+            )
+        except Exception:  # best-effort per member, same as the activity path below
+            logger.exception("failed to analyze course from zip member user_id=%s", user_id)
+            return None
+
+    activity = parsed
+    try:
+        # Persist like the single-file path so zip activities reach the calendar and
+        # compliance instead of being surfaced and dropped.
+        persisted = await _persist_extracted_activity(
+            user_id, activity, calling_endpoint="process_uploaded_zip"
+        )
+    except Exception:  # best-effort per member; a failed save must not abort the whole zip
+        # Catch broadly (not just HTTPException): _persist_extracted_activity lets a raw
+        # PostgRESTAPIError propagate to the global handler, which would 500 the whole
+        # archive instead of skipping this one member.
+        logger.exception("failed to persist activity from zip member user_id=%s", user_id)
+        return None
+    # `kind` already comes from _finalize_persisted_activity.
+    return dict(persisted)
+
+
+async def _best_effort_delete_r2_object(*, user_id: str, object_key: str) -> None:
+    """Delete an R2 object without letting a delete failure mask the caller's error."""
+    try:
+        await r2_service.delete_file(user_id=user_id, object_key=object_key)
+    except Exception:
+        logger.exception(
+            "failed to clean up orphaned r2 object user_id=%s object_key=%s",
+            user_id,
+            object_key,
+        )
+
+
+async def _zip_image_entry(
+    *, user_id: str, filename: str, content_type: str, member_bytes: bytes
+) -> dict[str, object] | None:
+    from backend.services.screenshot import analyze_screenshot
+
+    object_key = r2_service.build_object_key(
+        user_id=user_id, filename=filename, purpose="chat-attachment"
+    )
+    try:
+        uploaded = await r2_service.upload_file(
+            user_id=user_id,
+            object_key=object_key,
+            file_stream=io.BytesIO(member_bytes),
+            content_type=content_type,
+        )
+    except Exception:  # best-effort per member; a failed upload must not abort the whole zip
+        logger.exception("failed to re-upload zip image member user_id=%s", user_id)
+        return None
+    if uploaded.public_url is None:
+        logger.warning("zip image member has no public url (R2 base unset) user_id=%s", user_id)
+        await _best_effort_delete_r2_object(user_id=user_id, object_key=object_key)
+        return None
+    try:
+        result = await analyze_screenshot(uploaded.public_url)
+    except Exception as exc:  # best-effort per member; a flaky image must not abort the zip
+        # Analysis is driven by user-uploaded images, so occasional failures are expected
+        # and shouldn't clutter the error log — record at info. Emit a single grouped
+        # Sentry signal (tag + fixed fingerprint) so a *spike* is still detectable as an
+        # outlier without one issue per failure.
+        logger.info("zip image analysis failed user_id=%s: %r", user_id, exc)
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("error.category", "zip_image_analysis_failed")
+            scope.fingerprint = ["zip-image-analysis-failed"]
+            scope.set_extra("exception", repr(exc))
+            sentry_sdk.capture_message("zip image member analysis failed", level="warning")
+        await _best_effort_delete_r2_object(user_id=user_id, object_key=object_key)
+        return None
+    return {
+        "kind": "image_analysis",
+        "screenshot_type": result.screenshot_type,
+        "data": result.data,
+        "public_url": uploaded.public_url,
+        "object_key": object_key,
+    }
+
+
+async def _process_zip_member(
+    *,
+    archive: zipfile.ZipFile,
+    member: zipfile.ZipInfo,
+    user_id: str,
+    zip_object_key: str,
+    attempted_count: int,
+) -> _ZipMemberResult:
+    """Filter, read, and convert one member without aborting the archive."""
+    if member.is_dir():
+        return _ZipMemberResult()
+
+    member_path = Path(member.filename)
+    filename = member_path.name
+    suffix = member_path.suffix.lower()
+    activity_content_type = _ACTIVITY_SUFFIX_TO_CONTENT_TYPE.get(suffix)
+    image_content_type = _IMAGE_SUFFIX_TO_CONTENT_TYPE.get(suffix)
+
+    # Cheap rejects — junk, unknown type, oversized. We never read these, so they
+    # cost nothing and must not consume the work budget.
+    is_unprocessable = (
+        _is_zip_junk_member(member.filename, filename)
+        or (activity_content_type is None and image_content_type is None)
+        or member.file_size > _ZIP_MEMBER_MAX_BYTES
+    )
+    if is_unprocessable:
+        return _ZipMemberResult(counts_as_skipped=True)
+
+    # This member is a processable candidate; reading + parsing/uploading it is the
+    # expensive work the cap exists to bound. Enforce the cap here (before any read)
+    # so declining an over-budget member costs nothing and does not count as an
+    # attempt. Counting only successes would let a corrupt-heavy archive read every
+    # member — the cap must count attempts.
+    if attempted_count >= _ZIP_MAX_PROCESSED_MEMBERS:
+        return _ZipMemberResult(counts_as_skipped=True)
+
+    try:
+        member_bytes = archive.read(member)
+    except Exception:  # a corrupt member must not abort the whole zip
+        logger.warning("failed to read zip member user_id=%s", user_id)
+        return _ZipMemberResult(counts_as_skipped=True, counts_as_attempt=True)
+
+    if activity_content_type is not None:
+        entry = await _zip_activity_entry(
+            user_id=user_id,
+            filename=filename,
+            content_type=activity_content_type,
+            zip_object_key=zip_object_key,
+            member_bytes=member_bytes,
+        )
+    else:
+        # Filtering above guarantees that a non-activity member is a supported image.
+        assert image_content_type is not None
+        entry = await _zip_image_entry(
+            user_id=user_id,
+            filename=filename,
+            content_type=image_content_type,
+            member_bytes=member_bytes,
+        )
+
+    return _ZipMemberResult(entry=entry, counts_as_skipped=entry is None, counts_as_attempt=True)
+
+
+@app.post("/api/engine/process-uploaded-zip")
+async def process_uploaded_zip_endpoint(
+    payload: ProcessUploadedFileRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    logger.info("processing uploaded zip user_id=%s content_type=%s", user_id, payload.content_type)
+    # Resolve the key from public_url like the single-file path: the coach reliably
+    # transcribes public_url but corrupts the opaque object_key, which would otherwise
+    # fail the per-user scope/download check.
+    object_key = r2_service.resolve_object_key(
+        object_key=payload.object_key, public_url=payload.public_url
+    )
+    file_bytes = await r2_service.download_file_bytes(user_id=user_id, object_key=object_key)
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(file_bytes))
+    except zipfile.BadZipFile:
+        logger.warning("uploaded zip is not a valid archive user_id=%s", user_id)
+        return _empty_zip_result()
+
+    processed: list[dict[str, object]] = []
+    skipped_count = 0
+    attempted = 0
+    with archive:
+        for member in archive.infolist():
+            result = await _process_zip_member(
+                archive=archive,
+                member=member,
+                user_id=user_id,
+                zip_object_key=object_key,
+                attempted_count=attempted,
+            )
+            attempted += int(result.counts_as_attempt)
+            skipped_count += int(result.counts_as_skipped)
+            if result.entry is not None:
+                processed.append(result.entry)
+
+    if not processed:
+        return _empty_zip_result(skipped_count)
+
     logger.info(
-        "activity parsed user_id=%s sport=%s date=%s distance_m=%.0f",
-        user_context.user_id,
-        parsed.sport,
-        parsed.activity_date,
-        parsed.distance_meters or 0,
+        "uploaded zip processed user_id=%s processed=%d skipped=%d",
+        user_id,
+        len(processed),
+        skipped_count,
     )
-    return {"activity": activity.model_dump(mode="json")}
+    return {"processed": processed, "skipped_count": skipped_count, "status": "ok"}
 
 
 def _build_fitness_metrics(
@@ -858,6 +2108,123 @@ class GetRecentActivitiesRequest(BaseModel):
     limit: int = 20
 
 
+class UpdateGoalsRequest(BaseModel):
+    action: str
+    goal: dict[str, object] | None = None
+    goal_id: str | None = None
+
+
+@app.post("/api/engine/update-goals")
+async def update_goals_endpoint(
+    payload: UpdateGoalsRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    if payload.action in ("update", "complete", "abandon") and not payload.goal_id:
+        raise HTTPException(
+            status_code=400,
+            detail="goal_id required for update/complete/abandon",
+        )
+    try:
+        result = await goal_service.apply_action(
+            user_context.user_id,
+            payload.action,
+            payload.goal or {},
+            payload.goal_id,
+            repo=repo,
+        )
+    except InvalidGoalPayloadError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors) from exc
+    except UnknownGoalActionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("update_goals failed user_id=%s", user_context.user_id)
+        raise HTTPException(status_code=503, detail="Unable to update goals.") from exc
+    return result.model_dump(mode="json")
+
+
+class UpdateScheduleRequest(BaseModel):
+    # Merge semantics (issue #232):
+    #   weekly_pattern — full replacement of the recurring weekday template.
+    #   overrides      — per-date upsert (on_conflict=user_id,override_date).
+    # Typed per-day validation (max_hours in [0, 24]) rejects bad input as 422.
+    weekly_pattern: dict[str, ScheduleDayAvailability] | None = None
+    overrides: list[dict[str, object]] | None = None
+
+
+@app.post("/api/engine/update-schedule")
+async def update_schedule_endpoint(
+    payload: UpdateScheduleRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    updated: list[str] = []
+    try:
+        if payload.weekly_pattern is not None:
+            # weekly_pattern is a full replacement of the recurring weekday template.
+            weekly_pattern = {
+                day: entry.model_dump(mode="json") for day, entry in payload.weekly_pattern.items()
+            }
+            schedule = ScheduleAvailability(user_id=user_id, weekly_pattern=weekly_pattern)
+            await repo.upsert_schedule(schedule)
+            updated.append("weekly_pattern")
+        if payload.overrides:
+            # Each override upserts on (user_id, override_date).
+            for ov in payload.overrides:
+                override = ScheduleOverride.model_validate({"user_id": user_id, **ov})
+                await repo.upsert_schedule_override(override)
+            updated.append("overrides")
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("update_schedule failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Unable to update schedule.") from exc
+    return {"updated": updated}
+
+
+class SaveRecoveryDataRequest(BaseModel):
+    entries: list[dict[str, object]] = Field(min_length=1)
+
+
+def _recovery_log_from_entry(entry: Mapping[str, object], user_id: str) -> RecoveryLog:
+    # user_id is always derived from the bearer token; never trust the client payload.
+    fields = {key: value for key, value in entry.items() if key != "user_id"}
+    if fields.get("log_date") is None:
+        fields["log_date"] = datetime.now(UTC).date().isoformat()
+    fields["user_id"] = user_id
+    return RecoveryLog.model_validate(fields)
+
+
+@app.post("/api/engine/save-recovery-data")
+async def save_recovery_data_endpoint(
+    payload: SaveRecoveryDataRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    # Validate every entry up front so a malformed entry never leaves earlier
+    # entries partially persisted with a 422 that implies nothing was saved.
+    try:
+        logs = [_recovery_log_from_entry(entry, user_id) for entry in payload.entries]
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    saved: list[Mapping[str, object]] = []
+    try:
+        for log in logs:
+            persisted = await repo.upsert_recovery_log(log)
+            saved.append(persisted.model_dump(mode="json"))
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("save_recovery_data failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Unable to save recovery data.") from exc
+    logger.info("save_recovery_data user_id=%s count=%d", user_id, len(saved))
+    return {"saved": saved, "count": len(saved)}
+
+
 @app.post("/api/engine/get-recent-activities")
 async def get_recent_activities(
     payload: GetRecentActivitiesRequest,
@@ -877,17 +2244,445 @@ async def get_recent_activities(
     return {"activities": [activity.model_dump(mode="json") for activity in activities]}
 
 
+class SaveActivityFromTextRequest(BaseModel):
+    text: str = Field(min_length=1)
+    activity_id: str | None = None
+
+
+async def _activity_repo_call(awaitable, *, detail: str, log_message: str):
+    try:
+        return await awaitable
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("%s error_type=%s", log_message, type(exc).__name__)
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
+async def _load_activity_profile_and_thresholds(
+    user_id: str,
+) -> tuple[_AthleteProfile, list[SportThreshold]]:
+    try:
+        profile = await _activity_repo_call(
+            repo.get_athlete_profile(user_id),
+            detail="Failed to load athlete profile.",
+            log_message=f"get_athlete_profile failed for user_id={user_id}",
+        )
+    except RecordNotFoundError:
+        profile = _AthleteProfile(user_id=user_id)
+    thresholds = await _activity_repo_call(
+        repo.get_active_thresholds(user_id),
+        detail="Failed to load athlete thresholds.",
+        log_message=f"get_active_thresholds failed for user_id={user_id}",
+    )
+    return profile, thresholds
+
+
+async def _best_effort_rematch_activity_after_date_change(
+    user_id: str,
+    existing: Activity,
+    updated: Activity,
+) -> tuple[Activity, dict[str, object] | None]:
+    rematch_candidate = updated
+    if existing.planned_workout_id is not None:
+        try:
+            rematch_candidate = await repo.unlink_plan_workout_from_activity(
+                user_id=user_id,
+                workout_id=existing.planned_workout_id,
+                activity_id=updated.id or "",
+            )
+        except Exception:
+            logger.exception(
+                "activity date update failed to unlink old plan workout "
+                "user_id=%s activity_id=%s plan_workout_id=%s",
+                user_id,
+                updated.id,
+                existing.planned_workout_id,
+            )
+            # The atomic RPC failed, so both persisted links remain intact. Do not attach a second
+            # workout, and return the saved activity with its original reverse link preserved.
+            return updated, None
+    try:
+        matched = await _try_match_activity_to_plan(user_id, rematch_candidate)
+    except Exception:
+        # _try_match_activity_to_plan is already best-effort. Keep this boundary defensive so a
+        # substituted implementation cannot turn a successful activity save into an error.
+        logger.exception(
+            "activity date update failed to re-match plan workout user_id=%s activity_id=%s",
+            user_id,
+            rematch_candidate.id,
+        )
+        return rematch_candidate, None
+    if matched is not None:
+        rematch_candidate = rematch_candidate.model_copy(
+            update={"planned_workout_id": matched["plan_workout_id"]}
+        )
+    return rematch_candidate, matched
+
+
+async def _update_activity_from_text(
+    user_id: str,
+    activity_id: str,
+    text: str,
+) -> Mapping[str, object]:
+    from backend.services.activity_text import (
+        ActivityTextExtractionUnavailable,
+        merge_activity_text_update,
+    )
+
+    try:
+        existing = await _activity_repo_call(
+            repo.get_activity(user_id, activity_id),
+            detail="Failed to load activity.",
+            log_message=f"get_activity failed for user_id={user_id} activity_id={activity_id}",
+        )
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    profile, thresholds = await _load_activity_profile_and_thresholds(user_id)
+    try:
+        result = await merge_activity_text_update(
+            existing,
+            text,
+            profile=profile,
+            thresholds=thresholds,
+        )
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    date_changed = result.activity.activity_date != existing.activity_date
+    try:
+        # Keep the existing reverse link while saving the corrected activity. If the subsequent
+        # atomic unlink fails, both persisted sides still describe the same relationship.
+        activity = await _activity_repo_call(
+            repo.update_activity(result.activity),
+            detail="Failed to update activity.",
+            log_message=f"update_activity failed for user_id={user_id} activity_id={activity_id}",
+        )
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Activity not found.") from exc
+    except RuntimeError as exc:
+        logger.exception(
+            "update_activity failed for user_id=%s activity_id=%s", user_id, activity_id
+        )
+        raise HTTPException(status_code=503, detail="Failed to update activity.") from exc
+    matched = None
+    if date_changed:
+        activity, matched = await _best_effort_rematch_activity_after_date_change(
+            user_id, existing, activity
+        )
+    logger.info(
+        "save_activity_from_text user_id=%s activity_id=%s status=updated", user_id, activity_id
+    )
+    response: dict[str, object] = {
+        "activity": activity.model_dump(mode="json"),
+        "rejected_updates": result.rejected_updates,
+        "status": "updated",
+    }
+    if matched is not None:
+        response["matched_plan_workout"] = matched
+    return response
+
+
+@app.post("/api/engine/save-activity-from-text")
+async def save_activity_from_text(
+    payload: SaveActivityFromTextRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    from backend.services.activity_text import (
+        ActivityTextExtractionUnavailable,
+        build_activity_from_text,
+    )
+
+    if not payload.text.strip():
+        raise HTTPException(status_code=422, detail="Activity text must not be empty.")
+
+    if payload.activity_id is not None:
+        activity_id = payload.activity_id.strip()
+        if not activity_id:
+            raise HTTPException(status_code=422, detail="Activity id must not be empty.")
+        return await _update_activity_from_text(user_context.user_id, activity_id, payload.text)
+
+    profile, thresholds = await _load_activity_profile_and_thresholds(user_context.user_id)
+    try:
+        result = await build_activity_from_text(
+            payload.text,
+            user_id=user_context.user_id,
+            profile=profile,
+            thresholds=thresholds,
+        )
+    except ActivityTextExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if result.activity is None:
+        logger.info(
+            "save_activity_from_text user_id=%s status=needs_clarification missing=%s",
+            user_context.user_id,
+            result.missing,
+        )
+        return {
+            "missing": result.missing,
+            "raw_extraction": result.raw_extraction,
+            "status": "needs_clarification",
+        }
+    return await _persist_extracted_activity(
+        user_context.user_id, result.activity, calling_endpoint="save_activity_from_text"
+    )
+
+
+async def _persist_extracted_activity(
+    user_id: str,
+    extracted: Activity,
+    *,
+    calling_endpoint: ActivityPersistenceEndpoint,
+) -> Mapping[str, object]:
+    try:
+        activity = await _activity_repo_call(
+            repo.create_activity(extracted),
+            detail="Failed to save activity.",
+            log_message=f"create_activity failed for user_id={user_id}",
+        )
+    except RuntimeError as exc:
+        logger.exception("create_activity failed for user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to save activity.") from exc
+    return await _finalize_persisted_activity(user_id, activity, calling_endpoint=calling_endpoint)
+
+
+async def _finalize_persisted_activity(
+    user_id: str,
+    activity: Activity,
+    *,
+    calling_endpoint: ActivityPersistenceEndpoint,
+) -> Mapping[str, object]:
+    logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
+    matched = await _try_match_activity_to_plan(user_id, activity)
+    response: dict[str, object] = {
+        # Pairs with kind: "course" so the coach can tell a saved workout from an
+        # analyzed route without inspecting which keys happen to be present.
+        "kind": "activity",
+        "activity": activity.model_dump(mode="json"),
+        "status": "saved",
+    }
+    if matched is not None:
+        response["matched_plan_workout"] = matched
+    return response
+
+
+TrainingModelRequest = Literal["auto", "longevity", "performance", "recovery_return"]
+WorkoutTypeRequest = Literal[
+    "recovery",
+    "endurance",
+    "tempo",
+    "sweet_spot",
+    "threshold",
+    "vo2max",
+    "anaerobic",
+    "sprint",
+    "race",
+    "strength",
+    "mobility",
+    "rest",
+    "long_run",
+    "long_ride",
+    "brick",
+    "interval",
+    "fartlek",
+    "hill_repeats",
+]
+
+
+class ExplicitPlanWorkoutRequest(BaseModel):
+    description: str | None
+    phase_name: str | None
+    sport: str = Field(min_length=1)
+    target_distance_meters: float | None = Field(gt=0)
+    target_duration_minutes: int | None = Field(gt=0)
+    target_tss: float | None = Field(ge=0)
+    title: str = Field(min_length=1)
+    workout_date: date
+    workout_type: WorkoutTypeRequest
+
+
 class GeneratePlanStructureRequest(BaseModel):
     goal_id: str | None = None
+    title: str | None = Field(default=None, min_length=1)
+    training_model: TrainingModelRequest = "auto"
+    workouts: list[ExplicitPlanWorkoutRequest] | None = Field(
+        default=None, min_length=1, max_length=366
+    )
+
+
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _build_explicit_plan_workouts(
+    entries: list[ExplicitPlanWorkoutRequest],
+    *,
+    user_id: str,
+    plan_id: str,
+    start_date: date,
+) -> list[PlanWorkout]:
+    return [
+        PlanWorkout(
+            plan_id=plan_id,
+            user_id=user_id,
+            workout_date=entry.workout_date,
+            day_of_week=entry.workout_date.weekday(),
+            week_number=((entry.workout_date - start_date).days // 7) + 1,
+            phase_name=entry.phase_name,
+            sport=entry.sport,
+            title=entry.title,
+            description=entry.description,
+            workout_type=entry.workout_type,
+            target_duration_minutes=entry.target_duration_minutes,
+            target_distance_meters=entry.target_distance_meters,
+            target_tss=entry.target_tss,
+            status="scheduled",
+        )
+        for entry in sorted(entries, key=lambda item: item.workout_date)
+    ]
+
+
+def _build_explicit_training_plan(
+    payload: GeneratePlanStructureRequest,
+    *,
+    user_id: str,
+    target_goal: Goal | None,
+) -> tuple[TrainingPlan, str, int]:
+    entries = payload.workouts
+    if entries is None:  # pragma: no cover - guarded by the endpoint branch
+        raise ValueError("Explicit plan workouts are required.")
+
+    ordered_entries = sorted(entries, key=lambda item: item.workout_date)
+    plan_start = ordered_entries[0].workout_date
+    plan_end = ordered_entries[-1].workout_date
+    total_weeks = ((plan_end - plan_start).days // 7) + 1
+    duration_minutes = [entry.target_duration_minutes for entry in ordered_entries]
+    tss_targets = [entry.target_tss for entry in ordered_entries]
+    plan = TrainingPlan(
+        user_id=user_id,
+        title=payload.title
+        or (f"Plan: {target_goal.title}" if target_goal else "Custom training plan"),
+        plan_type=(
+            "full_cycle"
+            if target_goal and target_goal.target_date
+            else "mesocycle"
+            if total_weeks > 1
+            else "weekly"
+        ),
+        status="active",
+        start_date=plan_start,
+        end_date=plan_end,
+        target_goal_id=target_goal.id if target_goal else None,
+        phases=[],
+        # Explicit plans prescribe every workout verbatim, so there is no
+        # generated training model behind them — omit the vestigial
+        # training_model/source metadata that only applies to composed plans.
+        generation_context={"plan_mode": "explicit"},
+        weekly_tss_target=(
+            round(sum(value for value in tss_targets if value is not None) / total_weeks, 1)
+            if all(value is not None for value in tss_targets)
+            else None
+        ),
+        weekly_hours_target=(
+            round(
+                sum(value for value in duration_minutes if value is not None) / 60 / total_weeks,
+                1,
+            )
+            if all(value is not None for value in duration_minutes)
+            else None
+        ),
+    )
+    plan_sport = (target_goal.sport if target_goal else None) or ordered_entries[0].sport
+    return plan, plan_sport, total_weeks
+
+
+async def _persist_training_plan_with_workouts(
+    *,
+    user_id: str,
+    plan: TrainingPlan,
+    prepare_workouts: Callable[[str], Awaitable[list[PlanWorkout]]],
+) -> tuple[TrainingPlan, list[PlanWorkout]]:
+    persisted_plan = None
+    prior_plan = None
+    try:
+        # Capture the plan being superseded *before* the insert so we can clean up
+        # its future scheduled workouts and leave one coherent calendar timeline.
+        prior_plan = await repo.get_active_plan(user_id)
+        persisted_plan = await repo.create_training_plan(plan)
+        workouts = await prepare_workouts(persisted_plan.id or "")
+        persisted_workouts = await repo.create_plan_workouts(workouts)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
+    # this is a server-composed write, and the block runs compensating cleanup (supersede
+    # the partial plan below) that must happen on any persistence failure. A mid-write
+    # integrity error here is a server-side fault -> 503, not a client 422.
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.exception("generate_plan: persistence failed user_id=%s", user_id)
+        if persisted_plan is not None and persisted_plan.id:
+            # Don't leave a workout-less plan active (create_training_plan
+            # already superseded the previous one). Best-effort cleanup.
+            try:
+                await repo.update_training_plan_status(user_id, persisted_plan.id, "superseded")
+            except Exception:
+                logger.exception(
+                    "generate_plan: failed to supersede partial plan user_id=%s plan_id=%s",
+                    user_id,
+                    persisted_plan.id,
+                )
+        raise HTTPException(status_code=503, detail="Failed to persist training plan.") from exc
+
+    # The new plan and its workouts are durably persisted at this point. Cleaning up
+    # the superseded plan's future scheduled workouts is strictly best-effort and must
+    # run *outside* the compensation-guarded block above: the calendar read already
+    # scopes to the active plan at read time (`_scope_planned_workouts_to_active_plan`,
+    # #315), so leftover future rows are already hidden. A cleanup failure here is
+    # benign and must never supersede the plan we just committed (which would leave the
+    # athlete with no active plan and a misleading 503).
+    if prior_plan is not None and prior_plan.id:
+        try:
+            _ = await repo.delete_future_scheduled_workouts(user_id, prior_plan.id, plan.start_date)
+        except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError):
+            logger.exception(
+                "generate_plan: superseded-plan cleanup failed (read-time scoping still hides "
+                "the stale rows) user_id=%s prior_plan_id=%s",
+                user_id,
+                prior_plan.id,
+            )
+
+    return persisted_plan, persisted_workouts
+
+
+async def _load_plan_composition_inputs(
+    user_id: str, *, start: date, end: date
+) -> tuple[ScheduleAvailability | None, list[ScheduleOverride]]:
+    try:
+        schedule = await repo.get_schedule(user_id)
+        overrides = await repo.list_schedule_overrides_between(user_id, start=start, end=end)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.exception("generate_plan: failed to load schedule user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to persist training plan.") from exc
+    return schedule, overrides
+
+
+def _select_training_model(
+    requested: TrainingModelRequest, target_goal: Goal | None
+) -> tuple[Literal["longevity", "performance", "recovery_return"], str]:
+    if requested != "auto":
+        return requested, "explicit"
+    if target_goal is not None and target_goal.goal_type in {"event", "mountain", "improvement"}:
+        return "performance", "auto"
+    return "longevity", "auto"
 
 
 @app.post("/api/engine/generate-plan-structure")
-async def generate_plan_structure(
+async def generate_plan_structure(  # noqa: C901
     payload: GeneratePlanStructureRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     from backend.engine.periodization import build_plan_skeleton
     from backend.engine.thresholds import estimate_ctl_ceiling
+    from backend.services.nutrition_focus import derive_nutrition_focus
 
     user_id = user_context.user_id
     profile = await repo.get_athlete_profile(user_id)
@@ -898,49 +2693,571 @@ async def generate_plan_structure(
     if payload.goal_id:
         target_goal = next((g for g in goals if g.id == payload.goal_id), None)
         if target_goal is None:
+            if payload.workouts is not None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="goal_id does not match an active goal for this athlete.",
+                )
             logger.warning(
-                "generate_plan: goal_id not found, falling back to first goal"
-                " user_id=%s goal_id=%s",
+                "generate_plan: goal_id not found; no target goal user_id=%s goal_id=%s",
                 user_id,
                 payload.goal_id,
             )
-    elif goals:
+    elif goals and payload.workouts is None:
         target_goal = goals[0]
+
+    training_model, training_model_source = _select_training_model(
+        payload.training_model, target_goal
+    )
 
     current_ctl = latest_load.ctl if latest_load else 0.0
     available_hours = profile.weekly_available_hours or 6.0
-
     age = profile.age
     ceiling = estimate_ctl_ceiling(age, profile.biological_sex or "not_specified")
     recovery_freq = 4 if age is None or age < RECOVERY_WEEK_AGE_BREAKPOINT else 3
 
-    skeleton = build_plan_skeleton(
-        current_ctl=current_ctl,
-        target_date=target_goal.target_date if target_goal else None,
-        available_hours_per_week=available_hours,
-        goal_type=target_goal.goal_type if target_goal else "maintenance",
-        recovery_week_frequency=recovery_freq,
+    explicit_entries = payload.workouts
+    if explicit_entries is not None:
+        plan, plan_sport, total_weeks = _build_explicit_training_plan(
+            payload,
+            user_id=user_id,
+            target_goal=target_goal,
+        )
+        skeleton = None
+    else:
+        skeleton = build_plan_skeleton(
+            current_ctl=current_ctl,
+            target_date=target_goal.target_date if target_goal else None,
+            available_hours_per_week=available_hours,
+            goal_type=target_goal.goal_type if target_goal else "maintenance",
+            recovery_week_frequency=recovery_freq,
+        )
+        # Tag each phase with deterministic, athlete-tailored fueling guidance so the
+        # plan itself carries nutrition context (issue #53). Stored on the phases
+        # jsonb → surfaced to the coach and calendar without a schema change.
+        for phase in skeleton.phases:
+            phase.nutrition_focus = derive_nutrition_focus(
+                phase.focus, profile.dietary_restrictions
+            )
+        plan_sport = (
+            (target_goal.sport if target_goal else None)
+            or (profile.primary_sports[0] if profile.primary_sports else None)
+            or "cycling"
+        )
+        plan = TrainingPlan(
+            user_id=user_id,
+            title=(f"Plan: {target_goal.title}" if target_goal else "Rolling training plan"),
+            plan_type="full_cycle" if target_goal and target_goal.target_date else "weekly",
+            status="active",
+            start_date=skeleton.start_date,
+            end_date=skeleton.end_date,
+            target_goal_id=target_goal.id if target_goal else None,
+            phases=[p.to_dict() for p in skeleton.phases],
+            generation_context={
+                "training_model": training_model,
+                "training_model_source": training_model_source,
+            },
+            weekly_tss_target=round(skeleton.starting_weekly_tss, 1),
+            weekly_hours_target=available_hours,
+        )
+        total_weeks = skeleton.total_weeks
+
+    schedule: ScheduleAvailability | None = None
+    overrides: list[ScheduleOverride] = []
+    if explicit_entries is None:
+        schedule, overrides = await _load_plan_composition_inputs(
+            user_id, start=plan.start_date, end=plan.end_date
+        )
+
+    async def prepare_workouts(plan_id: str) -> list[PlanWorkout]:
+        if explicit_entries is not None:
+            return _build_explicit_plan_workouts(
+                explicit_entries,
+                user_id=user_id,
+                plan_id=plan_id,
+                start_date=plan.start_date,
+            )
+
+        from backend.services.plan_composer import PlanComposerPolicy, compose_plan_workouts
+
+        assert skeleton is not None
+        return compose_plan_workouts(
+            skeleton,
+            user_id=user_id,
+            plan_id=plan_id,
+            sport=plan_sport,
+            weekly_pattern=schedule.weekly_pattern if schedule else None,
+            overrides=overrides,
+            policy=PlanComposerPolicy(training_model=training_model),
+        )
+
+    persisted_plan, persisted_workouts = await _persist_training_plan_with_workouts(
+        user_id=user_id,
+        plan=plan,
+        prepare_workouts=prepare_workouts,
     )
 
-    logger.info(
-        "plan structure generated user_id=%s weeks=%d goal_type=%s recovery_freq=%d",
-        user_id,
-        skeleton.total_weeks,
-        target_goal.goal_type if target_goal else "maintenance",
-        recovery_freq,
-    )
-    return {
-        "total_weeks": skeleton.total_weeks,
-        "start_date": skeleton.start_date.isoformat(),
-        "end_date": skeleton.end_date.isoformat(),
-        "starting_weekly_tss": round(skeleton.starting_weekly_tss),
-        "phases": [p.to_dict() for p in skeleton.phases],
+    response: dict[str, object] = {
+        "plan_mode": "explicit" if explicit_entries is not None else "generated",
+        "plan_id": persisted_plan.id,
+        "sport": plan_sport,
+        # Explicit plans have no generated training model; suppress the field so
+        # the coach doesn't mislabel a bespoke schedule as a generic model.
+        "training_model": None if explicit_entries is not None else training_model,
+        "workouts_created": len(persisted_workouts),
+        "total_weeks": total_weeks,
+        "start_date": plan.start_date.isoformat(),
+        "end_date": plan.end_date.isoformat(),
+        "starting_weekly_tss": (
+            round(plan.weekly_tss_target) if plan.weekly_tss_target is not None else None
+        ),
+        "phases": plan.phases,
         "target_goal": target_goal.model_dump(mode="json") if target_goal else None,
         "ctl_ceiling": {
             "age_bracket": ceiling.age_bracket,
             "committed_amateur_ctl": ceiling.committed_amateur_ctl,
         },
     }
+    if explicit_entries is not None:
+        response["scheduled_workouts"] = [
+            {
+                "workout_date": workout.workout_date.isoformat(),
+                "day_name": _WEEKDAY_NAMES[workout.day_of_week],
+                "sport": workout.sport,
+                "title": workout.title,
+            }
+            for workout in sorted(persisted_workouts, key=lambda item: item.workout_date)
+        ]
+
+    logger.info(
+        "plan generated user_id=%s plan_id=%s mode=%s weeks=%d workouts=%d goal_type=%s",
+        user_id,
+        persisted_plan.id,
+        response["plan_mode"],
+        response["total_weeks"],
+        len(persisted_workouts),
+        target_goal.goal_type if target_goal else "maintenance",
+    )
+    return response
+
+
+class AdjustPlanRequest(BaseModel):
+    plan_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+def _rebuild_skeleton(plan: TrainingPlan):
+    """Reconstruct a PlanSkeleton from a persisted plan's stored ``phases``.
+
+    Recomposing from the plan's *own* skeleton (rather than a fresh one) keeps the
+    periodization ramp continuous across an adjust, so future weeks stay faithful
+    to the original build.
+    """
+    from backend.engine.periodization import PhasePlan, PlanSkeleton
+
+    phases = [
+        PhasePlan(
+            name=str(p["name"]),
+            start_week=int(p["start_week"]),
+            end_week=int(p["end_week"]),
+            focus=str(p["focus"]),
+            target_weekly_tss=float(p["target_weekly_tss"]),
+            z1_z2_pct=int(p["z1_z2_pct"]),
+            max_hiit_per_week=int(p["max_hiit_per_week"]),
+            description=str(p.get("description", "")),
+            # Preserve fueling guidance across an adjust; older plans lack the key.
+            nutrition_focus=str(p.get("nutrition_focus", "")),
+        )
+        for p in plan.phases
+    ]
+    total_weeks = max((phase.end_week for phase in phases), default=0)
+    return PlanSkeleton(
+        phases=phases,
+        total_weeks=total_weeks,
+        start_date=plan.start_date,
+        end_date=plan.end_date,
+        starting_weekly_tss=plan.weekly_tss_target or 0.0,
+    )
+
+
+@app.post("/api/engine/adjust-plan")
+async def adjust_plan(
+    payload: AdjustPlanRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Edit the active plan's *future scheduled* workouts in place (feedback loop).
+
+    Unlike full generation, adjust never spawns a new plan: it recomposes only the
+    remaining weeks on the same ``plan_id``, preserving completed/matched history
+    (and therefore compliance %) untouched.
+    """
+    from typing import cast
+
+    from backend.services.plan_composer import (
+        PlanComposerPolicy,
+        TrainingModel,
+        compose_plan_workouts,
+    )
+
+    user_id = user_context.user_id
+    today = datetime.now(UTC).date()
+    from_date = today + timedelta(days=1)
+
+    plan = await repo.get_active_plan(user_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="No active training plan to adjust.")
+    if plan.id != payload.plan_id:
+        raise HTTPException(
+            status_code=409,
+            detail="plan_id does not match the athlete's active plan.",
+        )
+    if (plan.generation_context or {}).get("plan_mode") == "explicit":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Exact-workout plans cannot be formula-adjusted. Regenerate the plan with the "
+                "complete revised workout schedule."
+            ),
+        )
+    # plan.id == payload.plan_id (a validated non-empty str); use it downstream.
+    plan_id = payload.plan_id
+
+    try:
+        # Sport lives on the workouts, not the plan; read it from surviving history.
+        existing = await repo.list_plan_workouts(plan_id)
+        plan_sport = existing[0].sport if existing else "cycling"
+        # Future completed/matched workouts are history — never double-book a
+        # recomposed session onto their dates. Derive this from the rows we already
+        # fetched (no second query), so it is known *before* the destructive delete.
+        surviving_dates = {
+            w.workout_date
+            for w in existing
+            if w.workout_date >= from_date
+            and (w.actual_activity_id is not None or w.status != "scheduled")
+        }
+
+        skeleton = _rebuild_skeleton(plan)
+        schedule = await repo.get_schedule(user_id)
+        overrides = await repo.list_schedule_overrides_between(
+            user_id, start=from_date, end=plan.end_date
+        )
+        raw_model = str((plan.generation_context or {}).get("training_model", "performance"))
+        training_model: TrainingModel = (
+            cast(TrainingModel, raw_model)
+            if raw_model in ("performance", "longevity", "recovery_return")
+            else "performance"
+        )
+
+        # Compose the replacement rows (pure computation) *before* deleting anything,
+        # so a recomposition failure can never leave the plan with its future wiped.
+        # delete and re-insert both target this plan_id, so insert-before-delete would
+        # clobber the new rows; keep them adjacent to minimise the non-atomic window.
+        recomposed = compose_plan_workouts(
+            skeleton,
+            user_id=user_id,
+            plan_id=plan_id,
+            sport=plan_sport,
+            weekly_pattern=schedule.weekly_pattern if schedule else None,
+            overrides=overrides,
+            policy=PlanComposerPolicy(training_model=training_model),
+            from_date=from_date,
+        )
+        to_insert = [w for w in recomposed if w.workout_date not in surviving_dates]
+        deleted = await repo.delete_future_scheduled_workouts(user_id, plan_id, from_date)
+        inserted = await repo.create_plan_workouts(to_insert)
+
+        # Append an audit entry to generation_context so adjusts are traceable.
+        context = dict(plan.generation_context or {})
+        adjustments = list(context.get("adjustments", []))
+        adjustments.append({"reason": payload.reason, "at": datetime.now(UTC).isoformat()})
+        context["adjustments"] = adjustments
+        await repo.update_training_plan_generation_context(user_id, plan_id, context)
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError stays caught locally (not delegated to _handle_postgrest_error):
+    # a failure mid-recompose of this server-composed write is a server-side fault → 503,
+    # not a client 422, and it is grouped with RuntimeError/ValueError from composition.
+    except (PostgRESTAPIError, httpx.HTTPError, RuntimeError, ValueError) as exc:
+        logger.exception("adjust_plan: persistence failed user_id=%s plan_id=%s", user_id, plan_id)
+        raise HTTPException(status_code=503, detail="Failed to adjust training plan.") from exc
+
+    logger.info(
+        "plan adjusted user_id=%s plan_id=%s deleted=%d inserted=%d reason=%r",
+        user_id,
+        plan_id,
+        deleted,
+        len(inserted),
+        payload.reason,
+    )
+    return {
+        "plan_id": plan_id,
+        "status": "adjusted",
+        "workouts_removed": deleted,
+        "workouts_created": len(inserted),
+        "from_date": from_date.isoformat(),
+    }
+
+
+async def _persist_workout_match(user_id: str, workout: PlanWorkout, activity: Activity) -> None:
+    """Link a confident plan↔activity match on both sides."""
+    await repo.match_plan_workout_to_activity(
+        user_id=user_id,
+        workout_id=workout.id or "",
+        activity_id=activity.id or "",
+        completion_source="auto_matched",
+    )
+
+
+async def _try_match_activity_to_plan(user_id: str, activity: Activity) -> dict[str, object] | None:
+    """Write-time glue: opportunistically match a just-saved activity.
+
+    Best-effort by design — a matching failure must never fail the save that
+    triggered it, so errors are logged and swallowed.
+    """
+    from backend.services.compliance import MATCH_MAX_DAY_OFFSET, match_activities_to_workouts
+
+    try:
+        window = timedelta(days=MATCH_MAX_DAY_OFFSET)
+        planned = await repo.list_plan_workouts_between(
+            user_id,
+            start=activity.activity_date - window,
+            end=activity.activity_date + window,
+        )
+        matches = match_activities_to_workouts(planned, [activity], today=datetime.now(UTC).date())
+        if not matches:
+            return None
+        match = matches[0]
+        await _persist_workout_match(user_id, match.workout, activity)
+        logger.info(
+            "activity auto-matched user_id=%s activity_id=%s plan_workout_id=%s",
+            user_id,
+            activity.id,
+            match.workout.id,
+        )
+        return {
+            "plan_workout_id": match.workout.id,
+            "workout_date": match.workout.workout_date.isoformat(),
+            "title": match.workout.title,
+        }
+    except Exception:
+        logger.exception("post-save plan matching failed user_id=%s", user_id)
+        return None
+
+
+@app.post("/api/engine/get-compliance-summary")
+async def get_compliance_summary(
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Read-time reconciliation + planned-versus-done summary for the coach."""
+    from backend.services.compliance import (
+        MATCH_MAX_DAY_OFFSET,
+        build_compliance_summary,
+        compliance_window,
+        match_activities_to_workouts,
+    )
+
+    user_id = user_context.user_id
+    today = datetime.now(UTC).date()
+
+    try:
+        plan = await repo.get_active_plan(user_id)
+        if plan is None:
+            return {
+                "status": "no_active_plan",
+                "message": "No active training plan; generate one to track compliance.",
+            }
+
+        start, _ = compliance_window(plan.start_date, today)
+        match_margin = timedelta(days=MATCH_MAX_DAY_OFFSET)
+        planned, activities = await asyncio.gather(
+            repo.list_plan_workouts_between(user_id, start=start, end=today + match_margin),
+            repo.list_activities_between(
+                user_id, start=start - match_margin, end=today + match_margin
+            ),
+        )
+
+        matches = match_activities_to_workouts(planned, activities, today=today)
+        persisted_matches = []
+        for match in matches:
+            try:
+                await _persist_workout_match(user_id, match.workout, match.activity)
+            except (RecordNotFoundError, RuntimeError):
+                # A stale match (e.g. the workout or activity was deleted/reassigned
+                # since the match was computed) must not abort the whole summary —
+                # skip it and reconcile it again on the next read.
+                logger.exception(
+                    "get_compliance_summary: skipping stale match user_id=%s "
+                    "plan_workout_id=%s activity_id=%s",
+                    user_id,
+                    match.workout.id,
+                    match.activity.id,
+                )
+                continue
+            persisted_matches.append(match)
+
+        # Reflect the persisted matches in memory so the summary is built from
+        # post-reconciliation state without a second round-trip.
+        workout_to_activity = {m.workout.id: m.activity.id for m in persisted_matches}
+        activity_to_workout = {m.activity.id: m.workout.id for m in persisted_matches}
+        planned = [
+            w.model_copy(
+                update={
+                    "status": "completed",
+                    "actual_activity_id": workout_to_activity[w.id],
+                    "completion_source": "auto_matched",
+                }
+            )
+            if w.id in workout_to_activity
+            else w
+            for w in planned
+        ]
+        activities = [
+            a.model_copy(update={"planned_workout_id": activity_to_workout[a.id]})
+            if a.id in activity_to_workout
+            else a
+            for a in activities
+        ]
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("get_compliance_summary failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to load compliance data.") from exc
+
+    summary = build_compliance_summary(plan, planned, activities, today=today)
+    logger.info(
+        "compliance summary user_id=%s plan_id=%s matches=%d pct=%s unconfirmed=%d",
+        user_id,
+        plan.id,
+        len(persisted_matches),
+        summary["compliance_pct"],
+        summary["totals"]["unconfirmed"],
+    )
+    return summary
+
+
+class FindPlanWorkoutRequest(BaseModel):
+    """Look up planned workouts on/around a date to obtain a concrete id."""
+
+    workout_date: date
+    sport: str | None = None
+
+
+@app.post("/api/engine/find-plan-workout")
+async def find_plan_workout(
+    payload: FindPlanWorkoutRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Resolve a loose date/sport description to concrete plan-workout ids.
+
+    Gives the coach a reliable way to obtain a real ``plan_workout_id`` before
+    calling resolve_plan_workout, instead of guessing one.
+    """
+    user_id = user_context.user_id
+    window = timedelta(days=1)
+    try:
+        workouts = await repo.list_plan_workouts_between(
+            user_id,
+            start=payload.workout_date - window,
+            end=payload.workout_date + window,
+        )
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:  # PostgREST → centralized _handle_postgrest_error
+        logger.exception("find_plan_workout failed user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Failed to look up plan workouts.") from exc
+
+    # Case-insensitive sport match: the coach supplies ``payload.sport`` loosely
+    # (e.g. "Running"), while stored ``w.sport`` is canonical lowercase.
+    sport = payload.sport.strip().casefold() if payload.sport else None
+    candidates = [w for w in workouts if sport is None or ((w.sport or "").casefold() == sport)]
+    # Closest to the requested date first so the coach's top candidate is the
+    # most likely match.
+    candidates.sort(
+        key=lambda w: (abs((w.workout_date - payload.workout_date).days), w.workout_date)
+    )
+    return {
+        "candidates": [
+            {
+                "plan_workout_id": w.id,
+                "workout_date": w.workout_date.isoformat(),
+                "sport": w.sport,
+                "title": w.title,
+                "workout_type": w.workout_type,
+                "status": w.status,
+                "target_duration_minutes": w.target_duration_minutes,
+            }
+            for w in candidates
+        ]
+    }
+
+
+class ResolvePlanWorkoutRequest(BaseModel):
+    """Explicit athlete/coach resolution of a planned workout."""
+
+    plan_workout_id: str = Field(min_length=1)
+    outcome: Literal["completed", "skipped"]
+    activity_id: str | None = None
+    source: Literal["athlete", "coach"] = "coach"
+
+    @field_validator("plan_workout_id")
+    @classmethod
+    def _require_uuid(cls, value: str) -> str:
+        # Reject fabricated/placeholder ids at the boundary (422) rather than letting
+        # a non-UUID reach Postgres and surface as a confusing 503. Callers must resolve
+        # a real id first (find_plan_workout / compliance summary).
+        try:
+            return str(UUID(value))
+        except ValueError as exc:
+            raise ValueError("plan_workout_id must be a valid UUID") from exc
+
+
+async def _apply_workout_resolution(
+    user_id: str, workout: PlanWorkout, payload: ResolvePlanWorkoutRequest
+) -> PlanWorkout:
+    if payload.outcome == "completed" and payload.activity_id:
+        await repo.get_activity(user_id, payload.activity_id)
+    return await repo.resolve_plan_workout_atomic(
+        user_id=user_id,
+        workout_id=workout.id or payload.plan_workout_id,
+        outcome=payload.outcome,
+        activity_id=payload.activity_id,
+        source=payload.source,
+    )
+
+
+@app.post("/api/engine/resolve-plan-workout")
+async def resolve_plan_workout(
+    payload: ResolvePlanWorkoutRequest,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    user_id = user_context.user_id
+    try:
+        workout = await repo.get_plan_workout(user_id, payload.plan_workout_id)
+        updated = await _apply_workout_resolution(user_id, workout, payload)
+    except RecordNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # PostgRESTAPIError propagates to the centralized _handle_postgrest_error handler,
+    # which maps a client-fault SQLSTATE (e.g. 22P02 from a non-UUID id) to 422 and a
+    # genuine outage to 503 — the behavior this endpoint's boundary validator and the
+    # original 503 investigation established, now shared across every endpoint.
+    except httpx.HTTPError as exc:
+        logger.exception(
+            "resolve_plan_workout failed user_id=%s workout_id=%s",
+            user_id,
+            payload.plan_workout_id,
+        )
+        raise HTTPException(status_code=503, detail="Failed to resolve plan workout.") from exc
+
+    logger.info(
+        "plan workout resolved user_id=%s workout_id=%s outcome=%s source=%s",
+        user_id,
+        payload.plan_workout_id,
+        payload.outcome,
+        payload.source,
+    )
+    return {"workout": updated.model_dump(mode="json")}
 
 
 class ConfirmThresholdRequest(BaseModel):

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Coach Arden logo</title>
+  <desc id="desc">A square endurance coaching mark with terrain, workout blocks, and a progress baseline.</desc>
+  <rect width="512" height="512" rx="96" fill="#0f172a"/>
+  <path d="M98 334c46-80 91-123 136-129 37-5 73 20 109 75 23-42 47-70 72-84" fill="none" stroke="#2a9d8f" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="125" y="356" width="34" height="52" rx="12" fill="#f97316"/>
+  <rect x="190" y="328" width="34" height="80" rx="12" fill="#f97316"/>
+  <rect x="255" y="344" width="34" height="64" rx="12" fill="#f97316"/>
+  <rect x="320" y="302" width="34" height="106" rx="12" fill="#f97316"/>
+  <path d="M108 409h300" fill="none" stroke="#f8fafc" stroke-width="18" stroke-linecap="round" opacity=".9"/>
+</svg>

@@ -1,6 +1,13 @@
 import * as Sentry from "@sentry/nextjs";
 import { type UIMessage } from "ai";
+import { after } from "next/server";
 
+import {
+  CHAT_TURN_LEASE_TTL_SECONDS,
+  acquireChatTurnLease,
+  LeaseReleaseError,
+  releaseChatTurnLease,
+} from "../../../lib/agent/lease-client";
 import {
   appendImageExtractionsToMessages,
   convertUnsupportedFilePartsToText,
@@ -8,7 +15,10 @@ import {
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
-import { chatRequestBodySchema } from "../../../lib/schemas";
+import {
+  chatRequestBodySchema,
+  type ChatRequestBody,
+} from "../../../lib/schemas";
 import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
@@ -45,6 +55,10 @@ function requestOrigin(request: Request): string {
 function vercelProtectionBypassHeaders(): Record<string, string> {
   const bypassSecret = process.env["VERCEL_AUTOMATION_BYPASS_SECRET"];
   return bypassSecret ? { "x-vercel-protection-bypass": bypassSecret } : {};
+}
+
+function browserTimeZone(request: Request): string | undefined {
+  return request.headers.get("x-athlete-timezone") ?? undefined;
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -117,6 +131,22 @@ function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
     };
   }
   return null;
+}
+
+function messagesForContextStrategy(
+  parsedBody: ChatRequestBody,
+  strategy: string,
+): UIMessage[] {
+  if (strategy === "full_history") {
+    if ("messages" in parsedBody) {
+      return parsedBody.messages as UIMessage[];
+    }
+    return [parsedBody.message] as UIMessage[];
+  }
+  if ("message" in parsedBody) {
+    return [parsedBody.message] as UIMessage[];
+  }
+  return parsedBody.messages.slice(-1) as UIMessage[];
 }
 
 async function persistUserMessage(
@@ -203,16 +233,56 @@ async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
 ): Promise<Response> {
-  let parsedBody;
+  let parsedBody: ChatRequestBody;
   try {
-    parsedBody = chatRequestBodySchema.parse(await request.json());
+    const serialized = await request.text();
+    if (new TextEncoder().encode(serialized).byteLength > 256 * 1024) {
+      return jsonError("Turn exceeds the 256 KiB request limit.", 413);
+    }
+    parsedBody = chatRequestBodySchema.parse(JSON.parse(serialized));
   } catch {
     return jsonError("Invalid request body.", 400);
   }
-  const messages = (parsedBody.messages ?? []) as UIMessage[];
+  const strategy = process.env["COACH_CONTEXT_STRATEGY"] ?? "session";
+  const messages = messagesForContextStrategy(parsedBody, strategy);
+  const baseUrl = requestOrigin(request);
+  // The browser supplies an IANA timezone so coach dates and clock times agree
+  // with what the athlete sees; prompt construction validates it before use.
+  const timeZone = browserTimeZone(request);
+  const extraHeaders = vercelProtectionBypassHeaders();
+  const leaseId = crypto.randomUUID();
+
+  after(async () => {
+    try {
+      await releaseChatTurnLease({
+        accessToken: token.access_token,
+        baseUrl,
+        extraHeaders,
+        leaseId,
+      });
+    } catch (error) {
+      if (error instanceof LeaseReleaseError && error.status === 409) return;
+      Sentry.captureException(error, {
+        tags: { subsystem: "lease-release-after" },
+        extra: { leaseId },
+      });
+    }
+  });
+  const acquiredLease =
+    strategy === "full_history"
+      ? undefined
+      : await acquireChatTurnLease({
+          accessToken: token.access_token,
+          baseUrl,
+          extraHeaders,
+          leaseId,
+          signal: request.signal,
+          ttlSeconds: CHAT_TURN_LEASE_TTL_SECONDS,
+        });
   Sentry.logger.info("chat turn start", {
     user_id: token.user_id,
     message_count: messages.length,
+    context_strategy: strategy,
   });
   const modelMessages = await appendImageExtractionsToMessages(
     convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
@@ -231,18 +301,39 @@ async function handleChatRequest(
 
   return streamCoachTurn({
     accessToken: token.access_token,
-    baseUrl: requestOrigin(request),
+    ...(acquiredLease ? { acquiredLease } : {}),
+    baseUrl,
     context,
-    extraHeaders: vercelProtectionBypassHeaders(),
+    extraHeaders,
+    leaseId,
     messages: modelMessages,
     messagesAreModelSelected: true,
+    useDurableSession: strategy !== "full_history",
     signal: request.signal,
     streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+    timeZone,
     ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),
   });
 }
 
 export async function POST(request: Request): Promise<Response> {
+  after(async () => {
+    try {
+      const flushed = await Sentry.flush(5000);
+      if (!flushed) {
+        console.warn("[chat] Sentry.flush timed out; some spans may be lost");
+        Sentry.logger.warn(
+          "chat: Sentry.flush timed out; some spans may be lost",
+        );
+      }
+    } catch (error) {
+      console.error("[chat] Sentry.flush threw unexpectedly:", error);
+      Sentry.logger.error("chat: Sentry.flush threw unexpectedly", {
+        error: String(error),
+      });
+    }
+  });
+
   let token: BrowserTokenResponse | null;
   try {
     token = await loadBrowserToken(request);

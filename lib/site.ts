@@ -1,6 +1,7 @@
 export const siteConfig = {
-  appName: "Exercise Training Plan GPT",
-  description: "Cyclocross-aware coaching app with durable athlete profiles and adaptive 14-day plans."
+  appName: "Coach Arden",
+  description:
+    "AI Chat Bot for endurance athletes that helps plan, adapt, and review training using athlete profile and workout data.",
 } as const;
 
 const TAVILY_MCP_BASE_URL = "https://mcp.tavily.com/mcp/";

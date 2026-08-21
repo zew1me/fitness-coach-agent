@@ -1,4 +1,18 @@
+import * as Sentry from "@sentry/nextjs";
+import { after } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, after: vi.fn() };
+});
+
+vi.mock("@sentry/nextjs", () => ({
+  flush: vi.fn().mockResolvedValue(true),
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  captureException: vi.fn(),
+  captureRequestError: vi.fn(),
+}));
 
 import { POST } from "../../app/api/chat/route";
 import { createCoachTools } from "../../lib/agent/coach-tools";
@@ -124,6 +138,53 @@ describe("app/api/chat route", () => {
         messages,
         messagesAreModelSelected: true,
       }),
+    );
+  });
+
+  it("acquires the durable lease before loading athlete context", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      const requestedUrl = String(url);
+      requestedUrls.push(requestedUrl);
+      if (requestedUrl.endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      if (requestedUrl.endsWith("/api/chat/model-state/lease")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ thread_id: "thread-1" }), {
+            headers: { "content-type": "application/json" },
+            status: 200,
+          }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    const streamOptions = vi.mocked(streamCoachTurn).mock.calls.at(-1)?.[0];
+    expect(streamOptions?.acquiredLease).toEqual({ thread_id: "thread-1" });
+    expect(
+      requestedUrls.indexOf("http://localhost/api/chat/model-state/lease"),
+    ).toBeLessThan(
+      requestedUrls.indexOf("http://localhost/api/engine/get-athlete-summary"),
     );
   });
 
@@ -318,7 +379,7 @@ describe("app/api/chat route", () => {
     errorSpy.mockRestore();
   });
 
-  it("delegates exactly one selected model window for long chat turns", async () => {
+  it("uses only the latest message when a legacy client sends full history", async () => {
     const messages = Array.from({ length: 40 }, (_, index) => ({
       id: `message-${index}`,
       parts: [{ text: `Message ${index}`, type: "text" as const }],
@@ -356,22 +417,41 @@ describe("app/api/chat route", () => {
 
     expect(streamCoachTurn).toHaveBeenCalledWith(
       expect.objectContaining({
-        messages: [
-          expect.objectContaining({
-            id: "context-window-notice",
-            parts: [
-              {
-                text: expect.stringContaining("previous 16 chat messages"),
-                type: "text",
-              },
-            ],
-            role: "system",
-          }),
-          ...messages.slice(16),
-        ],
+        messages: [messages.at(-1)],
         messagesAreModelSelected: true,
+        useDurableSession: true,
       }),
     );
+  });
+
+  it("rejects a serialized turn larger than 256 KiB", async () => {
+    globalThis.fetch = vi.fn((url: RequestInfo | URL) =>
+      Promise.resolve(
+        String(url).endsWith("/api/oauth/browser-token")
+          ? new Response(
+              JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+              { status: 200 },
+            )
+          : new Response("{}", { status: 200 }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({
+          message: {
+            id: "large",
+            role: "user",
+            parts: [{ type: "text", text: "x".repeat(257 * 1024) }],
+          },
+        }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    expect(streamCoachTurn).not.toHaveBeenCalled();
   });
 
   it("keeps short conversations intact for model context", () => {
@@ -981,6 +1061,7 @@ describe("app/api/chat route", () => {
     await expect(
       generateTrainingPlan.execute({
         goal_id: "goal-1",
+        training_model: "performance",
         user_id: "athlete-1",
       }),
     ).resolves.toEqual({ phases: [{ name: "Base" }], total_weeks: 8 });
@@ -989,6 +1070,7 @@ describe("app/api/chat route", () => {
       expect.objectContaining({
         body: JSON.stringify({
           goal_id: "goal-1",
+          training_model: "performance",
         }),
         method: "POST",
       }),
@@ -1190,5 +1272,179 @@ describe("app/api/chat route", () => {
         method: "POST",
       }),
     );
+  });
+
+  it("routes .zip uploads to the process-uploaded-zip endpoint", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            processed: [{ kind: "activity", activity: { sport: "running" } }],
+            skipped_count: 1,
+            status: "ok",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+      ),
+    );
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    const processUploadedFile = tools["process_uploaded_file"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const result = processUploadedFile.execute({
+      content_type: "application/zip",
+      filename: "garmin-export.zip",
+      object_key:
+        "users/athlete-1/chat-attachment/2026/04/19/garmin-export.zip",
+      public_url: "https://example.com/garmin-export.zip",
+      user_id: "attacker-controlled-user",
+    });
+
+    await expect(Promise.resolve(result)).resolves.toEqual({
+      processed: [{ kind: "activity", activity: { sport: "running" } }],
+      skipped_count: 1,
+      status: "ok",
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/process-uploaded-zip",
+      expect.objectContaining({
+        body: JSON.stringify({
+          content_type: "application/zip",
+          filename: "garmin-export.zip",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/04/19/garmin-export.zip",
+          public_url: "https://example.com/garmin-export.zip",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("schedules Sentry flush and lease cleanup via after() on every successful chat request", async () => {
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    expect(vi.mocked(after)).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the route lease from the deferred cleanup", async () => {
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    const cleanup = vi.mocked(after).mock.calls[1]?.[0];
+    expect(typeof cleanup).toBe("function");
+    await (cleanup as () => Promise<void>)();
+
+    const routeLeaseId = vi
+      .mocked(streamCoachTurn)
+      .mock.calls.at(-1)?.[0]?.leaseId;
+    expect(routeLeaseId).toEqual(expect.any(String));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/chat/model-state/lease",
+      expect.objectContaining({
+        body: JSON.stringify({ lease_id: routeLeaseId }),
+        method: "DELETE",
+      }),
+    );
+  });
+
+  it("logs a warning when Sentry.flush times out after streaming", async () => {
+    vi.mocked(Sentry.flush).mockResolvedValueOnce(false);
+    const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      if (String(url).endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await POST(
+      new Request("http://localhost/api/chat", {
+        body: JSON.stringify({ messages: [] }),
+        headers: { cookie: "coach_browser_session=session-token" },
+        method: "POST",
+      }),
+    );
+
+    // Extract and invoke the after() callback to exercise the flush path.
+    const afterCallback = vi.mocked(after).mock.calls[0]?.[0];
+    expect(typeof afterCallback).toBe("function");
+    await (afterCallback as () => Promise<void>)();
+
+    expect(Sentry.logger.warn).toHaveBeenCalledWith(
+      "chat: Sentry.flush timed out; some spans may be lost",
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[chat] Sentry.flush timed out; some spans may be lost",
+    );
+    consoleSpy.mockRestore();
   });
 });

@@ -1,8 +1,35 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { createCoachTools } from "../../lib/agent/coach-tools";
 import { coachToolDefinitions } from "../../lib/agent/tools";
+
+type RecordedRequest = { body: unknown; url: string };
+
+function createRecordingFetch(responseBody: unknown): {
+  fetchImpl: typeof fetch;
+  requests: RecordedRequest[];
+} {
+  const requests: RecordedRequest[] = [];
+  const fetchImpl = (
+    url: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    requests.push({
+      body: JSON.parse(String(init?.body)),
+      url: String(url),
+    });
+
+    return Promise.resolve(
+      new Response(JSON.stringify(responseBody), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+  };
+
+  return { fetchImpl, requests };
+}
 
 function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
   if (schema === null || typeof schema !== "object") {
@@ -34,28 +61,165 @@ function assertTypedAdditionalProperties(schema: unknown, path = "$"): void {
 }
 
 describe("coachToolDefinitions", () => {
-  it("exposes only coach tools with real execution paths", () => {
+  it("exposes the planned coaching tool surface", () => {
     expect(Object.keys(coachToolDefinitions)).toEqual([
       "get_athlete_context",
       "get_recent_activities",
       "get_active_plan",
+      "get_compliance_summary",
+      "find_plan_workout",
+      "resolve_plan_workout",
+      "save_activity_from_text",
       "process_uploaded_file",
+      "save_recovery_data",
+      "update_schedule",
+      "update_goals",
       "update_athlete_profile",
       "calculate_zones",
       "estimate_thresholds",
       "generate_training_plan",
+      "adjust_plan",
+      "recalibrate_thresholds",
     ]);
-    expect(Object.keys(coachToolDefinitions)).not.toEqual(
-      expect.arrayContaining([
-        "get_compliance_summary",
-        "save_activity_from_text",
-        "save_recovery_data",
-        "update_schedule",
-        "update_goals",
-        "adjust_plan",
-        "recalibrate_thresholds",
-      ]),
-    );
+  });
+
+  it("validates a goal update payload with course details", () => {
+    const parsed = coachToolDefinitions.update_goals.inputSchema.parse({
+      action: "create",
+      goal: {
+        title: "Hill climb",
+        goal_type: "event",
+        sport: "running",
+        target_date: "2026-07-01",
+        course_distance_meters: 14000,
+        course_elevation_gain_meters: 700,
+        course_profile_notes: null,
+        improvement_baseline_value: null,
+        improvement_metric: null,
+        improvement_target_value: null,
+      },
+    });
+
+    expect(parsed.goal?.title).toBe("Hill climb");
+    expect(parsed.goal?.course_elevation_gain_meters).toBe(700);
+  });
+
+  it("rejects unsupported goal_type values before tool execution", () => {
+    const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
+      action: "create",
+      goal: {
+        title: "Half marathon",
+        goal_type: "race",
+        sport: "running",
+        target_date: "2026-08-29",
+        course_distance_meters: 21097,
+        course_elevation_gain_meters: null,
+        course_profile_notes: null,
+        improvement_baseline_value: null,
+        improvement_metric: null,
+        improvement_target_value: null,
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+
+  it("accepts explicit training model policy for plan generation", () => {
+    const parsed =
+      coachToolDefinitions.generate_training_plan.inputSchema.parse({
+        goal_id: "goal-1",
+        training_model: "longevity",
+      });
+
+    expect(parsed).toEqual({
+      goal_id: "goal-1",
+      training_model: "longevity",
+    });
+  });
+
+  it("accepts an exact mixed-sport workout schedule for plan generation", () => {
+    const workouts = [
+      {
+        description: "Keep this easy after travel.",
+        phase_name: "Run build",
+        sport: "running",
+        target_distance_meters: null,
+        target_duration_minutes: 45,
+        target_tss: null,
+        title: "Easy trail run",
+        workout_date: "2026-07-14",
+        workout_type: "endurance",
+      },
+      {
+        description: "Planned bike intensity; running remains the priority.",
+        phase_name: "Run build",
+        sport: "cycling",
+        target_distance_meters: null,
+        target_duration_minutes: 165,
+        target_tss: null,
+        title: "Ride with criterium",
+        workout_date: "2026-07-16",
+        workout_type: "race",
+      },
+    ];
+
+    const parsed =
+      coachToolDefinitions.generate_training_plan.inputSchema.parse({
+        goal_id: "goal-1",
+        title: "Half-marathon-first plan",
+        training_model: "performance",
+        workouts,
+      });
+
+    expect(parsed).toEqual({
+      goal_id: "goal-1",
+      title: "Half-marathon-first plan",
+      training_model: "performance",
+      workouts,
+    });
+  });
+
+  it("accepts complete and abandon actions without a goal payload", () => {
+    for (const action of ["complete", "abandon"] as const) {
+      const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action,
+        goal_id: "goal-1",
+      });
+
+      expect(
+        parsed.success,
+        `${action} should be a valid update_goals call`,
+      ).toBe(true);
+    }
+  });
+
+  it("validates update_goals payloads by action", () => {
+    const partialUpdate =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "update",
+        goal_id: "goal-1",
+        goal: { title: "Sharpen for Leadville" },
+      });
+    const incompleteCreate =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "create",
+        goal: { title: "Sharpen for Leadville" },
+      });
+    const missingGoalId =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "complete",
+      });
+    const terminalGoalPayload =
+      coachToolDefinitions.update_goals.inputSchema.safeParse({
+        action: "complete",
+        goal_id: "goal-1",
+        goal: { title: "Ignored title" },
+      });
+
+    expect(partialUpdate.success).toBe(true);
+    expect(incompleteCreate.success).toBe(false);
+    expect(missingGoalId.success).toBe(false);
+    expect(terminalGoalPayload.success).toBe(false);
   });
 
   it("emits OpenAI-compatible schemas for all coach tools", () => {
@@ -68,7 +232,7 @@ describe("coachToolDefinitions", () => {
     }
   });
 
-  it("validates profile onboarding domain field names", () => {
+  it("validates profile onboarding, recovery, and schedule domain field names", () => {
     const fullProfileFields = {
       biological_sex: "not_specified" as const,
       birth_date: null,
@@ -106,6 +270,47 @@ describe("coachToolDefinitions", () => {
         fields: { ...fullProfileFields, hormone_status: "not_provided" },
       }),
     ).toThrow();
+
+    expect(
+      coachToolDefinitions.save_recovery_data.inputSchema.parse({
+        entries: [
+          {
+            body_battery: 55,
+            hrv_ms: 48,
+            log_date: "2026-05-30",
+            notes: null,
+            resting_hr_bpm: null,
+            sleep_consistency_pct: null,
+            sleep_duration_hours: 7.5,
+            sleep_score: null,
+            stress_score: 22,
+            subjective_energy: 4,
+          },
+        ],
+      }),
+    ).toMatchObject({
+      entries: [{ hrv_ms: 48, sleep_duration_hours: 7.5 }],
+    });
+
+    expect(
+      coachToolDefinitions.update_schedule.inputSchema.parse({
+        overrides: [
+          {
+            available: false,
+            max_hours: 0,
+            override_date: "2026-06-01",
+            reason: "travel",
+          },
+        ],
+        weekly_pattern: {
+          monday: { available: true, max_hours: 1.5, notes: null },
+        },
+      }),
+    ).toMatchObject({
+      weekly_pattern: {
+        monday: { available: true, max_hours: 1.5 },
+      },
+    });
   });
 
   it("routes athlete profile updates to the engine with nutrition fields", async () => {
@@ -157,6 +362,736 @@ describe("coachToolDefinitions", () => {
     ]);
   });
 
+  it("executes save_activity_from_text by calling the engine text activity endpoint", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            activity: {
+              activity_summary: {
+                estimates: { estimated_duration_moving_s: 1140 },
+              },
+              id: "activity-1",
+              source: "text_extract",
+            },
+            status: "saved",
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        ),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["save_activity_from_text"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      activity_id: "activity-1",
+      text: "Add RPE 9 and two gels.",
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({
+      activity: {
+        activity_summary: {
+          estimates: { estimated_duration_moving_s: 1140 },
+        },
+        id: "activity-1",
+        source: "text_extract",
+      },
+      status: "saved",
+    });
+    expect(requests).toEqual([
+      {
+        body: {
+          activity_id: "activity-1",
+          text: "Add RPE 9 and two gels.",
+        },
+        url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
+  it.each([
+    ["application/vnd.garmin.fit", "ride.fit"],
+    ["application/gpx+xml", "run.gpx"],
+    ["application/vnd.garmin.tcx+xml", "run.tcx"],
+  ])(
+    "redirects a %s upload stub passed to save_activity_from_text to process_uploaded_file",
+    async (contentType, filename) => {
+      const { fetchImpl, requests } = createRecordingFetch({
+        activity: { duration_seconds: 5880, sport: "cycling" },
+        status: "saved",
+      });
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl,
+      });
+
+      const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
+      const publicUrl = `https://cdn.example.com/${filename}`;
+      const stub =
+        `Uploaded file: ${filename}\r\n` +
+        `content_type=${contentType}\r\n` +
+        `public_url=${publicUrl}\r\n` +
+        `object_key=${objectKey}`;
+
+      const result = await (
+        tools["save_activity_from_text"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ text: stub });
+
+      expect(result).toEqual({
+        activity: { duration_seconds: 5880, sport: "cycling" },
+        status: "saved",
+      });
+      expect(requests).toEqual([
+        {
+          body: {
+            content_type: contentType,
+            filename,
+            object_key: objectKey,
+            public_url: publicUrl,
+          },
+          url: "https://coach.test/api/engine/process-uploaded-file",
+        },
+      ]);
+    },
+  );
+
+  it.each([
+    ["application/zip", "garmin-export.zip"],
+    ["application/x-zip-compressed", "activities.zip"],
+  ])(
+    "redirects a %s upload stub passed to save_activity_from_text to the zip unpacker",
+    async (contentType, filename) => {
+      const { fetchImpl, requests } = createRecordingFetch({
+        processed: [{ activity: { sport: "running" }, kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl,
+      });
+
+      const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
+      const publicUrl = `https://cdn.example.com/${filename}`;
+      const stub =
+        `Uploaded file: ${filename}\r\n` +
+        `content_type=${contentType}\r\n` +
+        `public_url=${publicUrl}\r\n` +
+        `object_key=${objectKey}`;
+
+      const result = await (
+        tools["save_activity_from_text"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ text: stub });
+
+      expect(result).toEqual({
+        processed: [{ activity: { sport: "running" }, kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      expect(requests).toEqual([
+        {
+          body: {
+            content_type: contentType,
+            filename,
+            object_key: objectKey,
+            public_url: publicUrl,
+          },
+          url: "https://coach.test/api/engine/process-uploaded-zip",
+        },
+      ]);
+    },
+  );
+
+  it("does not redirect ordinary free-text activity descriptions", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    await (
+      tools["save_activity_from_text"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ text: "Add RPE 9 and two gels." });
+
+    expect(requests).toEqual([
+      {
+        body: { text: "Add RPE 9 and two gels." },
+        url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
+  it("does not redirect a stub-shaped text for a non-activity content_type", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({ status: "saved" });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const stub =
+      "Uploaded file: notes.pdf\n" +
+      "content_type=application/pdf\n" +
+      "public_url=https://cdn.example.com/notes.pdf\n" +
+      "object_key=users/athlete-1/chat-attachment/2026/07/06/notes.pdf";
+
+    await (
+      tools["save_activity_from_text"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ text: stub });
+
+    expect(requests).toEqual([
+      {
+        body: { text: stub },
+        url: "https://coach.test/api/engine/save-activity-from-text",
+      },
+    ]);
+  });
+
+  it("routes get_compliance_summary to the engine compliance endpoint", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ compliance_pct: 66.7, status: "ok" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["get_compliance_summary"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({ user_id: "ignored-client-user" });
+
+    expect(result).toEqual({ compliance_pct: 66.7, status: "ok" });
+    expect(requests).toEqual([
+      {
+        body: {},
+        url: "https://coach.test/api/engine/get-compliance-summary",
+      },
+    ]);
+  });
+
+  it("routes resolve_plan_workout to the engine with coach provenance", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ workout: { status: "skipped" } }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["resolve_plan_workout"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      activity_id: null,
+      outcome: "skipped",
+      plan_workout_id: "workout-1",
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ workout: { status: "skipped" } });
+    expect(requests).toEqual([
+      {
+        body: {
+          activity_id: null,
+          outcome: "skipped",
+          plan_workout_id: "workout-1",
+          source: "coach",
+        },
+        url: "https://coach.test/api/engine/resolve-plan-workout",
+      },
+    ]);
+  });
+
+  it("routes adjust_plan to the engine adjust endpoint and strips client user_id", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ plan_id: "plan-1", status: "adjusted" }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        ),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["adjust_plan"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      plan_id: "plan-1",
+      reason: "Ease off next week",
+      user_id: "ignored-client-user",
+    });
+
+    // The mapping must resolve — no pending_implementation fallthrough.
+    expect(result).toEqual({ plan_id: "plan-1", status: "adjusted" });
+    expect(requests).toEqual([
+      {
+        body: { plan_id: "plan-1", reason: "Ease off next week" },
+        url: "https://coach.test/api/engine/adjust-plan",
+      },
+    ]);
+  });
+
+  it("routes recalibrate_thresholds to the engine recalibrate endpoint", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                candidate_id: "candidate-1",
+                confidence: "high",
+                explanation: "…",
+                sport: "running",
+                status: "candidate_queued",
+              },
+            ],
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          },
+        ),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["recalibrate_thresholds"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({});
+
+    // The mapping must resolve — no pending_implementation fallthrough.
+    expect(result).not.toEqual({
+      input: {},
+      status: "pending_implementation",
+      tool: "recalibrate_thresholds",
+    });
+    expect(requests).toEqual([
+      {
+        body: {},
+        url: "https://coach.test/api/engine/recalibrate-thresholds",
+      },
+    ]);
+  });
+
+  it("routes save_recovery_data to the engine and strips any client-sent user_id", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ count: 1, saved: [{ id: "rec-1" }] }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["save_recovery_data"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      entries: [
+        {
+          hrv_ms: 48,
+          log_date: "2026-05-30",
+          sleep_duration_hours: 7.5,
+        },
+      ],
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ count: 1, saved: [{ id: "rec-1" }] });
+    expect(requests).toEqual([
+      {
+        body: {
+          entries: [
+            {
+              hrv_ms: 48,
+              log_date: "2026-05-30",
+              sleep_duration_hours: 7.5,
+            },
+          ],
+        },
+        url: "https://coach.test/api/engine/save-recovery-data",
+      },
+    ]);
+  });
+
+  it("routes goal updates to the engine and strips any client-sent user_id", async () => {
+    const requests: Array<{ body: unknown; url: string }> = [];
+    const fetchImpl = (
+      url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requests.push({
+        body: JSON.parse(String(init?.body)),
+        url: String(url),
+      });
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: "goal-new", status: "active" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["update_goals"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      action: "create",
+      goal: {
+        goal_type: "event",
+        title: "Leadville 100",
+        sport: "cycling",
+      },
+      user_id: "ignored-client-user",
+    });
+    const completeResult = await (
+      tools["update_goals"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      action: "complete",
+      goal_id: "goal-new",
+      user_id: "ignored-client-user",
+    });
+
+    expect(result).toEqual({ id: "goal-new", status: "active" });
+    expect(completeResult).toEqual({ id: "goal-new", status: "active" });
+    expect(requests).toEqual([
+      {
+        body: {
+          action: "create",
+          goal: {
+            goal_type: "event",
+            title: "Leadville 100",
+            sport: "cycling",
+          },
+        },
+        url: "https://coach.test/api/engine/update-goals",
+      },
+      {
+        body: {
+          action: "complete",
+          goal_id: "goal-new",
+        },
+        url: "https://coach.test/api/engine/update-goals",
+      },
+    ]);
+  });
+
+  it("keeps long activity text extraction requests alive past 30 seconds", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    let resolveResponse:
+      | ((response: Response | PromiseLike<Response>) => void)
+      | undefined;
+    const fetchImpl = (
+      _url: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => {
+        resolveResponse = resolve;
+      });
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    try {
+      const resultPromise = (
+        tools["save_activity_from_text"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({ text: "Hard ride with two gels." });
+
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(requestSignal?.aborted).toBe(false);
+
+      resolveResponse?.(
+        new Response(JSON.stringify({ status: "saved" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+      await expect(resultPromise).resolves.toEqual({ status: "saved" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("describes zip handling and the no_processable_files outcome for the coach", () => {
+    const description = coachToolDefinitions.process_uploaded_file.description;
+
+    expect(description).toContain(".zip");
+    expect(description).toContain("unpacked server-side");
+    expect(description).toContain("no_processable_files");
+  });
+
+  it("tells the coach that a course result was not saved", () => {
+    // The backend refuses to log a course, but the model still has to describe it
+    // honestly — reporting a planned route as a completed workout is the failure
+    // this wording exists to prevent.
+    const description = coachToolDefinitions.process_uploaded_file.description;
+
+    expect(description).toContain("Check the 'kind' field on every result");
+    expect(description).toContain(
+      "'activity' is a workout the athlete completed and it has been saved",
+    );
+    expect(description).toContain("'course' is a route they plan to do");
+    expect(description).toContain("nothing was written");
+    expect(description).toContain(
+      "treating it as completed would credit them with a workout they have not done",
+    );
+
+    // The archive contract too: the coach has to know which zip entries were saved,
+    // which were only analyzed, and what an empty result means — otherwise it either
+    // re-saves activities the server already wrote or reports an empty archive as a
+    // failure.
+    expect(description).toContain("status 'saved'");
+    expect(description).toContain("status 'analyzed'");
+    expect(description).toContain("no_processable_files");
+    expect(description).toContain("empty processed list");
+    expect(description).toContain("do not re-save these activities yourself");
+  });
+
+  it.each([
+    ["application/zip", "garmin-export.zip"],
+    ["application/x-zip-compressed", "garmin-export.zip"],
+  ])(
+    "routes a %s upload to process-uploaded-zip",
+    async (contentType, filename) => {
+      const { fetchImpl, requests } = createRecordingFetch({
+        processed: [{ kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl,
+      });
+
+      const objectKey = `users/athlete-1/chat-attachment/2026/07/06/${filename}`;
+      const publicUrl = `https://cdn.example.com/${filename}`;
+
+      const result = await (
+        tools["process_uploaded_file"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({
+        content_type: contentType,
+        filename,
+        object_key: objectKey,
+        public_url: publicUrl,
+        user_id: "ignored-client-user",
+      });
+
+      expect(result).toEqual({
+        processed: [{ kind: "activity" }],
+        skipped_count: 0,
+        status: "ok",
+      });
+      expect(requests).toEqual([
+        {
+          body: {
+            content_type: contentType,
+            filename,
+            object_key: objectKey,
+            public_url: publicUrl,
+          },
+          url: "https://coach.test/api/engine/process-uploaded-zip",
+        },
+      ]);
+    },
+  );
+
+  it("routes a .zip filename with a generic content_type to process-uploaded-zip", async () => {
+    // resolveContentType only infers gpx/fit/tcx from filename, so a zip with a
+    // generic/missing content_type must still be detected as a zip by filename.
+    const { fetchImpl, requests } = createRecordingFetch({
+      processed: [],
+      skipped_count: 0,
+      status: "no_processable_files",
+    });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/octet-stream",
+      filename: "garmin-export.zip",
+      object_key:
+        "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
+      public_url: "https://cdn.example.com/garmin-export.zip",
+    });
+
+    expect(requests).toEqual([
+      {
+        body: {
+          content_type: "application/octet-stream",
+          filename: "garmin-export.zip",
+          object_key:
+            "users/athlete-1/chat-attachment/2026/07/06/garmin-export.zip",
+          public_url: "https://cdn.example.com/garmin-export.zip",
+        },
+        url: "https://coach.test/api/engine/process-uploaded-zip",
+      },
+    ]);
+  });
+
+  it("does not route a .zip upload to any engine endpoint when object_key is missing", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({ status: "ok" });
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/zip",
+      filename: "garmin-export.zip",
+      public_url: "https://cdn.example.com/garmin-export.zip",
+    });
+
+    expect(requests).toEqual([]);
+    expect(result).toMatchObject({
+      message: expect.stringContaining("Unsupported file type"),
+      status: "unsupported_file_type",
+      tool: "process_uploaded_file",
+    });
+  });
+
   it("forwards extra internal headers to engine tool calls", async () => {
     const requests: Array<{ headers: Headers; url: string }> = [];
     const fetchImpl = (
@@ -203,6 +1138,72 @@ describe("coachToolDefinitions", () => {
     );
   });
 
+  it("returns an error result instead of throwing when the engine rejects a .fit upload", async () => {
+    const fetchImpl = (): Promise<Response> =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            detail:
+              "Could not resolve the file reference in storage. Do not retry this file; report it to the athlete.",
+          }),
+          { status: 404 },
+        ),
+      );
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/vnd.garmin.fit",
+      filename: "ride.fit",
+      object_key: "users/athlete-1/chat-attachment/2026/07/06/ride.fit",
+      public_url: "https://cdn.example.com/ride.fit",
+    });
+
+    expect(result).toEqual({
+      detail: expect.stringContaining("could not be processed"),
+      status: "error",
+    });
+    // Every coach tool is disabled for the rest of the turn once one has run,
+    // so an affirmative retry instruction is unfollowable and strands the model
+    // on its remaining turns until maxTurns throws (Sentry 7633993901).
+    const detail = (result as { detail: string }).detail;
+    expect(detail).toContain("Do not retry");
+    expect(detail).not.toMatch(/retry (with|using)/i);
+  });
+
+  it("returns an error result instead of throwing when the engine rejects a .zip upload", async () => {
+    const fetchImpl = (): Promise<Response> =>
+      Promise.resolve(new Response("Internal Server Error", { status: 500 }));
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/zip",
+      filename: "rides.zip",
+      object_key: "users/athlete-1/chat-attachment/2026/07/06/rides.zip",
+      public_url: "https://cdn.example.com/rides.zip",
+    });
+
+    expect(result).toEqual({
+      detail: expect.stringContaining("could not be processed"),
+      status: "error",
+    });
+  });
+
   it("returns a graceful result for unsupported uploaded file types", async () => {
     let fetchCalled = false;
     const fetchImpl = (): Promise<Response> => {
@@ -215,13 +1216,11 @@ describe("coachToolDefinitions", () => {
       fetchImpl,
     });
 
-    const execute = (
+    const result = await (
       tools["process_uploaded_file"] as {
         execute: (input: unknown) => Promise<unknown>;
       }
-    ).execute;
-
-    const result = await execute({
+    ).execute({
       content_type: "application/pdf",
       filename: "plan.pdf",
       object_key: "uploads/plan.pdf",

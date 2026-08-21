@@ -1,16 +1,20 @@
 import { tool, type Tool } from "@openai/agents";
 import { type ToolSet } from "ai";
 
+import { coachingMemoryToolSchema } from "./coaching-memory";
+import type { SupabaseAgentSession } from "./supabase-agent-session";
 import { coachToolDefinitions } from "./tools";
+import { parseUploadedFileText } from "./uploaded-file-stub";
 
 export type CoachToolContext = {
   accessToken: string;
   baseUrl: string;
   extraHeaders?: Record<string, string>;
   fetchImpl?: typeof fetch;
+  modelSession?: SupabaseAgentSession;
 };
 
-const ENGINE_TIMEOUT_MS = 30_000;
+const ENGINE_TIMEOUT_MS = 65_000;
 
 async function postEngine<TInput extends object>(
   context: CoachToolContext,
@@ -36,12 +40,37 @@ async function postEngine<TInput extends object>(
     );
 
     if (!response.ok) {
-      throw new Error(`Engine request failed for ${path}.`);
+      const body = await response.text().catch(() => "");
+      throw new Error(
+        `Engine request failed for ${path}: HTTP ${response.status} ${response.statusText}${body ? `. ${body}` : ""}`,
+      );
     }
 
     return await response.json();
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+async function safePostEngine<TInput extends object>(
+  context: CoachToolContext,
+  path: string,
+  input: TInput,
+): Promise<unknown> {
+  try {
+    return await postEngine(context, path, input);
+  } catch {
+    // Deliberately cause-neutral: this catch also covers timeouts and auth
+    // failures, so it must not assert why the upload failed. It must also not
+    // instruct a retry — every coach tool is disabled for the rest of the turn
+    // once one has run (see the isEnabled gate in createAgentCoachTools), so a
+    // retry is structurally impossible and only burns turns against maxTurns.
+    return {
+      status: "error",
+      detail:
+        "This upload could not be processed. Do not retry it in this turn; " +
+        "tell the athlete which file did not load.",
+    };
   }
 }
 
@@ -82,7 +111,7 @@ function stringField(
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function isActivityFile(
+export function isActivityFile(
   contentType: string | null,
   filename: string | null,
 ): boolean {
@@ -94,6 +123,18 @@ function isActivityFile(
     lowerFilename.endsWith(".gpx") ||
     lowerFilename.endsWith(".fit") ||
     lowerFilename.endsWith(".tcx")
+  );
+}
+
+export function isZipUpload(
+  contentType: string | null,
+  filename: string | null,
+): boolean {
+  const lowerFilename = filename?.toLowerCase() ?? "";
+  return (
+    contentType === "application/zip" ||
+    contentType === "application/x-zip-compressed" ||
+    lowerFilename.endsWith(".zip")
   );
 }
 
@@ -160,6 +201,35 @@ function isValidActivityUpload(
   );
 }
 
+function routeSaveActivityFromText(
+  input: unknown,
+  context: CoachToolContext,
+): unknown {
+  const payload = engineInput(input);
+  const text = stringField(payload, "text");
+  const stub = text !== null ? parseUploadedFileText(text) : null;
+  if (
+    stub !== null &&
+    (isActivityFile(stub.contentType, stub.filename) ||
+      isZipUpload(stub.contentType, stub.filename))
+  ) {
+    // The model attached a GPX/FIT/TCX or .zip upload stub as free text instead
+    // of calling process_uploaded_file. Redirect to process_uploaded_file so the
+    // file is parsed deterministically (activities) or unpacked (.zip archives),
+    // never parsed as plain text where numeric fields would be LLM-guessed.
+    return processUploadedFile(
+      {
+        content_type: stub.contentType,
+        filename: stub.filename,
+        object_key: stub.objectKey,
+        public_url: stub.publicUrl,
+      },
+      context,
+    );
+  }
+  return postEngine(context, "/api/engine/save-activity-from-text", payload);
+}
+
 function processUploadedFile(
   input: unknown,
   context: CoachToolContext,
@@ -178,15 +248,22 @@ function processUploadedFile(
     });
   }
 
-  if (isValidActivityUpload(resolvedContentType, filename, objectKey)) {
-    const payload = {
+  if (isZipUpload(resolvedContentType, filename) && objectKey !== null) {
+    return safePostEngine(context, "/api/engine/process-uploaded-zip", {
       content_type: resolvedContentType,
       filename,
       object_key: objectKey,
       public_url: publicUrl,
-    };
+    });
+  }
 
-    return postEngine(context, "/api/engine/process-uploaded-file", payload);
+  if (isValidActivityUpload(resolvedContentType, filename, objectKey)) {
+    return safePostEngine(context, "/api/engine/process-uploaded-file", {
+      content_type: resolvedContentType,
+      filename,
+      object_key: objectKey,
+      public_url: publicUrl,
+    });
   }
 
   return null;
@@ -215,28 +292,28 @@ function executeDeterministicEngineTool(
   input: unknown,
   context: CoachToolContext,
 ): unknown {
-  if (name === "calculate_zones") {
-    return postEngine(
-      context,
-      "/api/engine/calculate-zones",
-      engineInput(input),
-    );
-  }
-
-  if (name === "estimate_thresholds") {
-    return postEngine(
-      context,
-      "/api/engine/estimate-thresholds",
-      engineInput(input),
-    );
-  }
-
-  if (name === "generate_training_plan") {
-    return postEngine(
-      context,
-      "/api/engine/generate-plan-structure",
-      engineInput(input),
-    );
+  const paths: Record<string, string> = {
+    adjust_plan: "/api/engine/adjust-plan",
+    calculate_zones: "/api/engine/calculate-zones",
+    estimate_thresholds: "/api/engine/estimate-thresholds",
+    find_plan_workout: "/api/engine/find-plan-workout",
+    generate_training_plan: "/api/engine/generate-plan-structure",
+    get_compliance_summary: "/api/engine/get-compliance-summary",
+    recalibrate_thresholds: "/api/engine/recalibrate-thresholds",
+    resolve_plan_workout: "/api/engine/resolve-plan-workout",
+    save_recovery_data: "/api/engine/save-recovery-data",
+    update_goals: "/api/engine/update-goals",
+    update_schedule: "/api/engine/update-schedule",
+  };
+  const path = paths[name];
+  if (path) {
+    // The coach agent is the caller: the engine maps source "coach" to the
+    // persisted completion_source "coach_confirmed".
+    const payload =
+      name === "resolve_plan_workout"
+        ? { ...engineInput(input), source: "coach" }
+        : engineInput(input);
+    return postEngine(context, path, payload);
   }
 
   return null;
@@ -263,6 +340,10 @@ export function executeCoachTool(
       "/api/engine/get-recent-activities",
       engineInput(input),
     );
+  }
+
+  if (name === "save_activity_from_text") {
+    return routeSaveActivityFromText(input, context);
   }
 
   if (name === "update_athlete_profile") {
@@ -292,20 +373,47 @@ export function executeCoachTool(
 
 export type CoachAgentRunContext = {
   toolCalled: boolean;
+  // True when this turn's messages include a gpx/fit/tcx activity file or a .zip
+  // archive attachment. Gates save_activity_from_text so the model can't route a
+  // file upload to the LLM-guessing text-extraction path even if it doesn't pass
+  // the stub text through verbatim (see parseUploadedFileText for the verbatim
+  // case). Zip archives belong to process_uploaded_file, which unpacks them.
+  hasActivityFileAttachment: boolean;
 };
 
 export function createAgentCoachTools(
   context: CoachToolContext,
 ): Tool<CoachAgentRunContext>[] {
-  return Object.entries(coachToolDefinitions).map(([name, definition]) =>
-    tool({
+  const tools: Tool<CoachAgentRunContext>[] = Object.entries(
+    coachToolDefinitions,
+  ).map(([name, definition]) =>
+    tool<typeof definition.inputSchema, CoachAgentRunContext>({
       name,
       description: definition.description,
       parameters: definition.inputSchema,
-      isEnabled: ({ runContext }) => !runContext.context.toolCalled,
+      isEnabled: ({ runContext }) =>
+        !runContext.context.toolCalled &&
+        (name !== "save_activity_from_text" ||
+          !runContext.context.hasActivityFileAttachment),
       execute: (input: unknown) => executeCoachTool(name, input, context),
     }),
   );
+  if (context.modelSession) {
+    tools.push(
+      tool<typeof coachingMemoryToolSchema, CoachAgentRunContext>({
+        name: "update_coaching_memory",
+        description:
+          "Maintain non-authoritative coaching commitments, preferences, follow-ups, insights, and outcomes. Never duplicate profile, goal, schedule, plan, threshold, load, or recovery data.",
+        parameters: coachingMemoryToolSchema,
+        isEnabled: ({ runContext }) => !runContext.context.toolCalled,
+        execute: async (input) => {
+          await context.modelSession?.updateCoachingMemory(input.operation);
+          return { status: "updated" };
+        },
+      }),
+    );
+  }
+  return tools;
 }
 
 export function createCoachTools(context: CoachToolContext): ToolSet {

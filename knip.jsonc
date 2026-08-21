@@ -1,0 +1,33 @@
+{
+  "$schema": "https://unpkg.com/knip/schema.json",
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "@next/eslint-plugin-next",
+    "@testing-library/jest-dom",
+    "eslint-config-next",
+    "jscpd",
+    // CodeGraph is invoked through documented bunx commands, which static import analysis cannot see.
+    "@colbymchenry/codegraph",
+    // ast-grep is run as a CLI from package.json scripts and lefthook, never imported, so knip
+    // cannot tie the `ast-grep` binary back to the package that provides it.
+    "@ast-grep/cli"
+  ],
+  "ignore": [
+    ".worktrees/**",
+    ".codex/**",
+    ".agents/**",
+    ".claude/**",
+    ".serena/**",
+    ".remember/**",
+    ".cache/**",
+    ".dev/**",
+    ".uv-cache/**",
+    ".venv/**",
+    ".vercel/**",
+    ".next/**"
+  ],
+  // Both are run as CLIs from package.json scripts and lefthook, never imported, so
+  // knip cannot tie the binary back to the package that provides it.
+  "ignoreBinaries": ["uv", "ast-grep"],
+  "lefthook": false
+}

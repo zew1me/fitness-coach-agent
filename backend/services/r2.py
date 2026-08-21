@@ -78,6 +78,22 @@ class R2Service:
             method="POST",  # Indicate this was a direct upload
         )
 
+    async def delete_file(self, *, user_id: str, object_key: str) -> None:
+        """Delete a user-scoped object from R2."""
+        self._ensure_configured()
+        self._validate_object_key_scope(user_id=user_id, object_key=object_key)
+        client = self._get_client()
+        await run_in_threadpool(
+            client.delete_object,
+            Bucket=settings.r2_bucket,
+            Key=object_key,
+        )
+        logger.info(
+            "r2 delete complete user_id=%s key_ref=%s",
+            user_id,
+            self._object_key_log_ref(object_key),
+        )
+
     async def download_file_bytes(self, *, user_id: str, object_key: str) -> bytes:
         """Download a user-scoped object from R2."""
         self._ensure_configured()
@@ -111,17 +127,58 @@ class R2Service:
         )
 
     def _build_object_key(self, *, user_id: str, request: PresignUploadRequest) -> str:
-        purpose = self._sanitize_segment(request.purpose)
-        extension = self._extract_extension(request.filename)
+        return self.build_object_key(
+            user_id=user_id, filename=request.filename, purpose=request.purpose
+        )
+
+    def build_object_key(self, *, user_id: str, filename: str, purpose: str) -> str:
+        """Build a fresh user-scoped object key.
+
+        Shared by the presigned-upload flow and direct server-side uploads (e.g. zip
+        image members re-uploaded via ``upload_file``).
+        """
+        purpose_segment = self._sanitize_segment(purpose)
+        extension = self._extract_extension(filename)
         date_prefix = datetime.now(UTC).strftime("%Y/%m/%d")
         object_name = f"{uuid4()}{extension}"
-        return str(PurePosixPath("users", user_id, purpose, date_prefix, object_name))
+        return str(PurePosixPath("users", user_id, purpose_segment, date_prefix, object_name))
 
     def _build_public_url(self, object_key: str) -> str | None:
         base = self._configured_value(settings.r2_public_base_url)
         if base is None:
             return None
         return f"{base.rstrip('/')}/{object_key}"
+
+    def resolve_object_key(self, *, object_key: str, public_url: str | None) -> str:
+        """Return the authoritative object key for a referenced upload.
+
+        The coach passes both an ``object_key`` and a ``public_url`` back into the
+        upload-processing tool. The model reliably transcribes the distinctive
+        ``public_url`` but corrupts the long opaque ``object_key`` (splicing the
+        user-UUID head onto the file-UUID tail), which then fails the per-user
+        scope check with a 403. When we can derive the key from ``public_url``
+        deterministically, that value wins; otherwise we fall back to the
+        model-supplied ``object_key``.
+        """
+        derived = self._object_key_from_public_url(public_url)
+        return derived or object_key
+
+    def _object_key_from_public_url(self, public_url: str | None) -> str | None:
+        """Invert ``_build_public_url``: recover the object key from a public URL.
+
+        Only URLs under the configured R2 base are trusted — that distinctive
+        prefix is what makes the derivation safe. Anything else (base unset, an
+        unrelated host, a model-hallucinated URL) returns ``None`` so the caller
+        falls back to the supplied ``object_key``.
+        """
+        url = self._configured_value(public_url)
+        base = self._configured_value(settings.r2_public_base_url)
+        if url is None or base is None:
+            return None
+        prefix = f"{base.rstrip('/')}/"
+        if not url.startswith(prefix):
+            return None
+        return url[len(prefix) :].lstrip("/") or None
 
     def _object_key_log_ref(self, object_key: str) -> str:
         return sha256(object_key.encode("utf-8")).hexdigest()[:12]

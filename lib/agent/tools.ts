@@ -7,6 +7,93 @@ const recentActivitiesInputSchema = z.object({
   sport: z.string().min(1).optional(),
 });
 
+// Nested object schemas: all fields are nullable (not optional) so that the
+// generated JSON Schema includes every key in `required`. The OpenAI Responses
+// API rejects tool schemas where `required` is missing or incomplete, even for
+// objects nested inside arrays or additionalProperties.
+
+// Canonical goal types must stay aligned with GoalType and the typed payloads in
+// backend/models/training.py. The backend alone accepts legacy aliases such as `race`.
+const goalSchema = z.object({
+  course_distance_meters: z.number().positive().nullable(),
+  course_elevation_gain_meters: z.number().nonnegative().nullable(),
+  course_profile_notes: z.string().min(1).nullable(),
+  goal_type: z.enum([
+    "event",
+    "mountain",
+    "improvement",
+    "maintenance",
+    "secondary",
+  ]),
+  improvement_baseline_value: z.number().nullable(),
+  improvement_metric: z.string().min(1).nullable(),
+  improvement_target_value: z.number().nullable(),
+  sport: z.string().min(1).nullable(),
+  target_date: z.string().nullable(),
+  title: z.string().min(1),
+});
+
+const partialGoalSchema = goalSchema
+  .partial()
+  .refine(
+    (goal) => Object.keys(goal).length > 0,
+    "At least one goal field is required for update.",
+  );
+
+const updateGoalsInputSchema = z
+  .object({
+    action: z.enum(["abandon", "complete", "create", "update"]),
+    goal: partialGoalSchema.nullable().optional(),
+    goal_id: z.string().min(1).optional(),
+  })
+  .superRefine((input, context) => {
+    if (input.action === "create") {
+      const goalResult = goalSchema.safeParse(input.goal);
+      if (!goalResult.success) {
+        for (const issue of goalResult.error.issues) {
+          context.addIssue({
+            ...issue,
+            path: ["goal", ...issue.path],
+          });
+        }
+      }
+      return;
+    }
+
+    if (input.action === "update") {
+      if (!input.goal_id) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "goal_id is required for update.",
+          path: ["goal_id"],
+        });
+      }
+      if (input.goal == null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "goal is required for update.",
+          path: ["goal"],
+        });
+      }
+      return;
+    }
+
+    if (!input.goal_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "goal_id is required for complete/abandon.",
+        path: ["goal_id"],
+      });
+    }
+    if (input.goal !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "goal must be omitted for complete/abandon.",
+        path: ["goal"],
+      });
+    }
+  });
+
 const thresholdInputSchema = z.object({
   race_distance_meters: z.number().positive().nullable(),
   race_time_seconds: z.number().int().positive().nullable(),
@@ -26,11 +113,51 @@ const zonesInputSchema = z.object({
   sport: z.string().min(1),
 });
 
+const activityTextInputSchema = z.object({
+  activity_id: z.string().min(1).optional(),
+  text: z.string().min(1),
+});
+
 const uploadedFileInputSchema = z.object({
   content_type: z.string().min(1),
   filename: z.string().min(1),
   object_key: z.string().min(1),
   public_url: z.string().nullable(),
+});
+
+const recoveryEntrySchema = z.object({
+  body_battery: z.number().int().min(0).max(100).nullable(),
+  hrv_ms: z.number().positive().nullable(),
+  log_date: z.string().min(1).nullable(),
+  notes: z.string().min(1).nullable(),
+  resting_hr_bpm: z.number().int().positive().nullable(),
+  sleep_consistency_pct: z.number().min(0).max(100).nullable(),
+  sleep_duration_hours: z.number().nonnegative().nullable(),
+  sleep_score: z.number().nonnegative().nullable(),
+  stress_score: z.number().nonnegative().nullable(),
+  subjective_energy: z.number().int().min(1).max(5).nullable(),
+});
+
+const recoveryInputSchema = z.object({
+  entries: z.array(recoveryEntrySchema).min(1),
+});
+
+const weeklyPatternDaySchema = z.object({
+  available: z.boolean().nullable(),
+  max_hours: z.number().nonnegative().nullable(),
+  notes: z.string().min(1).nullable(),
+});
+
+const scheduleOverrideSchema = z.object({
+  available: z.boolean().nullable(),
+  max_hours: z.number().nonnegative().nullable(),
+  override_date: z.string().min(1).nullable(),
+  reason: z.string().min(1).nullable(),
+});
+
+const scheduleInputSchema = z.object({
+  overrides: z.array(scheduleOverrideSchema).optional(),
+  weekly_pattern: z.record(z.string(), weeklyPatternDaySchema).optional(),
 });
 
 const onboardingCollectedSchema = z.object({
@@ -76,8 +203,72 @@ const profileInputSchema = z.object({
   fields: profileFieldsSchema,
 });
 
+const trainingModelSchema = z.enum([
+  "auto",
+  "longevity",
+  "performance",
+  "recovery_return",
+]);
+
+const explicitPlanWorkoutSchema = z.object({
+  // OpenAI strict tool schemas require every nested object field to be present.
+  // Nullable targets let the coach represent a prescribed session without
+  // inventing duration, distance, or TSS values the athlete never supplied.
+  description: z.string().min(1).nullable(),
+  phase_name: z.string().min(1).nullable(),
+  sport: z.string().min(1),
+  target_distance_meters: z.number().positive().nullable(),
+  target_duration_minutes: z.number().int().positive().nullable(),
+  target_tss: z.number().nonnegative().nullable(),
+  title: z.string().min(1),
+  workout_date: z.iso.date(),
+  workout_type: z.enum([
+    "recovery",
+    "endurance",
+    "tempo",
+    "sweet_spot",
+    "threshold",
+    "vo2max",
+    "anaerobic",
+    "sprint",
+    "race",
+    "strength",
+    "mobility",
+    "rest",
+    "long_run",
+    "long_ride",
+    "brick",
+    "interval",
+    "fartlek",
+    "hill_repeats",
+  ]),
+});
+
 const planInputSchema = z.object({
   goal_id: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  training_model: trainingModelSchema.optional(),
+  workouts: z.array(explicitPlanWorkoutSchema).min(1).max(366).optional(),
+});
+
+const adjustPlanInputSchema = z.object({
+  plan_id: z.string().min(1),
+  reason: z.string().min(1),
+});
+
+const resolvePlanWorkoutInputSchema = z.object({
+  activity_id: z.string().min(1).nullish(),
+  outcome: z.enum(["completed", "skipped"]),
+  // A real plan-workout UUID, obtained from find_plan_workout or a compliance
+  // summary — never a fabricated placeholder. Enforced so the coach cannot resolve
+  // against a made-up id.
+  plan_workout_id: z.uuid(),
+});
+
+const findPlanWorkoutInputSchema = z.object({
+  // ISO date (YYYY-MM-DD) of the planned session to look up.
+  workout_date: z.iso.date(),
+  sport: z.string().min(1).nullish(),
 });
 
 type ToolDefinition<TSchema extends z.ZodTypeAny> = {
@@ -105,9 +296,47 @@ export const coachToolDefinitions = {
     "Load the active plan and upcoming workouts.",
     userInputSchema,
   ),
+  get_compliance_summary: defineTool(
+    "Summarize planned versus actual workout completion since the plan started (up to 4 weeks). Auto-matches recorded activities to planned workouts, reports compliance percentage, and lists up to 3 recent unconfirmed sessions worth asking the athlete about.",
+    userInputSchema,
+  ),
+  find_plan_workout: defineTool(
+    "Look up the planned workout(s) on a given date (optionally filtered by sport) to get the real plan_workout_id. Call this before resolve_plan_workout whenever you do not already hold a concrete id — never guess or fabricate one.",
+    findPlanWorkoutInputSchema,
+  ),
+  resolve_plan_workout: defineTool(
+    "Mark a planned workout completed or skipped after the athlete confirms what happened. Optionally link the recorded activity that fulfilled it. plan_workout_id must be a real UUID from find_plan_workout or a compliance summary.",
+    resolvePlanWorkoutInputSchema,
+  ),
+  save_activity_from_text: defineTool(
+    "Persist an activity described in natural language after deterministic scoring.",
+    activityTextInputSchema,
+  ),
   process_uploaded_file: defineTool(
-    "Process GPX, FIT, or screenshot uploads through the engine.",
+    "Process GPX, FIT, TCX, screenshot, or .zip uploads through the engine. A .zip is " +
+      "unpacked server-side: contained recordings are saved to the training log " +
+      "(those entries have status 'saved'), courses are analyzed but not saved " +
+      "(status 'analyzed'), images are analyzed, and everything " +
+      "else is discarded — do not re-save these activities yourself. A result with " +
+      "status 'no_processable_files' (or an empty processed list) means the archive held " +
+      "nothing usable — tell the athlete there was nothing for you in the zip. " +
+      "Check the 'kind' field on every result: 'activity' is a workout the athlete " +
+      "completed and it has been saved, while 'course' is a route they plan to do — " +
+      "it carries terrain and pacing analysis, nothing was written, and treating it as " +
+      "completed would credit them with a workout they have not done.",
     uploadedFileInputSchema,
+  ),
+  save_recovery_data: defineTool(
+    "Persist recovery and wellness observations.",
+    recoveryInputSchema,
+  ),
+  update_schedule: defineTool(
+    "Persist weekly availability or date overrides.",
+    scheduleInputSchema,
+  ),
+  update_goals: defineTool(
+    "Create, update, complete, or abandon athlete goals.",
+    updateGoalsInputSchema,
   ),
   update_athlete_profile: defineTool(
     "Persist extracted athlete profile fields.",
@@ -122,7 +351,15 @@ export const coachToolDefinitions = {
     thresholdInputSchema,
   ),
   generate_training_plan: defineTool(
-    "Generate and persist a training plan.",
+    "Generate and persist a training plan. When saving a dated schedule already agreed with the athlete, pass title and every exact workout so their dates, sports, and intent are preserved. Omit workouts only when a generic generated plan is intended. Optional training_model: auto, longevity, performance, or recovery_return.",
     planInputSchema,
+  ),
+  adjust_plan: defineTool(
+    "Adjust generated plan prescriptions. Bespoke exact-workout plans must instead be regenerated with their complete revised workout list.",
+    adjustPlanInputSchema,
+  ),
+  recalibrate_thresholds: defineTool(
+    "Re-estimate thresholds from recent activities, non-overwriting.",
+    userInputSchema,
   ),
 } as const;
