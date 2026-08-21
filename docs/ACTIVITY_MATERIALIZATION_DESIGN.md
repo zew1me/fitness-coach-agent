@@ -362,6 +362,25 @@ closed. A trigger fires regardless of the caller's privileges, so the `security
 definer` RPCs are bound by it too — which is the point, since they are the only
 writers.
 
+**The guard constrains what FK actions an evidence column may carry, and this is a
+constraint on future schema evolution rather than a detail of this migration.** A
+cascading `set null` or `on update cascade` is an `UPDATE`, so it fires this trigger
+and raises `22023` — aborting the parent operation entirely. No evidence column may
+therefore be given either action. `origin_activity_id` is `on delete cascade` for that
+reason: it is the only action that does not attempt to rewrite the row.
+
+**That cascade has a consequence worth stating before someone hits it.** After a
+bridge, a source can have `activity_id = A` while `origin_activity_id = B`. Deleting B
+would cascade the source away even though it is a live member of A, which would then
+silently recompose one source short. Nothing can reach that today — there is no
+`delete_activity` in the repo and this design adds none, and the only live cascade is
+the whole-account delete from `athlete_profiles`, where losing both rows is correct.
+But **any future individual-activity delete must be group-aware**: it has to reparent
+or retire the sources it would orphan, and cannot lean on this FK to do the right
+thing. Same hazard class as the `superseded_by_activity_id` self-FK discussed under
+"Changes to `activities`", and it deserves the same explicit note rather than being
+rediscovered in Phase 1.
+
 This is a second trigger in a schema that has only `set_updated_at`, and that is a
 real cost. It is accepted because the alternative enforcement — column-level
 `revoke update (…) from service_role` — is bypassed by exactly the `security definer`
