@@ -890,8 +890,17 @@ Merging changes historical daily TSS, so `daily_load_snapshots` must be rebuilt 
    reads every activity from `rebuild_from` forward and rewrites a window of
    snapshots — far too much work to hold under the activity row locks. So the failure
    boundary is owned explicitly:
-   - The merge writes `load_rebuild_pending_from` **inside** its transaction.
-     Recompute clears it.
+   - The merge writes `load_rebuild_pending_from` **inside** its transaction, taking
+     the **earliest** of the stored value and its own `rebuild_from` so a pending
+     window is only ever widened.
+   - Recompute clears it with **compare-and-swap**: `update … set
+load_rebuild_pending_from = null where id = … and load_rebuild_pending_from =
+<the value this run captured>`. An unconditional clear loses work — recompute
+     reads a marker, rebuilds for several seconds, and a merge committing in that
+     window writes an earlier marker that the clear then erases, leaving an inflated
+     snapshot with nothing recorded to say so. Because the marker only ever moves
+     earlier, a failed CAS means strictly more work is outstanding than this run did,
+     so the correct response is to leave it pending; the next run picks it up.
    - Recompute is idempotent — it derives snapshots from the activity rows, so
      re-running converges.
    - Any later merge or recompute for that athlete starts from the **earliest**
