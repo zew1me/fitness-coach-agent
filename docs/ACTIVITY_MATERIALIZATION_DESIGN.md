@@ -418,7 +418,7 @@ and retired_at is null` — extended with a `provider`-scoped `external_id` matc
    provider that issued it, which is exactly why it carries a scope that a byte hash
    does not.
 2. If found → return **409** naming that `activity_id`.
-3. Otherwise insert. The partial unique indexes remain the **race backstop**: on a
+3. Otherwise insert. The partial unique index remains the **race backstop**: on a
    concurrent double-submit the insert raises `23505`, which is caught locally
    (documented at the catch site, per AGENTS.md) and the same select is re-run to
    recover the id.
