@@ -972,6 +972,78 @@ _away_ from its origin and the origin is immutable, membership restoration is ex
 rather than reconstructed; the event distinguishes a bridge-created override from a
 later ordinary athlete edit.
 
+### Append-only merge events make that reversal auditable
+
+`origin_activity_id` records where a source began; it does **not** record which bridge
+moved it, which other sources moved in that transaction, or what happened to plan
+links and conflicting overrides. Phase 5 therefore adds an audit row in the bridge
+transaction itself:
+
+```sql
+create table public.activity_merge_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null references public.athlete_profiles(user_id) on delete cascade,
+  event_type text not null check (event_type in ('bridge','unbridge')),
+  reverses_event_id uuid,
+  survivor_activity_id uuid not null,
+  superseded_activity_id uuid not null,
+  proposal_id uuid, -- FK to the Tier-B proposal table defined below
+  tier text not null check (tier = 'B'),
+  source_transitions jsonb not null,
+  plan_link_transitions jsonb not null,
+  activity_transitions jsonb not null,
+  created_at timestamptz not null default timezone('utc', now()),
+  unique (id, user_id),
+  foreign key (survivor_activity_id, user_id)
+    references public.activities(id, user_id),
+  foreign key (superseded_activity_id, user_id)
+    references public.activities(id, user_id),
+  foreign key (reverses_event_id, user_id)
+    references public.activity_merge_events(id, user_id),
+  check (
+    (event_type = 'bridge' and reverses_event_id is null)
+    or (event_type = 'unbridge' and reverses_event_id is not null)
+  )
+);
+
+create unique index activity_merge_events_one_reversal_idx
+  on public.activity_merge_events (reverses_event_id)
+  where event_type = 'unbridge';
+```
+
+The three transition arrays have versioned, closed schemas; unknown keys or a missing
+member raise `22023` before insertion:
+
+- `source_transitions`: every source changed by the operation, with `source_id`,
+  `before_activity_id`, `after_activity_id`, `before_retired_at`, `after_retired_at`,
+  and pre/post `updated_at`. It includes both retired original overrides and any
+  replacement override created by the bridge.
+- `plan_link_transitions`: every affected `plan_workout_id` with its before/after
+  `actual_activity_id` and the matching activities' before/after
+  `planned_workout_id`. Empty is recorded as `[]`, not omitted.
+- `activity_transitions`: both activity ids with before/after `presentation_state`,
+  `superseded_by_activity_id`, and `updated_at`.
+
+The bridge RPC takes no client-authored history payload. It captures the before-state
+from the rows it has locked, performs the bridge, captures the after-state, validates
+both sides of every transition, and inserts the event before commit. Failure to insert
+rolls back the bridge. The event's `proposal_id` is also read from the locked consent
+record, never from the model-visible tool arguments.
+
+An un-bridge names the bridge event, not just two activity ids. It locks that event and
+the recorded rows, requires that it has no reversal and that current state equals the
+recorded after-state; later edits or another bridge produce `40001` for re-read and
+athlete review rather than a destructive guess. It then applies the exact inverse,
+recomposes, and inserts an `unbridge` event whose transitions describe the reversal.
+The original event is never updated. This deliberately supports reversal only while
+the recorded post-state is still current; reconstructing through arbitrary later
+merges is out of scope.
+
+`activity_merge_events` is retained until account deletion. Application roles receive
+`SELECT` only; `INSERT`/`UPDATE`/`DELETE` are revoked, and only the bridge/un-bridge
+definer RPCs insert. Account deletion remains the sole cascade. The unique reversal index makes two
+concurrent un-bridges race to one success instead of applying the inverse twice.
+
 ---
 
 ## Training load rebuild
@@ -1148,7 +1220,8 @@ stops reporting the phantom unplanned session.
 
 **Phase 5 — Tier B + bridging.** The server-side consent protocol in full (ported
 item 1: proposal record, server-issued normalized `expected_phrase`,
-orchestration-injected message id, group-scoped consumption), coach tools
+orchestration-injected message id, group-scoped consumption), append-only merge-event
+schema and transactional bridge/un-bridge audit, coach tools
 (`find_duplicate_activities`, `merge_activities`, `unmerge_activity`) in
 `lib/agent/tools.ts` routed via `postEngine` in `lib/agent/coach-tools.ts`, system
 prompt guidance, bridging rules. _Verifiable:_ the coach can surface the backlog and
@@ -1263,11 +1336,10 @@ re-derived, and each is a gap in this document as it stands.
    SQL** — not a `limit`-capped display query with the new row filtered out in Python.
    A duplicate lying beyond an arbitrary cap is exactly the one a backlog pass exists
    to find.
-5. **Merge history survives an un-merge.** Retiring a source removes it from the live
-   set the reconciler reads, which this design gets nearly free — but the record of the
-   merge having happened must be retained append-only, not dropped. It is the evidence
-   needed when an athlete asks why their numbers moved twice, or when a bad Tier-A
-   rule has to be reconstructed after the fact.
+5. **Merge history survives an un-merge.** Implemented in the append-only event
+   contract above: both bridge and reversal remain queryable until account deletion,
+   including the exact source, activity, override, and plan-link transitions. It is the
+   evidence needed when an athlete asks why their numbers moved twice.
 
 ---
 
@@ -1275,7 +1347,7 @@ re-derived, and each is a gap in this document as it stands.
 
 | Area      | Files                                                                                                                                                                                                                                                                                                                 |
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Migration | `supabase/migrations/<ts>_activity_sources.sql`, `supabase/migrations/<ts>_recompose_activity_rpc.sql`, `docs/supabase-migration-history.md`                                                                                                                                                                          |
+| Migration | `supabase/migrations/<ts>_activity_sources.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_events.sql`, `docs/supabase-migration-history.md`                                                                                                                                                            |
 | Model     | `backend/models/training.py` (`Activity` gains the new columns; new `ActivitySource`)                                                                                                                                                                                                                                 |
 | Repo      | `backend/repos/supabase_repo.py` — `presentation_state` predicate on `list_activities`/`list_activities_between`; move `list_synced_intervals_keys` to source identities; new `create_activity_with_source`, `list_activity_sources`, `list_dedup_candidates`, `recompose_activity`, `get_load_snapshot_on_or_before` |
 | Services  | `backend/services/activity_dedup.py` (new — pure scorer + reconciler); `backend/services/activity_text.py` (Phase 3)                                                                                                                                                                                                  |
@@ -1313,7 +1385,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject cross-user source and supersession relationships; `fidelity_rank` is generated, consistent, and non-null; backfill maps all seven allowed legacy sources exactly, aborts before writes for `file_upload`/any unmapped source or malformed Intervals identity, and gives sparse rows a NULL fingerprint; a second live `athlete_override` raises `23505`; the pending-rebuild CAS clears only an unchanged marker                                                                                                                                             |
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability: membership/lifecycle updates succeed while evidence changes raise `22023`, including from a definer RPC. Projection ownership: application roles cannot update `activities` directly; every RPC changes only its enumerated columns; identity fields remain immutable even through a definer RPC. Retiring/restoring the winning provenance source deterministically changes/restores the entire legacy triplet, and no non-override source raises `22023`                                                                                          |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
-| `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, version mismatch, lock ordering, idempotent retry, and both plan-linked bridge refusal; both identity indexes and unknown-provider behavior; a bridge reparents B's sources and projects B-only fields; two live overrides without a proposal-bound resolution raise `22023` before any write, while a confirmed keep/combine/null resolution creates one live override and un-bridge restores both originals                                                                                                             |
+| `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/lock/retry checks, identity indexes, bridge reparenting and override resolution. Bridge inserts a complete event atomically; a forced event-insert failure rolls every transition back. Un-bridge rejects stale post-state, writes an inverse event without modifying history, restores sources/links/overrides exactly, and the partial unique index permits only one concurrent reversal. Application roles cannot update/delete events                                                                                                      |
 | `tests/python/test_api.py`                                                              | Exact duplicate by content hash or known-provider external id returns 409 naming the existing activity; concurrent external-id insertion recovers after `23505`; conflicting authoritative ids name both activities without storing; unknown-provider external ids do not reject; **a `payload_fingerprint` collision between distinct sessions stores both and returns no 409**; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                                                                  |
 | `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                                                                          |
