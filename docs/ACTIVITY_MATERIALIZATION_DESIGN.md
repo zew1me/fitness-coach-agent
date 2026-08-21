@@ -1304,6 +1304,25 @@ Then populate:
   re-uploaded after cutover is not rejected as an exact duplicate; it is stored and
   reaches the athlete through the tiered merge instead.
 
+**Batches are restart-safe, not merely small.** A temporary
+`activity_sources_backfill_progress` row stores the last committed `(created_at, id)`
+keyset position. Each batch transaction inserts bootstrap sources with deterministic
+`activity_sources.id = activities.id`, validates any existing id against the complete
+expected bootstrap row, and advances the checkpoint only after those inserts commit.
+A crash rolls back both inserts and checkpoint; a retry resumes at the prior key.
+When `ON CONFLICT (id) DO NOTHING` returns no inserted row, the transaction locks and
+compares the existing row's `user_id`, activity ids, format/provider, fields, and NULL
+hashes before advancing the checkpoint — a mismatch aborts rather than being mistaken
+for completed work. The temporary legacy
+insert trigger covers concurrent rows beyond the checkpoint.
+
+After the keyset reaches the end, run the full anti-join and the exactly-one-source
+invariant without a limit. Any hole resets the checkpoint to the earliest missing row
+and reruns; only a clean second pass marks completion. The contract migration may drop
+the progress table and legacy trigger only after that completed marker and the direct-
+INSERT revoke are both present. This makes a killed batch, a repeated migration
+command, and an application deploy during backfill converge to the same source set.
+
 **The backfill cannot collide, and this is a direct consequence of the fingerprint
 rule plus the existing Intervals constraint.** `payload_fingerprint` carries no unique
 index, so historical rows backfill without conflict whether duplicates happen to
@@ -1320,8 +1339,8 @@ have had to either fail on the very duplicates that motivated this work or inven
 separate legacy namespace for them; that dilemma is designed out rather than
 resolved.
 
-Run in batches; preview and production are separate Supabase projects and must each be
-linked and applied independently.
+Run the resumable batches independently in preview and production; the projects have
+separate progress rows and must each be linked, verified, and contracted.
 
 **Historic duplicates are not retro-merged by the migration.** They are surfaced by
 the opt-in backlog pass (Phase 5) and confirmed by the athlete. Silently restating
@@ -1350,11 +1369,11 @@ insert trigger, shadow `create_activity_with_source` RPC on every ingestion path
 resumable backfill, invariant validation, then revoke direct inserts and remove the
 trigger in that order. Add `Activity` model fields and repo methods. The shadow source
 uses NULL identity hashes, so presentation behaviour does not change. _Verifiable:_
-`bun run db:reset` replays clean; writes during every cutover step get exactly one
-source; an interrupted deployment leaves the trigger active; preflight rejects
-unmapped source or malformed/duplicate Intervals identity; **every activity has
-exactly one non-retired source whose mapping and fields round-trip**; sparse historical
-rows have a NULL fingerprint.
+`bun run db:reset` replays clean; writes during every cutover step get exactly one source; killing a batch before and
+after its checkpoint update converges without duplicate/missing rows; an interrupted
+deployment leaves the trigger active; preflight rejects unmapped source or malformed
+Intervals identity; **every activity has exactly one non-retired source whose mapping
+and fields round-trip**; sparse historical rows have a NULL fingerprint.
 
 **Phase 2 — identity-aware write path.** Upgrade the Phase-1 RPC to hash and
 fingerprint every new input. Select-then-insert exact-duplicate
@@ -1548,7 +1567,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules **asserted at Tier A as well as Tier B** — specifically that a `0`-vs-positive distance blocks auto-merge for a pair agreeing on sport, start, and duration, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived) |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs and generated rank invariants; exact seven-source backfill mapping/preflight and sparse fingerprints. A direct insert during the expand→app gap gets one bootstrap source; the shadow RPC suppresses the trigger and still gets exactly one; dropping the trigger is refused until the anti-join is empty and direct INSERT is revoked. Override uniqueness and pending-marker CAS remain covered                                                                                                                                                                   |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | FK/rank and seven-source mapping/preflight. Gap inserts and shadow RPC each get one source. Backfill failure before/after checkpoint, repeat execution, an existing matching row, and a conflicting deterministic id all prove restart behavior; an anti-join hole blocks completion. Trigger removal requires clean second pass plus direct-INSERT revoke. Override uniqueness and marker CAS remain covered                                                                                                                                                                     |
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields remain immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. Recompose and bridge/un-bridge can only widen `load_rebuild_pending_from` to the earliest pre/post date; they cannot clear or move it later. Recompute clears only by compare-and-swap, and a concurrent earlier invalidation survives. No non-override source raises `22023`                                                                                                     |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
 | `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's ids/events; application roles cannot mutate events; definer RPC behavior remains owner-checked                                                                                                              |
