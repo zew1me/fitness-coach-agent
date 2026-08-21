@@ -891,7 +891,7 @@ must stop being presented — and `plan_workouts.actual_activity_id` is
 `on delete set null`, so deleting the loser would **silently unlink a completed
 workout from the athlete's plan**.
 
-Three rules:
+Five rules:
 
 **1. Auto-bridging is forbidden.** Tier A may attach a new source to an existing
 activity, but it may **never** combine two activities that each already exist. Two
@@ -918,7 +918,29 @@ valid, reads drop it via the single predicate, the row remains fetchable by
   sides disagree (`20260806003910_…:51-58`), so a one-sided link must never be
   propagated.
 
-**4. The superseded activity's sources are reparented to the survivor, in the same
+**4. Two live athlete overrides require an explicit resolution.** The one-live-
+override index means blindly reparenting B when A and B both carry a live
+`athlete_override` would raise `23505`. More importantly, any automatic winner would
+silently discard athlete-authored RPE or notes. The bridge therefore checks this
+precondition after locking both activities and their live sources but **before any
+write**:
+
+- At most one live override across the pair → proceed; it reparents normally.
+- Two live overrides and no proposal-bound resolution → raise `22023` with both
+  activity ids and change nothing.
+- Two live overrides plus an explicit resolution captured in the athlete-confirmed
+  Tier-B proposal → retire both originals, reparent the non-override sources, and
+  insert one replacement override on the survivor carrying the athlete's chosen
+  fields. The RPC reads those fields from the locked proposal; the model cannot pass
+  or alter them in the merge tool call.
+
+The proposal must present both override payloads side-by-side and allow the athlete to
+keep either, combine them, or set explicit nulls. The merge event records both retired
+source ids and the replacement id, so un-bridge retires the replacement and restores
+the two original live overrides to their origin activities. That is the recovery path;
+"pick the newer override" and retry-after-`23505` are explicitly forbidden.
+
+**5. The superseded activity's sources are reparented to the survivor, in the same
 transaction.** This is the rule that makes bridging actually merge anything, and
 omitting it is a silent-data-loss bug rather than a gap: `recompose_activity(A)`
 derives from _A's_ live source set, so if B's sources kept `activity_id = B` they
@@ -927,8 +949,9 @@ the calendar and A keep exactly the numbers it already had — B's richer metric
 dropped on the floor, with `source_count` understating the group. Marking B superseded
 without moving its sources hides a workout instead of merging it.
 
-So the bridge transaction sets `activity_id = A` on every non-retired source of B,
-then recomposes A from the combined set. Reparenting rather than traversing
+Subject to the override-resolution rule, the bridge transaction sets
+`activity_id = A` on every non-retired source of B, then recomposes A from the
+combined set. Reparenting rather than traversing
 `superseded_by_activity_id` at read time is deliberate: recompose is defined as a pure
 function of the rows where `activity_id = <target> and retired_at is null`, and that
 definition holds only if membership is a stored fact. A recompose that had to chase a
@@ -942,11 +965,12 @@ extracted `fields`, the hashes, and `raw_extraction` are untouched by a bridge. 
 the evidence/state boundary section for the full split.
 
 **Reversal restores membership from `origin_activity_id`.** Un-bridging clears B's
-`presentation_state`/`superseded_by_activity_id`, returns each reparented source to
-its origin activity, and recomposes both rows. Because reparenting only ever moves a
-source _away_ from its origin and the origin is immutable, this is exact rather than
-reconstructed — the same reasoning that makes un-merge re-derive rather than replay a
-snapshot.
+`presentation_state`/`superseded_by_activity_id`, returns the sources recorded by that
+bridge event to their origin activities, applies the recorded override reversal when
+one exists, and recomposes both rows. Because ordinary reparenting only moves a source
+_away_ from its origin and the origin is immutable, membership restoration is exact
+rather than reconstructed; the event distinguishes a bridge-created override from a
+later ordinary athlete edit.
 
 ---
 
@@ -1128,7 +1152,9 @@ orchestration-injected message id, group-scoped consumption), coach tools
 (`find_duplicate_activities`, `merge_activities`, `unmerge_activity`) in
 `lib/agent/tools.ts` routed via `postEngine` in `lib/agent/coach-tools.ts`, system
 prompt guidance, bridging rules. _Verifiable:_ the coach can surface the backlog and
-merge only after explicit athlete confirmation; a both-sides-linked bridge is refused.
+merge only after explicit athlete confirmation; a both-sides-linked bridge is refused;
+a bridge with two live overrides makes no writes without a proposal-bound resolution,
+and a confirmed resolution survives merge and reverses exactly on un-bridge.
 
 **Phase 6 — UI.** "Merged from N sources" affordance in
 `components/coach-calendar.tsx`. Must survive the narrow-viewport dot mode
@@ -1287,7 +1313,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject cross-user source and supersession relationships; `fidelity_rank` is generated, consistent, and non-null; backfill maps all seven allowed legacy sources exactly, aborts before writes for `file_upload`/any unmapped source or malformed Intervals identity, and gives sparse rows a NULL fingerprint; a second live `athlete_override` raises `23505`; the pending-rebuild CAS clears only an unchanged marker                                                                                                                                             |
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability: membership/lifecycle updates succeed while evidence changes raise `22023`, including from a definer RPC. Projection ownership: application roles cannot update `activities` directly; every RPC changes only its enumerated columns; identity fields remain immutable even through a definer RPC. Retiring/restoring the winning provenance source deterministically changes/restores the entire legacy triplet, and no non-override source raises `22023`                                                                                          |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
-| `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`; both identity indexes reject a concurrent duplicate, `provider = 'unknown'` never collides on `external_id`, and distinct ZIP members remain valid; a bridge **reparents the superseded activity's sources to the survivor**, asserting the survivor's post-bridge `source_count` and that a field only B carried reaches A                                                                       |
+| `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, version mismatch, lock ordering, idempotent retry, and both plan-linked bridge refusal; both identity indexes and unknown-provider behavior; a bridge reparents B's sources and projects B-only fields; two live overrides without a proposal-bound resolution raise `22023` before any write, while a confirmed keep/combine/null resolution creates one live override and un-bridge restores both originals                                                                                                             |
 | `tests/python/test_api.py`                                                              | Exact duplicate by content hash or known-provider external id returns 409 naming the existing activity; concurrent external-id insertion recovers after `23505`; conflicting authoritative ids name both activities without storing; unknown-provider external ids do not reject; **a `payload_fingerprint` collision between distinct sessions stores both and returns no 409**; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                                                                  |
 | `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                                                                          |
