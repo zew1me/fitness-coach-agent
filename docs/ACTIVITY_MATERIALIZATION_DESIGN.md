@@ -1144,6 +1144,11 @@ create table public.activity_merge_events (
 create unique index activity_merge_events_one_reversal_idx
   on public.activity_merge_events (reverses_event_id)
   where event_type = 'unbridge';
+
+alter table public.activity_merge_events enable row level security;
+create policy activity_merge_events_owner_select
+  on public.activity_merge_events for select
+  using ((select auth.uid())::text = user_id);
 ```
 
 The three transition arrays have versioned, closed schemas; unknown keys or a missing
@@ -1177,9 +1182,11 @@ any state change. The original event is never updated. This deliberately support
 the recorded post-state is still current; reconstructing through arbitrary later
 merges is out of scope.
 
-`activity_merge_events` is retained until account deletion. Application roles receive
-`SELECT` only; `INSERT`/`UPDATE`/`DELETE` are revoked, and only the bridge/un-bridge
-definer RPCs insert. Account deletion remains the sole cascade. The unique reversal index makes two
+`activity_merge_events` is retained until account deletion. `authenticated` receives
+`SELECT` only through the owner policy; `anon` receives nothing, and
+`INSERT`/`UPDATE`/`DELETE` are revoked from application roles. Only the
+bridge/un-bridge definer RPCs insert after independently checking `p_user_id`. Account
+deletion remains the sole cascade. The unique reversal index makes two
 concurrent un-bridges race to one success instead of applying the inverse twice.
 
 ---
@@ -1517,7 +1524,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject cross-user source and supersession relationships; `fidelity_rank` is generated, consistent, and non-null; backfill maps all seven allowed legacy sources exactly, aborts before writes for `file_upload`/any unmapped source or malformed Intervals identity, and gives sparse rows a NULL fingerprint; a second live `athlete_override` raises `23505`; the pending-rebuild CAS clears only an unchanged marker                                                                                                                                             |
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields remain immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. Recompose and bridge/un-bridge can only widen `load_rebuild_pending_from` to the earliest pre/post date; they cannot clear or move it later. Recompute clears only by compare-and-swap, and a concurrent earlier invalidation survives. No non-override source raises `22023`                                                                                                     |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
-| `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/retry checks and concurrent group bridges prove sorted plan-workout → activity → source locking; override preconditions run only after those locks. Identity indexes and bridge events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes; it restores all transitions and permits one concurrent reversal. Application roles cannot mutate events                                                                                                                                      |
+| `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's ids/events; application roles cannot mutate events; definer RPC behavior remains owner-checked                                                                                                              |
 | `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases above. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant, and non-matching confirmations without a write; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges every stored member atomically, consumes once, and a response-loss retry recovers by proposal-linked events rather than reusing consent                                                                                                    |
 | `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                                                                          |
