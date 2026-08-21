@@ -400,7 +400,7 @@ def _recovery_log_row(**overrides: object) -> dict[str, object]:
         "stress_score": 22,
         "subjective_energy": 4,
         "notes": "seeded from watch",
-        "source": "garmin",
+        "source": "garmin_api",
     }
     row.update(overrides)
     return row
@@ -635,7 +635,7 @@ async def test_upsert_recovery_log_preserves_seeded_source_and_metrics() -> None
         RecoveryLog(user_id="athlete-1", log_date=date(2026, 7, 3), notes="sleep got worse")
     )
 
-    assert updated.source == "garmin"
+    assert updated.source == "garmin_api"
     assert updated.hrv_ms == 47.0
     assert updated.sleep_duration_hours == 7.5
     assert updated.notes == "sleep got worse"
@@ -650,13 +650,13 @@ async def test_upsert_recovery_log_persists_an_explicit_source_update() -> None:
         RecoveryLog(
             user_id="athlete-1",
             log_date=date(2026, 7, 3),
-            source="whoop_sync",
-            notes="imported from whoop",
+            source="apple_health",
+            notes="imported from Apple Health",
         )
     )
 
-    assert updated.source == "whoop_sync"
-    assert updated.notes == "imported from whoop"
+    assert updated.source == "apple_health"
+    assert updated.notes == "imported from Apple Health"
 
 
 @pytest.mark.asyncio
