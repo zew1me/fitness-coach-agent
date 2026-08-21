@@ -1241,6 +1241,32 @@ rows.
 `activities` columns, create the RPCs. Existing readers keep working untouched because
 `presentation_state` defaults to `'active'`.
 
+**The cutover closes the live-write gap before backfill.** Creating the table and then
+batching old rows while the old application still inserts `activities` would make the
+one-source invariant false as soon as the next upload lands. Phase 1 therefore has an
+ordered expand/dual-write/contract cutover:
+
+1. The expand migration creates `activity_sources` and a temporary `AFTER INSERT`
+   trigger for legacy direct activity inserts. It writes a bootstrap-grade source
+   using the total mapping below, `id = activity_id`, `origin_activity_id =
+activity_id`, NULL hashes, and the inserted projection fields. The trigger exists
+   only to cover the migration-to-application deployment window.
+2. Deploy every ingestion path through a shadow `create_activity_with_source` RPC.
+   That RPC sets a transaction-local marker so the temporary trigger does not also
+   create a source, then inserts the activity and the same bootstrap-grade source
+   atomically. The marker is cutover coordination, not an authorization boundary.
+3. Run the resumable backfill for rows predating the trigger/RPC, then require the
+   anti-join `activities left join activity_sources … where source.id is null` to be
+   empty in the same release gate.
+4. After deployment telemetry shows no legacy direct inserts, revoke direct
+   `activities` INSERT from application roles and drop the temporary trigger. All
+   later creation goes through the RPC. Phase 2 upgrades that RPC to compute hashes
+   and enable exact-identity rejection; the brief Phase-1 window deliberately has
+   backfill-grade NULL hashes rather than risking a missing source.
+
+A failure at any step leaves either the legacy trigger or the RPC maintaining the
+invariant; never drop the trigger merely because a deployment was requested.
+
 **Backfill.** One `activity_sources` row per existing `activities` row. The source map
 is total over the current `activities_source_check` allow-list and is the only mapping
 the backfill may use:
@@ -1319,18 +1345,19 @@ _Verifiable:_ a backward window rebuild produces correct CTL; a `.fit` file with
 suffix saves instead of 503-ing; a rebuild window holding more than 500 activities
 still includes the oldest of them in the rebuilt snapshots.
 
-**Phase 1 — schema.** Migration + backfill + `Activity` model fields + repo methods.
-No behaviour change. _Verifiable:_ `bun run db:reset` replays clean; the preflight
-fails before inserting anything for an unmapped source (including `file_upload`) or a
-malformed/duplicate Intervals identity; **every `activities` row has exactly one
-non-retired source whose provider/format pair follows the mapping above and whose
-`fields` round-trip to the values the row already holds**; sparse historical rows fail
-the same fingerprint information gate as new ingests and therefore backfill with a
-NULL fingerprint — those invariants, not "existing tests still pass", catch a bad
-backfill.
+**Phase 1 — schema and gap-free shadow write.** Expand migration, temporary legacy-
+insert trigger, shadow `create_activity_with_source` RPC on every ingestion path,
+resumable backfill, invariant validation, then revoke direct inserts and remove the
+trigger in that order. Add `Activity` model fields and repo methods. The shadow source
+uses NULL identity hashes, so presentation behaviour does not change. _Verifiable:_
+`bun run db:reset` replays clean; writes during every cutover step get exactly one
+source; an interrupted deployment leaves the trigger active; preflight rejects
+unmapped source or malformed/duplicate Intervals identity; **every activity has
+exactly one non-retired source whose mapping and fields round-trip**; sparse historical
+rows have a NULL fingerprint.
 
-**Phase 2 — write path.** Every ingestion path writes `activity_sources` alongside
-`activities`. Hashing and fingerprinting wired in. Select-then-insert exact-duplicate
+**Phase 2 — identity-aware write path.** Upgrade the Phase-1 RPC to hash and
+fingerprint every new input. Select-then-insert exact-duplicate
 409 on authoritative identifiers only. Still no merging. _Verifiable:_ re-uploading a
 file returns 409 naming the existing activity; a repeated known-provider external id
 is race-safe and returns the same result; the same id under `provider = 'unknown'`
@@ -1521,7 +1548,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules **asserted at Tier A as well as Tier B** — specifically that a `0`-vs-positive distance blocks auto-merge for a pair agreeing on sport, start, and duration, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived) |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject cross-user source and supersession relationships; `fidelity_rank` is generated, consistent, and non-null; backfill maps all seven allowed legacy sources exactly, aborts before writes for `file_upload`/any unmapped source or malformed Intervals identity, and gives sparse rows a NULL fingerprint; a second live `athlete_override` raises `23505`; the pending-rebuild CAS clears only an unchanged marker                                                                                                                                             |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs and generated rank invariants; exact seven-source backfill mapping/preflight and sparse fingerprints. A direct insert during the expand→app gap gets one bootstrap source; the shadow RPC suppresses the trigger and still gets exactly one; dropping the trigger is refused until the anti-join is empty and direct INSERT is revoked. Override uniqueness and pending-marker CAS remain covered                                                                                                                                                                   |
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields remain immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. Recompose and bridge/un-bridge can only widen `load_rebuild_pending_from` to the earliest pre/post date; they cannot clear or move it later. Recompute clears only by compare-and-swap, and a concurrent earlier invalidation survives. No non-override source raises `22023`                                                                                                     |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                                                                                                                     |
 | `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's ids/events; application roles cannot mutate events; definer RPC behavior remains owner-checked                                                                                                              |
