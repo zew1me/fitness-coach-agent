@@ -188,7 +188,7 @@ create table public.activity_sources (
     when 'text' then 5
     when 'screenshot' then 6
     when 'manual' then 7
-  end) stored,
+  end) stored not null,
   recorded_at timestamptz,
   retired_at timestamptz,
   created_at timestamptz not null default timezone('utc', now()),
@@ -242,11 +242,12 @@ reconciler sorts by rank, so the manual entry's numbers overwrite the FIT's on a
 merged activity, and the athlete sees a ride with wrong power and no obvious cause.
 One writer inserting a stale constant is enough to cause it.
 
-Making the column `generated always as (…) stored` removes the possibility rather than
-policing it — the rank is a pure function of `ingest_format`, and now Postgres computes
-it. The mapping is total over the eight permitted formats, so there is no `else`
-branch to go stale, and adding a ninth format fails loudly at migration time with a
-`null` rank rather than quietly sorting it first.
+Making the column `generated always as (…) stored not null` removes the possibility
+rather than policing it — the rank is a pure function of `ingest_format`, and now
+Postgres computes it. The mapping is total over the eight permitted formats. There is
+no `else` branch to mask an omission, and the `not null` constraint makes an allow-list
+change without a matching `case` arm fail on insert instead of quietly sorting the new
+format first. Every format change must update both lists in the same migration.
 
 It composes with the evidence guard below: a generated column can only change when
 `ingest_format` changes, and `ingest_format` is immutable evidence, so `fidelity_rank`
@@ -1194,7 +1195,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null degradation, the `(0,0)` = _no comparable metric_ and `(0,n)` = mismatch rules **asserted at Tier A as well as Tier B** — specifically that a `0`-vs-positive distance blocks auto-merge for a pair agreeing on sport, start, and duration, all three hard negatives, sport-conflict rejection, `"general"` treated as undeclared. Reconciler: fidelity ordering, deterministic tie-break, athlete columns untouched with no override source, `tss` recomputed not copied, order-independence (same result whatever order sources arrived) |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject a source whose `user_id` differs from its activity's owner, and reject a cross-user `superseded_by_activity_id`; `fidelity_rank` is generated and cannot be supplied inconsistently with `ingest_format`; a second live `athlete_override` for one activity raises `23505`; the pending-rebuild CAS clears only a marker unchanged since capture                                                                                                                                                                                                             |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject a source whose `user_id` differs from its activity's owner, and reject a cross-user `superseded_by_activity_id`; `fidelity_rank` is generated, cannot be supplied inconsistently with `ingest_format`, and cannot become NULL when the format allow-list and rank map diverge; a second live `athlete_override` for one activity raises `23505`; the pending-rebuild CAS clears only a marker unchanged since capture                                                                                                                                        |
 | `tests/python/test_supabase_db.py` (evidence guard)                                     | The immutability trigger: updating `activity_id` or `retired_at` succeeds; updating `fields`, `content_hash`, `provider`, `fidelity_rank`, or `raw_extraction` raises `22023` — including from a `security definer` RPC, which is the caller the guard exists to bind. An athlete edit inserts a new `athlete_override` source and retires the prior one, leaving exactly one live override                                                                                                                                                                                       |
 | `tests/python/test_supabase_repo.py`                                                    | Extend `FakeSupabaseClient`/`FakeTableQuery` for `activity_sources` and add an `rpc()` handler for `recompose_activity` (an unknown RPC raises `AssertionError`). Assert `client.calls` exactly. Verify `response.data` is handled as a **dict** for the composite-row return. Confirm the `presentation_state` predicate applies to the two list methods and **not** to `get_activity` / `list_synced_intervals_keys`                                                                                                                                                            |
 | `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`, that the `content_hash` partial unique index fires on re-insert but not for distinct ZIP members, and that a bridge **reparents the superseded activity's sources to the survivor** — asserting the survivor's post-bridge `source_count` and that a field only B carried reaches A, which is the assertion a stranded-source bug fails                                                           |
