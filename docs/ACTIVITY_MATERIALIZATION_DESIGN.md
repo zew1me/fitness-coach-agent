@@ -657,11 +657,11 @@ side-effect-free**, mirroring `match_activities_to_workouts`
 (`backend/services/compliance.py:85`). It takes candidate sources/activities and
 returns proposed groups; it persists nothing and is testable without a database.
 
-| Tier  | Condition                                                                                                                                                                                                          | Action                  |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
-| **A** | Casefolded sport equal (or one side `general`); both `started_at` present and within **±10 min**; both `duration_seconds` present and within **±5%**; when both distances are present and non-zero, within **±5%** | Auto-merge at ingestion |
-| **B** | Same sport (or `general`); `activity_date` within **±1 day**; duration **or** distance within **±10%** over whichever both carry                                                                                   | Propose to the athlete  |
-| —     | anything else                                                                                                                                                                                                      | Not a group             |
+| Tier  | Condition                                                                                                                                                                                                                                                                                                                                                                     | Action                  |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| **A** | Casefolded sport equal (or one side `general`); both `started_at` present and within **±10 min**; both `duration_seconds` present, positive, and within **±5%**; and **no metric disagreement** — for distance, either both are positive and within **±5%**, or both are zero, or at least one is null. A positive value against a zero is a mismatch and disqualifies Tier A | Auto-merge at ingestion |
+| **B** | Same sport (or `general`); `activity_date` within **±1 day**; duration **or** distance within **±10%** over whichever both carry                                                                                                                                                                                                                                              | Propose to the athlete  |
+| —     | anything else                                                                                                                                                                                                                                                                                                                                                                 | Not a group             |
 
 ±1 day matches `MATCH_MAX_DAY_OFFSET = 1` (`compliance.py:24`); casefolded sport
 equality matches `_pair_score` (`compliance.py:53`).
@@ -672,10 +672,27 @@ skipped rather than scored as a mismatch — but Tier B still requires at least 
 actual metric agreement, since same-sport-same-day alone describes two genuinely
 different workouts just as well as it describes a duplicate.
 
-**Zero is a value, not a null.** The comparator is `|a − b| ≤ tol × max(a, b)`, so no
-percentage comparison ever divides. When `max(a, b) = 0` the field has **no
-comparable metric** — it drops out exactly as a null does, and the pair must find
-agreement elsewhere. Zero against non-zero is an ordinary mismatch. This matters
+**Zero is a value, not a null, and the same three-way rule applies at both tiers.**
+The comparator is `|a − b| ≤ tol × max(a, b)`, so no percentage comparison ever
+divides. Every metric resolves to exactly one of three outcomes, and the earlier Tier A
+phrasing — "when both distances are present and non-zero" — was wrong because it
+collapsed the third into the second:
+
+| Pair              | Outcome                  | Effect                                                                          |
+| ----------------- | ------------------------ | ------------------------------------------------------------------------------- |
+| both positive     | compared against `tol`   | agreement or mismatch                                                           |
+| both zero         | **no comparable metric** | drops out exactly as a null does; the pair must find agreement elsewhere        |
+| one zero, one not | **mismatch**             | disqualifies Tier A outright; in Tier B it counts against the pair, not skipped |
+
+The reading being corrected mattered: "present and non-zero" made a `0`-vs-`5000 m`
+pair _skip_ the distance check, so two sessions agreeing on sport, start time, and
+duration would **auto-merge** despite one recording five kilometres and the other
+none. That is the pairing a trainer ride and an outdoor ride of the same duration
+produce, and auto-merge is the one tier with no athlete confirmation to catch it.
+
+`duration_seconds` is held to the same rule and additionally must be positive on both
+sides for Tier A: a zero-duration recording carries no evidence that it is the same
+session as anything. This matters
 because a trainer ride or a pool swim legitimately records `distance_meters = 0` on
 both sides, and zero — unlike null — passes a naive "both rows carry it" test;
 counting `(0, 0)` as agreement would let same-sport-same-day form a group.
