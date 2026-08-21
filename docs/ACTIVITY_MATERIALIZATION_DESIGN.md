@@ -177,7 +177,18 @@ create table public.activity_sources (
   payload_fingerprint text,
   fields jsonb not null default '{}'::jsonb,
   raw_extraction jsonb,
-  fidelity_rank integer not null,
+  -- Generated, never supplied: the rank and the format cannot disagree if only one
+  -- of them is ever written. See "fidelity_rank is derived, not stored alongside".
+  fidelity_rank integer generated always as (case ingest_format
+    when 'athlete_override' then 0
+    when 'fit' then 1
+    when 'tcx' then 2
+    when 'gpx' then 3
+    when 'intervals_api' then 4
+    when 'text' then 5
+    when 'screenshot' then 6
+    when 'manual' then 7
+  end) stored,
   recorded_at timestamptz,
   retired_at timestamptz,
   created_at timestamptz not null default timezone('utc', now()),
@@ -215,6 +226,26 @@ alter table public.activities
   foreign key (superseded_by_activity_id, user_id)
   references public.activities(id, user_id) on delete set null;
 ```
+
+### `fidelity_rank` is derived, not stored alongside `ingest_format`
+
+A plain `integer not null` accepts `('fit', 7)` — a FIT source ranked below a manual
+entry. Nothing would reject it, and the failure is silent in the worst way: the
+reconciler sorts by rank, so the manual entry's numbers overwrite the FIT's on a
+merged activity, and the athlete sees a ride with wrong power and no obvious cause.
+One writer inserting a stale constant is enough to cause it.
+
+Making the column `generated always as (…) stored` removes the possibility rather than
+policing it — the rank is a pure function of `ingest_format`, and now Postgres computes
+it. The mapping is total over the eight permitted formats, so there is no `else`
+branch to go stale, and adding a ninth format fails loudly at migration time with a
+`null` rank rather than quietly sorting it first.
+
+It composes with the evidence guard below: a generated column can only change when
+`ingest_format` changes, and `ingest_format` is immutable evidence, so `fidelity_rank`
+inherits that immutability without being named in the guard. Keeping it stored rather
+than virtual keeps it indexable and keeps `to_jsonb(new)` comparisons in the guard
+cheap.
 
 ### Cross-user references are closed by the schema, not by the RPCs
 
