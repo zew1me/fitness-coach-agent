@@ -1085,13 +1085,9 @@ describe("coachToolDefinitions", () => {
     });
 
     expect(requests).toEqual([]);
-    expect(result).toEqual({
-      input: {
-        content_type: "application/zip",
-        filename: "garmin-export.zip",
-        public_url: "https://cdn.example.com/garmin-export.zip",
-      },
-      status: "pending_implementation",
+    expect(result).toMatchObject({
+      message: expect.stringContaining("Unsupported file type"),
+      status: "unsupported_file_type",
       tool: "process_uploaded_file",
     });
   });
@@ -1205,6 +1201,36 @@ describe("coachToolDefinitions", () => {
     expect(result).toEqual({
       detail: expect.stringContaining("could not be processed"),
       status: "error",
+    });
+  });
+
+  it("returns a graceful result for unsupported uploaded file types", async () => {
+    let fetchCalled = false;
+    const fetchImpl = (): Promise<Response> => {
+      fetchCalled = true;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    };
+    const tools = createCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+    });
+
+    const result = await (
+      tools["process_uploaded_file"] as {
+        execute: (input: unknown) => Promise<unknown>;
+      }
+    ).execute({
+      content_type: "application/pdf",
+      filename: "plan.pdf",
+      object_key: "uploads/plan.pdf",
+      public_url: "https://files.test/plan.pdf",
+    });
+
+    expect(fetchCalled).toBe(false);
+    expect(result).toMatchObject({
+      status: "unsupported_file_type",
+      tool: "process_uploaded_file",
     });
   });
 });

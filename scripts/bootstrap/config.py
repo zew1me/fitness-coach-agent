@@ -1,6 +1,10 @@
 import json
+import os
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 
+from dotenv import dotenv_values
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
@@ -9,6 +13,33 @@ def _read_vercel_project_json() -> dict:
     if path.exists():
         return json.loads(path.read_text())
     return {}
+
+
+def warn_about_supabase_token_source(
+    *,
+    env_file: Path = Path(".env.bootstrap"),
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    environment = os.environ if environ is None else environ
+    shell_token = environment.get("SUPABASE_ACCESS_TOKEN", "").strip()
+    file_token = (dotenv_values(env_file).get("SUPABASE_ACCESS_TOKEN") or "").strip()
+
+    if not shell_token:
+        return
+    if file_token and shell_token != file_token:
+        print(
+            "Warning: shell SUPABASE_ACCESS_TOKEN conflicts with .env.bootstrap; "
+            ".env.bootstrap is authoritative. Run `unset SUPABASE_ACCESS_TOKEN` "
+            "before bootstrap to avoid using the stale token in other commands.",
+            file=sys.stderr,
+        )
+    elif not file_token:
+        print(
+            "Warning: bootstrap detected a shell-exported SUPABASE_ACCESS_TOKEN but no "
+            "token in .env.bootstrap. This shell-only pattern is risky; move it to "
+            ".env.bootstrap and run `unset SUPABASE_ACCESS_TOKEN` before bootstrap.",
+            file=sys.stderr,
+        )
 
 
 class BootstrapSettings(BaseSettings):
