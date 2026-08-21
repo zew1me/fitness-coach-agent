@@ -379,8 +379,17 @@ metres, so including it would guarantee the two never match — making the finge
 strictly weaker than advertised while appearing more precise. Distance is rounded to
 10 m for the same reason at smaller scale.
 
-**When `started_at` is null the fingerprint is NULL**, because without a start instant
-the remaining fields are far too weak to be worth indexing on: an athlete who runs 45
+**The fingerprint is NULL unless it carries enough information to be worth a bucket:
+`started_at` plus at least one positive metric (`duration_seconds` or
+`distance_meters`).** Sport and a start time alone would put every sparse record into
+a bucket the scorer then has to score pairwise, which is the cost the prefilter exists
+to avoid — and a text extract carrying nothing but a sport and a guessed time would
+share a bucket with genuinely detailed recordings. A NULL fingerprint costs only the
+prefilter: such rows are still reachable through the ordinary date-windowed candidate
+query and scored on their fields like anything else. (It costs nothing in safety
+either way, since the fingerprint cannot reject.)
+
+Without a start instant the remaining fields are far too weak to be worth indexing on: an athlete who runs 45
 easy minutes twice in one day (doubles are ordinary in endurance training) produces
 two identical field sets. Such pairs are still reachable by the ordinary date-windowed
 candidate query and are scored on their fields like any other — a NULL fingerprint
