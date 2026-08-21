@@ -796,10 +796,13 @@ both the "Canonical migration sequence" bullet and a section with
 
 Each phase is independently shippable and ends in something verifiable.
 
-**Phase 0 — unblock.** Fix the two verified bugs: `get_load_snapshot_on_or_before` +
+**Phase 0 — unblock.** Fix the three verified bugs: `get_load_snapshot_on_or_before` +
 seed-at-date in `recompute_load_endpoint`; `_activity_source_for_filename` fallback.
+Also replace the load rebuild's display-oriented `list_activities(..., limit=500)`
+candidate query with an unbounded keyset-paginated one (ported item 3 below).
 _Verifiable:_ a backward window rebuild produces correct CTL; a `.fit` file with no
-suffix saves instead of 503-ing.
+suffix saves instead of 503-ing; a rebuild window holding more than 500 activities
+still includes the oldest of them in the rebuilt snapshots.
 
 **Phase 1 — schema.** Migration + backfill + `Activity` model fields + repo methods.
 No behaviour change. _Verifiable:_ `bun run db:reset` replays clean; **every
@@ -829,7 +832,9 @@ workout from the surviving activity — this ordering is load-bearing), and the
 Intervals ride yields one calendar entry with the FIT's richer numbers; compliance
 stops reporting the phantom unplanned session.
 
-**Phase 5 — Tier B + bridging.** Proposal record, coach tools
+**Phase 5 — Tier B + bridging.** The server-side consent protocol in full (ported
+item 1: proposal record, server-issued normalized `expected_phrase`,
+orchestration-injected message id, group-scoped consumption), coach tools
 (`find_duplicate_activities`, `merge_activities`, `unmerge_activity`) in
 `lib/agent/tools.ts` routed via `postEngine` in `lib/agent/coach-tools.ts`, system
 prompt guidance, bridging rules. _Verifiable:_ the coach can surface the backlog and
@@ -893,6 +898,76 @@ merge only after explicit athlete confirmation; a both-sides-linked bridge is re
    worked around: the alternative — letting `payload_fingerprint` reject in its place —
    trades a recoverable duplicate for unrecoverable data loss, which is the one trade
    this design refuses.
+
+---
+
+## Open before sign-off
+
+Two ownership boundaries in this design are currently enforced by a table in this
+document and by the Python reconciler, and nothing else. Both must be exhaustively
+enumerated — and their enforcement point named — before implementation starts. A
+boundary that exists only in prose is the failure mode this design criticises in the
+in-place alternative, and relocating it is not the same as removing it.
+
+**1. Projection ownership.** `activities` is described as a derived projection, but the
+merge-precedence table carves out athlete-owned columns (untouched with no override
+source), `source` / `source_file_key` / `raw_extraction` ("left as the originating
+source's"), `planned_workout_id` (never merged), and a catch-all "everything else —
+untouched". So it is a _partially_ derived projection. Required: the exhaustive,
+enumerated list of which `activities` columns `recompose_activity` writes, and where
+that list is enforced beyond convention. If the honest answer is "the Python
+reconciler and nothing else", say so — the advantage over an in-place survivor is then
+real but narrower than this document's framing implies, and Phase 3's ordering
+constraint is doing more of the work than the architecture is.
+
+**2. Source ownership.** Settled above in "The evidence/state boundary", enumerated and
+enforced by the guard trigger. Listed here so the two boundaries are reviewed together
+and neither is signed off in isolation.
+
+**3. The non-destructive fingerprint requirement stands unless disproved.**
+`payload_fingerprint` remains candidate-generation evidence, with no unique index,
+unless someone can demonstrate collision-safe uniqueness on real athlete data —
+meaning a normalization under which two genuinely distinct sessions provably cannot
+produce equal fingerprints. Absent that proof, exact identifiers prevent duplicate
+ingestion and heuristic similarity does not, because heuristic similarity behind a
+constraint is data loss rather than a missed match.
+
+---
+
+## Ported from the in-place design (PR #450)
+
+The alternative design on `design-doc-dedupe` reached these conclusions independently
+of its storage model, and they hold here unchanged. They are adopted rather than
+re-derived, and each is a gap in this document as it stands.
+
+1. **Tier-B consent is a server invariant, not a prompt promise.** A short-lived
+   proposal record scoped to `user_id`, holding the sorted member ids, expected member
+   versions, a server-issued confirmation code, the derived `expected_phrase` stored
+   already normalized, `expires_at`, and `consumed_at`. The merge RPC requires a later
+   `chat_messages` row for the same user with `role = 'user'` whose normalized text
+   equals `expected_phrase`; the message id is injected by trusted orchestration and is
+   absent from the model-visible tool schema. A model-supplied boolean, copied
+   confirmation text, or prompt instruction is never evidence of consent. Phase 5 of
+   this document currently covers all of that in one clause, which is a security gap
+   rather than a level-of-detail gap.
+2. **Consent is group-scoped and outlives the first pairwise operation.** An
+   athlete confirmed _a group_, once; a multi-step sequence must not re-ask, and must
+   consume the proposal exactly once, on the final step, in the same transaction.
+3. **The load rebuild must not use the display query.** `recompute_load_endpoint`
+   currently loads candidates via `repo.list_activities(..., limit=500)`, ordered
+   `activity_date desc`. Any rebuild window holding more than 500 activities silently
+   drops the oldest of them from `daily_tss` and rebuilds wrong snapshots. Recompute
+   needs a dedicated unbounded, keyset-paginated query. This is a live defect
+   independent of dedup, and belongs in Phase 0 alongside the seed-at-date fix.
+4. **`list_dedup_candidates` is unbounded, keyset-paginated, and self-excluding in
+   SQL** — not a `limit`-capped display query with the new row filtered out in Python.
+   A duplicate lying beyond an arbitrary cap is exactly the one a backlog pass exists
+   to find.
+5. **Merge history survives an un-merge.** Retiring a source removes it from the live
+   set the reconciler reads, which this design gets nearly free — but the record of the
+   merge having happened must be retained append-only, not dropped. It is the evidence
+   needed when an athlete asks why their numbers moved twice, or when a bad Tier-A
+   rule has to be reconstructed after the fact.
 
 ---
 
