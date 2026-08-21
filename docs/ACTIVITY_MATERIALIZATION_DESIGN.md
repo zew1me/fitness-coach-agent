@@ -1150,6 +1150,11 @@ create unique index activity_merge_events_one_reversal_idx
   on public.activity_merge_events (reverses_event_id)
   where event_type = 'unbridge';
 
+-- Response-loss recovery reads the committed bridge set by proposal.
+create index activity_merge_events_proposal_idx
+  on public.activity_merge_events (user_id, proposal_id)
+  where proposal_id is not null;
+
 alter table public.activity_merge_events enable row level security;
 create policy activity_merge_events_owner_select
   on public.activity_merge_events for select
