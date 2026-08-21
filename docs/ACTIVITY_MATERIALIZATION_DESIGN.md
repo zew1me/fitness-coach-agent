@@ -1247,8 +1247,9 @@ Then populate:
 
 **The backfill cannot collide, and this is a direct consequence of the fingerprint
 rule plus the existing Intervals constraint.** `payload_fingerprint` carries no unique
-index, so historical duplicates — which by definition produce equal fingerprints,
-and which this migration deliberately leaves in place — backfill without conflict.
+index, so historical rows backfill without conflict whether duplicates happen to
+produce equal fingerprints or provider differences make their fingerprints diverge.
+This migration deliberately leaves both cases in place.
 `content_hash` is uniformly NULL. The only backfilled external ids are parsed from
 `intervals:{id}`, whose current `(user_id, intervals_source_file_key)` constraint has
 already made them unique per athlete; every other source gets NULL. So every
