@@ -22,10 +22,13 @@ import type {
 } from "../lib/schemas";
 import { siteConfig } from "../lib/site";
 import type { BrowserTokenResponse } from "../lib/types";
+import { useAthleteProfile } from "../lib/use-athlete-profile";
 import { useBrowserSession } from "../lib/use-browser-session";
 
+import { AccountMenuButton } from "./account-menu";
 import { CalendarLegend } from "./calendar-legend";
 import styles from "./coach-calendar.module.css";
+import { ProfileDrawer } from "./profile-drawer";
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const MAX_CHIPS_PER_DAY = 3;
@@ -209,6 +212,8 @@ function LoggedOutCalendar(): JSX.Element {
 function SignedInCalendar({
   token,
 }: Readonly<{ token: BrowserTokenResponse }>): JSX.Element {
+  const athleteProfile = useAthleteProfile(token);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const todayIso = useMemo(() => localTodayIso(), []);
   const range = useMemo(() => calendarDateRange(todayIso), [todayIso]);
   const calendarQuery = useQuery<CalendarResponse, Error>({
@@ -220,6 +225,11 @@ function SignedInCalendar({
   // Stable identity so the detail panel's focus/Escape effect doesn't re-run
   // (and re-steal focus) whenever this component re-renders.
   const closeDetail = useCallback(() => setSelectedDay(null), []);
+
+  async function openDrawer(): Promise<void> {
+    setDrawerOpen(true);
+    await athleteProfile.ensureLoaded();
+  }
 
   const weeks = useMemo(
     () => buildCalendarWeeks(range.start, range.end),
@@ -250,6 +260,13 @@ function SignedInCalendar({
               >
                 Back to chat
               </Link>
+              {/* The calendar has no loaded transcript, so it omits Export JSONL. */}
+              <AccountMenuButton
+                onOpenProfile={() => {
+                  void openDrawer();
+                }}
+                profile={athleteProfile.profile}
+              />
             </div>
           </header>
           <div className={styles.gridHeader}>
@@ -281,6 +298,17 @@ function SignedInCalendar({
           todayIso={todayIso}
         />
       ) : null}
+      <ProfileDrawer
+        onClose={() => setDrawerOpen(false)}
+        onSave={() => {
+          void athleteProfile.save();
+        }}
+        open={drawerOpen}
+        profile={athleteProfile.profile}
+        saving={athleteProfile.saving}
+        setProfile={athleteProfile.setProfile}
+        status={athleteProfile.status}
+      />
     </main>
   );
 }

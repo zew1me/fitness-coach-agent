@@ -23,11 +23,12 @@ import { useBrowserSession } from "../lib/use-browser-session";
 import { useChatThread } from "../lib/use-chat-thread";
 import { useIsMobile } from "../lib/use-is-mobile";
 
+import { AccountMenuButton } from "./account-menu";
 import { useChatTurnLease } from "./chat-turn-lease-provider";
 import styles from "./coach-chat.module.css";
+import { ProfileDrawer } from "./profile-drawer";
 import { SessionLoading } from "./session-loading";
 import { StatusCard } from "./status-card";
-import { ThemeSwitcher } from "./theme-switcher";
 
 type LocalAttachment = {
   id: string;
@@ -118,12 +119,6 @@ function removePreviewUrls(attachments: LocalAttachment[]): void {
 
 function coachingStatusLabel(profileComplete: boolean): string {
   return profileComplete ? "Coaching ready" : "Building your athlete profile";
-}
-
-function accountLabel(profile: AthleteProfile | null): string {
-  if (profile === null) return "Account";
-  const displayName = profile.display_name?.trim();
-  return displayName ? displayName : "Account";
 }
 
 function readString(
@@ -748,53 +743,6 @@ function MessagesSection({
   );
 }
 
-function AccountMenu({
-  profile,
-  onOpenProfile,
-  onExport,
-}: Readonly<{
-  profile: AthleteProfile | null;
-  onOpenProfile: () => void;
-  onExport: () => void;
-}>): JSX.Element {
-  return (
-    <div aria-label="Account" className={styles.accountMenu} role="menu">
-      <div className={styles.accountSummary}>
-        <span>Signed in</span>
-        <strong>{accountLabel(profile)}</strong>
-      </div>
-      <div className={styles.menuThemeRow}>
-        <ThemeSwitcher />
-      </div>
-      <button
-        className={styles.menuItem}
-        onClick={onOpenProfile}
-        role="menuitem"
-        type="button"
-      >
-        Profile
-      </button>
-      <button
-        className={styles.menuItem}
-        onClick={onExport}
-        role="menuitem"
-        type="button"
-      >
-        Export JSONL
-      </button>
-      <form
-        action="/api/oauth/browser-session/logout"
-        className={styles.menuForm}
-        method="post"
-      >
-        <button className={styles.menuItem} role="menuitem" type="submit">
-          Sign out
-        </button>
-      </form>
-    </div>
-  );
-}
-
 function ChatTopbar({
   profile,
   coachingStatus,
@@ -806,7 +754,6 @@ function ChatTopbar({
   onOpenDrawer: () => void;
   onExport: () => void;
 }>): JSX.Element {
-  const [open, setOpen] = useState(false);
   return (
     <header className={styles.topbar}>
       <div className={styles.brandBlock}>
@@ -848,52 +795,20 @@ function ChatTopbar({
             <circle cx="15.5" cy="13.5" fill="currentColor" r="1.2" />
           </svg>
         </Link>
-        <div className={styles.accountMenuWrap}>
-          <button
-            aria-expanded={open}
-            aria-haspopup="menu"
-            aria-label="Account menu"
-            className={styles.accountButton}
-            onClick={() => setOpen((prev) => !prev)}
-            title="Account"
-            type="button"
-          >
-            <svg
-              aria-hidden="true"
-              className={styles.accountIcon}
-              viewBox="0 0 24 24"
+        <AccountMenuButton
+          extraItems={
+            <button
+              className={styles.menuItem}
+              onClick={onExport}
+              role="menuitem"
+              type="button"
             >
-              <circle
-                cx="12"
-                cy="8"
-                fill="none"
-                r="3.5"
-                stroke="currentColor"
-                strokeWidth="1.8"
-              />
-              <path
-                d="M5 19.5a7 7 0 0 1 14 0"
-                fill="none"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeWidth="1.8"
-              />
-            </svg>
-          </button>
-          {open ? (
-            <AccountMenu
-              profile={profile}
-              onOpenProfile={() => {
-                setOpen(false);
-                onOpenDrawer();
-              }}
-              onExport={() => {
-                setOpen(false);
-                onExport();
-              }}
-            />
-          ) : null}
-        </div>
+              Export JSONL
+            </button>
+          }
+          onOpenProfile={onOpenDrawer}
+          profile={profile}
+        />
       </div>
     </header>
   );
@@ -1163,171 +1078,6 @@ function Composer({
         </div>
       </div>
     </div>
-  );
-}
-
-function ProfileDrawerFields({
-  profile,
-  setProfile,
-  saving,
-  status,
-  onSave,
-}: Readonly<{
-  profile: AthleteProfile;
-  setProfile: (_profile: AthleteProfile) => void;
-  saving: boolean;
-  status: string | null;
-  onSave: () => void;
-}>): JSX.Element {
-  return (
-    <div className={styles.fieldGrid}>
-      <label className={styles.fieldLabel}>
-        Display name
-        <input
-          className={styles.fieldInput}
-          onChange={(event) =>
-            setProfile({
-              ...profile,
-              display_name: event.target.value || null,
-            })
-          }
-          placeholder="Your name (optional)"
-          value={profile.display_name ?? ""}
-        />
-      </label>
-      <label className={styles.fieldLabel}>
-        Sports (comma-separated)
-        <input
-          className={styles.fieldInput}
-          onChange={(event) =>
-            setProfile({
-              ...profile,
-              primary_sports: event.target.value
-                .split(",")
-                .map((s) => s.trim())
-                .filter((s) => s.length > 0),
-            })
-          }
-          placeholder="e.g. running, cycling, strength"
-          value={profile.primary_sports.join(", ")}
-        />
-      </label>
-      <label className={styles.fieldLabel}>
-        Weekly training hours
-        <input
-          className={styles.fieldInput}
-          min="0"
-          onChange={(event) =>
-            setProfile({
-              ...profile,
-              weekly_available_hours:
-                event.target.value === "" ? null : Number(event.target.value),
-            })
-          }
-          step="0.5"
-          type="number"
-          value={profile.weekly_available_hours ?? ""}
-        />
-      </label>
-      <div className={styles.actionRow}>
-        <button
-          className={styles.primaryButton}
-          disabled={saving}
-          onClick={onSave}
-          type="button"
-        >
-          {saving ? "Saving..." : "Save profile"}
-        </button>
-      </div>
-      {status !== null ? <p className={styles.drawerStatus}>{status}</p> : null}
-    </div>
-  );
-}
-
-function ProfileDrawer({
-  open,
-  onClose,
-  profile,
-  setProfile,
-  saving,
-  status,
-  onSave,
-}: Readonly<{
-  open: boolean;
-  onClose: () => void;
-  profile: AthleteProfile | null;
-  setProfile: (_profile: AthleteProfile) => void;
-  saving: boolean;
-  status: string | null;
-  onSave: () => void;
-}>): JSX.Element | null {
-  if (!open) return null;
-  return (
-    <div
-      className={styles.drawerBackdrop}
-      onClick={onClose}
-      role="presentation"
-    >
-      <aside
-        aria-label="Profile and preferences"
-        className={styles.drawer}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className={styles.drawerHeader}>
-          <div>
-            <h2 className={styles.drawerTitle}>Profile</h2>
-            <p className={styles.drawerText}>
-              Review the profile details your coach uses for training guidance.
-            </p>
-          </div>
-          <button
-            className={styles.drawerClose}
-            onClick={onClose}
-            type="button"
-          >
-            Close
-          </button>
-        </div>
-
-        <ProfileDrawerBody
-          profile={profile}
-          saving={saving}
-          setProfile={setProfile}
-          status={status}
-          onSave={onSave}
-        />
-      </aside>
-    </div>
-  );
-}
-
-function ProfileDrawerBody({
-  profile,
-  setProfile,
-  saving,
-  status,
-  onSave,
-}: Readonly<{
-  profile: AthleteProfile | null;
-  setProfile: (_profile: AthleteProfile) => void;
-  saving: boolean;
-  status: string | null;
-  onSave: () => void;
-}>): JSX.Element {
-  if (saving && profile === null) {
-    return <p className={styles.drawerStatus}>Loading your settings…</p>;
-  }
-  if (profile === null) {
-    return <p className={styles.drawerStatus}>No profile loaded yet.</p>;
-  }
-  return (
-    <ProfileDrawerFields
-      profile={profile}
-      saving={saving}
-      setProfile={setProfile}
-      status={status}
-      onSave={onSave}
-    />
   );
 }
 

@@ -308,6 +308,24 @@ test("confirms an unconfirmed past workout from the day detail panel", async ({
   ).not.toBeVisible();
 });
 
+test("opens the account menu and profile drawer from the calendar", async ({
+  page,
+}) => {
+  await mockCalendarView(page);
+  await page.goto("/calendar");
+
+  await page.getByRole("button", { name: /Account menu/i }).click();
+  await expect(page.getByRole("menu", { name: /Account/i })).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: /Export JSONL/i }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: /Sign out/i })).toBeVisible();
+
+  await page.getByRole("menuitem", { name: /Profile/i }).click();
+  await expect(page.getByRole("heading", { name: /Profile/i })).toBeVisible();
+  await expect(page.getByLabel(/Display name/i)).toBeVisible();
+});
+
 test("navigates chat → calendar → chat via the topbar toggles", async ({
   page,
 }) => {
