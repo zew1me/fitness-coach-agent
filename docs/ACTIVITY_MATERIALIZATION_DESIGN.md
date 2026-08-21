@@ -75,8 +75,9 @@ this design rather than an implementation detail.
 
 - **Authoritative identifiers — `content_hash` (sha256 of the raw bytes) and a
   provider `external_id`.** These assert _identity_: this input **is** an input
-  already stored. They may reject an ingestion outright, and they are enforced by a
-  unique index.
+  already stored. They may reject an ingestion outright, and each is enforced by its
+  own partial unique index. An external id is authoritative only when its provider is
+  known; `provider = 'unknown'` has no namespace and never participates in that key.
 - **Heuristic evidence — `payload_fingerprint` (a hash over normalized extracted
   fields).** This asserts _similarity_: two inputs look like the same recording. That
   is a judgement, not an identity. It narrows the candidate set for the tiered merge
@@ -202,6 +203,14 @@ create unique index activity_sources_content_hash_idx
   on public.activity_sources (user_id, content_hash)
   where content_hash is not null and retired_at is null;
 
+-- Provider-issued identity. `unknown` is excluded because an identifier without a
+-- namespace is not authoritative; two unrelated devices may emit the same value.
+create unique index activity_sources_external_id_idx
+  on public.activity_sources (user_id, provider, external_id)
+  where external_id is not null
+    and provider <> 'unknown'
+    and retired_at is null;
+
 -- Deliberately NOT unique: payload_fingerprint is candidate-generation evidence,
 -- never a rejection key. A collision must narrow the merge search, never discard an
 -- activity. See "payload_fingerprint is candidate evidence, never a constraint".
@@ -280,11 +289,12 @@ Plus `enable row level security` with the owner policy
 (`(select auth.uid())::text = user_id`), and the standard
 `revoke all … / grant … to service_role` block.
 
-**The one unique index is a partial _index_, not a constraint** — deliberately. It
-excludes retired rows, which a constraint cannot. Nothing upserts against it (we
-insert and let `23505` propagate), so the PostgREST limitation that `on_conflict`
-cannot name a partial index does not apply here. The fingerprint index alongside it is
-an ordinary lookup index and enforces nothing.
+**Both authoritative-identity indexes are partial _indexes_, not constraints** —
+deliberately. They exclude retired rows, which a constraint cannot; the external-id
+index additionally excludes `provider = 'unknown'`. Nothing upserts against them (we
+insert and let `23505` drive the documented recovery path), so the PostgREST
+limitation that `on_conflict` cannot name a partial index does not apply here. The
+fingerprint index alongside them is an ordinary lookup index and enforces nothing.
 
 Three cases these keys must get right:
 
@@ -294,11 +304,13 @@ Three cases these keys must get right:
 | Two distinct members of one ZIP | both stored             | Distinct bytes, distinct hashes                                                                                                                                                          |
 | Text extract                    | never rejected as exact | No bytes ⇒ `content_hash` NULL, and NULLs are distinct in a unique index. A fingerprint may still be computed — it just cannot reject                                                    |
 
-### Scoping the one key that can reject: `(user_id, content_hash)` and nothing else
+### Scoping the byte-identity key: `(user_id, content_hash)` and nothing else
 
-There is exactly one unique key in this design, and it is scoped
-**`(user_id, content_hash)`**. Neither `provider` nor `ingest_format` appears in it,
-and both omissions are deliberate.
+The byte-identity key is scoped **`(user_id, content_hash)`**. Neither `provider` nor
+`ingest_format` appears in it, and both omissions are deliberate. This is separate
+from `(user_id, provider, external_id)`: provider belongs in that key because it is
+the namespace that makes an external id authoritative, not an inferred qualifier on
+the bytes.
 
 **Why not `ingest_format`.** Identical bytes cannot be two different recordings. If
 the same file arrives once named `ride.fit` and once named `ride.gpx`, the athlete has
@@ -321,17 +333,19 @@ nothing and can only cost recall.
 
 **The rule underneath both.** Narrowing a rejection key produces a missed duplicate;
 widening one produces a refused workout. `(user_id, content_hash)` is the widest scope
-that is still an identity claim, and **no field that is inferred rather than derived
-from the bytes may enter it**. That is what keeps `provider = 'unknown'` from being a
-correctness problem: the labels this pipeline guesses at are exactly the labels the key
-excludes.
+that is still a byte-identity claim, and **no field that is inferred rather than
+derived from the bytes may enter it**. Conversely, an external id has no meaning
+_without_ its issuer's namespace, so `(user_id, provider, external_id)` excludes
+`provider = 'unknown'` entirely. Unknown-provider inputs can still reject on byte
+identity and otherwise proceed to tiered matching; a coincidentally equal unscoped id
+cannot discard either input.
 
 ### `payload_fingerprint` is candidate evidence, never a constraint
 
 **Requirement.** `payload_fingerprint` may narrow the candidate set for the tiered
 merge below. It may **not** reject an ingestion, and it carries no unique index. Only
-authoritative identifiers — `content_hash`, or a provider `external_id` once one is
-available — may reject an ingestion outright. A fingerprint collision must never
+authoritative identifiers — `content_hash`, or a known-provider `external_id` — may
+reject an ingestion outright. A fingerprint collision must never
 silently discard a legitimate activity.
 
 This is not a tuning preference that a later, cleverer normalization could overturn.
@@ -549,26 +563,29 @@ Steps 1–2 identical, then **select-then-insert**. Only authoritative identifie
 consulted here; `payload_fingerprint` is deliberately absent from this query, because
 this is the one path that can refuse to store an athlete's workout:
 
-1. `select activity_id from activity_sources where user_id = … and content_hash = …
-and retired_at is null` — extended with a `provider`-scoped `external_id` match once
-   a provider supplies one. An external id is an identity claim only _within_ the
-   provider that issued it, which is exactly why it carries a scope that a byte hash
-   does not.
-2. If found → return **409** naming that `activity_id`.
-3. Otherwise insert. The partial unique index remains the **race backstop**: on a
-   concurrent double-submit the insert raises `23505`, which is caught locally
-   (documented at the catch site, per AGENTS.md) and the same select is re-run to
-   recover the id.
+1. Run the applicable identity lookups: `(user_id, content_hash)` when bytes exist,
+   and `(user_id, provider, external_id)` only when both an external id and a provider
+   other than `unknown` exist. Both filter `retired_at is null`.
+2. If every match names the same activity → return **409** naming that `activity_id`.
+   If the byte identity and provider identity resolve to different activities, return
+   409 naming both and store nothing: the authoritative evidence is inconsistent and
+   must not be guessed into one group.
+3. Otherwise insert. The two partial unique indexes remain the **race backstops**. On
+   a concurrent double-submit the insert raises `23505`, which is caught locally
+   (documented at the catch site, per AGENTS.md); inspect the constraint name and
+   re-run the applicable identity lookups to recover the id. Any other database error
+   propagates unchanged. If the recovery lookups disagree, use the same conflicting-
+   identity 409 rather than selecting whichever index happened to fire first.
 
 The lookup is required, not belt-and-braces: a `PostgRESTAPIError` for `23505` carries
 the constraint name and a detail string, **not** the colliding row — so the central
 handler alone can only produce a bare conflict, never _"you already logged this ride
 on June 1."_ Two round trips is the honest cost of a useful message.
 
-**Re-uploading after an un-merge succeeds, by design.** The `content_hash` unique
-index is partial on `retired_at is null`, so a retired source neither collides nor is
-found by the lookup. An athlete who un-merges and then re-uploads gets a fresh source rather
-than a 409 telling them about a record they deliberately removed.
+**Re-uploading after an un-merge succeeds, by design.** Both identity indexes are
+partial on `retired_at is null`, so a retired source neither collides nor is found by
+an identity lookup. An athlete who un-merges and then re-uploads gets a fresh source
+rather than a 409 telling them about a record they deliberately removed.
 
 ### N > 1 (merge)
 
@@ -948,12 +965,16 @@ rows.
   reaches the athlete through the tiered merge instead.
 
 **The backfill cannot collide, and this is a direct consequence of the fingerprint
-rule.** `payload_fingerprint` carries no unique index, so historical duplicates —
-which by definition produce equal fingerprints, and which this migration deliberately
-leaves in place — backfill without conflict. `content_hash` is uniformly NULL, and
-NULLs are distinct in a unique index. So every historical activity backfills as an
-active, unmerged row with exactly one source, and no legacy row is dropped or
-namespaced to get there. Had the fingerprint been a uniqueness key, the backfill would
+rule plus the existing Intervals constraint.** `payload_fingerprint` carries no unique
+index, so historical duplicates — which by definition produce equal fingerprints,
+and which this migration deliberately leaves in place — backfill without conflict.
+`content_hash` is uniformly NULL. The only backfilled external ids are parsed from
+`intervals:{id}`, whose current `(user_id, intervals_source_file_key)` constraint has
+already made them unique per athlete; every other source gets NULL. So every
+historical activity backfills as an active, unmerged row with exactly one source, and
+no legacy row is dropped or namespaced to get there. Preflight still asserts the
+Intervals uniqueness before inserting, rather than trusting that historical schema
+invariant silently. Had the fingerprint been a uniqueness key, the backfill would
 have had to either fail on the very duplicates that motivated this work or invent a
 separate legacy namespace for them; that dilemma is designed out rather than
 resolved.
@@ -992,10 +1013,12 @@ what catches a bad backfill mapping.
 **Phase 2 — write path.** Every ingestion path writes `activity_sources` alongside
 `activities`. Hashing and fingerprinting wired in. Select-then-insert exact-duplicate
 409 on authoritative identifiers only. Still no merging. _Verifiable:_ re-uploading a
-file returns 409 naming the existing activity; re-uploading a ZIP rejects every member;
-two distinct ZIP members both save; **the same ride uploaded as both `.fit` and `.gpx`
-stores two sources rather than rejecting the second**; and **two distinct sessions that
-collide on `payload_fingerprint` are both stored** — the fingerprint never rejects.
+file returns 409 naming the existing activity; a repeated known-provider external id
+is race-safe and returns the same result; the same id under `provider = 'unknown'`
+does not reject; re-uploading a ZIP rejects every member; two distinct ZIP members both
+save; **the same ride uploaded as both `.fit` and `.gpx` stores two sources rather than
+rejecting the second**; and **two distinct sessions that collide on
+`payload_fingerprint` are both stored** — the fingerprint never rejects.
 
 **Phase 3 — athlete overrides (must precede any recompose).** Convert
 `repo.update_activity`, `merge_activity_text_update`, **and
@@ -1039,15 +1062,15 @@ merge only after explicit athlete confirmation; a both-sides-linked bridge is re
 
 **Assumptions being made explicitly:**
 
-1. **Provider is mostly `unknown` at first, and nothing destructive depends on it.**
-   `activities` has no provider column today; external identity is smuggled into
-   `source_file_key` as `intervals:{id}`. Uploads can sometimes infer a provider from
-   file internals (FIT `manufacturer`) but will often be `unknown`. This is safe
-   because the only key that can reject is `content_hash`, and identical bytes are
-   identical regardless of which provider label they landed under. The fingerprint,
-   which is the key a wrong provider label would most plausibly distort, cannot reject
-   anything. Populating a real provider later only _narrows_ what counts as an exact
-   duplicate, so it is a strict improvement rather than a breaking change.
+1. **Provider is mostly `unknown` at first, and no provider-dependent destructive
+   decision is made for it.** `activities` has no provider column today; external
+   identity is smuggled into `source_file_key` as `intervals:{id}`. Uploads can
+   sometimes infer a provider from file internals (FIT `manufacturer`) but will often
+   be `unknown`. This is safe because unknown-provider rows are excluded from the
+   external-id uniqueness key; they can reject only on `content_hash`, whose byte
+   identity is independent of the label. Their fingerprints remain non-destructive.
+   A later real provider enables the narrower provider-id identity check; it never
+   retroactively turns an unscoped id into a rejection key.
 2. **The Garmin sidecar writes nothing today** (local files only, issue #388). When
    server upload lands, the Garmin activity id becomes a real `external_id` and
    becomes the strongest dedup key available. This design should not be finalized
@@ -1061,8 +1084,8 @@ merge only after explicit athlete confirmation; a both-sides-linked bridge is re
 
 **Hard parts, in rough order of risk:**
 
-1. **Grouping, not dedup, is the fuzzy part.** Exact dedup is a unique index and is
-   essentially free. Deciding that two _different_ records describe one workout is
+1. **Grouping, not dedup, is the fuzzy part.** Exact dedup is two identity indexes and
+   is essentially free. Deciding that two _different_ records describe one workout is
    heuristic, and every tolerance in the Tier A/B table is a guess until it meets real
    athlete data. Budget for tuning.
 2. **Bridging merges destroy plan links if done carelessly.** Addressed above by
@@ -1198,8 +1221,8 @@ default run). Before remote apply: `supabase migration list --linked` and
 | `tests/python/test_supabase_db.py` (schema invariants)                                  | Composite FKs reject a source whose `user_id` differs from its activity's owner, and reject a cross-user `superseded_by_activity_id`; `fidelity_rank` is generated, cannot be supplied inconsistently with `ingest_format`, and cannot become NULL when the format allow-list and rank map diverge; a second live `athlete_override` for one activity raises `23505`; the pending-rebuild CAS clears only a marker unchanged since capture                                                                                                                                        |
 | `tests/python/test_supabase_db.py` (evidence guard)                                     | The immutability trigger: updating `activity_id` or `retired_at` succeeds; updating `fields`, `content_hash`, `provider`, `fidelity_rank`, or `raw_extraction` raises `22023` — including from a `security definer` RPC, which is the caller the guard exists to bind. An athlete edit inserts a new `athlete_override` source and retires the prior one, leaving exactly one live override                                                                                                                                                                                       |
 | `tests/python/test_supabase_repo.py`                                                    | Extend `FakeSupabaseClient`/`FakeTableQuery` for `activity_sources` and add an `rpc()` handler for `recompose_activity` (an unknown RPC raises `AssertionError`). Assert `client.calls` exactly. Verify `response.data` is handled as a **dict** for the composite-row return. Confirm the `presentation_state` predicate applies to the two list methods and **not** to `get_activity` / `list_synced_intervals_keys`                                                                                                                                                            |
-| `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`, that the `content_hash` partial unique index fires on re-insert but not for distinct ZIP members, and that a bridge **reparents the superseded activity's sources to the survivor** — asserting the survivor's post-bridge `source_count` and that a field only B carried reaches A, which is the assertion a stranded-source bug fails                                                           |
-| `tests/python/test_api.py`                                                              | Exact duplicate returns 409 naming the existing activity; **a `payload_fingerprint` collision between two genuinely distinct sessions stores both and returns no 409** — the non-destructive-fingerprint requirement, asserted where it can actually be violated; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                                                                                                                                                                                  |
+| `tests/python/test_supabase_db.py`                                                      | RPC invariants against a real DB: cross-user rejection, the `40001` version-mismatch path, lock ordering, idempotent retry, both-sides-plan-linked bridge refused with `22023`; both identity indexes reject a concurrent duplicate, `provider = 'unknown'` never collides on `external_id`, and distinct ZIP members remain valid; a bridge **reparents the superseded activity's sources to the survivor**, asserting the survivor's post-bridge `source_count` and that a field only B carried reaches A                                                                       |
+| `tests/python/test_api.py`                                                              | Exact duplicate by content hash or known-provider external id returns 409 naming the existing activity; concurrent external-id insertion recovers after `23505`; conflicting authoritative ids name both activities without storing; unknown-provider external ids do not reject; **a `payload_fingerprint` collision between distinct sessions stores both and returns no 409**; Tier-A detection runs **before** `_try_match_activity_to_plan`                                                                                                                                  |
 | `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows drop out of the calendar and out of unplanned sessions; Intervals dedup behaviour is unchanged and a superseded Intervals row still blocks re-sync                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves `load_rebuild_pending_from` and is absorbed by the next one                                                                                                                                                                                                                                                                                                                                                                                          |
 | `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas (note `lib/agent/tools.ts:10-13`: nested object fields must be `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
