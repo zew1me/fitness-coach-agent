@@ -1325,15 +1325,25 @@ Then populate:
 
 **Batches are restart-safe, not merely small.** A temporary
 `activity_sources_backfill_progress` row stores the last committed `(created_at, id)`
-keyset position. Each batch transaction inserts bootstrap sources with deterministic
-`activity_sources.id = activities.id`, validates any existing id against the complete
-expected bootstrap row, and advances the checkpoint only after those inserts commit.
-A crash rolls back both inserts and checkpoint; a retry resumes at the prior key.
+keyset position. Each batch transaction selects its activity rows `FOR UPDATE` in
+`(created_at, id)` order, derives fields only after those locks, and inserts bootstrap
+sources with deterministic `activity_sources.id = activities.id`. The insert records
+the locked row's `updated_at`; if an implementation precomputes outside the lock, it
+must compare that expected version after locking and retry on any change. It validates
+any existing source id against the complete expected bootstrap row and advances the
+checkpoint only after those inserts commit. A crash rolls back both inserts and
+checkpoint; a retry resumes at the prior key.
 When `ON CONFLICT (id) DO NOTHING` returns no inserted row, the transaction locks and
 compares the existing row's `user_id`, activity ids, format/provider, fields, and NULL
 hashes before advancing the checkpoint — a mismatch aborts rather than being mistaken
 for completed work. The temporary legacy
 insert trigger covers concurrent rows beyond the checkpoint.
+
+A legacy update racing a batch therefore has only two outcomes: it commits first and
+its values are captured, or it waits for the batch and becomes a later, versioned
+projection change. Phase 3 scans for the latter drift and converts the difference —
+including athlete fields and date corrections — into explicit override provenance
+before enabling recompose. It is never folded into the already-captured source.
 
 After the keyset reaches the end, run the full anti-join and the exactly-one-source
 invariant without a limit. Any hole resets the checkpoint to the earliest missing row
@@ -1392,7 +1402,8 @@ uses NULL identity hashes, so presentation behaviour does not change. _Verifiabl
 after its checkpoint update converges without duplicate/missing rows; an interrupted
 deployment leaves the trigger active; preflight rejects unmapped source or malformed
 Intervals identity; **every activity has exactly one non-retired source whose mapping
-and fields round-trip**; sparse historical rows have a NULL fingerprint.
+and fields round-trip at its captured activity version**, and every later legacy update
+is in the Phase-3 drift set; sparse historical rows have a NULL fingerprint.
 
 **Phase 2 — identity-aware write path.** Upgrade the Phase-1 RPC to hash and
 fingerprint every new input. Select-then-insert exact-duplicate 409 on authoritative
@@ -1410,9 +1421,10 @@ rejecting the second**; and **two distinct sessions that collide on
 `repo.update_activity`, `merge_activity_text_update`, **and
 `build_activity_from_text`** to write an `athlete_override` source and route through
 recompose. Before enabling that path, backfill every existing non-null athlete field
-into a complete four-key override, assert that every row without one has four NULL
-athlete columns, then revoke direct `activities` UPDATE so only the enumerated definer
-RPCs can mutate it. The third writer is easy to miss and is not optional: it populates `rpe`,
+into a complete four-key override, convert any post-backfill projection drift
+(including corrected dates) against its captured source into override provenance,
+assert that every row without one has four NULL athlete columns, then revoke direct
+`activities` UPDATE so only the enumerated definer RPCs can mutate it. The third writer is easy to miss and is not optional: it populates `rpe`,
 `athlete_notes`, and `fueling_notes` directly on a `text_extract` activity today
 (`backend/services/activity_text.py:667-669`), so an athlete who describes a session
 in chat gets athlete-authored values on a source whose `ingest_format` is `text`, not
@@ -1587,7 +1599,7 @@ default run). Before remote apply: `supabase migration list --linked` and
 | File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null/zero rules at both tiers, hard negatives, sport conflict, `general`. Reconciler: fidelity/tie order, exact four-key override including explicit nulls, all athlete columns cleared with no override, `tss` recomputed, order independence. Regression: bridge a B-only override onto A, then un-bridge; A clears all athlete fields while B regains its exact values                                                                    |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | FK/rank and seven-source mapping/preflight. Gap inserts and shadow RPC each get one source. Backfill failure before/after checkpoint, repeat execution, an existing matching row, and a conflicting deterministic id all prove restart behavior; an anti-join hole blocks completion. Trigger removal requires clean second pass plus direct-INSERT revoke. Override uniqueness and marker CAS remain covered                                                                  |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | FK/rank/mapping; gap and shadow inserts. Backfill checkpoint failures, repeat, conflicts, and holes prove restart behavior. Race a legacy UPDATE on both sides of the row lock: pre-lock values are captured; post-lock update is detected as drift and Phase 3 converts it before recompose. Trigger removal requires clean second pass plus INSERT revoke. Override uniqueness and marker CAS remain covered                                                                 |
 | `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields remain immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. Recompose and bridge/un-bridge can only widen `load_rebuild_pending_from` to the earliest pre/post date; they cannot clear or move it later. Recompute clears only by compare-and-swap, and a concurrent earlier invalidation survives. No non-override source raises `22023`  |
 | `tests/python/test_supabase_repo.py`                                                    | Extend the fakes for `activity_sources` and `recompose_activity`; unknown RPC raises `AssertionError`, calls are exact, and composite-row data is handled as a dict. Confirm the presentation predicate applies to the two activity list methods and not `get_activity`; `list_synced_intervals_keys` queries Intervals source identities (including superseded/retired membership) rather than the lossy activity projection                                                  |
 | `tests/python/test_supabase_db.py`                                                      | RPC invariants: cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's ids/events; application roles cannot mutate events; definer RPC behavior remains owner-checked           |
