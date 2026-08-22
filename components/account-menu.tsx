@@ -39,6 +39,7 @@ function AccountMenu({
           onMenuItemClick();
         }
       }}
+      role="menu"
     >
       <div className={styles.accountSummary}>
         <span>Signed in</span>
@@ -51,6 +52,7 @@ function AccountMenu({
         className={styles.menuItem}
         data-menu-item
         onClick={onOpenProfile}
+        role="menuitem"
         type="button"
       >
         Profile
@@ -61,7 +63,12 @@ function AccountMenu({
         className={styles.menuForm}
         method="post"
       >
-        <button className={styles.menuItem} data-menu-item type="submit">
+        <button
+          className={styles.menuItem}
+          data-menu-item
+          role="menuitem"
+          type="submit"
+        >
           Sign out
         </button>
       </form>
@@ -85,7 +92,7 @@ export function AccountMenuButton({
     <div className={styles.accountMenuWrap}>
       <button
         aria-expanded={open}
-        aria-haspopup="dialog"
+        aria-haspopup="menu"
         aria-label="Account menu"
         className={styles.accountButton}
         onClick={() => setOpen((prev) => !prev)}
