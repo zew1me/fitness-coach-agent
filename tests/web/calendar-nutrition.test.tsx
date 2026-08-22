@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const coachApiMocks = vi.hoisted(() => ({
   loadCalendar: vi.fn(),
+  loadProfile: vi.fn(),
   resolvePlannedWorkout: vi.fn(),
+  saveProfile: vi.fn(),
 }));
 const sessionMocks = vi.hoisted(() => ({ useBrowserSession: vi.fn() }));
 
