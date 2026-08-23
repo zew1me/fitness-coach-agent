@@ -7,10 +7,17 @@ export function recordStageUsage(
 ): void {
   if (!usage) return;
   const entries = usage.requestUsageEntries ?? [];
+  const maxRequestInput = Math.max(
+    0,
+    ...entries.map((entry) => entry.inputTokens),
+  );
+  const requestSizeTokens =
+    entries.length > 0 ? maxRequestInput : usage.inputTokens;
   Sentry.logger.info("coach model stage usage", {
     stage,
     request_count: usage.requests,
     input_tokens: usage.inputTokens,
+    request_size_tokens: requestSizeTokens,
     cached_tokens: entries.reduce(
       (sum, entry) => sum + (entry.inputTokensDetails["cached_tokens"] ?? 0),
       0,
@@ -22,9 +29,6 @@ export function recordStageUsage(
       0,
     ),
     total_tokens: usage.totalTokens,
-    max_request_input: Math.max(
-      0,
-      ...entries.map((entry) => entry.inputTokens),
-    ),
+    max_request_input: maxRequestInput,
   });
 }
