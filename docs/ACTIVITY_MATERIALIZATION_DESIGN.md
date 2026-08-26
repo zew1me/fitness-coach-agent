@@ -139,11 +139,27 @@ filed separately so they can ship without waiting for this design to be approved
 | #462  | `_activity_source_for_filename` can emit `"file_upload"`, which is not in `activities_source_check`, producing a CHECK violation surfaced as 503 | The same upload path is being rewritten here, and the backfill's source mapping is total over the _valid_ allow-list — a stored `file_upload` row would abort it. |
 | #463  | No reader for a sport threshold as of a past date; `get_active_thresholds` returns current values only                                           | Recomputing a historical TSS uses today's FTP. Not a hard blocker — the rule in "Derived values" bounds the exposure — but it removes the imprecision properly.   |
 
-**If #461 is not fixed first**, Phase 4 must not ship: every merge would mark load stale
-and every rebuild would write a wrong series, which is worse than the double-counting
-this design exists to remove. **If #462 is not fixed first**, Phase 1's backfill
-preflight will abort on any `file_upload` row that reached the table, and the Phase 1
-write path can still produce them.
+### Sequencing
+
+**#461 is a hard gate on Phase 4 and should ship well before it.** Phase 4 is the first
+phase that merges anything, and every merge marks a load window stale. With #461
+unfixed, each of those rebuilds seeds from the newest snapshot and reads through a
+500-row cap, so the rebuild writes a _wrong_ series rather than a corrected one. That is
+strictly worse than the double-counting this design exists to remove: today the error is
+an over-count with an identifiable cause, whereas afterwards it would be an arbitrary
+series with none. Do not ship Phase 4 against an unfixed #461 — and prefer to land #461
+on its own, ahead of Phase 1, rather than carrying it as a Phase 0 task inside this work.
+It is an independent bug fix with independent value, and holding it hostage to this
+design's review cycle leaves a live defect shipped for no reason.
+
+**#462 gates Phase 1.** The backfill's source mapping is total over the _valid_
+`activities_source_check` allow-list, and its preflight aborts on any unmapped value. A
+`file_upload` row that reached the table would therefore stop the backfill outright, and
+the Phase 1 write path can still produce them until #462 lands.
+
+**#463 gates nothing.** The rule in "Derived values" bounds the exposure to activities
+whose inputs a merge actually changed, within the 90-day horizon. It should land when
+convenient, not as a blocker.
 
 ---
 
@@ -176,27 +192,16 @@ create table public.activity_sources (
   provider text not null check (provider in (
     'garmin','intervals','strava','wahoo','coros','polar','suunto','athlete','unknown'
   )),
-  ingest_format text not null check (ingest_format in (
-    'fit','gpx','tcx','intervals_api','text','screenshot','manual','athlete_override'
-  )),
+  -- FK to the fidelity reference table rather than a CHECK list, so the permitted
+  -- formats and their ranks are defined in exactly one place. There is deliberately
+  -- no fidelity_rank column here — see "Source fidelity lives in a reference table".
+  ingest_format text not null references public.activity_ingest_formats(ingest_format),
   external_id text,
   object_key text,
   content_hash text,
   payload_fingerprint text,
   fields jsonb not null default '{}'::jsonb,
   raw_extraction jsonb,
-  -- Generated, never supplied, so the rank and the format cannot disagree. See
-  -- "fidelity_rank" below, including an open decision about replacing this.
-  fidelity_rank integer generated always as (case ingest_format
-    when 'athlete_override' then 0
-    when 'fit' then 1
-    when 'tcx' then 2
-    when 'gpx' then 3
-    when 'intervals_api' then 4
-    when 'text' then 5
-    when 'screenshot' then 6
-    when 'manual' then 7
-  end) stored not null,
   recorded_at timestamptz,
   retired_at timestamptz,
   created_at timestamptz not null default timezone('utc', now()),
@@ -255,41 +260,65 @@ Three cases these keys must get right:
 | Two distinct members of one ZIP | both stored             | Distinct bytes, distinct hashes                                                                                                                                                     |
 | Text extract                    | never rejected as exact | No bytes ⇒ `content_hash` NULL, and NULLs are distinct in a unique index. A fingerprint may still be computed — it just cannot reject                                               |
 
-### `fidelity_rank`
+### Source fidelity lives in a reference table, not on the row
 
-A plain `integer not null` would accept `('fit', 7)` — a FIT source ranked below a manual
-entry. The reconciler sorts by rank, so the manual entry's numbers would overwrite the
-FIT's, and the athlete would see a ride with wrong power and no obvious cause. One writer
-inserting a stale constant is enough.
+Fidelity ordering decides which source wins a contested field, so a row carrying its own
+rank is a row that can carry a _wrong_ rank. A plain `integer not null` column would
+accept `('fit', 7)` — a FIT source ranked below a manual entry — and the failure is silent
+in the worst way: the reconciler sorts by rank, the manual entry's numbers overwrite the
+FIT's, and the athlete sees a ride with wrong power and no obvious cause. One writer
+inserting a stale constant is enough to cause it.
 
-The generated column removes the possibility rather than policing it. The mapping is
-total over the eight permitted formats, there is no `else` branch to mask an omission,
-and `not null` makes an allow-list change without a matching `case` arm fail on insert.
-It composes with the evidence guard below: a generated column can only change when
-`ingest_format` changes, and that is immutable evidence, so the rank inherits
-immutability without being named in the guard.
-
-**Cost, and an open decision.** Changing the mapping later means
-`alter table … alter column fidelity_rank set expression as (…)`, which requires
-**Postgres 17** and rewrites the table under `ACCESS EXCLUSIVE`. `supabase/config.toml:36`
-pins `major_version = 17` locally; the hosted preview and production projects must be
-confirmed to match before relying on it.
-
-A reference table would avoid both the version dependency and the duplicated allow-list:
+Rank is a property of the **format**, not of the row, so it is stored that way:
 
 ```sql
 create table public.activity_ingest_formats (
   ingest_format text primary key,
-  fidelity_rank integer not null unique
+  fidelity_rank integer not null unique,
+  created_at timestamptz not null default timezone('utc', now())
 );
+
+insert into public.activity_ingest_formats (ingest_format, fidelity_rank) values
+  ('athlete_override', 0),
+  ('fit',              1),
+  ('tcx',              2),
+  ('gpx',              3),
+  ('intervals_api',    4),
+  ('text',             5),
+  ('screenshot',       6),
+  ('manual',           7);
 ```
 
-with `activity_sources.ingest_format` as an FK to it and no generated column. Changing a
-rank becomes a one-row `UPDATE`; adding a format becomes one `INSERT` instead of a CHECK
-migration plus a generated-expression migration; and the format list stops existing in
-two places that must agree. The per-row staleness hazard disappears entirely, because
-rank becomes a property of the format rather than of the row. The reconciler joins once,
-or the repo caches seven rows. **Unresolved — see "Open decisions".**
+`activity_sources.ingest_format` is a foreign key to it, and there is no `fidelity_rank`
+column on `activity_sources` at all. The per-row staleness hazard is not policed — it
+becomes unrepresentable, because there is no per-row rank to be stale.
+
+Three further consequences, all of which favour this over a generated column:
+
+- **The format allow-list exists once.** A generated column would have required the eight
+  formats in a `CHECK` constraint _and_ in a `case` expression, kept in agreement by
+  review. Here the primary key is the allow-list, and the FK enforces it.
+- **Changing a rank is a one-row `UPDATE`.** No table rewrite, no `ACCESS EXCLUSIVE` lock.
+  Adding a format is one `INSERT` rather than a `CHECK` migration plus a
+  generated-expression migration. (All three Supabase projects are on Postgres 17 — local
+  `supabase/config.toml:36`, preview 17.6.1.105, production 17.6.1.155 — so
+  `alter column … set expression` was available; it is simply the worse tool here.)
+- **The `unique` on `fidelity_rank` makes ties impossible**, which matters because the
+  reconciler's tie-break assumes a total order over formats before it ever reaches
+  `created_at`.
+
+`activity_ingest_formats` is reference data, not athlete data: it carries no `user_id`,
+gets `select` for `authenticated` and `service_role`, and `insert`/`update`/`delete`
+revoked from application roles so the mapping only changes by migration. RLS is enabled
+with a permissive read policy rather than left off, so the table matches the
+all-tables-have-RLS posture established by `20260816191358_rls_and_security.sql`.
+
+**The reconciler resolves rank by lookup, not by row.** It loads the eight rows once per
+process and sorts sources by `(fidelity_rank[ingest_format], created_at, id)`. Since
+`ingest_format` is immutable evidence (see the evidence/state boundary), a source's
+effective rank can only change when the _mapping_ changes — which is a reviewed migration,
+and which is the point: re-ranking a format is a deliberate, auditable act rather than
+something a writer can do by accident.
 
 ### Cross-user references are closed by the schema, not by the RPCs
 
@@ -408,11 +437,11 @@ the database rather than by convention.
 Every field that resolves, retires, supersedes, or overrides those values lives in the
 narrow mutable set below and nowhere else.
 
-| Class                                                               | Fields                                                                                                                                                                                                           | Rule                                                                                  |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| **Immutable evidence** — what this input said                       | `id`, `user_id`, `origin_activity_id`, `provider`, `ingest_format`, `fidelity_rank`, `external_id`, `object_key`, `content_hash`, `payload_fingerprint`, `fields`, `raw_extraction`, `recorded_at`, `created_at` | Written once at insert. **Any `UPDATE` that changes one is rejected by the database** |
-| **Mutable state** — how the system currently resolves that evidence | `activity_id` (group membership), `retired_at` (lifecycle)                                                                                                                                                       | Written only by the merge/bridge/retire RPCs, under the documented lock order         |
-| **Trigger-managed**                                                 | `updated_at`                                                                                                                                                                                                     | `set_updated_at`, as everywhere else in this schema                                   |
+| Class                                                               | Fields                                                                                                                                                                                          | Rule                                                                                  |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **Immutable evidence** — what this input said                       | `id`, `user_id`, `origin_activity_id`, `provider`, `ingest_format`, `external_id`, `object_key`, `content_hash`, `payload_fingerprint`, `fields`, `raw_extraction`, `recorded_at`, `created_at` | Written once at insert. **Any `UPDATE` that changes one is rejected by the database** |
+| **Mutable state** — how the system currently resolves that evidence | `activity_id` (group membership), `retired_at` (lifecycle)                                                                                                                                      | Written only by the merge/bridge/retire RPCs, under the documented lock order         |
+| **Trigger-managed**                                                 | `updated_at`                                                                                                                                                                                    | `set_updated_at`, as everywhere else in this schema                                   |
 
 Two mutable columns is the entire surface. A future requirement needing a third gets added
 to this table and to the guard in the same change, or it does not ship.
@@ -467,10 +496,12 @@ the sense the scoping rule forbids: it constrains a row the athlete's own edit c
 recovery is to retire the previous override and retry, and no ingested workout can be lost
 to it.
 
-**Accepted consequence.** Because `provider`, `ingest_format`, and `fidelity_rank` are
-evidence, improving provider inference later cannot re-label rows in flight — it takes a
-backfill migration, reviewed as one. That is the intended trade: a label that can silently
-change underneath a stored fidelity ordering can silently change which source won a field.
+**Accepted consequence.** Because `provider` and `ingest_format` are evidence, improving
+provider inference later cannot re-label rows in flight — it takes a backfill migration,
+reviewed as one. That is the intended trade: a label that can silently change underneath a
+fidelity ordering can silently change which source won a field. Note this is why
+`ingest_format` being immutable matters more than it looks: it is the key that resolves a
+source's rank, so freezing it freezes the row's position in the merge order.
 
 ### Changes to `activities`
 
@@ -649,7 +680,7 @@ needs storing now.
 
 `source`, `source_file_key`, and `raw_extraction` are selected from **one** source rather
 than mixed. Ignore `athlete_override` rows, then take the first live source in the ordinary
-`fidelity_rank`, `created_at`, `id` order; map its `ingest_format` back to the existing
+fidelity, `created_at`, `id` order; map its `ingest_format` back to the existing
 `activities.source` vocabulary (`fit → fit_upload`, `gpx → gpx_upload`, `tcx → tcx_upload`,
 `intervals_api → intervals_sync`, `text → text_extract`,
 `screenshot → screenshot_extract`, `manual → manual`), copy `object_key` to
@@ -1365,10 +1396,10 @@ Per AGENTS.md, `docs/supabase-migration-history.md` is updated **in the same cha
 
 Each phase is independently shippable and ends in something verifiable.
 
-**Phase 0 — unblock.** Ship #461 and #462. Neither is part of this design's scope; both are
-prerequisites. _Verifiable:_ a backward window rebuild produces correct CTL; a rebuild window holding
-more than 500 activities still includes the oldest of them; a `.fit` file with no suffix saves instead
-of 503-ing.
+**Phase 0 — unblock.** Ship #461 and #462 as independent fixes, ideally merged before Phase 1
+rather than tracked inside it (see "Sequencing"). _Verifiable:_ a backward window rebuild produces
+correct CTL; a rebuild window holding more than 500 activities still includes the oldest of them; a
+`.fit` file with no suffix saves instead of 503-ing.
 
 **Phase 1 — schema and gap-free shadow write.** Expand migration, temporary legacy-insert trigger,
 shadow `create_activity_with_source` RPC on every ingestion path, resumable backfill, invariant
@@ -1490,13 +1521,16 @@ the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display
 
 ## Open decisions
 
-1. **`fidelity_rank`: generated column or reference table?** See "fidelity_rank". The reference table
-   removes the Postgres 17 dependency and the duplicated allow-list, at the cost of a join. Needs a
-   decision before the Phase 1 migration is written.
-2. **Are the hosted preview and production projects on Postgres 17?** `supabase/config.toml:36` pins
-   17 locally. If either hosted project is older, `alter column … set expression` is unavailable and
-   decision 1 resolves to the reference table by default.
-3. **Tier A/B tolerances.** ±10 min, ±5%, ±1 day, ±10% are guesses until they meet real athlete data.
+1. **Tier A/B tolerances.** ±10 min, ±5%, ±1 day, ±10% are guesses until they meet real athlete
+   data. Budget for tuning after Phase 4 rather than trying to get them right up front.
+
+**Settled since the first draft**, recorded so they are not reopened:
+
+- **Source fidelity is a reference table**, not a generated column — see "Source fidelity lives in
+  a reference table".
+- **Every environment is on Postgres 17**: local `supabase/config.toml:36`, preview 17.6.1.105,
+  production 17.6.1.155 (`supabase projects list`). So `NULLS NOT DISTINCT` on
+  `load_rebuild_pending` and any other 15+ feature are safe to rely on.
 
 ---
 
@@ -1504,7 +1538,7 @@ the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display
 
 | Area      | Files                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Migration | `supabase/migrations/<ts>_activity_sources.sql`, `<ts>_load_rebuild_pending.sql`, `<ts>_retire_intervals_activity_key.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_consent.sql`, `<ts>_activity_merge_events.sql`, `docs/supabase-migration-history.md`                                                                                                                                                      |
+| Migration | `supabase/migrations/<ts>_activity_ingest_formats.sql`, `<ts>_activity_sources.sql`, `<ts>_load_rebuild_pending.sql`, `<ts>_retire_intervals_activity_key.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_consent.sql`, `<ts>_activity_merge_events.sql`, `docs/supabase-migration-history.md`                                                                                                                  |
 | Model     | `backend/models/training.py` (`Activity` gains the new columns; new `ActivitySource`)                                                                                                                                                                                                                                                                                                                                         |
 | Repo      | `backend/repos/supabase_repo.py` — `presentation_state` predicate on `list_activities`/`list_activities_between`; move `list_synced_intervals_keys` to source identities; **replace `create_intervals_activity`'s constraint-targeted upsert**; new `create_activity_with_source`, `list_activity_sources`, `list_dedup_candidates`, `recompose_activity`, `get_load_snapshot_on_or_before`, `load_rebuild_pending` accessors |
 | Services  | `backend/services/activity_dedup.py` (new — pure scorer + reconciler); `backend/services/activity_text.py` (Phase 3); `backend/services/intervals.py` (Phase 2)                                                                                                                                                                                                                                                               |
@@ -1534,19 +1568,19 @@ production separately.
 
 **New tests:**
 
-| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null/zero rules at both tiers, hard negatives, sport conflict, `general`. Reconciler: fidelity/tie order, exact four-key override including explicit nulls, all athlete columns cleared with no override, derived values rebuilt only when an input changed, provider TSS preferred over recomputation, order independence. Regression: bridge a B-only override onto A, then un-bridge        |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | FK/rank/mapping; gap and shadow inserts. Backfill checkpoint failures, repeat, conflicts, and holes prove restart behavior. Race a legacy UPDATE on both sides of the row lock. Trigger removal requires clean second pass plus INSERT revoke. Override uniqueness. `presentation_state` agrees with the live-source-set predicate for every row                                                                                 |
-| `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. No non-override source raises `22023`                                                                                                                                                                                                   |
-| `tests/python/test_supabase_db.py` (load invalidation)                                  | Recompose/bridge/un-bridge upsert both the sport row and the aggregate row and may only widen `pending_from`. Recompute deletes only by compare-and-swap. A concurrent earlier invalidation survives a slow rebuild. A cycling recompute cannot clear a running row                                                                                                                                                              |
-| `tests/python/test_supabase_repo.py`                                                    | Extend fakes for sources/recompose; unknown RPC fails, calls are exact, composite-row data is a dict. Presentation filtering stays on activity lists, not `get_activity`. `list_synced_intervals_keys` reads non-retired Intervals source identities rather than the projection                                                                                                                                                  |
-| `tests/python/test_supabase_db.py` (RPC invariants)                                     | Cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's                                                                            |
-| `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant-authored, and non-matching confirmations without a write; a missing user-turn row rejects rather than falling back; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges atomically and consumes once |
-| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows leave calendar/compliance. Intervals idempotency survives the constraint drop and reads live source ids; a re-sync after the canonical-entry-point conversion creates no second activity; a bridge can project a reparented Intervals source without a uniqueness failure                                                                                                                                        |
-| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves its pending rows and is absorbed by the next run                                                                                                                                                                                                                                                    |
-| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas; merge accepts a proposal id but exposes no confirmation message id, confirmation boolean/text, member replacement, or override-resolution argument (nested object fields remain `.nullable()`, not `.optional()`)                                                                                                                                                                                    |
-| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                |
+| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null/zero rules at both tiers, hard negatives, sport conflict, `general`. Reconciler: fidelity/tie order, exact four-key override including explicit nulls, all athlete columns cleared with no override, derived values rebuilt only when an input changed, provider TSS preferred over recomputation, order independence. Regression: bridge a B-only override onto A, then un-bridge                                                                                          |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | The ingest-format FK rejects an unknown format; `fidelity_rank` is unique so the merge order is total; application roles cannot write `activity_ingest_formats`. Backfill mapping; gap and shadow inserts. Backfill checkpoint failures, repeat, conflicts, and holes prove restart behavior. Race a legacy UPDATE on both sides of the row lock. Trigger removal requires clean second pass plus INSERT revoke. Override uniqueness. `presentation_state` agrees with the live-source-set predicate for every row |
+| `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. No non-override source raises `22023`                                                                                                                                                                                                                                                                                     |
+| `tests/python/test_supabase_db.py` (load invalidation)                                  | Recompose/bridge/un-bridge upsert both the sport row and the aggregate row and may only widen `pending_from`. Recompute deletes only by compare-and-swap. A concurrent earlier invalidation survives a slow rebuild. A cycling recompute cannot clear a running row                                                                                                                                                                                                                                                |
+| `tests/python/test_supabase_repo.py`                                                    | Extend fakes for sources/recompose; unknown RPC fails, calls are exact, composite-row data is a dict. Presentation filtering stays on activity lists, not `get_activity`. `list_synced_intervals_keys` reads non-retired Intervals source identities rather than the projection                                                                                                                                                                                                                                    |
+| `tests/python/test_supabase_db.py` (RPC invariants)                                     | Cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's                                                                                                                                                              |
+| `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant-authored, and non-matching confirmations without a write; a missing user-turn row rejects rather than falling back; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges atomically and consumes once                                                                                   |
+| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows leave calendar/compliance. Intervals idempotency survives the constraint drop and reads live source ids; a re-sync after the canonical-entry-point conversion creates no second activity; a bridge can project a reparented Intervals source without a uniqueness failure                                                                                                                                                                                                                          |
+| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves its pending rows and is absorbed by the next run                                                                                                                                                                                                                                                                                                                                      |
+| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas; merge accepts a proposal id but exposes no confirmation message id, confirmation boolean/text, member replacement, or override-resolution argument (nested object fields remain `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                      |
+| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 **End-to-end manual check** (`bun run dev:local`): upload a FIT file → confirm one calendar entry;
 upload the identical file again → confirm 409 naming the first activity; sync the same ride from
