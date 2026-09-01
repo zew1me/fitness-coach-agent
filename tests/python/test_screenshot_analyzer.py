@@ -9,6 +9,11 @@ from typing import Any
 
 import pytest
 from openai import OpenAIError
+from openai.types.responses.response_usage import (
+    InputTokensDetails,
+    OutputTokensDetails,
+    ResponseUsage,
+)
 from pydantic import ValidationError
 
 from backend.config import Settings
@@ -38,7 +43,7 @@ class FakeVisionResponse:
         refusal: str | None = None,
         error: Any = None,
         incomplete_reason: str | None = None,
-        usage: Any = None,
+        usage: ResponseUsage | None = None,
     ) -> None:
         self.status = status
         self.output_parsed = output_parsed
@@ -338,11 +343,11 @@ async def test_call_vision_records_stage_and_separate_reasoning_usage(
         output_parsed=screenshot_analyzer.ScreenshotClassificationModel(
             screenshot_type="activity_single", confidence=0.9
         ),
-        usage=SimpleNamespace(
+        usage=ResponseUsage(
             input_tokens=900,
-            input_tokens_details=SimpleNamespace(cached_tokens=100),
+            input_tokens_details=InputTokensDetails(cached_tokens=100),
             output_tokens=420,
-            output_tokens_details=SimpleNamespace(reasoning_tokens=300),
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=300),
             total_tokens=1320,
         ),
     )

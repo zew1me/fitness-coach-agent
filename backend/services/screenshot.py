@@ -17,8 +17,10 @@ from typing import Any, TypeVar
 
 import sentry_sdk
 from openai import AsyncOpenAI, OpenAIError
+from openai.types.responses import ResponseUsage
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
+from sentry_sdk.tracing import Span
 
 from backend.config import settings
 from backend.models.screenshot import (
@@ -262,7 +264,7 @@ def _refusal_text(response: Any) -> str | None:
     return None
 
 
-def _record_vision_usage(span: Any, response: Any) -> None:
+def _record_vision_usage(span: Span, usage: ResponseUsage) -> None:
     """Attach Responses API token usage to the manual vision span.
 
     Sentry's OpenAI integration instruments ``responses.create`` but not the SDK's
@@ -270,32 +272,20 @@ def _record_vision_usage(span: Any, response: Any) -> None:
     reasoning subset, plus the derived non-reasoning content count, so latency can be
     compared against each independently.
     """
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return
-
     token_attributes = {
-        "gen_ai.usage.input_tokens": getattr(usage, "input_tokens", None),
-        "gen_ai.usage.output_tokens": getattr(usage, "output_tokens", None),
-        "gen_ai.usage.total_tokens": getattr(usage, "total_tokens", None),
-        "gen_ai.usage.input_tokens.cached": getattr(
-            getattr(usage, "input_tokens_details", None), "cached_tokens", None
-        ),
-        "gen_ai.usage.output_tokens.reasoning": getattr(
-            getattr(usage, "output_tokens_details", None), "reasoning_tokens", None
-        ),
+        "gen_ai.usage.input_tokens": usage.input_tokens,
+        "gen_ai.usage.output_tokens": usage.output_tokens,
+        "gen_ai.usage.total_tokens": usage.total_tokens,
+        "gen_ai.usage.input_tokens.cached": usage.input_tokens_details.cached_tokens,
+        "gen_ai.usage.output_tokens.reasoning": usage.output_tokens_details.reasoning_tokens,
     }
     for key, value in token_attributes.items():
-        if isinstance(value, int):
-            span.set_data(key, value)
+        span.set_data(key, value)
 
-    output_tokens = token_attributes["gen_ai.usage.output_tokens"]
-    reasoning_tokens = token_attributes["gen_ai.usage.output_tokens.reasoning"]
-    if isinstance(output_tokens, int) and isinstance(reasoning_tokens, int):
-        span.set_data(
-            "openai.usage.output_tokens.non_reasoning",
-            max(output_tokens - reasoning_tokens, 0),
-        )
+    span.set_data(
+        "openai.usage.output_tokens.non_reasoning",
+        usage.output_tokens - usage.output_tokens_details.reasoning_tokens,
+    )
 
 
 def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
@@ -387,7 +377,8 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
                     max_output_tokens=settings.openai_vision_max_output_tokens,
                     reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
                 )
-                _record_vision_usage(span, response)
+                if response.usage is not None:
+                    _record_vision_usage(span, response.usage)
     except TimeoutError:
         logger.warning(
             "screenshot vision call exceeded its total budget type=%s budget=%ss",
