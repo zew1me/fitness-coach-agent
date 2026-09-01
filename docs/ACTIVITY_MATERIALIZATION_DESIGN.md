@@ -3,7 +3,7 @@
 **Status: proposed, not implemented.** Every reference to existing code is real and
 current. Every reference to new tables, columns, RPCs, and services is a plan.
 
-Issue: #397. Prerequisite bug fixes: #461, #462. Related follow-ups: #463, #464.
+Issue: #397. Prerequisite bug fixes: #447, #462. Related follow-ups: #463, #464, #467.
 
 ## Context
 
@@ -43,12 +43,13 @@ It is **not** a materialized view, and describing it as one sets the wrong expec
 A view has a single writer and no independent state. This table has four distinct jobs,
 and the ownership matrix under "Projection ownership" is the enumeration of them:
 
-| Job                 | Columns                                                                     | Nature                                                                                                                    |
-| ------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **Projection**      | every metric, `sport`, dates, the legacy provenance triplet, derived values | Recomputed from the live source set. This is the part that behaves like a view.                                           |
-| **Identity anchor** | `id`, `user_id`, `created_at`                                               | Stable forever. `plan_workouts.actual_activity_id` and every index depend on it.                                          |
-| **Link state**      | `planned_workout_id`                                                        | An explicit assertion by the athlete or coach. Never derived, never field-merged. **Removed before Phase 5** — see below. |
-| **Lifecycle**       | `presentation_state`, `superseded_by_activity_id`                           | Which row is presented after a bridge. See the note below — mostly derivable.                                             |
+| Job                    | Columns                                                                     | Nature                                                                                                                    |
+| ---------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **Projection**         | every metric, `sport`, dates, the legacy provenance triplet, derived values | Recomputed from the live source set. This is the part that behaves like a view.                                           |
+| **Identity anchor**    | `id`, `user_id`, `created_at`                                               | Stable forever. `plan_workouts.actual_activity_id` and every index depend on it.                                          |
+| **Link state**         | `planned_workout_id`                                                        | An explicit assertion by the athlete or coach. Never derived, never field-merged. **Removed before Phase 5** — see below. |
+| **Lifecycle**          | `presentation_state`, `superseded_by_activity_id`                           | Which row is presented after a bridge. See the note below — mostly derivable.                                             |
+| **Recompose metadata** | `source_count`, `field_provenance`, `materialized_at`                       | Bookkeeping about the projection itself: how many sources fed it, which won each field, when it was last rebuilt.         |
 
 Two things that would otherwise land here are deliberately kept out:
 
@@ -135,24 +136,25 @@ recompute over.
 
 ## Prerequisite bug fixes
 
-Three defects block this work. All are live today, independent of deduplication, and
-filed separately so they can ship without waiting for this design to be approved.
+Two defects block this work and a third removes an accepted imprecision. All are live
+today, independent of deduplication, and filed separately so they can ship without waiting
+for this design to be approved.
 
 | Issue | Defect                                                                                                                                           | Why this design needs it                                                                                                                                          |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| #461  | `recompute_load_endpoint` seeds CTL/ATL from the **newest** snapshot regardless of `since`, and reads candidates through a 500-row display query | Merging changes historical daily TSS. Without both fixes a backward rebuild produces wrong numbers, so a merge cannot correct load — it can only move the error.  |
+| #447  | `recompute_load_endpoint` seeds CTL/ATL from the **newest** snapshot regardless of `since`, and reads candidates through a 500-row display query | Merging changes historical daily TSS. Without both fixes a backward rebuild produces wrong numbers, so a merge cannot correct load — it can only move the error.  |
 | #462  | `_activity_source_for_filename` can emit `"file_upload"`, which is not in `activities_source_check`, producing a CHECK violation surfaced as 503 | The same upload path is being rewritten here, and the backfill's source mapping is total over the _valid_ allow-list — a stored `file_upload` row would abort it. |
 | #463  | No reader for a sport threshold as of a past date; `get_active_thresholds` returns current values only                                           | Recomputing a historical TSS uses today's FTP. Not a hard blocker — the rule in "Derived values" bounds the exposure — but it removes the imprecision properly.   |
 
 ### Sequencing
 
-**#461 is a hard gate on Phase 4 and should ship well before it.** Phase 4 is the first
-phase that merges anything, and every merge marks a load window stale. With #461
+**#447 is a hard gate on Phase 4 and should ship well before it.** Phase 4 is the first
+phase that merges anything, and every merge marks a load window stale. With #447
 unfixed, each of those rebuilds seeds from the newest snapshot and reads through a
 500-row cap, so the rebuild writes a _wrong_ series rather than a corrected one. That is
 strictly worse than the double-counting this design exists to remove: today the error is
 an over-count with an identifiable cause, whereas afterwards it would be an arbitrary
-series with none. Do not ship Phase 4 against an unfixed #461 — and prefer to land #461
+series with none. Do not ship Phase 4 against an unfixed #447 — and prefer to land #447
 on its own, ahead of Phase 1, rather than carrying it as a Phase 0 task inside this work.
 It is an independent bug fix with independent value, and holding it hostage to this
 design's review cycle leaves a live defect shipped for no reason.
@@ -343,15 +345,10 @@ owner checks remain, because a caller must still be denied the _existence_ of an
 athlete's activity, but they are no longer the only thing between a bug and a tenancy
 leak.
 
-The same treatment applies to `activities.superseded_by_activity_id`, which otherwise
-lets one athlete's activity be superseded by another's:
-
-```sql
-alter table public.activities
-  add constraint activities_superseded_by_same_user
-  foreign key (superseded_by_activity_id, user_id)
-  references public.activities(id, user_id) on delete set null;
-```
+The same treatment applies to `activities.superseded_by_activity_id`, which otherwise lets
+one athlete's activity be superseded by another's; both that FK and the redundant
+`unique (id, user_id)` those composite references target are declared in
+"Changes to `activities`" below.
 
 ### Scoping the byte-identity key: `(user_id, content_hash)` and nothing else
 
@@ -445,7 +442,7 @@ narrow mutable set below and nowhere else.
 | Class                                                               | Fields                                                                                                                                                                                          | Rule                                                                                  |
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **Immutable evidence** — what this input said                       | `id`, `user_id`, `origin_activity_id`, `provider`, `ingest_format`, `external_id`, `object_key`, `content_hash`, `payload_fingerprint`, `fields`, `raw_extraction`, `recorded_at`, `created_at` | Written once at insert. **Any `UPDATE` that changes one is rejected by the database** |
-| **Mutable state** — how the system currently resolves that evidence | `activity_id` (group membership), `retired_at` (lifecycle)                                                                                                                                      | Written only by the merge/bridge/retire RPCs, under the documented lock order         |
+| **Mutable state** — how the system currently resolves that evidence | `activity_id` (group membership), `retired_at` (lifecycle)                                                                                                                                      | Written only by the merge and bridge/un-bridge RPCs, under the documented lock order  |
 | **Trigger-managed**                                                 | `updated_at`                                                                                                                                                                                    | `set_updated_at`, as everywhere else in this schema                                   |
 
 Two mutable columns is the entire surface. A future requirement needing a third gets added
@@ -511,14 +508,26 @@ source's rank, so freezing it freezes the row's position in the merge order.
 ### Changes to `activities`
 
 ```sql
+-- Redundant to the primary key, and that is the point: it is the target a composite FK
+-- can reference. Required by activity_sources, activity_merge_proposal_members, and
+-- activity_merge_events. See "Cross-user references are closed by the schema".
+alter table public.activities
+  add constraint activities_id_user_id_key unique (id, user_id);
+
 alter table public.activities
   add column source_count integer not null default 1,
   add column field_provenance jsonb not null default '{}'::jsonb,
   add column presentation_state text not null default 'active'
     check (presentation_state in ('active','superseded')),
-  add column superseded_by_activity_id uuid
-    references public.activities(id) on delete set null,
+  add column superseded_by_activity_id uuid,
   add column materialized_at timestamptz;
+
+-- Composite, not a single-column self-reference: the narrow form would let one athlete's
+-- activity be superseded by another's.
+alter table public.activities
+  add constraint activities_superseded_by_same_user
+  foreign key (superseded_by_activity_id, user_id)
+  references public.activities(id, user_id) on delete set null;
 ```
 
 **The self-FK must be `on delete set null`, not `restrict`.** `activities.user_id` is
@@ -635,7 +644,7 @@ never relies on call order or JSON iteration order.
 | Derived — `tss`, `intensity_factor`, `activity_summary`, `summary_schema_version`                                                                                                                                     | See "Derived values" below                                                                                             |
 | Athlete-authored — `rpe`, `athlete_notes`, `fatigue_notes`, `fueling_notes`                                                                                                                                           | Exact four-key value from the one live `athlete_override`; all four become NULL when no live override exists           |
 | `source`, `source_file_key`, `raw_extraction`                                                                                                                                                                         | Copied as one triplet from the first live non-override source in the same total fidelity order; see below              |
-| `planned_workout_id`                                                                                                                                                                                                  | Never field-merged. Transferred only by the explicit link RPC under lock                                               |
+| `planned_workout_id`                                                                                                                                                                                                  | Never field-merged. Transferred only by the explicit link RPC under lock. Dropped by the Phase-5 prerequisite          |
 
 ### Derived values
 
@@ -702,7 +711,7 @@ keyset-paginated query over non-retired
 
 Once that source-backed reader and the external-id index are live, Phase 2 drops both
 `activities_intervals_source_file_key_unique` and the generated
-`activities.intervals_source_file_key` column. Leaving them through Phase 4 is incorrect: a
+`activities.intervals_source_file_key` column. Deferring that drop to a later phase is incorrect: a
 superseded Intervals-origin row can retain `intervals:{id}` while survivor recomposition
 selects the reparented Intervals source and projects the same key, making the bridge fail
 with `23505`. Source identity now owns that invariant. Phase 4 has a migration preflight
@@ -727,16 +736,16 @@ column on the projection. That refactor is a required part of Phase 2, not a fol
 
 There is no catch-all. Every `activities` column belongs to exactly one writer class:
 
-| Writer class                         | Complete column set                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Insert identity, then immutable      | `id`, `user_id`, `created_at`                                                                                                                                                                                                                                                                                                               |
-| Reconciled source projection         | `sport`, `activity_date`, `started_at`, `duration_seconds`, `distance_meters`, `elevation_gain_meters`, `avg_hr_bpm`, `max_hr_bpm`, `avg_power_watts`, `normalized_power_watts`, `avg_pace_sec_per_km`, `avg_cadence_rpm`, `zone_distribution`, `source`, `source_file_key`, `raw_extraction`, `summary_schema_version`, `activity_summary` |
-| Rebuilt by the reconciler            | `tss`, `intensity_factor`                                                                                                                                                                                                                                                                                                                   |
-| Athlete override, via the reconciler | `rpe`, `athlete_notes`, `fatigue_notes`, `fueling_notes`                                                                                                                                                                                                                                                                                    |
-| Recompose metadata                   | `source_count`, `field_provenance`, `materialized_at`                                                                                                                                                                                                                                                                                       |
-| Plan-link RPCs only                  | `planned_workout_id` (until the Phase-5 prerequisite drops the column; the relationship then lives only on `plan_workouts.actual_activity_id`)                                                                                                                                                                                              |
-| Bridge/un-bridge RPCs only           | `presentation_state`, `superseded_by_activity_id`                                                                                                                                                                                                                                                                                           |
-| Trigger-managed                      | `updated_at`; the legacy generated `intervals_source_file_key` is removed in Phase 2                                                                                                                                                                                                                                                        |
+| Writer class                         | Complete column set                                                                                                                                                                                                                                                                           |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Insert identity, then immutable      | `id`, `user_id`, `created_at`                                                                                                                                                                                                                                                                 |
+| Reconciled source projection         | `sport`, `activity_date`, `started_at`, `duration_seconds`, `distance_meters`, `elevation_gain_meters`, `avg_hr_bpm`, `max_hr_bpm`, `avg_power_watts`, `normalized_power_watts`, `avg_pace_sec_per_km`, `avg_cadence_rpm`, `zone_distribution`, `source`, `source_file_key`, `raw_extraction` |
+| Derived, per "Derived values"        | `tss`, `intensity_factor`, `activity_summary`, `summary_schema_version` — rebuilt from the merged field set only when an input to them changed, and a provider-supplied `tss` is projected rather than recomputed                                                                             |
+| Athlete override, via the reconciler | `rpe`, `athlete_notes`, `fatigue_notes`, `fueling_notes`                                                                                                                                                                                                                                      |
+| Recompose metadata                   | `source_count`, `field_provenance`, `materialized_at`                                                                                                                                                                                                                                         |
+| Plan-link RPCs only                  | `planned_workout_id` (until the Phase-5 prerequisite drops the column; the relationship then lives only on `plan_workouts.actual_activity_id`)                                                                                                                                                |
+| Bridge/un-bridge RPCs only           | `presentation_state`, `superseded_by_activity_id`                                                                                                                                                                                                                                             |
+| Trigger-managed                      | `updated_at`; the legacy generated `intervals_source_file_key` is removed in Phase 2                                                                                                                                                                                                          |
 
 **Enforcement before Phase 4.** After Phase 3 converts the last direct writer, revoke direct
 `UPDATE` on `activities` from `service_role`, `authenticated`, and `anon`. Updates then run
@@ -1039,13 +1048,14 @@ Two SQLSTATE facts to design around, both verified in `_postgrest_http_status`
 
 ## Reads: one predicate
 
-`presentation_state = 'active'` is added to **`list_activities` and `list_activities_between`
-only** (`backend/repos/supabase_repo.py:496`, `:513`). Those two are the funnel for the
+`presentation_state = 'active'` is added to the two activity list readers —
+`list_activities` and `list_activities_between` (`backend/repos/supabase_repo.py:496`,
+`:513`) — and to the new `list_dedup_candidates`. No other read path gains it. Those two are the funnel for the
 calendar, compliance, training load, recalibration, and the coach's `get_recent_activities`, so
 one predicate collapses every view at once.
 
-It **is** also applied to the new `list_dedup_candidates`: a superseded activity must never come
-back as a merge candidate, or merges cycle.
+`list_dedup_candidates` needs it for a different reason than the other two: a superseded
+activity must never come back as a merge candidate, or merges cycle.
 
 Deliberately **not** applied to:
 
@@ -1054,7 +1064,7 @@ Deliberately **not** applied to:
   non-retired Intervals identity regardless of the activity's presentation state. Supersession
   does not retire sources, so a superseded activity still blocks re-sync.
 
-The frontend needs no schema change: `calendarActivitySchema` (`lib/schemas.ts:170`) is a
+The frontend needs no schema change: `calendarActivitySchema` (`lib/schemas.ts:176`) is a
 `z.looseObject`, and `components/coach-calendar.tsx` reads only `sport`, `id`, `activity_date`,
 `duration_seconds`, `distance_meters`, `tss`, `avg_hr_bpm`, `rpe`, `athlete_notes`. A "merged
 from N sources" affordance is a deliberate addition (Phase 6), not a correctness requirement.
@@ -1240,8 +1250,9 @@ raise `22023` before insertion:
 - `source_transitions`: every source changed, with `source_id`, `before_activity_id`,
   `after_activity_id`, `before_retired_at`, `after_retired_at`, and pre/post `updated_at`.
   Includes retired original overrides and any replacement override created by the bridge.
-- `plan_link_transitions`: every affected `plan_workout_id` with before/after
-  `actual_activity_id` and the matching activities' before/after `planned_workout_id`. Empty is
+- `plan_link_transitions`: every affected `plan_workout_id` with its before/after
+  `actual_activity_id`. There is no paired `planned_workout_id` side — the Phase-5
+  prerequisite drops that column, so the link has exactly one owner to record. Empty is
   recorded as `[]`, not omitted.
 - `activity_transitions`: both activity ids with before/after `presentation_state`,
   `superseded_by_activity_id`, and `updated_at`.
@@ -1270,7 +1281,7 @@ the inverse twice.
 
 ## Training load rebuild
 
-Merging changes historical daily TSS, so `daily_load_snapshots` must be rebuilt — and **#461
+Merging changes historical daily TSS, so `daily_load_snapshots` must be rebuilt — and **#447
 means it currently cannot be**, for two independent reasons.
 
 ### Pending rebuilds live in their own table
@@ -1298,7 +1309,20 @@ create table public.load_rebuild_pending (
 
 create unique index load_rebuild_pending_key_idx
   on public.load_rebuild_pending (user_id, sport) nulls not distinct;
+
+alter table public.load_rebuild_pending enable row level security;
+create policy load_rebuild_pending_owner
+  on public.load_rebuild_pending for select
+  using ((select auth.uid())::text = user_id);
+
+revoke all on public.load_rebuild_pending from public, anon, authenticated;
+grant select on public.load_rebuild_pending to authenticated;
+grant all on public.load_rebuild_pending to service_role;
 ```
+
+Owner-read RLS and the revoke/grant block match every other table this design adds; the
+marker says when an athlete's fitness numbers are mid-rebuild, so it is their data, not
+shared bookkeeping.
 
 `NULLS NOT DISTINCT` (Postgres 15+) lets the aggregate row participate in the key without a
 sentinel value. Ownership:
@@ -1316,7 +1340,7 @@ did, so the correct response is to leave it pending for the next run.
 ### Rebuilding
 
 1. **Seed at a date.** `get_load_snapshot_on_or_before(user_id, sport, on_date)` seeds
-   `initial_ctl`/`initial_atl` from the day _before_ `since` (#461).
+   `initial_ctl`/`initial_atl` from the day _before_ `since` (#447).
 2. **Rebuild `[pending_from, today]`**, where `pending_from` is the earliest `activity_date` on
    either side of the transition. A Tier-B pair can span two days, so using only the post-merge
    date would leave the other day's snapshot inflated.
@@ -1447,7 +1471,7 @@ Per AGENTS.md, `docs/supabase-migration-history.md` is updated **in the same cha
 
 Each phase is independently shippable and ends in something verifiable.
 
-**Phase 0 — unblock.** Ship #461 and #462 as independent fixes, ideally merged before Phase 1
+**Phase 0 — unblock.** Ship #447 and #462 as independent fixes, ideally merged before Phase 1
 rather than tracked inside it (see "Sequencing"). _Verifiable:_ a backward window rebuild produces
 correct CTL; a rebuild window holding more than 500 activities still includes the oldest of them; a
 `.fit` file with no suffix saves instead of 503-ing.
@@ -1476,7 +1500,10 @@ two sources rather than rejecting the second**; **two distinct sessions collidin
 `payload_fingerprint` are both stored**; and **Intervals sync remains idempotent across the constraint
 drop**, with a re-sync of an already-synced ride creating no second activity.
 
-**Phase 3 — athlete overrides (must precede any recompose).** Convert `repo.update_activity`,
+**Phase 3 — athlete overrides and the recompose RPC.** Ship `recompose_activity` here, not in
+Phase 4: this phase revokes direct `activities` UPDATE, so the RPC that replaces it must exist
+first or athlete edits have no write path at all. Phase 4 then wires the scorer to an RPC already
+live and tested against single-source activities. Convert `repo.update_activity`,
 `merge_activity_text_update`, **and `build_activity_from_text`** to write an `athlete_override` source
 and route through recompose. Before enabling that path, backfill every existing non-null athlete field
 into a complete four-key override, convert any post-backfill projection drift (including corrected
@@ -1491,8 +1518,8 @@ unconverted, the authoritative no-override rule would clear those values on firs
 _Verifiable:_ an athlete note and a corrected date both survive a subsequent recompose, **including a
 note that originated from a chat text extract rather than an explicit edit**.
 
-**Phase 4 — materialization.** `activity_dedup.py` scorer + reconciler, `recompose_activity` RPC,
-Tier-A auto-merge wired into `_finalize_persisted_activity` **before** `_try_match_activity_to_plan`,
+**Phase 4 — materialization.** `activity_dedup.py` scorer + reconciler (the `recompose_activity`
+RPC already shipped in Phase 3), Tier-A auto-merge wired into `_finalize_persisted_activity` **before** `_try_match_activity_to_plan`,
 and the `presentation_state` read predicate. The ordering matters: reversing it lets a duplicate steal
 the planned workout from the surviving activity. _Verifiable:_ a FIT upload of an already-synced
 Intervals ride yields one calendar entry carrying the FIT's richer measurements and the Intervals TSS;
@@ -1506,8 +1533,8 @@ protocol; append-only merge-event schema and transactional bridge/un-bridge audi
 (`find_duplicate_activities`, `merge_activities`, `unmerge_activity`) in `lib/agent/tools.ts` routed
 via `postEngine` in `lib/agent/coach-tools.ts`; system prompt guidance; bridging rules.
 _Verifiable:_ the calendar, compliance, and unplanned-session detection are unchanged after the
-column is dropped; a bridge transfers a plan link with one `plan_workouts` update and no
-`activities` write; the coach can surface the backlog and merge only after explicit athlete
+column is dropped; a bridge transfers a plan link with a single `plan_workouts` update, with no
+`activities` write needed for the transfer itself; the coach can surface the backlog and merge only after explicit athlete
 confirmation; a both-sides-linked bridge is refused; a bridge with two live overrides makes no
 writes without a proposal-bound resolution, and a confirmed resolution survives merge and reverses
 exactly on un-bridge.
@@ -1546,7 +1573,7 @@ the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display
 2. **Bridging destroys plan links if done carelessly.** Addressed by forbidding auto-bridging, by
    refusing the both-linked case, and by collapsing the link to one owning column before Phase 5 —
    which is what removes the one-sided-link failure mode rather than merely detecting it.
-3. **The load rebuild is the only eventually-consistent seam**, and it depends on #461, whose absence is
+3. **The load rebuild is the only eventually-consistent seam**, and it depends on #447, whose absence is
    invisible until you specifically test a backward window.
 4. **The coach gets exactly one tool call per turn** (`lib/agent/coach-tools.ts:382`,
    `isEnabled: !runContext.context.toolCalled`). A dedup conversation that needs _find → present →
@@ -1592,15 +1619,15 @@ the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display
 
 ## Files this design will touch
 
-| Area      | Files                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Migration | `supabase/migrations/<ts>_activity_ingest_formats.sql`, `<ts>_activity_sources.sql`, `<ts>_load_rebuild_pending.sql`, `<ts>_retire_intervals_activity_key.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_consent.sql`, `<ts>_activity_merge_events.sql`, `<ts>_collapse_plan_link.sql`, `docs/supabase-migration-history.md`                                                                                   |
-| Model     | `backend/models/training.py` (`Activity` gains the new columns; new `ActivitySource`)                                                                                                                                                                                                                                                                                                                                         |
-| Repo      | `backend/repos/supabase_repo.py` — `presentation_state` predicate on `list_activities`/`list_activities_between`; move `list_synced_intervals_keys` to source identities; **replace `create_intervals_activity`'s constraint-targeted upsert**; new `create_activity_with_source`, `list_activity_sources`, `list_dedup_candidates`, `recompose_activity`, `get_load_snapshot_on_or_before`, `load_rebuild_pending` accessors |
-| Services  | `backend/services/activity_dedup.py` (new — pure scorer + reconciler); `backend/services/activity_text.py` (Phase 3); `backend/services/intervals.py` (Phase 2); `backend/services/compliance.py` (Phase 5 — unplanned detection moves to the join)                                                                                                                                                                           |
-| API       | `api/index.py` — `_finalize_persisted_activity` (:2448), `_persist_extracted_activity` (:2430), `_build_uploaded_activity_or_course` (:1551), `_zip_activity_entry` (:1779), `intervals_sync` (:557), `recompute_load_endpoint` (:1439), `_activity_source_for_filename` (:1513), new find/merge/unmerge endpoints                                                                                                            |
-| Agent     | `lib/agent/tools.ts`, `lib/agent/coach-tools.ts`, `lib/agent/system-prompt.ts`                                                                                                                                                                                                                                                                                                                                                |
-| Frontend  | `components/coach-calendar.tsx`, `lib/schemas.ts` (Phase 6)                                                                                                                                                                                                                                                                                                                                                                   |
+| Area      | Files                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Migration | `supabase/migrations/<ts>_activity_ingest_formats.sql`, `<ts>_activity_sources.sql`, `<ts>_load_rebuild_pending.sql`, `<ts>_retire_intervals_activity_key.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_sources_contract.sql` (Phase 1: revoke direct INSERT, drop the temporary trigger and progress table), `<ts>_athlete_override_backfill.sql` (Phase 3: override provenance, then revoke direct UPDATE), `<ts>_activity_merge_consent.sql`, `<ts>_activity_merge_events.sql`, `<ts>_collapse_plan_link.sql`, `docs/supabase-migration-history.md` |
+| Model     | `backend/models/training.py` (`Activity` gains the new columns; new `ActivitySource`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Repo      | `backend/repos/supabase_repo.py` — `presentation_state` predicate on `list_activities`/`list_activities_between`; move `list_synced_intervals_keys` to source identities; **replace `create_intervals_activity`'s constraint-targeted upsert**; new `create_activity_with_source`, `list_activity_sources`, `list_dedup_candidates`, `recompose_activity`, `get_load_snapshot_on_or_before`, `load_rebuild_pending` accessors                                                                                                                                    |
+| Services  | `backend/services/activity_dedup.py` (new — pure scorer + reconciler); `backend/services/activity_text.py` (Phase 3); `backend/services/intervals.py` (Phase 2); `backend/services/compliance.py` (Phase 5 — unplanned detection moves to the join)                                                                                                                                                                                                                                                                                                              |
+| API       | `api/index.py` — `_finalize_persisted_activity` (:2448), `_persist_extracted_activity` (:2430), `_build_uploaded_activity_or_course` (:1551), `_zip_activity_entry` (:1779), `intervals_sync` (:557), new find/merge/unmerge endpoints. (`recompute_load_endpoint` :1439 and `_activity_source_for_filename` :1513 are touched by #447 and #462, not by this design)                                                                                                                                                                                             |
+| Agent     | `lib/agent/tools.ts`, `lib/agent/coach-tools.ts`, `lib/agent/system-prompt.ts`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Frontend  | `components/coach-calendar.tsx`, `lib/schemas.ts` (Phase 6)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 **Reuse rather than rebuild:** the pure-scorer shape of `match_activities_to_workouts`
 (`compliance.py:85`); the `unlink_plan_workout_from_activity` RPC template (`20260806003910_…`); the
