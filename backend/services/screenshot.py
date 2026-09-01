@@ -20,6 +20,7 @@ from openai import AsyncOpenAI, OpenAIError
 from openai.types.responses import ResponseUsage
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
+from sentry_sdk.consts import OP, SPANDATA
 from sentry_sdk.tracing import Span
 
 from backend.config import settings
@@ -272,19 +273,24 @@ def _record_vision_usage(span: Span, usage: ResponseUsage) -> None:
     reasoning subset, plus the derived non-reasoning content count, so latency can be
     compared against each independently.
     """
+    cached_tokens = usage.input_tokens_details.cached_tokens
+    reasoning_tokens = usage.output_tokens_details.reasoning_tokens
     token_attributes = {
-        "gen_ai.usage.input_tokens": usage.input_tokens,
-        "gen_ai.usage.output_tokens": usage.output_tokens,
-        "gen_ai.usage.total_tokens": usage.total_tokens,
-        "gen_ai.usage.input_tokens.cached": usage.input_tokens_details.cached_tokens,
-        "gen_ai.usage.output_tokens.reasoning": usage.output_tokens_details.reasoning_tokens,
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS: usage.input_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS: usage.output_tokens,
+        "gen_ai.usage.cache_read.input_tokens": cached_tokens,
+        "gen_ai.usage.reasoning.output_tokens": reasoning_tokens,
+        # Sentry 2.x still indexes these v1.36-era aliases and total-token extension.
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS_CACHED: cached_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS_REASONING: reasoning_tokens,
+        SPANDATA.GEN_AI_USAGE_TOTAL_TOKENS: usage.total_tokens,
     }
     for key, value in token_attributes.items():
         span.set_data(key, value)
 
     span.set_data(
-        "openai.usage.output_tokens.non_reasoning",
-        usage.output_tokens - usage.output_tokens_details.reasoning_tokens,
+        "screenshot.usage.output_tokens.non_reasoning",
+        usage.output_tokens - reasoning_tokens,
     )
 
 
@@ -347,17 +353,22 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
             logger.debug("openai vision call start model=%s", settings.openai_vision_model)
             stage = "classify" if schema is ScreenshotClassificationModel else "extract"
             with sentry_sdk.start_span(
-                op="gen_ai.responses",
-                name=f"screenshot vision {stage}",
+                op=OP.GEN_AI_RESPONSES,
+                name=f"generate_content {settings.openai_vision_model} screenshot.{stage}",
             ) as span:
-                span.set_data("gen_ai.system", "openai")
-                span.set_data("gen_ai.request.model", settings.openai_vision_model)
-                span.set_data(
-                    "gen_ai.request.reasoning_effort",
-                    settings.openai_vision_reasoning_effort,
-                )
-                span.set_data("screenshot.stage", stage)
-                span.set_data("screenshot.schema", schema.__name__)
+                span_attributes = {
+                    SPANDATA.GEN_AI_OPERATION_NAME: "generate_content",
+                    SPANDATA.GEN_AI_PROVIDER_NAME: "openai",
+                    SPANDATA.GEN_AI_REQUEST_MODEL: settings.openai_vision_model,
+                    SPANDATA.GEN_AI_REQUEST_MAX_TOKENS: (settings.openai_vision_max_output_tokens),
+                    "gen_ai.request.reasoning.level": (settings.openai_vision_reasoning_effort),
+                    "gen_ai.output.type": "json",
+                    "openai.api.type": "responses",
+                    "screenshot.stage": stage,
+                }
+                for key, value in span_attributes.items():
+                    span.set_data(key, value)
+
                 response = await client.responses.parse(
                     model=settings.openai_vision_model,
                     input=[
