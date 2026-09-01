@@ -17,7 +17,7 @@ from typing import Any, TypeVar
 
 import sentry_sdk
 from openai import AsyncOpenAI, OpenAIError
-from openai.types.responses import ResponseUsage
+from openai.types.responses import ResponseInputParam, ResponseUsage
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
 from sentry_sdk.consts import OP, SPANDATA
@@ -326,6 +326,23 @@ def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
     return parsed
 
 
+def _vision_input(prompt: str, image_url: str) -> ResponseInputParam:
+    """Build the typed multimodal input shared by screenshot vision calls."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_image",
+                    "image_url": image_url,
+                    "detail": "high",
+                },
+            ],
+        }
+    ]
+
+
 async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> ModelT | None:
     """Call the OpenAI vision model with an image and a strict response schema.
 
@@ -371,19 +388,7 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
 
                 response = await client.responses.parse(
                     model=settings.openai_vision_model,
-                    input=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "input_text", "text": prompt},
-                                {
-                                    "type": "input_image",
-                                    "image_url": image_url,
-                                    "detail": "high",
-                                },
-                            ],
-                        }
-                    ],
+                    input=_vision_input(prompt, image_url),
                     text_format=schema,
                     max_output_tokens=settings.openai_vision_max_output_tokens,
                     reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
