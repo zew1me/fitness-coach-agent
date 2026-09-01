@@ -43,12 +43,12 @@ It is **not** a materialized view, and describing it as one sets the wrong expec
 A view has a single writer and no independent state. This table has four distinct jobs,
 and the ownership matrix under "Projection ownership" is the enumeration of them:
 
-| Job                 | Columns                                                                     | Nature                                                                            |
-| ------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **Projection**      | every metric, `sport`, dates, the legacy provenance triplet, derived values | Recomputed from the live source set. This is the part that behaves like a view.   |
-| **Identity anchor** | `id`, `user_id`, `created_at`                                               | Stable forever. `plan_workouts.actual_activity_id` and every index depend on it.  |
-| **Link state**      | `planned_workout_id`                                                        | An explicit assertion by the athlete or coach. Never derived, never field-merged. |
-| **Lifecycle**       | `presentation_state`, `superseded_by_activity_id`                           | Which row is presented after a bridge. See the note below — mostly derivable.     |
+| Job                 | Columns                                                                     | Nature                                                                                                                    |
+| ------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **Projection**      | every metric, `sport`, dates, the legacy provenance triplet, derived values | Recomputed from the live source set. This is the part that behaves like a view.                                           |
+| **Identity anchor** | `id`, `user_id`, `created_at`                                               | Stable forever. `plan_workouts.actual_activity_id` and every index depend on it.                                          |
+| **Link state**      | `planned_workout_id`                                                        | An explicit assertion by the athlete or coach. Never derived, never field-merged. **Removed before Phase 5** — see below. |
+| **Lifecycle**       | `presentation_state`, `superseded_by_activity_id`                           | Which row is presented after a bridge. See the note below — mostly derivable.                                             |
 
 Two things that would otherwise land here are deliberately kept out:
 
@@ -68,13 +68,18 @@ query is the wrong read shape, but it is stored as a **derived cache with a test
 consistency invariant**, not as a fact the system could disagree with itself about.
 `superseded_by_activity_id` is genuinely not derivable and stays as a pointer.
 
-**Where the bridging complexity comes from.** The plan link is stored twice —
-`activities.planned_workout_id` and `plan_workouts.actual_activity_id` — two columns
-encoding one relationship, kept in agreement by an RPC that raises `22023` when they
-disagree (`20260806003910_unlink_plan_workout_from_activity_atomic.sql:51-58`). That
-denormalization predates this design. It is why transferring a link during a bridge is
-the most dangerous operation here, and it is not inherent to merging. Out of scope to
-fix; named so nobody mistakes the complexity for something this design introduced.
+**Link state collapses to one column before Phase 5 — this is a committed prerequisite.**
+The plan link is stored twice today: `activities.planned_workout_id` and
+`plan_workouts.actual_activity_id`, two columns encoding one relationship with no
+uniqueness constraint on either, kept in agreement by RPC convention. That
+denormalization predates this design and already has a live correctness bug of its own
+(#467). It is also the single largest source of danger in bridging, and it is not
+inherent to merging.
+
+**Phase 5 requires `activities.planned_workout_id` to be gone**, with
+`plan_workouts.actual_activity_id` as the sole owner of the relationship and the reverse
+direction obtained by join. See "Collapsing the plan link" under Bridging for what that
+buys and what it costs.
 
 ---
 
@@ -729,7 +734,7 @@ There is no catch-all. Every `activities` column belongs to exactly one writer c
 | Rebuilt by the reconciler            | `tss`, `intensity_factor`                                                                                                                                                                                                                                                                                                                   |
 | Athlete override, via the reconciler | `rpe`, `athlete_notes`, `fatigue_notes`, `fueling_notes`                                                                                                                                                                                                                                                                                    |
 | Recompose metadata                   | `source_count`, `field_provenance`, `materialized_at`                                                                                                                                                                                                                                                                                       |
-| Plan-link RPCs only                  | `planned_workout_id`                                                                                                                                                                                                                                                                                                                        |
+| Plan-link RPCs only                  | `planned_workout_id` (until the Phase-5 prerequisite drops the column; the relationship then lives only on `plan_workouts.actual_activity_id`)                                                                                                                                                                                              |
 | Bridge/un-bridge RPCs only           | `presentation_state`, `superseded_by_activity_id`                                                                                                                                                                                                                                                                                           |
 | Trigger-managed                      | `updated_at`; the legacy generated `intervals_source_file_key` is removed in Phase 2                                                                                                                                                                                                                                                        |
 
@@ -1080,10 +1085,56 @@ row remains fetchable by `get_activity` for audit, and the operation is reversib
 - If **both own different plan workouts** → reject with `22023`. The athlete must unlink one
   first. We cannot silently discard one of two explicit assertions that these were separate
   sessions.
-- Any link that does move is transferred bidirectionally inside the same transaction, after
-  locking the `plan_workouts` row first and verifying `actual_activity_id` points back.
-  `unlink_plan_workout_from_activity` already raises `22023` when the two sides disagree
-  (`20260806003910_…:51-58`), so a one-sided link must never be propagated.
+- Any link that does move is transferred by updating the single owning column — see
+  "Collapsing the plan link" immediately below, which Phase 5 depends on.
+
+### Collapsing the plan link (Phase 5 prerequisite)
+
+`activities.planned_workout_id` is dropped; `plan_workouts.actual_activity_id` becomes the
+sole owner of the relationship, and readers that need the reverse direction get it by join.
+
+**Why this is a prerequisite rather than a nice-to-have.** With two columns, transferring a
+link during a bridge means locking both rows, writing both columns, verifying they pointed
+at each other beforehand, and refusing to propagate a one-sided link — and any bug in that
+sequence detaches a completed workout from the athlete's plan. With one column it is a
+single statement inside the bridge transaction:
+
+```sql
+update public.plan_workouts
+set actual_activity_id = p_survivor_activity_id
+where actual_activity_id = p_superseded_activity_id
+  and user_id = p_user_id;
+```
+
+There is no agreement to verify, because there are no two sides to disagree. A one-sided
+link becomes unrepresentable rather than something the RPC has to detect. The
+`plan_link_transitions` entries in the merge event shrink to the workout id and its
+before/after activity — the paired `planned_workout_id` transitions disappear with the
+column.
+
+It also removes **Link state** from the table's jobs: `activities` becomes projection,
+identity, and lifecycle only, and the ownership matrix loses a writer class. That is the
+same cleanup as moving load-rebuild bookkeeping out to its own table, applied to the other
+column that was neither derived nor identity.
+
+**What stays.** The both-sides-linked refusal above is unchanged — two workouts each
+asserting a different completion is a genuine semantic conflict, not a storage artifact,
+and the athlete must resolve it.
+
+**Cost.** Six read sites take a join instead of a column: `compliance.py:229` (unplanned
+detection), `api/index.py:2287` and `:3115`, `_best_effort_rematch_activity_after_date_change`,
+`list_activities`/`list_activities_between` where the calendar payload needs it, and
+`calendarActivitySchema` (`lib/schemas.ts:188`) which keeps its field name. The `Activity`
+Pydantic field is retained and populated by the query rather than stored, so the API shape
+does not change.
+
+**Sequencing against #467.** #467 is the interim fix for the live bug — RPC guards plus
+partial unique indexes on both columns — and should ship on its own timeline. This collapse
+supersedes it: dropping `activities.planned_workout_id` removes
+`activities_planned_workout_unique` along with the column, and
+`plan_workouts_actual_activity_unique` becomes the only constraint the invariant needs. Do
+not treat #467 as wasted work; it makes the interim safe, and its unique index on the
+surviving column is the one this design keeps.
 
 **4. Two live athlete overrides require an explicit resolution.** The one-live-override index
 means blindly reparenting B when both carry a live override would raise `23505`, and any
@@ -1447,14 +1498,19 @@ the planned workout from the surviving activity. _Verifiable:_ a FIT upload of a
 Intervals ride yields one calendar entry carrying the FIT's richer measurements and the Intervals TSS;
 compliance stops reporting the phantom unplanned session.
 
-**Phase 5 — Tier B + bridging.** The proposal/member schema, the shared normalization function, and
-the atomic server-side consent protocol; append-only merge-event schema and transactional
-bridge/un-bridge audit; coach tools (`find_duplicate_activities`, `merge_activities`,
-`unmerge_activity`) in `lib/agent/tools.ts` routed via `postEngine` in `lib/agent/coach-tools.ts`;
-system prompt guidance; bridging rules. _Verifiable:_ the coach can surface the backlog and merge only
-after explicit athlete confirmation; a both-sides-linked bridge is refused; a bridge with two live
-overrides makes no writes without a proposal-bound resolution, and a confirmed resolution survives
-merge and reverses exactly on un-bridge.
+**Phase 5 — Tier B + bridging.** **Prerequisite: collapse the plan link** (drop
+`activities.planned_workout_id`, convert its six readers to a join, leave
+`plan_workouts.actual_activity_id` as sole owner) — see "Collapsing the plan link". Then the
+proposal/member schema, the shared normalization function, and the atomic server-side consent
+protocol; append-only merge-event schema and transactional bridge/un-bridge audit; coach tools
+(`find_duplicate_activities`, `merge_activities`, `unmerge_activity`) in `lib/agent/tools.ts` routed
+via `postEngine` in `lib/agent/coach-tools.ts`; system prompt guidance; bridging rules.
+_Verifiable:_ the calendar, compliance, and unplanned-session detection are unchanged after the
+column is dropped; a bridge transfers a plan link with one `plan_workouts` update and no
+`activities` write; the coach can surface the backlog and merge only after explicit athlete
+confirmation; a both-sides-linked bridge is refused; a bridge with two live overrides makes no
+writes without a proposal-bound resolution, and a confirmed resolution survives merge and reverses
+exactly on un-bridge.
 
 **Phase 6 — UI.** "Merged from N sources" affordance in `components/coach-calendar.tsx`. Must survive
 the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display: none }`) and the
@@ -1487,9 +1543,9 @@ the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display
 1. **Grouping, not dedup, is the fuzzy part.** Exact dedup is two identity indexes and is essentially
    free. Deciding that two _different_ records describe one workout is heuristic, and every tolerance
    in the Tier A/B table is a guess until it meets real athlete data. Budget for tuning.
-2. **Bridging destroys plan links if done carelessly.** Addressed by forbidding auto-bridging and
-   refusing the both-linked case, but it remains the most dangerous operation here — and the
-   bidirectional link storage described at the top is why.
+2. **Bridging destroys plan links if done carelessly.** Addressed by forbidding auto-bridging, by
+   refusing the both-linked case, and by collapsing the link to one owning column before Phase 5 —
+   which is what removes the one-sided-link failure mode rather than merely detecting it.
 3. **The load rebuild is the only eventually-consistent seam**, and it depends on #461, whose absence is
    invisible until you specifically test a backward window.
 4. **The coach gets exactly one tool call per turn** (`lib/agent/coach-tools.ts:382`,
@@ -1538,10 +1594,10 @@ the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display
 
 | Area      | Files                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Migration | `supabase/migrations/<ts>_activity_ingest_formats.sql`, `<ts>_activity_sources.sql`, `<ts>_load_rebuild_pending.sql`, `<ts>_retire_intervals_activity_key.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_consent.sql`, `<ts>_activity_merge_events.sql`, `docs/supabase-migration-history.md`                                                                                                                  |
+| Migration | `supabase/migrations/<ts>_activity_ingest_formats.sql`, `<ts>_activity_sources.sql`, `<ts>_load_rebuild_pending.sql`, `<ts>_retire_intervals_activity_key.sql`, `<ts>_recompose_activity_rpc.sql`, `<ts>_activity_merge_consent.sql`, `<ts>_activity_merge_events.sql`, `<ts>_collapse_plan_link.sql`, `docs/supabase-migration-history.md`                                                                                   |
 | Model     | `backend/models/training.py` (`Activity` gains the new columns; new `ActivitySource`)                                                                                                                                                                                                                                                                                                                                         |
 | Repo      | `backend/repos/supabase_repo.py` — `presentation_state` predicate on `list_activities`/`list_activities_between`; move `list_synced_intervals_keys` to source identities; **replace `create_intervals_activity`'s constraint-targeted upsert**; new `create_activity_with_source`, `list_activity_sources`, `list_dedup_candidates`, `recompose_activity`, `get_load_snapshot_on_or_before`, `load_rebuild_pending` accessors |
-| Services  | `backend/services/activity_dedup.py` (new — pure scorer + reconciler); `backend/services/activity_text.py` (Phase 3); `backend/services/intervals.py` (Phase 2)                                                                                                                                                                                                                                                               |
+| Services  | `backend/services/activity_dedup.py` (new — pure scorer + reconciler); `backend/services/activity_text.py` (Phase 3); `backend/services/intervals.py` (Phase 2); `backend/services/compliance.py` (Phase 5 — unplanned detection moves to the join)                                                                                                                                                                           |
 | API       | `api/index.py` — `_finalize_persisted_activity` (:2448), `_persist_extracted_activity` (:2430), `_build_uploaded_activity_or_course` (:1551), `_zip_activity_entry` (:1779), `intervals_sync` (:557), `recompute_load_endpoint` (:1439), `_activity_source_for_filename` (:1513), new find/merge/unmerge endpoints                                                                                                            |
 | Agent     | `lib/agent/tools.ts`, `lib/agent/coach-tools.ts`, `lib/agent/system-prompt.ts`                                                                                                                                                                                                                                                                                                                                                |
 | Frontend  | `components/coach-calendar.tsx`, `lib/schemas.ts` (Phase 6)                                                                                                                                                                                                                                                                                                                                                                   |
@@ -1568,19 +1624,19 @@ production separately.
 
 **New tests:**
 
-| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null/zero rules at both tiers, hard negatives, sport conflict, `general`. Reconciler: fidelity/tie order, exact four-key override including explicit nulls, all athlete columns cleared with no override, derived values rebuilt only when an input changed, provider TSS preferred over recomputation, order independence. Regression: bridge a B-only override onto A, then un-bridge                                                                                          |
-| `tests/python/test_supabase_db.py` (schema invariants)                                  | The ingest-format FK rejects an unknown format; `fidelity_rank` is unique so the merge order is total; application roles cannot write `activity_ingest_formats`. Backfill mapping; gap and shadow inserts. Backfill checkpoint failures, repeat, conflicts, and holes prove restart behavior. Race a legacy UPDATE on both sides of the row lock. Trigger removal requires clean second pass plus INSERT revoke. Override uniqueness. `presentation_state` agrees with the live-source-set predicate for every row |
-| `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. No non-override source raises `22023`                                                                                                                                                                                                                                                                                     |
-| `tests/python/test_supabase_db.py` (load invalidation)                                  | Recompose/bridge/un-bridge upsert both the sport row and the aggregate row and may only widen `pending_from`. Recompute deletes only by compare-and-swap. A concurrent earlier invalidation survives a slow rebuild. A cycling recompute cannot clear a running row                                                                                                                                                                                                                                                |
-| `tests/python/test_supabase_repo.py`                                                    | Extend fakes for sources/recompose; unknown RPC fails, calls are exact, composite-row data is a dict. Presentation filtering stays on activity lists, not `get_activity`. `list_synced_intervals_keys` reads non-retired Intervals source identities rather than the projection                                                                                                                                                                                                                                    |
-| `tests/python/test_supabase_db.py` (RPC invariants)                                     | Cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's                                                                                                                                                              |
-| `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant-authored, and non-matching confirmations without a write; a missing user-turn row rejects rather than falling back; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges atomically and consumes once                                                                                   |
-| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows leave calendar/compliance. Intervals idempotency survives the constraint drop and reads live source ids; a re-sync after the canonical-entry-point conversion creates no second activity; a bridge can project a reparented Intervals source without a uniqueness failure                                                                                                                                                                                                                          |
-| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves its pending rows and is absorbed by the next run                                                                                                                                                                                                                                                                                                                                      |
-| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas; merge accepts a proposal id but exposes no confirmation message id, confirmation boolean/text, member replacement, or override-resolution argument (nested object fields remain `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                      |
-| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| File                                                                                    | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/python/test_activity_dedup.py` (new)                                             | Pure scorer: Tier A/B boundaries, null/zero rules at both tiers, hard negatives, sport conflict, `general`. Reconciler: fidelity/tie order, exact four-key override including explicit nulls, all athlete columns cleared with no override, derived values rebuilt only when an input changed, provider TSS preferred over recomputation, order independence. Regression: bridge a B-only override onto A, then un-bridge                                                                                            |
+| `tests/python/test_supabase_db.py` (schema invariants)                                  | The ingest-format FK rejects an unknown format; `fidelity_rank` is unique so the merge order is total; application roles cannot write `activity_ingest_formats`. Backfill mapping; gap and shadow inserts. Backfill checkpoint failures, repeat, conflicts, and holes prove restart behavior. Race a legacy UPDATE on both sides of the row lock. Trigger removal requires clean second pass plus INSERT revoke. Override uniqueness. `presentation_state` agrees with the live-source-set predicate for every row   |
+| `tests/python/test_supabase_db.py` (ownership guards)                                   | Source evidence immutability and projection write privileges/RPC column sets. Identity fields immutable through definer RPCs. Provenance winner retirement/restoration is deterministic. No non-override source raises `22023`                                                                                                                                                                                                                                                                                       |
+| `tests/python/test_supabase_db.py` (load invalidation)                                  | Recompose/bridge/un-bridge upsert both the sport row and the aggregate row and may only widen `pending_from`. Recompute deletes only by compare-and-swap. A concurrent earlier invalidation survives a slow rebuild. A cycling recompute cannot clear a running row                                                                                                                                                                                                                                                  |
+| `tests/python/test_supabase_repo.py`                                                    | Extend fakes for sources/recompose; unknown RPC fails, calls are exact, composite-row data is a dict. Presentation filtering stays on activity lists, not `get_activity`. `list_synced_intervals_keys` reads non-retired Intervals source identities rather than the projection                                                                                                                                                                                                                                      |
+| `tests/python/test_supabase_db.py` (RPC invariants)                                     | Cross-user/version/retry and sorted group locking; override preconditions follow locks. Identity indexes/events are atomic. Un-bridge rejects stale state, a non-null proposal, and reversal of an unbridge before writes, then restores exactly. Only one reversal can win. Authenticated RLS can read the owner's history but not another athlete's                                                                                                                                                                |
+| `tests/python/test_api.py`                                                              | Exact-identity/fingerprint and Tier-A-before-plan-link cases. Tier B rejects wrong-user, expired, consumed, stale-version, substituted-member, pre-proposal, assistant-authored, and non-matching confirmations without a write; a missing user-turn row rejects rather than falling back; the model tool schema cannot supply a message id or resolved override. A valid group confirmation merges atomically and consumes once                                                                                     |
+| `tests/python/test_calendar_api.py`, `test_compliance_api.py`, `test_intervals_sync.py` | Superseded rows leave calendar/compliance. After the plan-link collapse, the calendar payload and unplanned-session detection return identical results from the join as from the dropped column, and a bridge moves a plan link with a single `plan_workouts` update. Intervals idempotency survives the constraint drop and reads live source ids; a re-sync after the canonical-entry-point conversion creates no second activity; a bridge can project a reparented Intervals source without a uniqueness failure |
+| `tests/python/test_engine.py`                                                           | Seed-at-date rebuild correctness; rebuild starts at the earliest affected date; the 90-day horizon; a dropped rebuild leaves its pending rows and is absorbed by the next run                                                                                                                                                                                                                                                                                                                                        |
+| `tests/web/agent-tools.test.ts`                                                         | The three new tool schemas; merge accepts a proposal id but exposes no confirmation message id, confirmation boolean/text, member replacement, or override-resolution argument (nested object fields remain `.nullable()`, not `.optional()`)                                                                                                                                                                                                                                                                        |
+| `tests/ui/calendar.spec.ts`                                                             | The merged-sources affordance, including narrow-viewport dot mode                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 **End-to-end manual check** (`bun run dev:local`): upload a FIT file → confirm one calendar entry;
 upload the identical file again → confirm 409 naming the first activity; sync the same ride from
