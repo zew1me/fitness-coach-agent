@@ -272,6 +272,11 @@ def _record_vision_usage(span: Span, usage: ResponseUsage) -> None:
     ``responses.parse`` helper used here. Keep the provider-reported output total and
     reasoning subset, plus the derived non-reasoning content count, so latency can be
     compared against each independently.
+
+    This intentionally remains a free function while it only adapts the two SDK types.
+    If tracing starts coordinating request attributes, response status/errors, and span
+    lifecycle, replace this helper and the inline span setup with a composed
+    ``_VisionTrace`` context manager rather than subclassing or monkey-patching ``Span``.
     """
     cached_tokens = usage.input_tokens_details.cached_tokens
     reasoning_tokens = usage.output_tokens_details.reasoning_tokens
