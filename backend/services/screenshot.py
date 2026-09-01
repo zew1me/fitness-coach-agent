@@ -17,8 +17,11 @@ from typing import Any, TypeVar
 
 import sentry_sdk
 from openai import AsyncOpenAI, OpenAIError
+from openai.types.responses import ResponseInputParam, ResponseUsage
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
+from sentry_sdk.consts import OP, SPANDATA
+from sentry_sdk.tracing import Span
 
 from backend.config import settings
 from backend.models.screenshot import (
@@ -262,6 +265,40 @@ def _refusal_text(response: Any) -> str | None:
     return None
 
 
+def _record_vision_usage(span: Span, usage: ResponseUsage) -> None:
+    """Attach Responses API token usage to the manual vision span.
+
+    Sentry's OpenAI integration instruments ``responses.create`` but not the SDK's
+    ``responses.parse`` helper used here. Keep the provider-reported output total and
+    reasoning subset, plus the derived non-reasoning content count, so latency can be
+    compared against each independently.
+
+    This intentionally remains a free function while it only adapts the two SDK types.
+    If tracing starts coordinating request attributes, response status/errors, and span
+    lifecycle, replace this helper and the inline span setup with a composed
+    ``_VisionTrace`` context manager rather than subclassing or monkey-patching ``Span``.
+    """
+    cached_tokens = usage.input_tokens_details.cached_tokens
+    reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+    token_attributes = {
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS: usage.input_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS: usage.output_tokens,
+        "gen_ai.usage.cache_read.input_tokens": cached_tokens,
+        "gen_ai.usage.reasoning.output_tokens": reasoning_tokens,
+        # Sentry 2.x still indexes these v1.36-era aliases and total-token extension.
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS_CACHED: cached_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS_REASONING: reasoning_tokens,
+        SPANDATA.GEN_AI_USAGE_TOTAL_TOKENS: usage.total_tokens,
+    }
+    for key, value in token_attributes.items():
+        span.set_data(key, value)
+
+    span.set_data(
+        "screenshot.usage.output_tokens.non_reasoning",
+        usage.output_tokens - reasoning_tokens,
+    )
+
+
 def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
     """Interpret a completed `responses.parse` call into a validated model or `None`."""
     if response.status in ("failed", "cancelled"):
@@ -294,6 +331,23 @@ def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
     return parsed
 
 
+def _vision_input(prompt: str, image_url: str) -> ResponseInputParam:
+    """Build the typed multimodal input shared by screenshot vision calls."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_image",
+                    "image_url": image_url,
+                    "detail": "high",
+                },
+            ],
+        }
+    ]
+
+
 async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> ModelT | None:
     """Call the OpenAI vision model with an image and a strict response schema.
 
@@ -319,25 +373,33 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
             ) as client,
         ):
             logger.debug("openai vision call start model=%s", settings.openai_vision_model)
-            response = await client.responses.parse(
-                model=settings.openai_vision_model,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": prompt},
-                            {
-                                "type": "input_image",
-                                "image_url": image_url,
-                                "detail": "high",
-                            },
-                        ],
-                    }
-                ],
-                text_format=schema,
-                max_output_tokens=settings.openai_vision_max_output_tokens,
-                reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
-            )
+            stage = "classify" if schema is ScreenshotClassificationModel else "extract"
+            with sentry_sdk.start_span(
+                op=OP.GEN_AI_RESPONSES,
+                name=f"generate_content {settings.openai_vision_model} screenshot.{stage}",
+            ) as span:
+                span_attributes = {
+                    SPANDATA.GEN_AI_OPERATION_NAME: "generate_content",
+                    SPANDATA.GEN_AI_PROVIDER_NAME: "openai",
+                    SPANDATA.GEN_AI_REQUEST_MODEL: settings.openai_vision_model,
+                    SPANDATA.GEN_AI_REQUEST_MAX_TOKENS: (settings.openai_vision_max_output_tokens),
+                    "gen_ai.request.reasoning.level": (settings.openai_vision_reasoning_effort),
+                    "gen_ai.output.type": "json",
+                    "openai.api.type": "responses",
+                    "screenshot.stage": stage,
+                }
+                for key, value in span_attributes.items():
+                    span.set_data(key, value)
+
+                response = await client.responses.parse(
+                    model=settings.openai_vision_model,
+                    input=_vision_input(prompt, image_url),
+                    text_format=schema,
+                    max_output_tokens=settings.openai_vision_max_output_tokens,
+                    reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
+                )
+                if response.usage is not None:
+                    _record_vision_usage(span, response.usage)
     except TimeoutError:
         logger.warning(
             "screenshot vision call exceeded its total budget type=%s budget=%ss",
