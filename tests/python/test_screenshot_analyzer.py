@@ -38,11 +38,13 @@ class FakeVisionResponse:
         refusal: str | None = None,
         error: Any = None,
         incomplete_reason: str | None = None,
+        usage: Any = None,
     ) -> None:
         self.status = status
         self.output_parsed = output_parsed
         self.output_text = None
         self.error = error
+        self.usage = usage
         self.incomplete_details = (
             SimpleNamespace(reason=incomplete_reason) if incomplete_reason else None
         )
@@ -325,6 +327,70 @@ async def test_call_vision_uses_model_max_tokens_and_high_detail(
     assert parse_kwargs["reasoning"]["effort"] == "low"
     assert parse_kwargs["text_format"] is screenshot_analyzer.ActivityExtraction
     assert parse_kwargs["input"][0]["content"][1]["detail"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_call_vision_records_stage_and_separate_reasoning_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    response = FakeVisionResponse(
+        output_parsed=screenshot_analyzer.ScreenshotClassificationModel(
+            screenshot_type="activity_single", confidence=0.9
+        ),
+        usage=SimpleNamespace(
+            input_tokens=900,
+            input_tokens_details=SimpleNamespace(cached_tokens=100),
+            output_tokens=420,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=300),
+            total_tokens=1320,
+        ),
+    )
+
+    class FakeSpan:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["span_kwargs"] = kwargs
+            self.data: dict[str, Any] = {}
+
+        def set_data(self, key: str, value: Any) -> None:
+            self.data[key] = value
+
+        def __enter__(self) -> "FakeSpan":
+            captured["span"] = self
+            return self
+
+        def __exit__(self, *_exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_model", "vision-model")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_reasoning_effort", "low")
+    monkeypatch.setattr(
+        screenshot_analyzer, "AsyncOpenAI", make_fake_openai(captured, response=response)
+    )
+    monkeypatch.setattr(screenshot_analyzer.sentry_sdk, "start_span", FakeSpan)
+
+    await screenshot_analyzer._call_vision(
+        "Classify image",
+        "https://example.com/image.png",
+        screenshot_analyzer.ScreenshotClassificationModel,
+    )
+
+    assert captured["span_kwargs"] == {
+        "op": "gen_ai.responses",
+        "name": "screenshot vision classify",
+    }
+    span_data = captured["span"].data
+    assert span_data["screenshot.stage"] == "classify"
+    assert span_data["screenshot.schema"] == "ScreenshotClassificationModel"
+    assert span_data["gen_ai.request.model"] == "vision-model"
+    assert span_data["gen_ai.request.reasoning_effort"] == "low"
+    assert span_data["gen_ai.usage.input_tokens"] == 900
+    assert span_data["gen_ai.usage.input_tokens.cached"] == 100
+    assert span_data["gen_ai.usage.output_tokens"] == 420
+    assert span_data["gen_ai.usage.output_tokens.reasoning"] == 300
+    assert span_data["openai.usage.output_tokens.non_reasoning"] == 120
+    assert span_data["gen_ai.usage.total_tokens"] == 1320
 
 
 @pytest.mark.asyncio
