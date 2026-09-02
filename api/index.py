@@ -1458,26 +1458,38 @@ async def recompute_load_endpoint(
     for a in activities:
         daily_tss[a.activity_date] = daily_tss.get(a.activity_date, 0) + (a.tss or 0)
 
-    prev = await repo.get_latest_load(user_id, sport=payload.sport)
-    initial_ctl = prev.ctl if prev else 0.0
-    initial_atl = prev.atl if prev else 0.0
+    seed = await repo.get_load_snapshot_on_or_before(
+        user_id, since - timedelta(days=1), sport=payload.sport
+    )
+    # Do not widen for a stale/absent seed: the capped candidate query could omit earlier work.
+    # Part two of #447 adds the unbounded candidates needed for a fully accurate rebuild.
+    initial_ctl = seed.ctl if seed else 0.0
+    initial_atl = seed.atl if seed else 0.0
 
     snapshots = recompute_load_series(daily_tss, since, date.today(), initial_ctl, initial_atl)
 
     await repo.upsert_load_snapshots(user_id, snapshots, sport=payload.sport)
 
     latest = snapshots[-1] if snapshots else {}
+    seed_date = seed.snapshot_date.isoformat() if seed else None
     logger.info(
-        "load recomputed user_id=%s sport=%s snapshots=%d ctl=%.1f atl=%.1f tsb=%.1f",
+        "load recomputed user_id=%s sport=%s snapshots=%d seed_date=%s seed_ctl=%.1f "
+        "seed_atl=%.1f ctl=%.1f atl=%.1f tsb=%.1f",
         user_id,
         payload.sport,
         len(snapshots),
+        seed_date,
+        initial_ctl,
+        initial_atl,
         latest.get("ctl", 0),
         latest.get("atl", 0),
         latest.get("tsb", 0),
     )
     return {
         "snapshots_written": len(snapshots),
+        "seed_date": seed_date,
+        "seed_ctl": initial_ctl,
+        "seed_atl": initial_atl,
         "latest_ctl": latest.get("ctl", 0),
         "latest_atl": latest.get("atl", 0),
         "latest_tsb": latest.get("tsb", 0),
