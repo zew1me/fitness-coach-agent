@@ -1522,34 +1522,43 @@ async def analyze_screenshot_endpoint(
     }
 
 
-def _activity_source_for_filename(filename: str) -> str:
+ActivityFileFormat = Literal["gpx", "fit", "tcx"]
+ActivityUploadSource = Literal["gpx_upload", "fit_upload", "tcx_upload"]
+
+
+def _resolve_activity_file_format(filename: str, content_type: str) -> ActivityFileFormat:
     suffix = Path(filename).suffix.lower()
-    if suffix == ".fit":
-        return "fit_upload"
-    if suffix == ".gpx":
-        return "gpx_upload"
-    if suffix == ".tcx":
-        return "tcx_upload"
-    return "file_upload"
+    if content_type == "application/gpx+xml" or suffix == ".gpx":
+        return "gpx"
+    if content_type == "application/vnd.garmin.fit" or suffix == ".fit":
+        return "fit"
+    if content_type == "application/vnd.garmin.tcx+xml" or suffix == ".tcx":
+        return "tcx"
+    raise HTTPException(status_code=415, detail="Unsupported activity file type.")
+
+
+def _activity_source_for_format(file_format: ActivityFileFormat) -> ActivityUploadSource:
+    match file_format:
+        case "gpx":
+            return "gpx_upload"
+        case "fit":
+            return "fit_upload"
+        case "tcx":
+            return "tcx_upload"
 
 
 def _parse_uploaded_activity_file(
-    filename: str, content_type: str, file_bytes: bytes
+    file_format: ActivityFileFormat, file_bytes: bytes
 ) -> ParsedActivity | ParsedCourse:
-    suffix = Path(filename).suffix.lower()
-    if content_type == "application/gpx+xml" or suffix == ".gpx":
-        parser = parse_gpx
-        suffix = ".gpx"
-    elif content_type == "application/vnd.garmin.fit" or suffix == ".fit":
-        parser = parse_fit
-        suffix = ".fit"
-    elif content_type == "application/vnd.garmin.tcx+xml" or suffix == ".tcx":
-        parser = parse_tcx
-        suffix = ".tcx"
-    else:
-        raise HTTPException(status_code=415, detail="Unsupported activity file type.")
+    match file_format:
+        case "gpx":
+            parser = parse_gpx
+        case "fit":
+            parser = parse_fit
+        case "tcx":
+            parser = parse_tcx
 
-    with NamedTemporaryFile(suffix=suffix) as tmp:
+    with NamedTemporaryFile(suffix=f".{file_format}") as tmp:
         tmp.write(file_bytes)
         tmp.flush()
         return parser(tmp.name)
@@ -1579,7 +1588,8 @@ def _build_uploaded_activity_or_course(  # noqa: PLR0913
     ``Activity``. Callers must branch; persisting a course would put a workout the
     athlete never did into their training log.
     """
-    parsed = _parse_uploaded_activity_file(filename, content_type, file_bytes)
+    file_format = _resolve_activity_file_format(filename, content_type)
+    parsed = _parse_uploaded_activity_file(file_format, file_bytes)
     if isinstance(parsed, ParsedCourse):
         logger.info(
             "course parsed user_id=%s sport=%s distance_m=%.0f gain_m=%.0f",
@@ -1602,7 +1612,7 @@ def _build_uploaded_activity_or_course(  # noqa: PLR0913
         max_hr_bpm=parsed.max_hr_bpm,
         avg_power_watts=parsed.avg_power_watts,
         avg_cadence_rpm=parsed.avg_cadence_rpm,
-        source=_activity_source_for_filename(filename),
+        source=_activity_source_for_format(file_format),
         source_file_key=object_key,
         raw_extraction={
             "activity_date_source": (
