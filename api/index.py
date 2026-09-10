@@ -1437,7 +1437,7 @@ class RecomputeLoadRequest(BaseModel):
 
 
 # Bounded candidate query for the rebuild window. Part two of #447 replaces it with keyset
-# pagination; until then a full page is logged as a warning rather than silently truncated.
+# pagination; until then the endpoint fails closed rather than persisting a truncated rebuild.
 _RECOMPUTE_ACTIVITY_LIMIT = 500
 
 
@@ -1464,8 +1464,12 @@ async def recompute_load_endpoint(
     initial_ctl = seed.ctl if seed else 0.0
     initial_atl = seed.atl if seed else 0.0
 
+    # Fetch one past the cap purely to detect overflow: `list_activities` returns newest first,
+    # so a truncated page silently drops the *oldest* activities. Those days would then be
+    # recomputed as zero TSS and upserted over the real snapshots, so overflow must fail closed
+    # before any write rather than merely warn.
     activities = await repo.list_activities(
-        user_id, sport=payload.sport, since=rebuild_start, limit=_RECOMPUTE_ACTIVITY_LIMIT
+        user_id, sport=payload.sport, since=rebuild_start, limit=_RECOMPUTE_ACTIVITY_LIMIT + 1
     )
     logger.debug(
         "recompute_load user_id=%s sport=%s since=%s rebuild_start=%s activities=%d",
@@ -1475,15 +1479,21 @@ async def recompute_load_endpoint(
         rebuild_start,
         len(activities),
     )
-    if len(activities) >= _RECOMPUTE_ACTIVITY_LIMIT:
-        # list_activities returns newest first, so a full page means the oldest days of the
-        # rebuild window may be missing their activities and will understate load.
+    if len(activities) > _RECOMPUTE_ACTIVITY_LIMIT:
         logger.warning(
-            "recompute_load activity cap reached user_id=%s sport=%s rebuild_start=%s limit=%d",
+            "recompute_load activity cap exceeded user_id=%s sport=%s rebuild_start=%s limit=%d",
             user_id,
             payload.sport,
             rebuild_start,
             _RECOMPUTE_ACTIVITY_LIMIT,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Rebuild window from {rebuild_start.isoformat()} holds more than "
+                f"{_RECOMPUTE_ACTIVITY_LIMIT} activities; recomputing it would discard the "
+                "oldest and overwrite load history. Request a later `since`."
+            ),
         )
 
     daily_tss: dict[date, float] = {}

@@ -237,3 +237,41 @@ async def test_stale_seed_rebuild_is_stable_across_runs(monkeypatch) -> None:
             # that rounding, but they are not bit-identical.
             drift = round(abs(_number(second[field]) - _number(first[field])), 6)
             assert drift <= 0.1, (snapshot_date, field, drift)
+
+
+@pytest.mark.usefixtures("as_athlete")
+async def test_rebuild_window_over_the_activity_cap_is_rejected_before_writing(monkeypatch) -> None:
+    today = date.today()
+    over_cap = api_index._RECOMPUTE_ACTIVITY_LIMIT + 1
+    since = today - timedelta(days=over_cap - 1)
+    client = FakeSupabaseClient(
+        activity_rows=[
+            _activity_row(today - timedelta(days=offset), 50.0) for offset in range(over_cap)
+        ],
+    )
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+
+    response = await _post_recompute_load({"since": since.isoformat()})
+
+    assert response.status_code == 409, response.text
+    # The oldest activities would have been dropped by the newest-first cap and recomputed as
+    # zero TSS, so nothing may be persisted.
+    assert _load_rows(client) == []
+
+
+@pytest.mark.usefixtures("as_athlete")
+async def test_rebuild_window_exactly_at_the_activity_cap_still_recomputes(monkeypatch) -> None:
+    today = date.today()
+    at_cap = api_index._RECOMPUTE_ACTIVITY_LIMIT
+    since = today - timedelta(days=at_cap - 1)
+    client = FakeSupabaseClient(
+        activity_rows=[
+            _activity_row(today - timedelta(days=offset), 50.0) for offset in range(at_cap)
+        ],
+    )
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+
+    response = await _post_recompute_load({"since": since.isoformat()})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["snapshots_written"] == at_cap
