@@ -1436,6 +1436,11 @@ class RecomputeLoadRequest(BaseModel):
     sport: str | None = None
 
 
+# Bounded candidate query for the rebuild window. Part two of #447 replaces it with keyset
+# pagination; until then the endpoint fails closed rather than persisting a truncated rebuild.
+_RECOMPUTE_ACTIVITY_LIMIT = 500
+
+
 @app.post("/api/engine/recompute-load")
 async def recompute_load_endpoint(
     payload: RecomputeLoadRequest,
@@ -1445,39 +1450,84 @@ async def recompute_load_endpoint(
 
     user_id = user_context.user_id
     since = payload.since or date.today()
-    activities = await repo.list_activities(user_id, sport=payload.sport, since=since, limit=500)
+
+    seed = await repo.get_load_snapshot_on_or_before(
+        user_id, since - timedelta(days=1), sport=payload.sport
+    )
+    # A seed older than `since - 1 day` is stale at `since`: applying it verbatim would skip the
+    # intervening days' load and their zero-load decay, writing wrong CTL/ATL/TSB. Rebuild that
+    # gap instead of starting at `since`. The gap provably holds no snapshot for this sport --
+    # the seed is the newest one at or before `since - 1 day` -- so filling it in never
+    # overwrites recorded history. An absent seed still starts from zero at `since`; widening
+    # back to first-ever activity needs the unbounded candidates deferred to part two of #447.
+    rebuild_start = seed.snapshot_date + timedelta(days=1) if seed else since
+    initial_ctl = seed.ctl if seed else 0.0
+    initial_atl = seed.atl if seed else 0.0
+
+    # Fetch one past the cap purely to detect overflow: `list_activities` returns newest first,
+    # so a truncated page silently drops the *oldest* activities. Those days would then be
+    # recomputed as zero TSS and upserted over the real snapshots, so overflow must fail closed
+    # before any write rather than merely warn.
+    activities = await repo.list_activities(
+        user_id, sport=payload.sport, since=rebuild_start, limit=_RECOMPUTE_ACTIVITY_LIMIT + 1
+    )
     logger.debug(
-        "recompute_load user_id=%s sport=%s since=%s activities=%d",
+        "recompute_load user_id=%s sport=%s since=%s rebuild_start=%s activities=%d",
         user_id,
         payload.sport,
         since,
+        rebuild_start,
         len(activities),
     )
+    if len(activities) > _RECOMPUTE_ACTIVITY_LIMIT:
+        logger.warning(
+            "recompute_load activity cap exceeded user_id=%s sport=%s rebuild_start=%s limit=%d",
+            user_id,
+            payload.sport,
+            rebuild_start,
+            _RECOMPUTE_ACTIVITY_LIMIT,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Rebuild window from {rebuild_start.isoformat()} holds more than "
+                f"{_RECOMPUTE_ACTIVITY_LIMIT} activities; recomputing it would discard the "
+                "oldest and overwrite load history. Request a later `since`."
+            ),
+        )
 
     daily_tss: dict[date, float] = {}
     for a in activities:
         daily_tss[a.activity_date] = daily_tss.get(a.activity_date, 0) + (a.tss or 0)
 
-    prev = await repo.get_latest_load(user_id, sport=payload.sport)
-    initial_ctl = prev.ctl if prev else 0.0
-    initial_atl = prev.atl if prev else 0.0
-
-    snapshots = recompute_load_series(daily_tss, since, date.today(), initial_ctl, initial_atl)
+    snapshots = recompute_load_series(
+        daily_tss, rebuild_start, date.today(), initial_ctl, initial_atl
+    )
 
     await repo.upsert_load_snapshots(user_id, snapshots, sport=payload.sport)
 
     latest = snapshots[-1] if snapshots else {}
+    seed_date = seed.snapshot_date.isoformat() if seed else None
     logger.info(
-        "load recomputed user_id=%s sport=%s snapshots=%d ctl=%.1f atl=%.1f tsb=%.1f",
+        "load recomputed user_id=%s sport=%s snapshots=%d rebuild_start=%s seed_date=%s "
+        "seed_ctl=%.1f seed_atl=%.1f ctl=%.1f atl=%.1f tsb=%.1f",
         user_id,
         payload.sport,
         len(snapshots),
+        rebuild_start,
+        seed_date,
+        initial_ctl,
+        initial_atl,
         latest.get("ctl", 0),
         latest.get("atl", 0),
         latest.get("tsb", 0),
     )
     return {
         "snapshots_written": len(snapshots),
+        "rebuild_start": rebuild_start.isoformat(),
+        "seed_date": seed_date,
+        "seed_ctl": initial_ctl,
+        "seed_atl": initial_atl,
         "latest_ctl": latest.get("ctl", 0),
         "latest_atl": latest.get("atl", 0),
         "latest_tsb": latest.get("tsb", 0),
