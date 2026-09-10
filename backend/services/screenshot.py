@@ -20,7 +20,7 @@ import sentry_sdk
 from openai import AsyncOpenAI, OpenAIError
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
-from sentry_sdk import logger as sentry_logger
+from sentry_sdk import metrics as sentry_metrics
 
 from backend.config import settings
 from backend.models.screenshot import (
@@ -477,6 +477,34 @@ def _vision_stage(schema: type[BaseModel]) -> str:
     return _VISION_STAGE_BY_SCHEMA.get(schema, "extract")
 
 
+# Token counts worth aggregating, as (usage attribute, details attribute, metric name).
+# `details` names a nested field on ResponseUsage; None means read it off usage directly.
+_VISION_TOKEN_METRICS: tuple[tuple[str, str | None, str], ...] = (
+    ("input_tokens", None, "input_tokens"),
+    ("output_tokens", None, "output_tokens"),
+    ("total_tokens", None, "total_tokens"),
+    ("cached_tokens", "input_tokens_details", "cached_tokens"),
+    # Reasoning tokens are emitted serially, so this is the closest thing to a direct
+    # explanation of a slow extraction call.
+    ("reasoning_tokens", "output_tokens_details", "reasoning_tokens"),
+)
+
+
+def _vision_usage(response: Any) -> dict[str, int]:
+    """Pull the token counts off an OpenAI response, skipping anything absent."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+
+    counts: dict[str, int] = {}
+    for attribute, details, metric_name in _VISION_TOKEN_METRICS:
+        source = usage if details is None else getattr(usage, details, None)
+        value = getattr(source, attribute, None)
+        if value is not None:
+            counts[metric_name] = value
+    return counts
+
+
 def _record_vision_call(
     span: Any,
     *,
@@ -485,42 +513,55 @@ def _record_vision_call(
     outcome: str,
     response: Any = None,
 ) -> None:
-    """Attach timing and token usage for one vision call to its span and to Sentry Logs.
+    """Report one vision call as span attributes and as trace metrics.
 
-    Traces already show the raw `POST /v1/responses` httpx span, but both vision calls
-    share one description, so the classify/extract split is invisible in aggregate. The
-    `stage` field here is what separates them. Field names mirror `recordStageUsage` in
-    lib/agent/usage-metrics.ts so the coach-side and screenshot-side p95 queries in
-    Sentry Logs line up (issue #403).
+    Traces already carry a `POST /v1/responses` httpx span, but both calls of the old
+    two-call pipeline shared one description, so the classify/extract split was
+    invisible in aggregate. `stage` is what separates them.
+
+    Durations and token counts go out as distributions rather than as fields on a log
+    line, so Sentry aggregates them natively (p50/p95 by stage) instead of requiring a
+    text search to be parsed back into numbers. The span attributes carry the same
+    values for per-request drill-down, and use `gen_ai.*` naming where a convention
+    exists so Sentry's AI views pick them up.
     """
     duration_ms = (time.perf_counter() - started) * 1000
     stage = _vision_stage(schema)
+    counts = _vision_usage(response)
 
-    fields: dict[str, Any] = {
+    # Grouping keys, attached to every metric so each can be split by stage or outcome.
+    attributes = {
         "stage": stage,
         "schema": schema.__name__,
-        "model": settings.openai_vision_model,
         "outcome": outcome,
-        "duration_ms": round(duration_ms, 1),
+        "model": settings.openai_vision_model,
     }
 
-    usage = getattr(response, "usage", None)
-    if usage is not None:
-        input_details = getattr(usage, "input_tokens_details", None)
-        output_details = getattr(usage, "output_tokens_details", None)
-        fields.update(
-            input_tokens=getattr(usage, "input_tokens", None),
-            output_tokens=getattr(usage, "output_tokens", None),
-            total_tokens=getattr(usage, "total_tokens", None),
-            cached_tokens=getattr(input_details, "cached_tokens", None),
-            # Reasoning tokens are emitted serially, so this is the closest thing to a
-            # direct explanation of a slow extraction call.
-            reasoning_tokens=getattr(output_details, "reasoning_tokens", None),
-        )
+    span.update_data(
+        {
+            "gen_ai.operation.name": f"screenshot.{stage}",
+            "gen_ai.request.model": settings.openai_vision_model,
+            **{f"gen_ai.usage.{name}": value for name, value in counts.items()},
+            "screenshot.stage": stage,
+            "screenshot.schema": schema.__name__,
+            "screenshot.outcome": outcome,
+            "screenshot.duration_ms": round(duration_ms, 1),
+        }
+    )
 
-    reported = {key: value for key, value in fields.items() if value is not None}
-    span.update_data({f"vision.{key}": value for key, value in reported.items()})
-    sentry_logger.info("screenshot vision call", **reported)
+    sentry_metrics.distribution(
+        "screenshot.vision.duration",
+        duration_ms,
+        unit="millisecond",
+        attributes=attributes,
+    )
+    for name, value in counts.items():
+        sentry_metrics.distribution(
+            f"screenshot.vision.{name}",
+            value,
+            unit="none",
+            attributes=attributes,
+        )
 
 
 async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> ModelT | None:

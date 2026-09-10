@@ -52,8 +52,10 @@ class FakeVisionResponse:
         refusal: str | None = None,
         error: Any = None,
         incomplete_reason: str | None = None,
+        usage: Any = None,
     ) -> None:
         self.status = status
+        self.usage = usage
         self.output_parsed = output_parsed
         self.output_text = None
         self.error = error
@@ -615,6 +617,101 @@ async def test_call_vision_reasoning_mismatch_captures_to_sentry(
     assert "o1*" in fake_scope.extras["operator_hint"]
     assert any(r.levelno == logging.ERROR for r in caplog.records)
     assert any("does not support reasoning" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_call_vision_reports_duration_and_tokens_as_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Latency and token counts must be aggregatable, not parsed back out of log text."""
+    recorded: list[tuple[str, float, str | None, dict[str, Any]]] = []
+
+    def fake_distribution(
+        name: str,
+        value: float,
+        unit: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        recorded.append((name, value, unit, attributes or {}))
+
+    monkeypatch.setattr(screenshot_analyzer.sentry_metrics, "distribution", fake_distribution)
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_model", "vision-model")
+
+    response = FakeVisionResponse(
+        output_parsed=screenshot_analyzer.ActivityExtraction(sport="running"),
+        usage=SimpleNamespace(
+            input_tokens=1200,
+            output_tokens=340,
+            total_tokens=1540,
+            input_tokens_details=SimpleNamespace(cached_tokens=64),
+            output_tokens_details=SimpleNamespace(reasoning_tokens=256),
+        ),
+    )
+    monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", make_fake_openai({}, response=response))
+
+    await screenshot_analyzer._call_vision(
+        "Extract fields",
+        "https://example.com/image.png",
+        screenshot_analyzer.ActivityExtraction,
+    )
+
+    by_name = {name: (value, unit, attrs) for name, value, unit, attrs in recorded}
+
+    duration, unit, attributes = by_name["screenshot.vision.duration"]
+    assert duration >= 0
+    assert unit == "millisecond"
+    # Every metric carries the grouping keys, so p95 can be split by stage or outcome.
+    assert attributes == {
+        "stage": "extract",
+        "schema": "ActivityExtraction",
+        "outcome": "ok",
+        "model": "vision-model",
+    }
+
+    assert by_name["screenshot.vision.input_tokens"][0] == 1200
+    assert by_name["screenshot.vision.output_tokens"][0] == 340
+    assert by_name["screenshot.vision.total_tokens"][0] == 1540
+    assert by_name["screenshot.vision.cached_tokens"][0] == 64
+    assert by_name["screenshot.vision.reasoning_tokens"][0] == 256
+
+
+@pytest.mark.asyncio
+async def test_call_vision_reports_a_timeout_with_its_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout is latency too — it must not be missing from the duration metric."""
+    recorded: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_distribution(
+        name: str,
+        value: float,
+        unit: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        recorded.append((name, attributes or {}))
+
+    class HangingAsyncOpenAI:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.responses = self
+
+        async def parse(self, **_kwargs: Any) -> Any:
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(screenshot_analyzer.sentry_metrics, "distribution", fake_distribution)
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_total_timeout_seconds", 0.01)
+    monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", HangingAsyncOpenAI)
+
+    result = await screenshot_analyzer._call_vision(
+        "Extract fields",
+        "https://example.com/image.png",
+        screenshot_analyzer.ActivityExtraction,
+    )
+
+    assert result is None
+    outcomes = [attrs.get("outcome") for name, attrs in recorded if name.endswith("duration")]
+    assert outcomes == ["timeout"]
 
 
 @pytest.mark.asyncio
