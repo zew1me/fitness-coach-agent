@@ -965,7 +965,12 @@ async def test_analyze_screenshot_low_confidence_falls_back_to_generic(
 async def test_analyze_screenshot_falls_back_to_generic_when_typed_branch_is_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A confident classification whose payload field came back null must not lose data."""
+    """A confident classification whose payload field came back null must not lose data.
+
+    The reported type must describe the payload actually returned. Echoing
+    "training_load_chart" beside a generic-shaped body would send a caller looking for
+    `series` that is not there.
+    """
 
     async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
         return screenshot_analyzer.ScreenshotAnalysis(
@@ -979,8 +984,36 @@ async def test_analyze_screenshot_falls_back_to_generic_when_typed_branch_is_emp
 
     result = await screenshot_analyzer.analyze_screenshot("https://example.com/chart.png")
 
-    assert result.screenshot_type == "training_load_chart"
     assert result.data["summary"] == "CTL and ATL lines."
+    assert result.screenshot_type == "unknown"
+    # The model's own verdict is still reported, just not as the payload's type.
+    assert result.data["classification"]["screenshot_type"] == "training_load_chart"
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_keeps_plan_or_calendar_on_a_generic_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """plan_or_calendar has no typed schema — generic *is* its shape, so the type stands.
+
+    Guards the boundary of the fallback above: only a typed branch coming back empty
+    downgrades the reported type, never a classification whose payload is generic by
+    design.
+    """
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return screenshot_analyzer.ScreenshotAnalysis(
+            screenshot_type="plan_or_calendar",
+            confidence=0.95,
+            generic=screenshot_analyzer.GenericExtraction(summary="A weekly plan grid."),
+        )
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/plan.png")
+
+    assert result.screenshot_type == "plan_or_calendar"
+    assert result.data["summary"] == "A weekly plan grid."
 
 
 @pytest.mark.asyncio

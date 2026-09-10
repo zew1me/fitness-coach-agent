@@ -256,17 +256,26 @@ def _select_payload(
     Preference order: the branch matching the classification, then the generic
     catch-all, then any other populated branch. The last step matters because the model
     can classify weakly while still filling a typed branch correctly — reporting nothing
-    there would throw away data we already paid for. When it fires, the returned type is
-    corrected to match the branch, so `screenshot_type` always describes `data`'s shape.
+    there would throw away data we already paid for.
+
+    The returned type always describes the shape of the payload beside it, so a caller
+    switching on `screenshot_type` to read typed fields will find them. That is why the
+    latter two branches correct the type rather than echoing the classification: the
+    model's own verdict is never lost, because `analyze_screenshot` reports it
+    separately under `data["classification"]`.
     """
     preferred = _ANALYSIS_FIELD_BY_TYPE.get(extract_type, "generic") if confident else "generic"
 
     payload: BaseModel | None = getattr(parsed, preferred, None)
     if payload is not None:
+        # Includes plan_or_calendar and the low-confidence path, whose preferred field
+        # *is* `generic` — there the classification already describes a generic shape.
         return extract_type, payload
 
     if parsed.generic is not None:
-        return extract_type, parsed.generic
+        # Only reachable when the typed branch the model chose came back empty, so the
+        # payload is generic-shaped and the typed name would misdescribe it.
+        return "unknown", parsed.generic
 
     for candidate_type, field in _ANALYSIS_FIELD_BY_TYPE.items():
         payload = getattr(parsed, field, None)
