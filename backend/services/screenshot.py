@@ -14,13 +14,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import sentry_sdk
 from openai import AsyncOpenAI, OpenAIError
+from openai.types.responses import ResponseInputParam, ResponseUsage
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
 from sentry_sdk import metrics as sentry_metrics
+from sentry_sdk.consts import OP, SPANDATA
+from sentry_sdk.tracing import Span
 
 from backend.config import settings
 from backend.models.screenshot import (
@@ -404,6 +410,40 @@ def _refusal_text(response: Any) -> str | None:
     return None
 
 
+def _record_vision_usage(span: Span, usage: ResponseUsage) -> None:
+    """Attach Responses API token usage to the manual vision span.
+
+    Sentry's OpenAI integration instruments ``responses.create`` but not the SDK's
+    ``responses.parse`` helper used here. Keep the provider-reported output total and
+    reasoning subset, plus the derived non-reasoning content count, so latency can be
+    compared against each independently.
+
+    This intentionally remains a free function while it only adapts the two SDK types.
+    If tracing starts coordinating request attributes, response status/errors, and span
+    lifecycle, replace this helper and the inline span setup with a composed
+    ``_VisionTrace`` context manager rather than subclassing or monkey-patching ``Span``.
+    """
+    cached_tokens = usage.input_tokens_details.cached_tokens
+    reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+    token_attributes = {
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS: usage.input_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS: usage.output_tokens,
+        "gen_ai.usage.cache_read.input_tokens": cached_tokens,
+        "gen_ai.usage.reasoning.output_tokens": reasoning_tokens,
+        # Sentry 2.x still indexes these v1.36-era aliases and total-token extension.
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS_CACHED: cached_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS_REASONING: reasoning_tokens,
+        SPANDATA.GEN_AI_USAGE_TOTAL_TOKENS: usage.total_tokens,
+    }
+    for key, value in token_attributes.items():
+        span.set_data(key, value)
+
+    span.set_data(
+        "screenshot.usage.output_tokens.non_reasoning",
+        usage.output_tokens - reasoning_tokens,
+    )
+
+
 def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
     """Interpret a completed `responses.parse` call into a validated model or `None`."""
     if response.status in ("failed", "cancelled"):
@@ -477,91 +517,147 @@ def _vision_stage(schema: type[BaseModel]) -> str:
     return _VISION_STAGE_BY_SCHEMA.get(schema, "extract")
 
 
-# Token counts worth aggregating, as (usage attribute, details attribute, metric name).
-# `details` names a nested field on ResponseUsage; None means read it off usage directly.
-_VISION_TOKEN_METRICS: tuple[tuple[str, str | None, str], ...] = (
-    ("input_tokens", None, "input_tokens"),
-    ("output_tokens", None, "output_tokens"),
-    ("total_tokens", None, "total_tokens"),
-    ("cached_tokens", "input_tokens_details", "cached_tokens"),
-    # Reasoning tokens are emitted serially, so this is the closest thing to a direct
-    # explanation of a slow extraction call.
-    ("reasoning_tokens", "output_tokens_details", "reasoning_tokens"),
-)
+def _vision_token_counts(usage: ResponseUsage) -> dict[str, int]:
+    """Token counts worth aggregating, keyed by metric suffix.
 
-
-def _vision_usage(response: Any) -> dict[str, int]:
-    """Pull the token counts off an OpenAI response, skipping anything absent."""
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return {}
-
-    counts: dict[str, int] = {}
-    for attribute, details, metric_name in _VISION_TOKEN_METRICS:
-        source = usage if details is None else getattr(usage, details, None)
-        value = getattr(source, attribute, None)
-        if value is not None:
-            counts[metric_name] = value
-    return counts
-
-
-def _record_vision_call(
-    span: Any,
-    *,
-    schema: type[BaseModel],
-    started: float,
-    outcome: str,
-    response: Any = None,
-) -> None:
-    """Report one vision call as span attributes and as trace metrics.
-
-    Traces already carry a `POST /v1/responses` httpx span, but both calls of the old
-    two-call pipeline shared one description, so the classify/extract split was
-    invisible in aggregate. `stage` is what separates them.
-
-    Durations and token counts go out as distributions rather than as fields on a log
-    line, so Sentry aggregates them natively (p50/p95 by stage) instead of requiring a
-    text search to be parsed back into numbers. The span attributes carry the same
-    values for per-request drill-down, and use `gen_ai.*` naming where a convention
-    exists so Sentry's AI views pick them up.
+    Mirrors what `_record_vision_usage` puts on the span, so the metric and the span
+    never disagree about the same call.
     """
-    duration_ms = (time.perf_counter() - started) * 1000
-    stage = _vision_stage(schema)
-    counts = _vision_usage(response)
-
-    # Grouping keys, attached to every metric so each can be split by stage or outcome.
-    attributes = {
-        "stage": stage,
-        "schema": schema.__name__,
-        "outcome": outcome,
-        "model": settings.openai_vision_model,
+    reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "cached_tokens": usage.input_tokens_details.cached_tokens,
+        # Reasoning tokens are emitted serially, so this is the closest thing to a
+        # direct explanation of a slow extraction call.
+        "reasoning_tokens": reasoning_tokens,
+        "non_reasoning_output_tokens": usage.output_tokens - reasoning_tokens,
     }
 
-    span.update_data(
-        {
-            "gen_ai.operation.name": f"screenshot.{stage}",
-            "gen_ai.request.model": settings.openai_vision_model,
-            **{f"gen_ai.usage.{name}": value for name, value in counts.items()},
-            "screenshot.stage": stage,
-            "screenshot.schema": schema.__name__,
-            "screenshot.outcome": outcome,
-            "screenshot.duration_ms": round(duration_ms, 1),
-        }
+
+def _record_vision_usage(span: Span, usage: ResponseUsage) -> None:
+    """Attach Responses API token usage to the manual vision span.
+
+    Sentry's OpenAI integration instruments ``responses.create`` but not the SDK's
+    ``responses.parse`` helper used here. Keep the provider-reported output total and
+    reasoning subset, plus the derived non-reasoning content count, so latency can be
+    compared against each independently.
+    """
+    cached_tokens = usage.input_tokens_details.cached_tokens
+    reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+    token_attributes = {
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS: usage.input_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS: usage.output_tokens,
+        "gen_ai.usage.cache_read.input_tokens": cached_tokens,
+        "gen_ai.usage.reasoning.output_tokens": reasoning_tokens,
+        # Sentry 2.x still indexes these v1.36-era aliases and total-token extension.
+        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS_CACHED: cached_tokens,
+        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS_REASONING: reasoning_tokens,
+        SPANDATA.GEN_AI_USAGE_TOTAL_TOKENS: usage.total_tokens,
+    }
+    for key, value in token_attributes.items():
+        span.set_data(key, value)
+
+    span.set_data(
+        "screenshot.usage.output_tokens.non_reasoning",
+        usage.output_tokens - reasoning_tokens,
     )
 
-    sentry_metrics.distribution(
-        "screenshot.vision.duration",
-        duration_ms,
-        unit="millisecond",
-        attributes=attributes,
-    )
-    for name, value in counts.items():
-        sentry_metrics.distribution(
-            f"screenshot.vision.{name}",
-            value,
-            unit="none",
-            attributes=attributes,
-        )
+
+@dataclass
+class _VisionCall:
+    """Mutable handle a traced vision call fills in as it progresses."""
+
+    schema: type[BaseModel]
+    stage: str
+    # Pessimistic default: if the body escapes without setting one, that is a failure.
+    outcome: str = "error"
+    usage: ResponseUsage | None = None
+
+
+@contextmanager
+def _vision_trace(schema: type[BaseModel]) -> Iterator[_VisionCall]:
+    """Own the span, timing, and metrics for one vision call.
+
+    #468 kept the span setup inline and noted that once tracing had to coordinate
+    request attributes, response status, and span lifecycle together, it should become a
+    composed context manager rather than a free helper. Recording an outcome on every
+    exit path — including timeouts and API errors, which previously produced a span with
+    no verdict on it — is that point.
+
+    Durations and token counts also go out as distributions, so Sentry aggregates
+    p50/p95 by stage natively instead of requiring span attributes to be re-aggregated
+    per query. The span carries the same values for per-request drill-down.
+    """
+    call = _VisionCall(schema=schema, stage=_vision_stage(schema))
+    started = time.perf_counter()
+
+    with sentry_sdk.start_span(
+        op=OP.GEN_AI_RESPONSES,
+        name=f"generate_content {settings.openai_vision_model} screenshot.{call.stage}",
+    ) as span:
+        request_attributes = {
+            SPANDATA.GEN_AI_OPERATION_NAME: "generate_content",
+            SPANDATA.GEN_AI_PROVIDER_NAME: "openai",
+            SPANDATA.GEN_AI_REQUEST_MODEL: settings.openai_vision_model,
+            SPANDATA.GEN_AI_REQUEST_MAX_TOKENS: settings.openai_vision_max_output_tokens,
+            "gen_ai.request.reasoning.level": settings.openai_vision_reasoning_effort,
+            "gen_ai.output.type": "json",
+            "openai.api.type": "responses",
+            "screenshot.stage": call.stage,
+            "screenshot.schema": schema.__name__,
+        }
+        for key, value in request_attributes.items():
+            span.set_data(key, value)
+
+        try:
+            yield call
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000
+            counts = _vision_token_counts(call.usage) if call.usage is not None else {}
+            if call.usage is not None:
+                _record_vision_usage(span, call.usage)
+            span.set_data("screenshot.outcome", call.outcome)
+            span.set_data("screenshot.duration_ms", round(duration_ms, 1))
+
+            # Grouping keys on every metric, so each can be split by stage or outcome.
+            attributes = {
+                "stage": call.stage,
+                "schema": schema.__name__,
+                "outcome": call.outcome,
+                "model": settings.openai_vision_model,
+            }
+            sentry_metrics.distribution(
+                "screenshot.vision.duration",
+                duration_ms,
+                unit="millisecond",
+                attributes=attributes,
+            )
+            for name, value in counts.items():
+                sentry_metrics.distribution(
+                    f"screenshot.vision.{name}",
+                    value,
+                    unit="none",
+                    attributes=attributes,
+                )
+
+
+def _vision_input(prompt: str, image_url: str) -> ResponseInputParam:
+    """Build the typed multimodal input shared by screenshot vision calls."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_image",
+                    "image_url": image_url,
+                    "detail": "high",
+                },
+            ],
+        }
+    ]
 
 
 async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> ModelT | None:
@@ -576,38 +672,25 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
     internally, so the enclosing `openai_vision_total_timeout_seconds` guard is what
     stops a stalled vision call from consuming the whole serverless request budget.
 
-    Every exit path reports through `_record_vision_call`, so a timeout or an error is
-    as visible in the latency data as a success.
+    Every exit path sets an outcome on the trace, so a timeout or an error is as visible
+    in the latency data as a success.
     """
     if not settings.openai_api_key:
         return None
 
-    started = time.perf_counter()
-    with sentry_sdk.start_span(op="gen_ai.vision", name=f"vision {_vision_stage(schema)}") as span:
+    with _vision_trace(schema) as call:
         try:
             async with asyncio.timeout(settings.openai_vision_total_timeout_seconds):
                 logger.debug("openai vision call start model=%s", settings.openai_vision_model)
                 response = await _get_vision_client().responses.parse(
                     model=settings.openai_vision_model,
-                    input=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "input_text", "text": prompt},
-                                {
-                                    "type": "input_image",
-                                    "image_url": image_url,
-                                    "detail": "high",
-                                },
-                            ],
-                        }
-                    ],
+                    input=_vision_input(prompt, image_url),
                     text_format=schema,
                     max_output_tokens=settings.openai_vision_max_output_tokens,
                     reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
                 )
         except TimeoutError:
-            _record_vision_call(span, schema=schema, started=started, outcome="timeout")
+            call.outcome = "timeout"
             logger.warning(
                 "screenshot vision call exceeded its total budget type=%s budget=%ss",
                 schema.__name__,
@@ -615,8 +698,8 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
             )
             return None
         except OpenAIError as error:
+            call.outcome = "error"
             status_code = getattr(error, "status_code", None)
-            _record_vision_call(span, schema=schema, started=started, outcome="error")
             if _is_reasoning_model_mismatch(error):
                 # The model rejected the `reasoning` parameter — config mismatch that slipped
                 # past the startup validator. Capture explicitly so Sentry shows the operator
@@ -651,12 +734,7 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
             return None
 
         logger.debug("openai vision call complete status=%s", response.status)
+        call.usage = response.usage
         parsed = _parsed_or_none(response, schema)
-        _record_vision_call(
-            span,
-            schema=schema,
-            started=started,
-            outcome="ok" if parsed is not None else "unparsed",
-            response=response,
-        )
+        call.outcome = "ok" if parsed is not None else "unparsed"
         return parsed

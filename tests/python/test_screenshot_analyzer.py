@@ -9,6 +9,11 @@ from typing import Any
 
 import pytest
 from openai import OpenAIError
+from openai.types.responses.response_usage import (
+    InputTokensDetails,
+    OutputTokensDetails,
+    ResponseUsage,
+)
 from pydantic import ValidationError
 
 from backend.config import Settings
@@ -52,13 +57,14 @@ class FakeVisionResponse:
         refusal: str | None = None,
         error: Any = None,
         incomplete_reason: str | None = None,
-        usage: Any = None,
+        usage: ResponseUsage | None = None,
     ) -> None:
         self.status = status
         self.usage = usage
         self.output_parsed = output_parsed
         self.output_text = None
         self.error = error
+        self.usage = usage
         self.incomplete_details = (
             SimpleNamespace(reason=incomplete_reason) if incomplete_reason else None
         )
@@ -341,6 +347,69 @@ async def test_call_vision_uses_model_max_tokens_and_high_detail(
     assert parse_kwargs["reasoning"]["effort"] == "low"
     assert parse_kwargs["text_format"] is screenshot_analyzer.ActivityExtraction
     assert parse_kwargs["input"][0]["content"][1]["detail"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_call_vision_records_stage_and_separate_reasoning_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    response = FakeVisionResponse(
+        output_parsed=screenshot_analyzer.ScreenshotClassificationModel(
+            screenshot_type="activity_single", confidence=0.9
+        ),
+        usage=ResponseUsage(
+            input_tokens=900,
+            input_tokens_details=InputTokensDetails(cached_tokens=100),
+            output_tokens=420,
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=300),
+            total_tokens=1320,
+        ),
+    )
+
+    class FakeSpan:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["span_kwargs"] = kwargs
+            self.data: dict[str, Any] = {}
+
+        def set_data(self, key: str, value: Any) -> None:
+            self.data[key] = value
+
+        def __enter__(self) -> "FakeSpan":
+            captured["span"] = self
+            return self
+
+        def __exit__(self, *_exc: Any) -> bool:
+            return False
+
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_model", "vision-model")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_reasoning_effort", "low")
+    monkeypatch.setattr(
+        screenshot_analyzer, "AsyncOpenAI", make_fake_openai(captured, response=response)
+    )
+    monkeypatch.setattr(screenshot_analyzer.sentry_sdk, "start_span", FakeSpan)
+
+    await screenshot_analyzer._call_vision(
+        "Classify image",
+        "https://example.com/image.png",
+        screenshot_analyzer.ScreenshotClassificationModel,
+    )
+
+    assert captured["span_kwargs"] == {
+        "op": "gen_ai.responses",
+        "name": "generate_content vision-model screenshot.classify",
+    }
+    span_data = captured["span"].data
+    expected_core_data = {
+        "gen_ai.operation.name": "generate_content",
+        "gen_ai.provider.name": "openai",
+        "screenshot.stage": "classify",
+        "gen_ai.usage.output_tokens": 420,
+        "gen_ai.usage.reasoning.output_tokens": 300,
+        "screenshot.usage.output_tokens.non_reasoning": 120,
+    }
+    assert {key: span_data[key] for key in expected_core_data} == expected_core_data
 
 
 @pytest.mark.asyncio
@@ -640,12 +709,12 @@ async def test_call_vision_reports_duration_and_tokens_as_metrics(
 
     response = FakeVisionResponse(
         output_parsed=screenshot_analyzer.ActivityExtraction(sport="running"),
-        usage=SimpleNamespace(
+        usage=ResponseUsage(
             input_tokens=1200,
+            input_tokens_details=InputTokensDetails(cached_tokens=64),
             output_tokens=340,
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=256),
             total_tokens=1540,
-            input_tokens_details=SimpleNamespace(cached_tokens=64),
-            output_tokens_details=SimpleNamespace(reasoning_tokens=256),
         ),
     )
     monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", make_fake_openai({}, response=response))
@@ -674,6 +743,8 @@ async def test_call_vision_reports_duration_and_tokens_as_metrics(
     assert by_name["screenshot.vision.total_tokens"][0] == 1540
     assert by_name["screenshot.vision.cached_tokens"][0] == 64
     assert by_name["screenshot.vision.reasoning_tokens"][0] == 256
+    # Mirrors the span's screenshot.usage.output_tokens.non_reasoning (340 - 256).
+    assert by_name["screenshot.vision.non_reasoning_output_tokens"][0] == 84
 
 
 @pytest.mark.asyncio

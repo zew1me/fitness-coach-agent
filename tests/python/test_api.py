@@ -1367,7 +1367,30 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
     assert body["public_url"] == public_url
 
 
-def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("filename", "content_type", "expected"),
+    [
+        ("activity", "application/gpx+xml", "gpx"),
+        ("activity", "application/vnd.garmin.fit", "fit"),
+        ("activity", "application/vnd.garmin.tcx+xml", "tcx"),
+        ("activity.GPX", "application/octet-stream", "gpx"),
+    ],
+)
+def test_resolve_activity_file_format(filename: str, content_type: str, expected: str) -> None:
+    assert api_index._resolve_activity_file_format(filename, content_type) == expected
+
+
+def test_resolve_activity_file_format_rejects_unknown_type() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        api_index._resolve_activity_file_format("activity", "application/octet-stream")
+
+    assert exc_info.value.status_code == 415
+    assert exc_info.value.detail == "Unsupported activity file type."
+
+
+def test_build_uploaded_activity_uses_resolved_format_for_source_and_date_provenance(
+    monkeypatch,
+) -> None:
     from backend.engine.gpx_parser import ParsedActivity
 
     parsed = ParsedActivity(
@@ -1376,11 +1399,17 @@ def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) 
         started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
         utc_offset_seconds=-25200,
     )
-    monkeypatch.setattr(api_index, "_parse_uploaded_activity_file", lambda *_args: parsed)
+    captured: dict[str, str] = {}
+
+    def mock_parse(file_format: str, _file_bytes: bytes) -> ParsedActivity:
+        captured["file_format"] = file_format
+        return parsed
+
+    monkeypatch.setattr(api_index, "_parse_uploaded_activity_file", mock_parse)
 
     activity = api_index._build_uploaded_activity_or_course(
         user_id="athlete-1",
-        filename="ride.fit",
+        filename="ride",
         content_type="application/vnd.garmin.fit",
         object_key="users/athlete-1/ride.fit",
         public_url="https://cdn.example.com/ride.fit",
@@ -1388,6 +1417,8 @@ def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) 
     )
 
     assert isinstance(activity, Activity)
+    assert activity.source == "fit_upload"
+    assert captured == {"file_format": "fit"}
     assert activity.raw_extraction is not None
     assert activity.raw_extraction["utc_offset_seconds"] == -25200
     assert activity.raw_extraction["activity_date_source"] == "fit_local_timestamp"
