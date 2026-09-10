@@ -20,6 +20,20 @@ from backend.config import Settings
 from backend.services import screenshot as screenshot_analyzer
 
 
+@pytest.fixture(autouse=True)
+def reset_vision_client() -> typing.Iterator[None]:
+    """Drop the process-wide vision client around every test.
+
+    _call_vision memoizes its AsyncOpenAI client, so without this a client built under
+    one test's monkeypatched settings (or its fake AsyncOpenAI) would leak into the next.
+    """
+    screenshot_analyzer.reset_vision_client()
+    try:
+        yield
+    finally:
+        screenshot_analyzer.reset_vision_client()
+
+
 class _StatusError(OpenAIError):
     """OpenAIError carrying a `status_code`, like the SDK's APIStatusError subclasses."""
 
@@ -46,6 +60,7 @@ class FakeVisionResponse:
         usage: ResponseUsage | None = None,
     ) -> None:
         self.status = status
+        self.usage = usage
         self.output_parsed = output_parsed
         self.output_text = None
         self.error = error
@@ -674,16 +689,35 @@ async def test_call_vision_reasoning_mismatch_captures_to_sentry(
 
 
 @pytest.mark.asyncio
-async def test_call_vision_closes_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-    response = FakeVisionResponse(
-        output_parsed=screenshot_analyzer.ActivityExtraction(sport="running")
-    )
+async def test_call_vision_reports_duration_and_tokens_as_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Latency and token counts must be aggregatable, not parsed back out of log text."""
+    recorded: list[tuple[str, float, str | None, dict[str, Any]]] = []
 
+    def fake_distribution(
+        name: str,
+        value: float,
+        unit: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        recorded.append((name, value, unit, attributes or {}))
+
+    monkeypatch.setattr(screenshot_analyzer.sentry_metrics, "distribution", fake_distribution)
     monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
-    monkeypatch.setattr(
-        screenshot_analyzer, "AsyncOpenAI", make_fake_openai(captured, response=response)
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_model", "vision-model")
+
+    response = FakeVisionResponse(
+        output_parsed=screenshot_analyzer.ActivityExtraction(sport="running"),
+        usage=ResponseUsage(
+            input_tokens=1200,
+            input_tokens_details=InputTokensDetails(cached_tokens=64),
+            output_tokens=340,
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=256),
+            total_tokens=1540,
+        ),
     )
+    monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", make_fake_openai({}, response=response))
 
     await screenshot_analyzer._call_vision(
         "Extract fields",
@@ -691,7 +725,119 @@ async def test_call_vision_closes_client(monkeypatch: pytest.MonkeyPatch) -> Non
         screenshot_analyzer.ActivityExtraction,
     )
 
-    assert captured["closed"] is True
+    by_name = {name: (value, unit, attrs) for name, value, unit, attrs in recorded}
+
+    duration, unit, attributes = by_name["screenshot.vision.duration"]
+    assert duration >= 0
+    assert unit == "millisecond"
+    # Every metric carries the grouping keys, so p95 can be split by stage or outcome.
+    assert attributes == {
+        "stage": "extract",
+        "schema": "ActivityExtraction",
+        "outcome": "ok",
+        "model": "vision-model",
+    }
+
+    assert by_name["screenshot.vision.input_tokens"][0] == 1200
+    assert by_name["screenshot.vision.output_tokens"][0] == 340
+    assert by_name["screenshot.vision.total_tokens"][0] == 1540
+    assert by_name["screenshot.vision.cached_tokens"][0] == 64
+    assert by_name["screenshot.vision.reasoning_tokens"][0] == 256
+    # Mirrors the span's screenshot.usage.output_tokens.non_reasoning (340 - 256).
+    assert by_name["screenshot.vision.non_reasoning_output_tokens"][0] == 84
+
+
+@pytest.mark.asyncio
+async def test_call_vision_reports_a_timeout_with_its_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout is latency too — it must not be missing from the duration metric."""
+    recorded: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_distribution(
+        name: str,
+        value: float,
+        unit: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        recorded.append((name, attributes or {}))
+
+    class HangingAsyncOpenAI:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.responses = self
+
+        async def parse(self, **_kwargs: Any) -> Any:
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(screenshot_analyzer.sentry_metrics, "distribution", fake_distribution)
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_vision_total_timeout_seconds", 0.01)
+    monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", HangingAsyncOpenAI)
+
+    result = await screenshot_analyzer._call_vision(
+        "Extract fields",
+        "https://example.com/image.png",
+        screenshot_analyzer.ActivityExtraction,
+    )
+
+    assert result is None
+    outcomes = [attrs.get("outcome") for name, attrs in recorded if name.endswith("duration")]
+    assert outcomes == ["timeout"]
+
+
+@pytest.mark.asyncio
+async def test_call_vision_reuses_one_client_across_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client owns a connection pool, so it must outlive a single call.
+
+    Building one per call cost a fresh TLS handshake to api.openai.com on every vision
+    request. Two calls must therefore construct exactly one client.
+    """
+    captured: dict[str, Any] = {}
+    response = FakeVisionResponse(
+        output_parsed=screenshot_analyzer.ActivityExtraction(sport="running")
+    )
+    fake_cls = make_fake_openai(captured, response=response)
+    constructed = 0
+
+    class CountingAsyncOpenAI(fake_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs: Any) -> None:
+            nonlocal constructed
+            constructed += 1
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "openai-key")
+    monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", CountingAsyncOpenAI)
+
+    for _ in range(2):
+        await screenshot_analyzer._call_vision(
+            "Extract fields",
+            "https://example.com/image.png",
+            screenshot_analyzer.ActivityExtraction,
+        )
+
+    assert constructed == 1
+
+
+@pytest.mark.asyncio
+async def test_call_vision_does_not_build_a_client_without_an_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(**_kwargs: Any) -> None:
+        raise AssertionError("AsyncOpenAI must not be constructed without an API key")
+
+    monkeypatch.setattr(screenshot_analyzer.settings, "openai_api_key", "")
+    monkeypatch.setattr(screenshot_analyzer, "AsyncOpenAI", boom)
+
+    assert (
+        await screenshot_analyzer._call_vision(
+            "Extract fields",
+            "https://example.com/image.png",
+            screenshot_analyzer.ActivityExtraction,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -755,9 +901,168 @@ async def test_classify_screenshot_none_returns_unknown(
 
 
 @pytest.mark.asyncio
-async def test_analyze_screenshot_happy_path_extracts_and_attaches_classification(
+async def test_analyze_screenshot_uses_a_single_vision_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One call must do both jobs — the second round-trip was ~40% of the wall clock."""
+    schemas_seen: list[type] = []
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        schemas_seen.append(schema)
+        assert prompt == screenshot_analyzer.ANALYZE_PROMPT
+        return screenshot_analyzer.ScreenshotAnalysis(
+            screenshot_type="activity_single",
+            source_app_hint="Strava",
+            confidence=0.9,
+            activity=screenshot_analyzer.ActivityExtraction(
+                sport="running",
+                confidence=[screenshot_analyzer.ConfidenceEntry(field="sport", confidence=0.8)],
+            ),
+        )
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/run.png")
+
+    assert schemas_seen == [screenshot_analyzer.ScreenshotAnalysis]
+    # The `data` shape must stay byte-compatible with the old two-call pipeline.
+    assert result.screenshot_type == "activity_single"
+    assert result.data["sport"] == "running"
+    assert result.data["confidence"] == [{"field": "sport", "confidence": 0.8}]
+    assert result.data["classification"]["screenshot_type"] == "activity_single"
+    assert result.data["classification"]["source_app_hint"] == "Strava"
+    assert result.data["classification"]["confidence"] == 0.9
+    # raw_response carries the payload only, not the classification envelope.
+    assert "sport" in result.raw_response
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_low_confidence_falls_back_to_generic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        # A type is guessed, but below the confidence floor, so the typed branch is
+        # ignored in favour of whatever the generic catch-all captured.
+        return screenshot_analyzer.ScreenshotAnalysis(
+            screenshot_type="activity_single",
+            confidence=0.1,
+            activity=screenshot_analyzer.ActivityExtraction(sport="running"),
+            generic=screenshot_analyzer.GenericExtraction(summary="A weekly plan grid."),
+        )
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/plan.png")
+
+    assert result.screenshot_type == "unknown"
+    assert result.data["summary"] == "A weekly plan grid."
+    assert "sport" not in result.data
+    # The raw classification is still reported, floor or no floor.
+    assert result.data["classification"]["screenshot_type"] == "activity_single"
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_falls_back_to_generic_when_typed_branch_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confident classification whose payload field came back null must not lose data.
+
+    The reported type must describe the payload actually returned. Echoing
+    "training_load_chart" beside a generic-shaped body would send a caller looking for
+    `series` that is not there.
+    """
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return screenshot_analyzer.ScreenshotAnalysis(
+            screenshot_type="training_load_chart",
+            confidence=0.95,
+            training_load_chart=None,
+            generic=screenshot_analyzer.GenericExtraction(summary="CTL and ATL lines."),
+        )
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/chart.png")
+
+    assert result.data["summary"] == "CTL and ATL lines."
+    assert result.screenshot_type == "unknown"
+    # The model's own verdict is still reported, just not as the payload's type.
+    assert result.data["classification"]["screenshot_type"] == "training_load_chart"
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_keeps_plan_or_calendar_on_a_generic_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """plan_or_calendar has no typed schema — generic *is* its shape, so the type stands.
+
+    Guards the boundary of the fallback above: only a typed branch coming back empty
+    downgrades the reported type, never a classification whose payload is generic by
+    design.
+    """
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return screenshot_analyzer.ScreenshotAnalysis(
+            screenshot_type="plan_or_calendar",
+            confidence=0.95,
+            generic=screenshot_analyzer.GenericExtraction(summary="A weekly plan grid."),
+        )
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/plan.png")
+
+    assert result.screenshot_type == "plan_or_calendar"
+    assert result.data["summary"] == "A weekly plan grid."
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_keeps_a_typed_payload_when_generic_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A weak classification must not throw away a typed branch the model did fill."""
+
+    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
+        return screenshot_analyzer.ScreenshotAnalysis(
+            screenshot_type="unknown",
+            confidence=0.0,
+            activity=screenshot_analyzer.ActivityExtraction(sport="cycling"),
+            generic=None,
+        )
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/ride.png")
+
+    assert result.data["sport"] == "cycling"
+    # The reported type is corrected to describe the shape of `data`.
+    assert result.screenshot_type == "activity_single"
+    assert result.data["classification"]["screenshot_type"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_returns_unknown_when_the_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call_vision(*_args: Any, **_kwargs: Any) -> Any:
+        return None
+
+    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
+
+    result = await screenshot_analyzer.analyze_screenshot("https://example.com/x.png")
+
+    assert result.screenshot_type == "unknown"
+    # Callers index data["classification"], so it must be present even on failure.
+    assert result.data["classification"]["screenshot_type"] == "unknown"
+    assert result.data["classification"]["confidence"] == 0.0
+    assert result.raw_response == "Vision extraction returned no usable data."
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_legacy_flag_restores_the_two_call_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rollback path must still work while the flag exists."""
     schemas_seen: list[type] = []
 
     async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
@@ -766,51 +1071,20 @@ async def test_analyze_screenshot_happy_path_extracts_and_attaches_classificatio
             return screenshot_analyzer.ScreenshotClassificationModel(
                 screenshot_type="activity_single", confidence=0.9
             )
-        return screenshot_analyzer.ActivityExtraction(
-            sport="running",
-            confidence=[screenshot_analyzer.ConfidenceEntry(field="sport", confidence=0.8)],
-        )
+        return screenshot_analyzer.ActivityExtraction(sport="running")
 
+    monkeypatch.setattr(screenshot_analyzer.settings, "screenshot_legacy_two_call_analysis", True)
     monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
 
     result = await screenshot_analyzer.analyze_screenshot("https://example.com/run.png")
 
-    assert result.screenshot_type == "activity_single"
-    assert result.data["sport"] == "running"
-    assert result.data["confidence"] == [{"field": "sport", "confidence": 0.8}]
-    assert result.data["classification"]["screenshot_type"] == "activity_single"
     assert schemas_seen == [
         screenshot_analyzer.ScreenshotClassificationModel,
         screenshot_analyzer.ActivityExtraction,
     ]
-
-
-@pytest.mark.asyncio
-async def test_analyze_screenshot_low_confidence_uses_generic_extractor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    schemas_seen: list[type] = []
-
-    async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
-        schemas_seen.append(schema)
-        if schema is screenshot_analyzer.ScreenshotClassificationModel:
-            # Classifier guesses a type but below the confidence floor.
-            return screenshot_analyzer.ScreenshotClassificationModel(
-                screenshot_type="activity_single", confidence=0.1
-            )
-        return screenshot_analyzer.GenericExtraction(summary="A weekly plan grid.")
-
-    monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
-
-    result = await screenshot_analyzer.analyze_screenshot("https://example.com/plan.png")
-
-    assert result.screenshot_type == "unknown"
-    assert result.data["summary"] == "A weekly plan grid."
+    assert result.screenshot_type == "activity_single"
+    assert result.data["sport"] == "running"
     assert result.data["classification"]["screenshot_type"] == "activity_single"
-    assert schemas_seen == [
-        screenshot_analyzer.ScreenshotClassificationModel,
-        screenshot_analyzer.GenericExtraction,
-    ]
 
 
 def _solid_png_data_url(
