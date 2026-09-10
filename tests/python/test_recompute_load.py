@@ -35,6 +35,20 @@ async def _post_recompute_load(body: dict[str, object]) -> Response:
         return await client.post("/api/engine/recompute-load", json=body)
 
 
+def _load_rows(client: FakeSupabaseClient) -> list[dict[str, object]]:
+    return client._tables["daily_load_snapshots"]._rows
+
+
+def _text(value: object) -> str:
+    assert isinstance(value, str)
+    return value
+
+
+def _number(value: object) -> float:
+    assert isinstance(value, int | float)
+    return float(value)
+
+
 def _load_values(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     keys = ("snapshot_date", "sport", "daily_tss", "ctl", "atl", "tsb")
     return [{key: row.get(key) for key in keys} for row in rows]
@@ -147,3 +161,79 @@ async def test_recompute_load_without_seed_reports_degraded_fallback(monkeypatch
     assert snapshot["ctl"] == round(expected_ctl, 1)
     assert snapshot["atl"] == round(expected_atl, 1)
     assert snapshot["tsb"] == round(expected_tsb, 1)
+
+
+@pytest.mark.usefixtures("as_athlete")
+async def test_stale_seed_rebuilds_the_gap_before_the_window(monkeypatch) -> None:
+    today = date.today()
+    since = today - timedelta(days=1)
+    seed_date = since - timedelta(days=4)
+    gap_activity_date = seed_date + timedelta(days=2)
+    seed_ctl = 30.0
+    seed_atl = 40.0
+    gap_tss = 90.0
+    since_tss = 60.0
+    client = FakeSupabaseClient(
+        activity_rows=[
+            _activity_row(gap_activity_date, gap_tss),
+            _activity_row(since, since_tss),
+        ],
+        daily_load_snapshot_rows=[_snapshot_row(seed_date, ctl=seed_ctl, atl=seed_atl)],
+    )
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+
+    response = await _post_recompute_load({"since": since.isoformat()})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["seed_date"] == seed_date.isoformat()
+    assert payload["rebuild_start"] == (seed_date + timedelta(days=1)).isoformat()
+
+    # Walking the gap day by day is what a stale seed applied verbatim at `since` would skip.
+    ctl, atl = seed_ctl, seed_atl
+    expected: dict[date, tuple[float, float, float]] = {}
+    day = seed_date + timedelta(days=1)
+    while day <= today:
+        tss = {gap_activity_date: gap_tss, since: since_tss}.get(day, 0.0)
+        ctl, atl, tsb = compute_next_load(ctl, atl, tss)
+        expected[day] = (round(ctl, 1), round(atl, 1), round(tsb, 1))
+        day += timedelta(days=1)
+
+    written = {
+        date.fromisoformat(_text(row["snapshot_date"])): (
+            _number(row["ctl"]),
+            _number(row["atl"]),
+            _number(row["tsb"]),
+        )
+        for row in client._tables["daily_load_snapshots"]._rows
+        if row["snapshot_date"] != seed_date.isoformat()
+    }
+    assert written == expected
+
+
+@pytest.mark.usefixtures("as_athlete")
+async def test_stale_seed_rebuild_is_stable_across_runs(monkeypatch) -> None:
+    today = date.today()
+    since = today - timedelta(days=1)
+    seed_date = since - timedelta(days=3)
+    client = FakeSupabaseClient(
+        activity_rows=[_activity_row(seed_date + timedelta(days=1), 75.0)],
+        daily_load_snapshot_rows=[_snapshot_row(seed_date, ctl=25.0, atl=35.0)],
+    )
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+
+    assert (await _post_recompute_load({"since": since.isoformat()})).status_code == 200
+    first_rows = {row["snapshot_date"]: deepcopy(row) for row in _load_rows(client)}
+
+    assert (await _post_recompute_load({"since": since.isoformat()})).status_code == 200
+    second_rows = {row["snapshot_date"]: row for row in _load_rows(client)}
+
+    assert second_rows.keys() == first_rows.keys()
+    for snapshot_date, second in second_rows.items():
+        first = first_rows[snapshot_date]
+        for field in ("daily_tss", "ctl", "atl", "tsb"):
+            # Snapshots are persisted rounded to 0.1, so the second run reseeds from a rounded
+            # row rather than the first run's full-precision state. Values must stay put within
+            # that rounding, but they are not bit-identical.
+            drift = round(abs(_number(second[field]) - _number(first[field])), 6)
+            assert drift <= 0.1, (snapshot_date, field, drift)
