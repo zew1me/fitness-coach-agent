@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, TypeVar
 
 import sentry_sdk
 from openai import AsyncOpenAI, OpenAIError
 from openai.types.shared_params import Reasoning
 from pydantic import BaseModel
+from sentry_sdk import logger as sentry_logger
 
 from backend.config import settings
 from backend.models.screenshot import (
@@ -28,6 +30,7 @@ from backend.models.screenshot import (
     ExtractionResult,
     GenericExtraction,
     GenericObservation,
+    ScreenshotAnalysis,
     ScreenshotClassification,
     ScreenshotClassificationModel,
     ScreenshotType,
@@ -53,6 +56,7 @@ __all__ = [
     "ExtractionResult",
     "GenericExtraction",
     "GenericObservation",
+    "ScreenshotAnalysis",
     "ScreenshotClassification",
     "ScreenshotClassificationModel",
     "ScreenshotType",
@@ -135,16 +139,65 @@ _EXTRACTION_BY_TYPE: dict[ScreenshotType, tuple[str, type[BaseModel]]] = {
 }
 
 
+ANALYZE_PROMPT = f"""Analyze this screenshot in one pass: classify it, then extract its data.
+
+Step 1 — set `screenshot_type` to exactly one of:
+
+- activity_single: A single workout/activity summary
+  (Strava, Garmin, Runalyze, intervals.icu, Apple Fitness, etc.)
+- wellness_multi_day: Multiple days of sleep/recovery/wellness data
+  (sleep history, body battery trend, HRV trend)
+- wellness_single_day: A single day's recovery/wellness summary
+  (today's body battery, sleep score, HRV)
+- training_load_chart: A fitness/fatigue chart showing CTL/ATL/TSB or similar
+  training load over time
+- plan_or_calendar: A training plan or workout calendar view
+- unknown: Cannot determine what this screenshot shows
+
+Also set `source_app_hint`, `date_range_hint`, and a `confidence` from 0.0 to 1.0.
+
+Step 2 — fill in exactly ONE payload field, the one matching the type you chose, and
+leave every other payload field null:
+
+- activity_single -> `activity`: {EXTRACT_ACTIVITY_PROMPT}
+
+- wellness_multi_day -> `wellness_multi`: {EXTRACT_WELLNESS_MULTI_PROMPT}
+
+- wellness_single_day -> `wellness_single`: {EXTRACT_WELLNESS_SINGLE_PROMPT}
+
+- training_load_chart -> `training_load_chart`: {EXTRACT_TRAINING_LOAD_CHART_PROMPT}
+
+- plan_or_calendar or unknown -> `generic`: {EXTRACT_GENERIC_PROMPT}
+
+If your confidence in the type is below {MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE}, fill
+`generic` instead of a typed field, so nothing legible is lost."""
+
+
+# Which payload field on ScreenshotAnalysis carries each type's extraction.
+_ANALYSIS_FIELD_BY_TYPE: dict[ScreenshotType, str] = {
+    "activity_single": "activity",
+    "wellness_multi_day": "wellness_multi",
+    "wellness_single_day": "wellness_single",
+    "training_load_chart": "training_load_chart",
+    "plan_or_calendar": "generic",
+}
+
+
+def _unknown_classification() -> ScreenshotClassification:
+    """The classification reported when the vision model gave us nothing to go on."""
+    return ScreenshotClassification(
+        screenshot_type="unknown",
+        source_app_hint=None,
+        date_range_hint=None,
+        confidence=0.0,
+    )
+
+
 async def classify_screenshot(image_url: str) -> ScreenshotClassification:
     """Step 1: Classify a screenshot into a category."""
     parsed = await _call_vision(CLASSIFY_PROMPT, image_url, ScreenshotClassificationModel)
     if parsed is None:
-        return ScreenshotClassification(
-            screenshot_type="unknown",
-            source_app_hint=None,
-            date_range_hint=None,
-            confidence=0.0,
-        )
+        return _unknown_classification()
 
     classification = ScreenshotClassification(
         screenshot_type=parsed.screenshot_type,
@@ -186,12 +239,101 @@ async def extract_from_screenshot(
     )
 
 
-async def analyze_screenshot(image_url: str) -> ExtractionResult:
-    """Full pipeline: classify then extract.
+def _select_payload(
+    parsed: ScreenshotAnalysis,
+    extract_type: ScreenshotType,
+    *,
+    confident: bool,
+) -> tuple[ScreenshotType, BaseModel | None]:
+    """Pick which populated payload branch to return, and the type that describes it.
 
-    When the classifier is confident we use the type-specific extractor; otherwise
-    (`unknown` or below the confidence floor) we still run the generic catch-all so the
-    lead coach receives whatever was legible rather than nothing.
+    Preference order: the branch matching the classification, then the generic
+    catch-all, then any other populated branch. The last step matters because the model
+    can classify weakly while still filling a typed branch correctly — reporting nothing
+    there would throw away data we already paid for. When it fires, the returned type is
+    corrected to match the branch, so `screenshot_type` always describes `data`'s shape.
+    """
+    preferred = _ANALYSIS_FIELD_BY_TYPE.get(extract_type, "generic") if confident else "generic"
+
+    payload: BaseModel | None = getattr(parsed, preferred, None)
+    if payload is not None:
+        return extract_type, payload
+
+    if parsed.generic is not None:
+        return extract_type, parsed.generic
+
+    for candidate_type, field in _ANALYSIS_FIELD_BY_TYPE.items():
+        payload = getattr(parsed, field, None)
+        if payload is not None:
+            return candidate_type, payload
+
+    return extract_type, None
+
+
+async def analyze_screenshot(image_url: str) -> ExtractionResult:
+    """Classify and extract a screenshot in a single vision call.
+
+    One call does both jobs. The previous pipeline classified in one call purely to
+    choose the second call's schema, which meant a full extra model round-trip — and
+    OpenAI fetching the image a second time — on every request, including the case where
+    the classification was too weak to use.
+
+    Set `screenshot_legacy_two_call_analysis` to fall back to that pipeline.
+    """
+    if settings.screenshot_legacy_two_call_analysis:
+        return await _analyze_screenshot_two_call(image_url)
+
+    parsed = await _call_vision(ANALYZE_PROMPT, image_url, ScreenshotAnalysis)
+    if parsed is None:
+        return ExtractionResult(
+            screenshot_type="unknown",
+            data={"classification": _unknown_classification().__dict__},
+            raw_response="Vision extraction returned no usable data.",
+        )
+
+    classification = ScreenshotClassification(
+        screenshot_type=parsed.screenshot_type,
+        source_app_hint=parsed.source_app_hint,
+        date_range_hint=parsed.date_range_hint,
+        confidence=parsed.confidence,
+    )
+    confident = (
+        parsed.screenshot_type != "unknown"
+        and parsed.confidence >= MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE
+    )
+    extract_type: ScreenshotType = parsed.screenshot_type if confident else "unknown"
+
+    extract_type, payload = _select_payload(parsed, extract_type, confident=confident)
+
+    logger.info(
+        "screenshot analysis extracted type=%s confidence=%.2f confident=%s payload=%s",
+        extract_type,
+        parsed.confidence,
+        confident,
+        type(payload).__name__ if payload is not None else None,
+    )
+
+    if payload is None:
+        return ExtractionResult(
+            screenshot_type=extract_type,
+            data={"classification": classification.__dict__},
+            raw_response="Vision extraction returned no usable data.",
+        )
+
+    data = payload.model_dump()
+    data["classification"] = classification.__dict__
+    return ExtractionResult(
+        screenshot_type=extract_type,
+        data=data,
+        raw_response=payload.model_dump_json(),
+    )
+
+
+async def _analyze_screenshot_two_call(image_url: str) -> ExtractionResult:
+    """Legacy pipeline: classify in one vision call, then extract in a second.
+
+    Retained only as a rollback for `screenshot_legacy_two_call_analysis`; delete it
+    once single-call extraction quality is confirmed in production.
     """
     classification = await classify_screenshot(image_url)
 
@@ -294,6 +436,93 @@ def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
     return parsed
 
 
+# Single-slot cache. A dict rather than a module-level name so the accessors mutate it
+# in place instead of rebinding a global.
+_vision_client_cache: dict[str, AsyncOpenAI] = {}
+
+
+def _get_vision_client() -> AsyncOpenAI:
+    """Return the process-wide vision client, creating it on first use.
+
+    The client owns an HTTP connection pool, so building one per call cost a fresh TLS
+    handshake to api.openai.com on every vision request. It is deliberately never closed:
+    on Vercel the process is frozen between requests and reclaimed wholesale, so a
+    long-lived pool is what lets a warm instance skip the handshake. Mirrors the boto3
+    memoization in backend/services/r2.py.
+    """
+    client = _vision_client_cache.get("client")
+    if client is None:
+        client = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            max_retries=settings.openai_max_retries,
+            timeout=settings.openai_vision_timeout_seconds,
+        )
+        _vision_client_cache["client"] = client
+    return client
+
+
+def reset_vision_client() -> None:
+    """Drop the memoized client so a later call rebuilds it. For tests."""
+    _vision_client_cache.clear()
+
+
+_VISION_STAGE_BY_SCHEMA: dict[type[BaseModel], str] = {
+    ScreenshotClassificationModel: "classify",
+    ScreenshotAnalysis: "analyze",
+}
+
+
+def _vision_stage(schema: type[BaseModel]) -> str:
+    """Telemetry label for a vision call: the combined pass, or a legacy half of it."""
+    return _VISION_STAGE_BY_SCHEMA.get(schema, "extract")
+
+
+def _record_vision_call(
+    span: Any,
+    *,
+    schema: type[BaseModel],
+    started: float,
+    outcome: str,
+    response: Any = None,
+) -> None:
+    """Attach timing and token usage for one vision call to its span and to Sentry Logs.
+
+    Traces already show the raw `POST /v1/responses` httpx span, but both vision calls
+    share one description, so the classify/extract split is invisible in aggregate. The
+    `stage` field here is what separates them. Field names mirror `recordStageUsage` in
+    lib/agent/usage-metrics.ts so the coach-side and screenshot-side p95 queries in
+    Sentry Logs line up (issue #403).
+    """
+    duration_ms = (time.perf_counter() - started) * 1000
+    stage = _vision_stage(schema)
+
+    fields: dict[str, Any] = {
+        "stage": stage,
+        "schema": schema.__name__,
+        "model": settings.openai_vision_model,
+        "outcome": outcome,
+        "duration_ms": round(duration_ms, 1),
+    }
+
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        input_details = getattr(usage, "input_tokens_details", None)
+        output_details = getattr(usage, "output_tokens_details", None)
+        fields.update(
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+            total_tokens=getattr(usage, "total_tokens", None),
+            cached_tokens=getattr(input_details, "cached_tokens", None),
+            # Reasoning tokens are emitted serially, so this is the closest thing to a
+            # direct explanation of a slow extraction call.
+            reasoning_tokens=getattr(output_details, "reasoning_tokens", None),
+        )
+
+    reported = {key: value for key, value in fields.items() if value is not None}
+    span.update_data({f"vision.{key}": value for key, value in reported.items()})
+    sentry_logger.info("screenshot vision call", **reported)
+
+
 async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> ModelT | None:
     """Call the OpenAI vision model with an image and a strict response schema.
 
@@ -305,80 +534,88 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
     `openai_vision_timeout_seconds` bounds a single attempt, but the SDK retries
     internally, so the enclosing `openai_vision_total_timeout_seconds` guard is what
     stops a stalled vision call from consuming the whole serverless request budget.
+
+    Every exit path reports through `_record_vision_call`, so a timeout or an error is
+    as visible in the latency data as a success.
     """
     if not settings.openai_api_key:
         return None
 
-    try:
-        async with (
-            asyncio.timeout(settings.openai_vision_total_timeout_seconds),
-            AsyncOpenAI(
-                api_key=settings.openai_api_key,
-                max_retries=settings.openai_max_retries,
-                timeout=settings.openai_vision_timeout_seconds,
-            ) as client,
-        ):
-            logger.debug("openai vision call start model=%s", settings.openai_vision_model)
-            response = await client.responses.parse(
-                model=settings.openai_vision_model,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": prompt},
-                            {
-                                "type": "input_image",
-                                "image_url": image_url,
-                                "detail": "high",
-                            },
-                        ],
-                    }
-                ],
-                text_format=schema,
-                max_output_tokens=settings.openai_vision_max_output_tokens,
-                reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
-            )
-    except TimeoutError:
-        logger.warning(
-            "screenshot vision call exceeded its total budget type=%s budget=%ss",
-            schema.__name__,
-            settings.openai_vision_total_timeout_seconds,
-        )
-        return None
-    except OpenAIError as error:
-        status_code = getattr(error, "status_code", None)
-        if _is_reasoning_model_mismatch(error):
-            # The model rejected the `reasoning` parameter — config mismatch that slipped
-            # past the startup validator. Capture explicitly so Sentry shows the operator
-            # which model is misconfigured, not just a raw 400.
-            with sentry_sdk.new_scope() as scope:
-                scope.set_tag("error.category", "reasoning_model_mismatch")
-                scope.set_extra("vision_model", settings.openai_vision_model)
-                scope.set_extra(
-                    "operator_hint",
-                    f"Model {settings.openai_vision_model!r} rejected the reasoning parameter. "
-                    f"Set OPENAI_VISION_MODEL to a reasoning-capable model "
-                    f"(o1*, o3*, o4*, gpt-5*), or add its prefix to "
-                    f"_REASONING_CAPABLE_MODEL_PREFIXES in backend/config.py.",
+    started = time.perf_counter()
+    with sentry_sdk.start_span(op="gen_ai.vision", name=f"vision {_vision_stage(schema)}") as span:
+        try:
+            async with asyncio.timeout(settings.openai_vision_total_timeout_seconds):
+                logger.debug("openai vision call start model=%s", settings.openai_vision_model)
+                response = await _get_vision_client().responses.parse(
+                    model=settings.openai_vision_model,
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": prompt},
+                                {
+                                    "type": "input_image",
+                                    "image_url": image_url,
+                                    "detail": "high",
+                                },
+                            ],
+                        }
+                    ],
+                    text_format=schema,
+                    max_output_tokens=settings.openai_vision_max_output_tokens,
+                    reasoning=Reasoning(effort=settings.openai_vision_reasoning_effort),
                 )
-                sentry_sdk.capture_exception(error)
-            logger.exception(
-                "screenshot vision model config error: %r does not support reasoning — "
-                "set OPENAI_VISION_MODEL to a reasoning-capable model (o1*, o3*, o4*, gpt-5*); "
-                "type=%s status=%s",
-                settings.openai_vision_model,
+        except TimeoutError:
+            _record_vision_call(span, schema=schema, started=started, outcome="timeout")
+            logger.warning(
+                "screenshot vision call exceeded its total budget type=%s budget=%ss",
                 schema.__name__,
-                status_code,
+                settings.openai_vision_total_timeout_seconds,
             )
-        else:
-            log = logger.error if _is_permanent_openai_error(status_code) else logger.warning
-            log(
-                "screenshot vision request failed type=%s status=%s error=%s",
-                schema.__name__,
-                status_code,
-                error,
-            )
-        return None
+            return None
+        except OpenAIError as error:
+            status_code = getattr(error, "status_code", None)
+            _record_vision_call(span, schema=schema, started=started, outcome="error")
+            if _is_reasoning_model_mismatch(error):
+                # The model rejected the `reasoning` parameter — config mismatch that slipped
+                # past the startup validator. Capture explicitly so Sentry shows the operator
+                # which model is misconfigured, not just a raw 400.
+                with sentry_sdk.new_scope() as scope:
+                    scope.set_tag("error.category", "reasoning_model_mismatch")
+                    scope.set_extra("vision_model", settings.openai_vision_model)
+                    scope.set_extra(
+                        "operator_hint",
+                        f"Model {settings.openai_vision_model!r} rejected the reasoning "
+                        f"parameter. Set OPENAI_VISION_MODEL to a reasoning-capable model "
+                        f"(o1*, o3*, o4*, gpt-5*), or add its prefix to "
+                        f"_REASONING_CAPABLE_MODEL_PREFIXES in backend/config.py.",
+                    )
+                    sentry_sdk.capture_exception(error)
+                logger.exception(
+                    "screenshot vision model config error: %r does not support reasoning — "
+                    "set OPENAI_VISION_MODEL to a reasoning-capable model "
+                    "(o1*, o3*, o4*, gpt-5*); type=%s status=%s",
+                    settings.openai_vision_model,
+                    schema.__name__,
+                    status_code,
+                )
+            else:
+                log = logger.error if _is_permanent_openai_error(status_code) else logger.warning
+                log(
+                    "screenshot vision request failed type=%s status=%s error=%s",
+                    schema.__name__,
+                    status_code,
+                    error,
+                )
+            return None
 
-    logger.debug("openai vision call complete status=%s", response.status)
-    return _parsed_or_none(response, schema)
+        logger.debug("openai vision call complete status=%s", response.status)
+        parsed = _parsed_or_none(response, schema)
+        _record_vision_call(
+            span,
+            schema=schema,
+            started=started,
+            outcome="ok" if parsed is not None else "unparsed",
+            response=response,
+        )
+        return parsed

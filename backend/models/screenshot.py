@@ -132,6 +132,32 @@ class GenericExtraction(BaseModel):
     observations: list[GenericObservation] = Field(default_factory=list)
 
 
+class ScreenshotAnalysis(BaseModel):
+    """Classification and extraction in one response.
+
+    Classifying and extracting used to be two serialized vision calls against the same
+    image, where the first call existed only to choose the second one's schema. This
+    model lets one call do both: the model picks `screenshot_type` and fills the single
+    matching payload field, leaving the rest null.
+
+    The payload fields reuse the per-type models unchanged, so downstream `data` shapes
+    are identical to what the two-call pipeline produced.
+    """
+
+    screenshot_type: ScreenshotType
+    source_app_hint: str | None = None
+    date_range_hint: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    activity: ActivityExtraction | None = None
+    wellness_multi: WellnessMultiExtraction | None = None
+    wellness_single: WellnessSingleExtraction | None = None
+    training_load_chart: TrainingLoadChartExtraction | None = None
+    # Filled for plan_or_calendar and unknown, and as the fallback whenever the typed
+    # branch the model chose came back empty.
+    generic: GenericExtraction | None = None
+
+
 @dataclass
 class ScreenshotClassification:
     screenshot_type: ScreenshotType

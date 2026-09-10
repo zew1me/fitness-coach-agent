@@ -541,6 +541,111 @@ describe("app/api/chat route", () => {
     });
   });
 
+  it("extracts multiple images concurrently rather than one at a time", async () => {
+    // Each extraction is a multi-second vision call, so a four-screenshot turn used to
+    // cost four back-to-back round-trips.
+    const messages = [
+      {
+        id: "message-with-images",
+        parts: [
+          { text: "Three screenshots.", type: "text" as const },
+          ...["a.png", "b.png", "c.png"].map((filename) => ({
+            filename,
+            mediaType: "image/png",
+            type: "file" as const,
+            url: `https://example.com/${filename}`,
+          })),
+        ],
+        role: "user" as const,
+      },
+    ];
+
+    let inflight = 0;
+    let peakInflight = 0;
+    const release: Array<() => void> = [];
+
+    const enrichedPromise = appendImageExtractionsToMessages(messages, () => {
+      inflight += 1;
+      peakInflight = Math.max(peakInflight, inflight);
+      return new Promise((resolve) => {
+        release.push(() => {
+          inflight -= 1;
+          resolve({ data: {}, screenshot_type: "unknown" });
+        });
+      });
+    });
+
+    // Let every extractor start before any of them finishes.
+    await vi.waitFor(() => expect(release).toHaveLength(3));
+    release.forEach((done) => {
+      done();
+    });
+    await enrichedPromise;
+
+    expect(peakInflight).toBe(3);
+  });
+
+  it("keeps extracted text in image order across messages", async () => {
+    const imagePart = (
+      filename: string,
+    ): { filename: string; mediaType: string; type: "file"; url: string } => ({
+      filename,
+      mediaType: "image/png",
+      type: "file" as const,
+      url: `https://example.com/${filename}`,
+    });
+    const messages = [
+      {
+        id: "first",
+        parts: [imagePart("a.png"), imagePart("b.png")],
+        role: "user" as const,
+      },
+      { id: "second", parts: [imagePart("c.png")], role: "user" as const },
+    ];
+
+    // Resolve out of order: the slowest image is the first one.
+    const delays: Record<string, number> = {
+      "a.png": 30,
+      "b.png": 10,
+      "c.png": 0,
+    };
+    const enriched = await appendImageExtractionsToMessages(
+      messages,
+      async ({ filename }) => {
+        await new Promise((resolve) => setTimeout(resolve, delays[filename]));
+        return { data: {}, screenshot_type: "unknown" };
+      },
+    );
+
+    const textOf = (message: (typeof enriched)[number]): string[] =>
+      message.parts
+        .filter((part) => part.type === "text")
+        .map((part) => (part as { text: string }).text);
+
+    expect(textOf(enriched[0]!)[0]).toContain("a.png");
+    expect(textOf(enriched[0]!)[1]).toContain("b.png");
+    expect(textOf(enriched[1]!)[0]).toContain("c.png");
+  });
+
+  it("returns the original messages untouched when there is nothing to extract", async () => {
+    const messages = [
+      {
+        id: "text-only",
+        parts: [{ text: "No images here.", type: "text" as const }],
+        role: "user" as const,
+      },
+    ];
+
+    const extractImage = vi.fn();
+    const enriched = await appendImageExtractionsToMessages(
+      messages,
+      extractImage,
+    );
+
+    expect(enriched[0]).toBe(messages[0]);
+    expect(extractImage).not.toHaveBeenCalled();
+  });
+
   describe("convertUnsupportedFilePartsToText", () => {
     it("converts a GPX file part to a text descriptor", () => {
       const messages = [
