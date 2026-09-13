@@ -406,6 +406,21 @@ def _recovery_log_row(**overrides: object) -> dict[str, object]:
     return row
 
 
+def _daily_load_snapshot_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "load-1",
+        "user_id": "athlete-1",
+        "snapshot_date": "2026-07-03",
+        "sport": None,
+        "daily_tss": 50.0,
+        "ctl": 20.0,
+        "atl": 25.0,
+        "tsb": -5.0,
+    }
+    row.update(overrides)
+    return row
+
+
 @pytest.mark.asyncio
 async def test_unlink_plan_workout_from_activity_uses_atomic_rpc() -> None:
     activity_row: dict[str, object] = {
@@ -607,6 +622,79 @@ async def test_upsert_load_snapshots_handles_batch_payloads() -> None:
     assert [row["snapshot_date"] for row in rows] == ["2026-06-28", "2026-06-29"]
     assert all(row["user_id"] == "athlete-1" for row in rows)
     assert all(row["sport"] == "cycling" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_returns_exact_date() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[
+                _daily_load_snapshot_row(snapshot_date="2026-07-02", ctl=19.0),
+                _daily_load_snapshot_row(id="load-2", snapshot_date="2026-07-03", ctl=20.0),
+            ]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 3))
+
+    assert snapshot is not None
+    assert snapshot.snapshot_date == date(2026, 7, 3)
+    assert snapshot.ctl == 20.0
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_returns_nearest_earlier_date() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[
+                _daily_load_snapshot_row(snapshot_date="2026-07-01", ctl=18.0),
+                _daily_load_snapshot_row(id="load-2", snapshot_date="2026-07-03", ctl=20.0),
+            ]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 2))
+
+    assert snapshot is not None
+    assert snapshot.snapshot_date == date(2026, 7, 1)
+    assert snapshot.ctl == 18.0
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_returns_none_when_all_rows_are_later() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[_daily_load_snapshot_row(snapshot_date="2026-07-03")]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 2))
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_aggregate_excludes_sport_rows() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[
+                _daily_load_snapshot_row(snapshot_date="2026-07-02", ctl=19.0),
+                _daily_load_snapshot_row(
+                    id="cycling-load",
+                    snapshot_date="2026-07-03",
+                    sport="cycling",
+                    ctl=40.0,
+                ),
+            ]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 3))
+
+    assert snapshot is not None
+    assert snapshot.sport is None
+    assert snapshot.snapshot_date == date(2026, 7, 2)
+    assert snapshot.ctl == 19.0
 
 
 @pytest.mark.asyncio
