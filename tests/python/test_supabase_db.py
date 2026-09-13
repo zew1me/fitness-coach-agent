@@ -202,6 +202,69 @@ async def test_upsert_recovery_log_preserves_metric_and_source_on_partial_second
 
 
 @pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_uses_live_postgrest_filters(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """The seed lookup must honor date bounds and SQL NULL sport semantics end-to-end."""
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["cycling"], coaching_state="active")
+    )
+    client = repo._require_client()
+    client.table("daily_load_snapshots").insert(
+        [
+            {
+                "user_id": unique_user,
+                "snapshot_date": "2026-07-01",
+                "sport": None,
+                "ctl": 10.0,
+                "atl": 15.0,
+                "tsb": -5.0,
+            },
+            {
+                "user_id": unique_user,
+                "snapshot_date": "2026-07-03",
+                "sport": None,
+                "ctl": 12.0,
+                "atl": 18.0,
+                "tsb": -6.0,
+            },
+            {
+                "user_id": unique_user,
+                "snapshot_date": "2026-07-04",
+                "sport": "cycling",
+                "ctl": 40.0,
+                "atl": 45.0,
+                "tsb": -5.0,
+            },
+            {
+                "user_id": unique_user,
+                "snapshot_date": "2026-07-05",
+                "sport": None,
+                "ctl": 14.0,
+                "atl": 20.0,
+                "tsb": -6.0,
+            },
+        ]
+    ).execute()
+
+    exact = await repo.get_load_snapshot_on_or_before(unique_user, date(2026, 7, 3))
+    earlier = await repo.get_load_snapshot_on_or_before(unique_user, date(2026, 7, 2))
+    missing = await repo.get_load_snapshot_on_or_before(unique_user, date(2026, 6, 30))
+    aggregate = await repo.get_load_snapshot_on_or_before(unique_user, date(2026, 7, 4))
+    cycling = await repo.get_load_snapshot_on_or_before(
+        unique_user, date(2026, 7, 4), sport="cycling"
+    )
+
+    assert exact is not None and exact.snapshot_date == date(2026, 7, 3)
+    assert earlier is not None and earlier.snapshot_date == date(2026, 7, 1)
+    assert missing is None
+    assert aggregate is not None and aggregate.snapshot_date == date(2026, 7, 3)
+    assert aggregate.sport is None
+    assert cycling is not None and cycling.snapshot_date == date(2026, 7, 4)
+    assert cycling.sport == "cycling"
+
+
+@pytest.mark.asyncio
 async def test_update_goal_course_profile_notes_merges_without_losing_sibling_keys(
     repo: SupabaseRepository, unique_user: str
 ) -> None:
