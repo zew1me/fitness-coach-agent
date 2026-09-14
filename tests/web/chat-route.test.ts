@@ -541,15 +541,17 @@ describe("app/api/chat route", () => {
     });
   });
 
-  it("extracts multiple images concurrently rather than one at a time", async () => {
-    // Each extraction is a multi-second vision call, so a four-screenshot turn used to
-    // cost four back-to-back round-trips.
+  it("queues images beyond the four-call concurrency limit", async () => {
+    // Five images cross the production boundary: four may run while the fifth must wait
+    // for a slot. Deferred completions keep the calls meaningfully in flight rather than
+    // letting immediately resolved promises hide an unbounded implementation.
+    const filenames = ["a.png", "b.png", "c.png", "d.png", "e.png"];
     const messages = [
       {
         id: "message-with-images",
         parts: [
-          { text: "Three screenshots.", type: "text" as const },
-          ...["a.png", "b.png", "c.png"].map((filename) => ({
+          { text: "Five screenshots.", type: "text" as const },
+          ...filenames.map((filename) => ({
             filename,
             mediaType: "image/png",
             type: "file" as const,
@@ -562,27 +564,46 @@ describe("app/api/chat route", () => {
 
     let inflight = 0;
     let peakInflight = 0;
+    const started: string[] = [];
     const release: Array<() => void> = [];
 
-    const enrichedPromise = appendImageExtractionsToMessages(messages, () => {
-      inflight += 1;
-      peakInflight = Math.max(peakInflight, inflight);
-      return new Promise((resolve) => {
-        release.push(() => {
-          inflight -= 1;
-          resolve({ data: {}, screenshot_type: "unknown" });
+    const enrichedPromise = appendImageExtractionsToMessages(
+      messages,
+      ({ filename }) => {
+        started.push(filename);
+        inflight += 1;
+        peakInflight = Math.max(peakInflight, inflight);
+        return new Promise((resolve) => {
+          release.push(() => {
+            inflight -= 1;
+            resolve({ data: { filename }, screenshot_type: "unknown" });
+          });
         });
-      });
-    });
+      },
+    );
 
-    // Let every extractor start before any of them finishes.
-    await vi.waitFor(() => expect(release).toHaveLength(3));
-    release.forEach((done) => {
+    await vi.waitFor(() => expect(started).toHaveLength(4));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(started).toEqual(filenames.slice(0, 4));
+    expect(peakInflight).toBe(4);
+
+    const firstDone = release.shift();
+    expect(firstDone).toBeDefined();
+    firstDone!();
+
+    await vi.waitFor(() => expect(started).toHaveLength(5));
+    expect(started).toEqual(filenames);
+    expect(peakInflight).toBe(4);
+
+    release.splice(0).forEach((done) => {
       done();
     });
-    await enrichedPromise;
-
-    expect(peakInflight).toBe(3);
+    const enriched = await enrichedPromise;
+    const extractedText = enriched[0]!.parts.filter(
+      (part) =>
+        part.type === "text" && part.text.startsWith("Extracted image content"),
+    );
+    expect(extractedText).toHaveLength(5);
   });
 
   it("keeps extracted text in image order across messages", async () => {
