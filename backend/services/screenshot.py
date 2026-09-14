@@ -1,22 +1,20 @@
-"""Screenshot classification and data extraction via vision model.
+"""Screenshot classification and data extraction via a vision model.
 
-Two-step process:
-1. Classify screenshot type (activity, wellness multi-day, wellness single-day, etc.)
-2. Route to type-specific extraction prompt
-
-Both steps use OpenAI Structured Outputs (strict `json_schema`) driven by the Pydantic
-models in backend.models.screenshot, so the vision model is constrained to return JSON
-matching our schema rather than free-form text we have to parse defensively.
+The default path classifies and extracts in one OpenAI Structured Outputs call. A temporary
+rollback flag retains the legacy two-call path. Pydantic response models constrain the vision
+output; application code then deterministically normalizes displayed activity units.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, TypeVar
 
 import sentry_sdk
@@ -31,8 +29,12 @@ from sentry_sdk.tracing import Span
 from backend.config import settings
 from backend.models.screenshot import (
     ActivityExtraction,
+    ActivityScreenshotExtraction,
     ChartDateRange,
-    ConfidenceEntry,
+    DisplayedDate,
+    DisplayedDistance,
+    DisplayedDuration,
+    DisplayedPace,
     ExtractionResult,
     GenericExtraction,
     GenericObservation,
@@ -57,8 +59,12 @@ __all__ = [
     "EXTRACT_WELLNESS_SINGLE_PROMPT",
     "MIN_SCREENSHOT_CLASSIFICATION_CONFIDENCE",
     "ActivityExtraction",
+    "ActivityScreenshotExtraction",
     "ChartDateRange",
-    "ConfidenceEntry",
+    "DisplayedDate",
+    "DisplayedDistance",
+    "DisplayedDuration",
+    "DisplayedPace",
     "ExtractionResult",
     "GenericExtraction",
     "GenericObservation",
@@ -97,10 +103,13 @@ Provide your best source-app and date-range hints, and a confidence from 0.0 to 
 
 EXTRACT_ACTIVITY_PROMPT = """Extract any relevant athlete, event, or workout data shown in
 this screenshot — for example a single activity/workout summary and its key metrics.
-Use null for anything not clearly visible. Do not guess values. For each field you read,
-add a confidence entry naming the field and your confidence from 0.0 to 1.0.
-Place any visible values that do not fit the fields above into additional_observations
-as label/value pairs."""
+Report the activity date as its visible year, month, and day components. Report duration,
+distance, elevation gain, and average pace exactly as displayed, together with their units;
+do not convert them. Use null rather than returning a value you are not confident you read
+correctly, and do not guess. Never treat sport-specific distances (such as total surf
+distance or longest wave) as elevation gain unless the screenshot explicitly
+labels the value as elevation, ascent, climbing, or gain. Place any visible values that do
+not fit the fields above into additional_observations as label/value pairs."""
 
 EXTRACT_WELLNESS_MULTI_PROMPT = """Extract the daily wellness/recovery data shown in this
 screenshot. It may cover multiple days — return one entry per visible day.
@@ -119,9 +128,8 @@ as label/value pairs."""
 EXTRACT_TRAINING_LOAD_CHART_PROMPT = """Extract data from this training load chart.
 It may show CTL/fitness, ATL/fatigue, TSB/form, training stress, or similar time-series
 lines. Capture the visible date range, axis labels, and readable value points (one series
-entry per readable point). Use null when dates or labels are not visible. Approximate a
-value only when the axis/grid makes it clear, and lower the confidence for approximate
-points. Do not guess hidden values.
+entry per readable point). Use null when dates, labels, or values are not clear enough to
+read confidently. Do not guess or interpolate hidden values.
 Place any visible values that do not fit the fields above into additional_observations
 as label/value pairs."""
 
@@ -137,7 +145,7 @@ label/value observations. Use null/empty for anything not clearly visible. Do no
 _GENERIC_EXTRACTION: tuple[str, type[BaseModel]] = (EXTRACT_GENERIC_PROMPT, GenericExtraction)
 
 _EXTRACTION_BY_TYPE: dict[ScreenshotType, tuple[str, type[BaseModel]]] = {
-    "activity_single": (EXTRACT_ACTIVITY_PROMPT, ActivityExtraction),
+    "activity_single": (EXTRACT_ACTIVITY_PROMPT, ActivityScreenshotExtraction),
     "training_load_chart": (EXTRACT_TRAINING_LOAD_CHART_PROMPT, TrainingLoadChartExtraction),
     "wellness_multi_day": (EXTRACT_WELLNESS_MULTI_PROMPT, WellnessMultiExtraction),
     "wellness_single_day": (EXTRACT_WELLNESS_SINGLE_PROMPT, WellnessSingleExtraction),
@@ -220,6 +228,124 @@ async def classify_screenshot(image_url: str) -> ScreenshotClassification:
     return classification
 
 
+_DISTANCE_TO_METERS = {
+    "meters": 1.0,
+    "kilometers": 1000.0,
+    "feet": 0.3048,
+    "yards": 0.9144,
+    "miles": 1609.344,
+}
+_MILE_IN_KILOMETERS = 1.609344
+_SECONDS_PER_MINUTE = 60
+_HMS_PART_COUNT = 3
+
+
+def _finite_nonnegative(value: float) -> float | None:
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def _activity_date(displayed: DisplayedDate | None) -> str | None:
+    if (
+        displayed is None
+        or displayed.year is None
+        or displayed.month is None
+        or displayed.day is None
+    ):
+        return None
+    try:
+        return date(displayed.year, displayed.month, displayed.day).isoformat()
+    except ValueError:
+        return None
+
+
+def _distance_meters(measurement: DisplayedDistance | None) -> float | None:
+    if measurement is None or measurement.value is None or measurement.unit is None:
+        return None
+    value = _finite_nonnegative(measurement.value)
+    if value is None:
+        return None
+    return round(value * _DISTANCE_TO_METERS[measurement.unit], 1)
+
+
+def _clock_seconds(value: str, expected_parts: int) -> float | None:
+    try:
+        parts = [float(part.strip()) for part in value.strip().split(":")]
+    except ValueError:
+        return None
+    if len(parts) != expected_parts or any(_finite_nonnegative(part) is None for part in parts):
+        return None
+    if any(part >= _SECONDS_PER_MINUTE for part in parts[1:]):
+        return None
+    if expected_parts == _HMS_PART_COUNT:
+        return parts[0] * 3600 + parts[1] * _SECONDS_PER_MINUTE + parts[2]
+    return parts[0] * _SECONDS_PER_MINUTE + parts[1]
+
+
+def _duration_seconds(measurement: DisplayedDuration | None) -> int | None:
+    if measurement is None or measurement.value is None or measurement.unit is None:
+        return None
+    if measurement.unit == "h:mm:ss":
+        seconds = _clock_seconds(measurement.value, 3)
+    elif measurement.unit == "m:ss":
+        seconds = _clock_seconds(measurement.value, 2)
+    else:
+        try:
+            value = _finite_nonnegative(float(measurement.value.strip()))
+        except ValueError:
+            value = None
+        multipliers = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
+        seconds = value * multipliers[measurement.unit] if value is not None else None
+    return round(seconds) if seconds is not None else None
+
+
+def _pace_seconds_per_kilometer(measurement: DisplayedPace | None) -> int | None:
+    if measurement is None or measurement.value is None or measurement.unit is None:
+        return None
+    if measurement.unit.startswith("min/"):
+        if ":" in measurement.value:
+            seconds = _clock_seconds(measurement.value, 2)
+        else:
+            try:
+                minutes = _finite_nonnegative(float(measurement.value.strip()))
+            except ValueError:
+                minutes = None
+            seconds = minutes * 60 if minutes is not None else None
+    else:
+        try:
+            seconds = _finite_nonnegative(float(measurement.value.strip()))
+        except ValueError:
+            seconds = None
+    if seconds is None:
+        return None
+    if measurement.unit.endswith("/mi"):
+        seconds /= _MILE_IN_KILOMETERS
+    return round(seconds)
+
+
+def _normalize_activity(parsed: ActivityScreenshotExtraction) -> ActivityExtraction:
+    return ActivityExtraction(
+        sport=parsed.sport,
+        activity_date=_activity_date(parsed.activity_date),
+        duration_seconds=_duration_seconds(parsed.duration),
+        distance_meters=_distance_meters(parsed.distance),
+        elevation_gain_meters=_distance_meters(parsed.elevation_gain),
+        avg_hr_bpm=parsed.avg_hr_bpm,
+        max_hr_bpm=parsed.max_hr_bpm,
+        avg_power_watts=parsed.avg_power_watts,
+        normalized_power_watts=parsed.normalized_power_watts,
+        avg_pace_sec_per_km=_pace_seconds_per_kilometer(parsed.avg_pace),
+        avg_cadence_rpm=parsed.avg_cadence_rpm,
+        tss=parsed.tss,
+        additional_observations=parsed.additional_observations,
+    )
+
+
+def _normalized_payload(payload: BaseModel) -> BaseModel:
+    if isinstance(payload, ActivityScreenshotExtraction):
+        return _normalize_activity(payload)
+    return payload
+
+
 async def extract_from_screenshot(
     image_url: str,
     screenshot_type: ScreenshotType,
@@ -238,9 +364,10 @@ async def extract_from_screenshot(
             raw_response="Vision extraction returned no usable data.",
         )
 
+    normalized = _normalized_payload(parsed)
     return ExtractionResult(
         screenshot_type=screenshot_type,
-        data=parsed.model_dump(),
+        data=normalized.model_dump(),
         raw_response=parsed.model_dump_json(),
     )
 
@@ -335,7 +462,8 @@ async def analyze_screenshot(image_url: str) -> ExtractionResult:
             raw_response="Vision extraction returned no usable data.",
         )
 
-    data = payload.model_dump()
+    normalized = _normalized_payload(payload)
+    data = normalized.model_dump()
     data["classification"] = classification.__dict__
     return ExtractionResult(
         screenshot_type=extract_type,

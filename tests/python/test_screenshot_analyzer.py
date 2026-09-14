@@ -160,6 +160,82 @@ def test_validate_activity_text_model_accepts_any_non_empty_model(model_name: st
 
 
 @pytest.mark.parametrize(
+    ("measurement", "expected"),
+    [
+        (screenshot_analyzer.DisplayedDistance(value=42, unit="meters"), 42.0),
+        (screenshot_analyzer.DisplayedDistance(value=1.5, unit="kilometers"), 1500.0),
+        (screenshot_analyzer.DisplayedDistance(value=315, unit="feet"), 96.0),
+        (screenshot_analyzer.DisplayedDistance(value=100, unit="yards"), 91.4),
+        (screenshot_analyzer.DisplayedDistance(value=4.66, unit="miles"), 7499.5),
+    ],
+)
+def test_distance_meters_converts_displayed_units(
+    measurement: screenshot_analyzer.DisplayedDistance,
+    expected: float,
+) -> None:
+    assert screenshot_analyzer._distance_meters(measurement) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("measurement", "expected"),
+    [
+        (screenshot_analyzer.DisplayedDuration(value="1:11:06", unit="h:mm:ss"), 4266),
+        (screenshot_analyzer.DisplayedDuration(value="53:27", unit="m:ss"), 3207),
+        (screenshot_analyzer.DisplayedDuration(value="90", unit="seconds"), 90),
+        (screenshot_analyzer.DisplayedDuration(value="1.5", unit="minutes"), 90),
+        (screenshot_analyzer.DisplayedDuration(value="1.5", unit="hours"), 5400),
+    ],
+)
+def test_duration_seconds_converts_displayed_units(
+    measurement: screenshot_analyzer.DisplayedDuration,
+    expected: int,
+) -> None:
+    assert screenshot_analyzer._duration_seconds(measurement) == expected
+
+
+@pytest.mark.parametrize(
+    ("displayed", "expected"),
+    [
+        (screenshot_analyzer.DisplayedDate(year=2026, month=8, day=26), "2026-08-26"),
+        (screenshot_analyzer.DisplayedDate(year=2026, month=2, day=30), None),
+        (screenshot_analyzer.DisplayedDate(year=None, month=9, day=13), None),
+    ],
+)
+def test_activity_date_normalizes_complete_valid_calendar_components(
+    displayed: screenshot_analyzer.DisplayedDate,
+    expected: str | None,
+) -> None:
+    assert screenshot_analyzer._activity_date(displayed) == expected
+
+
+@pytest.mark.parametrize(
+    ("measurement", "expected"),
+    [
+        (screenshot_analyzer.DisplayedPace(value="7:08", unit="min/km"), 428),
+        (screenshot_analyzer.DisplayedPace(value="11:28", unit="min/mi"), 428),
+        (screenshot_analyzer.DisplayedPace(value="428", unit="sec/km"), 428),
+        (screenshot_analyzer.DisplayedPace(value="688", unit="sec/mi"), 428),
+    ],
+)
+def test_pace_seconds_per_kilometer_converts_displayed_units(
+    measurement: screenshot_analyzer.DisplayedPace,
+    expected: int,
+) -> None:
+    assert screenshot_analyzer._pace_seconds_per_kilometer(measurement) == expected
+
+
+def test_extraction_schemas_do_not_ask_the_model_for_confidence_scores() -> None:
+    extraction_schemas = [
+        screenshot_analyzer.ActivityScreenshotExtraction,
+        screenshot_analyzer.WellnessDayEntry,
+        screenshot_analyzer.WellnessSingleExtraction,
+        screenshot_analyzer.TrainingLoadPoint,
+    ]
+    for schema in extraction_schemas:
+        assert "confidence" not in schema.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize(
     ("status_code", "message", "expected"),
     [
         (400, "Unsupported parameter: reasoning is not supported with this model", True),
@@ -219,7 +295,7 @@ async def test_extract_from_screenshot_returns_model_data(
         (
             "activity_single",
             screenshot_analyzer.EXTRACT_ACTIVITY_PROMPT,
-            screenshot_analyzer.ActivityExtraction,
+            screenshot_analyzer.ActivityScreenshotExtraction,
         ),
         (
             "wellness_multi_day",
@@ -274,12 +350,16 @@ async def test_extract_from_screenshot_routes_prompt_and_schema(
 
 
 @pytest.mark.asyncio
-async def test_extract_from_screenshot_preserves_confidence_entry_shape(
+async def test_extract_from_screenshot_normalizes_displayed_activity_units(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = screenshot_analyzer.ActivityExtraction(
+    model = screenshot_analyzer.ActivityScreenshotExtraction(
         sport="running",
-        confidence=[screenshot_analyzer.ConfidenceEntry(field="sport", confidence=0.8)],
+        activity_date=screenshot_analyzer.DisplayedDate(year=2026, month=8, day=18),
+        duration=screenshot_analyzer.DisplayedDuration(value="53:27", unit="m:ss"),
+        distance=screenshot_analyzer.DisplayedDistance(value=4.66, unit="miles"),
+        elevation_gain=screenshot_analyzer.DisplayedDistance(value=315, unit="feet"),
+        avg_pace=screenshot_analyzer.DisplayedPace(value="11:28", unit="min/mi"),
     )
 
     async def fake_call_vision(prompt: str, image_url: str, schema: type) -> Any:
@@ -292,7 +372,11 @@ async def test_extract_from_screenshot_preserves_confidence_entry_shape(
         "activity_single",
     )
 
-    assert result.data["confidence"] == [{"field": "sport", "confidence": 0.8}]
+    assert result.data["activity_date"] == "2026-08-18"
+    assert result.data["duration_seconds"] == 3207
+    assert result.data["distance_meters"] == pytest.approx(7499.5, abs=0.1)
+    assert result.data["elevation_gain_meters"] == pytest.approx(96.0, abs=0.1)
+    assert result.data["avg_pace_sec_per_km"] == 428
 
 
 @pytest.mark.asyncio
@@ -914,10 +998,7 @@ async def test_analyze_screenshot_uses_a_single_vision_call(
             screenshot_type="activity_single",
             source_app_hint="Strava",
             confidence=0.9,
-            activity=screenshot_analyzer.ActivityExtraction(
-                sport="running",
-                confidence=[screenshot_analyzer.ConfidenceEntry(field="sport", confidence=0.8)],
-            ),
+            activity=screenshot_analyzer.ActivityScreenshotExtraction(sport="running"),
         )
 
     monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
@@ -925,10 +1006,10 @@ async def test_analyze_screenshot_uses_a_single_vision_call(
     result = await screenshot_analyzer.analyze_screenshot("https://example.com/run.png")
 
     assert schemas_seen == [screenshot_analyzer.ScreenshotAnalysis]
-    # The `data` shape must stay byte-compatible with the old two-call pipeline.
+    # The normalized `data` shape stays compatible with screenshot-analysis callers.
     assert result.screenshot_type == "activity_single"
     assert result.data["sport"] == "running"
-    assert result.data["confidence"] == [{"field": "sport", "confidence": 0.8}]
+    assert "confidence" not in result.data
     assert result.data["classification"]["screenshot_type"] == "activity_single"
     assert result.data["classification"]["source_app_hint"] == "Strava"
     assert result.data["classification"]["confidence"] == 0.9
@@ -946,7 +1027,7 @@ async def test_analyze_screenshot_low_confidence_falls_back_to_generic(
         return screenshot_analyzer.ScreenshotAnalysis(
             screenshot_type="activity_single",
             confidence=0.1,
-            activity=screenshot_analyzer.ActivityExtraction(sport="running"),
+            activity=screenshot_analyzer.ActivityScreenshotExtraction(sport="running"),
             generic=screenshot_analyzer.GenericExtraction(summary="A weekly plan grid."),
         )
 
@@ -1026,7 +1107,7 @@ async def test_analyze_screenshot_keeps_a_typed_payload_when_generic_is_empty(
         return screenshot_analyzer.ScreenshotAnalysis(
             screenshot_type="unknown",
             confidence=0.0,
-            activity=screenshot_analyzer.ActivityExtraction(sport="cycling"),
+            activity=screenshot_analyzer.ActivityScreenshotExtraction(sport="cycling"),
             generic=None,
         )
 
@@ -1071,7 +1152,7 @@ async def test_analyze_screenshot_legacy_flag_restores_the_two_call_pipeline(
             return screenshot_analyzer.ScreenshotClassificationModel(
                 screenshot_type="activity_single", confidence=0.9
             )
-        return screenshot_analyzer.ActivityExtraction(sport="running")
+        return screenshot_analyzer.ActivityScreenshotExtraction(sport="running")
 
     monkeypatch.setattr(screenshot_analyzer.settings, "screenshot_legacy_two_call_analysis", True)
     monkeypatch.setattr(screenshot_analyzer, "_call_vision", fake_call_vision)
@@ -1080,7 +1161,7 @@ async def test_analyze_screenshot_legacy_flag_restores_the_two_call_pipeline(
 
     assert schemas_seen == [
         screenshot_analyzer.ScreenshotClassificationModel,
-        screenshot_analyzer.ActivityExtraction,
+        screenshot_analyzer.ActivityScreenshotExtraction,
     ]
     assert result.screenshot_type == "activity_single"
     assert result.data["sport"] == "running"
@@ -1116,7 +1197,7 @@ def _solid_png_data_url(
 async def test_activity_extraction_carries_additional_observations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = screenshot_analyzer.ActivityExtraction(
+    model = screenshot_analyzer.ActivityScreenshotExtraction(
         sport="cycling",
         additional_observations=[
             screenshot_analyzer.GenericObservation(label="Training Effect", value="3.2"),
