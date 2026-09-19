@@ -470,7 +470,7 @@ async def oauth_browser_token(
 ) -> BrowserTokenResponse:
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
-        token = auth_service.create_browser_token(browser_session)
+        token = await asyncio.to_thread(auth_service.create_browser_token, browser_session)
     except OAuthLoginRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except OAuthRepositoryNotConfiguredError as exc:
