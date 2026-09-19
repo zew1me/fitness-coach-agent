@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
+
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.config import settings
 from backend.models.auth import (
@@ -16,6 +19,14 @@ from supabase import Client, create_client
 
 class OAuthRepositoryNotConfiguredError(RuntimeError):
     """Raised when OAuth persistence is requested without Supabase config."""
+
+
+# Supabase's gateway can time out after forwarding a write, so the response does not
+# reveal whether Postgres committed it. Retrying the complete read-then-write operation
+# lets the next read observe a successful ambiguous write before deciding what to do.
+_GATEWAY_RETRYABLE_CODES = frozenset({"502", "503", "504"})
+_GATEWAY_RETRY_ATTEMPTS = 2
+_GATEWAY_RETRY_BACKOFF_SECONDS = 0.25
 
 
 class OAuthRepository:
@@ -66,9 +77,32 @@ class OAuthRepository:
     def upsert_grant(
         self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
     ) -> OAuthGrantRecord:
+        for attempt in range(_GATEWAY_RETRY_ATTEMPTS):
+            try:
+                return self._upsert_grant_once(
+                    user_id=user_id,
+                    client_id=client_id,
+                    redirect_uri=redirect_uri,
+                    scopes=scopes,
+                )
+            except PostgRESTAPIError as exc:
+                if exc.code not in _GATEWAY_RETRYABLE_CODES:
+                    raise
+                if attempt == _GATEWAY_RETRY_ATTEMPTS - 1:
+                    raise
+                time.sleep(_GATEWAY_RETRY_BACKOFF_SECONDS)
+        raise AssertionError("unreachable: OAuth grant retry loop exited without returning")
+
+    def _upsert_grant_once(
+        self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
+    ) -> OAuthGrantRecord:
         existing = self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
+        requested_scopes = set(scopes)
+        if existing is not None and requested_scopes.issubset(existing.scopes):
+            return existing
+
         client = self._require_client()
         now = datetime.now(UTC).isoformat()
         if existing is None:
@@ -85,7 +119,7 @@ class OAuthRepository:
             response = client.table(self._grants_table).insert(payload).execute()
         else:
             payload = {
-                "scopes": sorted(set(existing.scopes).union(scopes)),
+                "scopes": sorted(set(existing.scopes).union(requested_scopes)),
                 "updated_at": now,
                 "revoked_at": None,
             }
