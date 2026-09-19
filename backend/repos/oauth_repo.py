@@ -100,8 +100,13 @@ class OAuthRepository:
         existing = self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
-        requested_scopes = set(scopes)
-        if existing is not None and requested_scopes.issubset(existing.scopes):
+        requested_scopes = sorted(set(scopes))
+        merged_scopes = (
+            sorted(set(existing.scopes).union(requested_scopes))
+            if existing is not None
+            else requested_scopes
+        )
+        if existing is not None and existing.scopes == merged_scopes:
             return existing
 
         client = self._require_client()
@@ -112,7 +117,7 @@ class OAuthRepository:
                 "user_id": user_id,
                 "client_id": client_id,
                 "redirect_uri": redirect_uri,
-                "scopes": scopes,
+                "scopes": requested_scopes,
                 "created_at": now,
                 "updated_at": now,
                 "revoked_at": None,
@@ -120,7 +125,7 @@ class OAuthRepository:
             response = client.table(self._grants_table).insert(payload).execute()
         else:
             payload = {
-                "scopes": sorted(set(existing.scopes).union(requested_scopes)),
+                "scopes": merged_scopes,
                 "updated_at": now,
                 "revoked_at": None,
             }

@@ -153,6 +153,26 @@ def test_upsert_grant_updates_when_requested_scope_is_missing() -> None:
     assert client.calls == {"select": 1, "insert": 0, "update": 1}
 
 
+def test_upsert_grant_normalizes_existing_duplicate_scopes() -> None:
+    client = _FakeClient([_grant(scopes=["profile:read", "profile:read"])])
+    repository = OAuthRepository(client=client)
+
+    result = _upsert(repository, ["profile:read"])
+
+    assert result.scopes == ["profile:read"]
+    assert client.calls == {"select": 1, "insert": 0, "update": 1}
+
+
+def test_upsert_grant_normalizes_scopes_before_insert() -> None:
+    client = _FakeClient([])
+    repository = OAuthRepository(client=client)
+
+    result = _upsert(repository, ["profile:read", "metrics:write", "profile:read"])
+
+    assert result.scopes == ["metrics:write", "profile:read"]
+    assert client.calls == {"select": 1, "insert": 1, "update": 0}
+
+
 @pytest.mark.parametrize("code", ["502", "503", "504", 502, 503, 504])
 def test_upsert_grant_retries_transient_gateway_errors(
     code: str | int, monkeypatch: pytest.MonkeyPatch
