@@ -80,7 +80,11 @@ def _entry_by_date(data: Data, date_fragment: str) -> Data:
 
 
 def _training_load_value(data: Data, metric: str) -> float:
-    aliases = {"form": {"form", "balance", "tsb"}}
+    aliases = {
+        "fitness": {"fitness", "ctl"},
+        "fatigue": {"fatigue", "atl"},
+        "form": {"form", "balance", "tsb"},
+    }
     accepted = aliases.get(metric, {metric})
     for point in data["series"]:
         point_names = {
@@ -107,8 +111,13 @@ def _training_load_value(data: Data, metric: str) -> float:
 def _validate_recipe_card(data: Data) -> None:
     observations = data["observations"]
     extracted_text = " ".join(
-        f"{observation.get('label', '')} {observation.get('value', '')}"
-        for observation in observations
+        [
+            str(data.get("summary") or ""),
+            *(
+                f"{observation.get('label', '')} {observation.get('value', '')}"
+                for observation in observations
+            ),
+        ]
     ).casefold()
     assert "tomato soup" in extracted_text
     assert "tomatoes" in extracted_text

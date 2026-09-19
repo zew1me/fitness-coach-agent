@@ -264,7 +264,10 @@ def _distance_meters(measurement: DisplayedDistance | None) -> float | None:
     value = _finite_nonnegative(measurement.value)
     if value is None:
         return None
-    return round(value * _DISTANCE_TO_METERS[measurement.unit], 1)
+    # Re-check after converting: a finite but enormous displayed value can overflow to
+    # infinity once scaled, and an infinite distance is not a distance.
+    meters = _finite_nonnegative(value * _DISTANCE_TO_METERS[measurement.unit])
+    return round(meters, 1) if meters is not None else None
 
 
 def _clock_seconds(value: str, expected_parts: int) -> float | None:
@@ -295,6 +298,9 @@ def _duration_seconds(measurement: DisplayedDuration | None) -> int | None:
             value = None
         multipliers = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
         seconds = value * multipliers[measurement.unit] if value is not None else None
+    # round() on an infinity raises OverflowError, and scaling hours or minutes (or a
+    # clock field) can reach one from a value that was finite on the way in.
+    seconds = _finite_nonnegative(seconds) if seconds is not None else None
     return round(seconds) if seconds is not None else None
 
 
@@ -319,7 +325,8 @@ def _pace_seconds_per_kilometer(measurement: DisplayedPace | None) -> int | None
         return None
     if measurement.unit.endswith("/mi"):
         seconds /= _MILE_IN_KILOMETERS
-    return round(seconds)
+    seconds = _finite_nonnegative(seconds)
+    return round(seconds) if seconds is not None else None
 
 
 def _normalize_activity(parsed: ActivityScreenshotExtraction) -> ActivityExtraction:

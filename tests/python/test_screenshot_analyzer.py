@@ -224,6 +224,36 @@ def test_pace_seconds_per_kilometer_converts_displayed_units(
     assert screenshot_analyzer._pace_seconds_per_kilometer(measurement) == expected
 
 
+def test_normalizers_reject_a_value_that_overflows_its_unit_conversion() -> None:
+    """A displayed value can be finite yet overflow to infinity once scaled to canonical
+    units. Malformed model output has to normalize to None: an infinite distance is not a
+    distance, and round() on an infinity raises OverflowError, which would fail the turn."""
+    assert (
+        screenshot_analyzer._distance_meters(
+            screenshot_analyzer.DisplayedDistance(value=1e308, unit="miles")
+        )
+        is None
+    )
+    assert (
+        screenshot_analyzer._duration_seconds(
+            screenshot_analyzer.DisplayedDuration(value="1e308", unit="hours")
+        )
+        is None
+    )
+    assert (
+        screenshot_analyzer._duration_seconds(
+            screenshot_analyzer.DisplayedDuration(value="1e308:00:00", unit="h:mm:ss")
+        )
+        is None
+    )
+    assert (
+        screenshot_analyzer._pace_seconds_per_kilometer(
+            screenshot_analyzer.DisplayedPace(value="1e308", unit="min/km")
+        )
+        is None
+    )
+
+
 def test_extraction_schemas_do_not_ask_the_model_for_confidence_scores() -> None:
     extraction_schemas = [
         screenshot_analyzer.ActivityScreenshotExtraction,
