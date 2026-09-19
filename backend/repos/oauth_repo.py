@@ -86,7 +86,8 @@ class OAuthRepository:
                     scopes=scopes,
                 )
             except PostgRESTAPIError as exc:
-                if exc.code not in _GATEWAY_RETRYABLE_CODES:
+                code = str(exc.code) if exc.code is not None else None
+                if code not in _GATEWAY_RETRYABLE_CODES:
                     raise
                 if attempt == _GATEWAY_RETRY_ATTEMPTS - 1:
                     raise

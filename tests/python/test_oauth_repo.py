@@ -112,7 +112,7 @@ def _grant(*, scopes: list[str] | None = None) -> dict[str, Any]:
     }
 
 
-def _api_error(code: str) -> PostgRESTAPIError:
+def _api_error(code: str | int) -> PostgRESTAPIError:
     return PostgRESTAPIError(
         {
             "message": "JSON could not be generated",
@@ -153,9 +153,9 @@ def test_upsert_grant_updates_when_requested_scope_is_missing() -> None:
     assert client.calls == {"select": 1, "insert": 0, "update": 1}
 
 
-@pytest.mark.parametrize("code", ["502", "503", "504"])
+@pytest.mark.parametrize("code", ["502", "503", "504", 502, 503, 504])
 def test_upsert_grant_retries_transient_gateway_errors(
-    code: str, monkeypatch: pytest.MonkeyPatch
+    code: str | int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _FakeClient([_grant()])
     client.fail_next("select", _api_error(code))
