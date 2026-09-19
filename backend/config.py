@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # Keep reasoning light: screenshot extraction is a perception task, not a reasoning one.
     # Low effort leaves more of the token budget for output and reduces latency.
     openai_vision_reasoning_effort: Literal["minimal", "low", "medium", "high"] = "low"
+    # Screenshot analysis classifies and extracts in a single vision call. The old
+    # two-call pipeline ran a whole extra model round-trip just to choose the second
+    # call's schema, which measured as roughly 40% of the endpoint's wall clock.
+    # Set this to true to fall back to that pipeline if single-call extraction quality
+    # regresses; remove the flag and the legacy path once a release has confirmed it.
+    screenshot_legacy_two_call_analysis: bool = False
     intervals_client_id: str = ""
     intervals_client_secret: str = ""
     intervals_token_encryption_secret: str = ""
