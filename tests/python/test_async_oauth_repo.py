@@ -212,6 +212,20 @@ async def test_upsert_grant_updates_existing_grant_and_merges_scopes() -> None:
     assert client.operations[(GRANTS_TABLE, "insert")] == 0
 
 
+async def test_get_active_grant_ignores_revoked_matching_grant() -> None:
+    client = AsyncFakeSupabaseClient(grants=[_grant_row(revoked_at=datetime.now(UTC).isoformat())])
+    repo = AsyncOAuthRepository(client=client)
+
+    grant = await repo.get_active_grant(
+        user_id="user-1",
+        client_id="client-1",
+        redirect_uri="https://example.com/callback",
+    )
+
+    assert grant is None
+    assert client.operations[(GRANTS_TABLE, "select")] == 1
+
+
 async def test_get_active_grant_and_get_grant_by_id_hit_and_miss() -> None:
     client = AsyncFakeSupabaseClient(grants=[_grant_row()])
     repo = AsyncOAuthRepository(client=client)
