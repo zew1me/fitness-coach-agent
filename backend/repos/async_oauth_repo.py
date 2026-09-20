@@ -8,7 +8,7 @@ from backend.models.auth import (
     OAuthGrantRecord,
     OAuthRefreshTokenRecord,
 )
-from backend.repos.oauth_repo import _OAuthRepositoryBase
+from backend.repos.oauth_repo_base import _OAuthRepositoryBase
 from supabase import AsyncClient as SupabaseAsyncClient
 
 
@@ -64,7 +64,7 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
             response = await query.execute()
         return self._parse_grant(self._require_grant_row(response.data or []))
 
-    # Keep the OAuth protocol inputs explicit at this public persistence boundary.
+    # This signature is permanently flat so the public boundary mirrors the OAuth protocol fields.
     async def create_authorization_code(  # noqa: PLR0913
         self,
         *,
