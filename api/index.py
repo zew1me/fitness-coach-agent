@@ -470,7 +470,10 @@ async def oauth_browser_token(
 ) -> BrowserTokenResponse:
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
-        token = auth_service.create_browser_token(browser_session)
+        # OAuthRepository still uses the synchronous supabase-py client, and its bounded
+        # gateway retry may sleep. Offload that blocking work until the repository itself
+        # has an async implementation so one slow token write cannot stall the event loop.
+        token = await asyncio.to_thread(auth_service.create_browser_token, browser_session)
     except OAuthLoginRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except OAuthRepositoryNotConfiguredError as exc:

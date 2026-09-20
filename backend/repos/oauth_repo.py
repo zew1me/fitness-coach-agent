@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
+
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.config import settings
 from backend.models.auth import (
@@ -12,6 +15,14 @@ from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError, _OA
 from supabase import Client, create_client
 
 __all__ = ["OAuthRepository", "OAuthRepositoryNotConfiguredError"]
+
+
+# Supabase's gateway can time out after forwarding a write, so the response does not
+# reveal whether Postgres committed it. Retrying the complete read-then-write operation
+# lets the next read observe a successful ambiguous write before deciding what to do.
+_GATEWAY_RETRYABLE_CODES = frozenset({"502", "503", "504"})
+_GATEWAY_RETRY_ATTEMPTS = 2
+_GATEWAY_RETRY_BACKOFF_SECONDS = 0.25
 
 
 class OAuthRepository(_OAuthRepositoryBase):
@@ -49,20 +60,49 @@ class OAuthRepository(_OAuthRepositoryBase):
     def upsert_grant(
         self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
     ) -> OAuthGrantRecord:
+        for attempt in range(_GATEWAY_RETRY_ATTEMPTS):
+            try:
+                return self._upsert_grant_once(
+                    user_id=user_id,
+                    client_id=client_id,
+                    redirect_uri=redirect_uri,
+                    scopes=scopes,
+                )
+            except PostgRESTAPIError as exc:
+                code = str(exc.code) if exc.code is not None else None
+                if code not in _GATEWAY_RETRYABLE_CODES:
+                    raise
+                if attempt == _GATEWAY_RETRY_ATTEMPTS - 1:
+                    raise
+                time.sleep(_GATEWAY_RETRY_BACKOFF_SECONDS)
+        raise AssertionError("unreachable: OAuth grant retry loop exited without returning")
+
+    def _upsert_grant_once(
+        self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
+    ) -> OAuthGrantRecord:
         existing = self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
+        requested_scopes = sorted(set(scopes))
+        merged_scopes = (
+            sorted(set(existing.scopes).union(requested_scopes))
+            if existing is not None
+            else requested_scopes
+        )
+        if existing is not None and existing.scopes == merged_scopes:
+            return existing
+
         client = self._require_client()
         if existing is None:
             payload = self._grant_insert_payload(
                 user_id=user_id,
                 client_id=client_id,
                 redirect_uri=redirect_uri,
-                scopes=scopes,
+                scopes=requested_scopes,
             )
             response = client.table(self._grants_table).insert(payload).execute()
         else:
-            payload = self._grant_update_payload(existing, scopes)
+            payload = self._grant_update_payload(existing, requested_scopes)
             response = (
                 client.table(self._grants_table).update(payload).eq("id", existing.id).execute()
             )
