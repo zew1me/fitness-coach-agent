@@ -554,40 +554,6 @@ def _refusal_text(response: Any) -> str | None:
     return None
 
 
-def _record_vision_usage(span: Span, usage: ResponseUsage) -> None:
-    """Attach Responses API token usage to the manual vision span.
-
-    Sentry's OpenAI integration instruments ``responses.create`` but not the SDK's
-    ``responses.parse`` helper used here. Keep the provider-reported output total and
-    reasoning subset, plus the derived non-reasoning content count, so latency can be
-    compared against each independently.
-
-    This intentionally remains a free function while it only adapts the two SDK types.
-    If tracing starts coordinating request attributes, response status/errors, and span
-    lifecycle, replace this helper and the inline span setup with a composed
-    ``_VisionTrace`` context manager rather than subclassing or monkey-patching ``Span``.
-    """
-    cached_tokens = usage.input_tokens_details.cached_tokens
-    reasoning_tokens = usage.output_tokens_details.reasoning_tokens
-    token_attributes = {
-        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS: usage.input_tokens,
-        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS: usage.output_tokens,
-        "gen_ai.usage.cache_read.input_tokens": cached_tokens,
-        "gen_ai.usage.reasoning.output_tokens": reasoning_tokens,
-        # Sentry 2.x still indexes these v1.36-era aliases and total-token extension.
-        SPANDATA.GEN_AI_USAGE_INPUT_TOKENS_CACHED: cached_tokens,
-        SPANDATA.GEN_AI_USAGE_OUTPUT_TOKENS_REASONING: reasoning_tokens,
-        SPANDATA.GEN_AI_USAGE_TOTAL_TOKENS: usage.total_tokens,
-    }
-    for key, value in token_attributes.items():
-        span.set_data(key, value)
-
-    span.set_data(
-        "screenshot.usage.output_tokens.non_reasoning",
-        usage.output_tokens - reasoning_tokens,
-    )
-
-
 def _parsed_or_none(response: Any, schema: type[ModelT]) -> ModelT | None:
     """Interpret a completed `responses.parse` call into a validated model or `None`."""
     if response.status in ("failed", "cancelled"):
