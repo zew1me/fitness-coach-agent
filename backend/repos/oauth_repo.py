@@ -77,6 +77,12 @@ class OAuthRepository:
     def upsert_grant(
         self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
     ) -> OAuthGrantRecord:
+        """Return the active grant, creating it or canonicalizing its scopes as needed.
+
+        The complete operation is retried once for a 502, 503, or 504 gateway error so
+        a read can observe whether an earlier write succeeded before another write.
+        Other PostgREST errors, or a second gateway error, are propagated.
+        """
         for attempt in range(_GATEWAY_RETRY_ATTEMPTS):
             try:
                 return self._upsert_grant_once(
@@ -97,6 +103,7 @@ class OAuthRepository:
     def _upsert_grant_once(
         self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
     ) -> OAuthGrantRecord:
+        """Insert, update, or return the canonical active grant without retrying."""
         existing = self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
