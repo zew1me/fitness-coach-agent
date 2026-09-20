@@ -112,6 +112,31 @@ async def test_otp_login_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_browser_token_offloads_sync_repository_work(
+    auth_client: tuple[AsyncClient, AuthFlowFakeService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, service = auth_client
+    browser_session = BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
+    cookie = service.create_browser_session_token(browser_session)
+    calls: list[tuple[Any, tuple[Any, ...]]] = []
+
+    async def fake_to_thread(function: Any, *args: Any) -> Any:
+        calls.append((function, args))
+        return function(*args)
+
+    monkeypatch.setattr(api_index.asyncio, "to_thread", fake_to_thread)
+
+    response = await client.post(
+        "/api/oauth/browser-token",
+        cookies={"coach_browser_session": cookie},
+    )
+
+    assert response.status_code == 200
+    assert calls == [(service.create_browser_token, (browser_session,))]
+
+
+@pytest.mark.asyncio
 async def test_browser_token_renews_the_browser_session_cookie(
     auth_client: tuple[AsyncClient, AuthFlowFakeService],
 ) -> None:
