@@ -1,6 +1,7 @@
-# Local Garmin Connect FIT downloader
+# Local Garmin Connect sidecar
 
-The Garmin sidecar is a **local, personal-use workaround** built on
+The Garmin sidecar downloads original FIT activities and exports wellness signals for coach-chat
+ingestion. It is a **local, personal-use workaround** built on
 [`cyberjunky/python-garminconnect`](https://github.com/cyberjunky/python-garminconnect). It is
 separate from the planned first-party Garmin integration in GitHub issue #339. Garmin Connect is
 not a supported public API, and Garmin can change or block these login/download flows at any time.
@@ -14,11 +15,11 @@ fitness coach server. Server upload is tracked separately under issue #388.
 From the repository root:
 
 ```bash
-uv sync --extra garmin
+uv sync --package fitness-coach-garmin-sidecar
 ```
 
-The optional `garmin` dependency keeps `garminconnect`, its `curl_cffi` transport, and Typer out of
-the deployed API's required dependency set.
+The `fitness-coach-garmin-sidecar` workspace package owns `garminconnect`, its `curl_cffi`
+transport, and Typer, keeping them out of the deployed API's required dependency set.
 
 Run the upstream project's bundled `example.py` first if you want to prove that your Garmin account
 can authenticate independently of this CLI. Login success can vary by account, region, IP, MFA
@@ -27,7 +28,7 @@ state, and Garmin rate limits.
 ## Download a date window
 
 ```bash
-uv run --extra garmin python -m scripts.garmin_connect download \
+uv run --package fitness-coach-garmin-sidecar garmin-sidecar download \
   2026-07-01 2026-07-31 \
   --output-dir downloads/garmin-fit
 ```
@@ -48,10 +49,25 @@ discarded after login, and never written by this project. Renewable tokens are t
 authentication material persisted; the CLI restricts the token directory to mode `0700` and the
 token file to `0600` where the operating system supports POSIX permissions.
 
+## Export wellness data
+
+To print daily sleep, HRV, resting-heart-rate, body-battery, and stress fields in a block that can be
+pasted into coach chat:
+
+```bash
+uv run --package fitness-coach-garmin-sidecar garmin-sidecar wellness export \
+  2026-08-09 2026-08-15
+```
+
+See [Garmin wellness export](garmin-wellness.md) for field origins, JSON output, partial-failure
+behavior, the paste workflow, and privacy guidance.
+
+## Authentication and storage
+
 Use a different private token directory if needed:
 
 ```bash
-uv run --extra garmin python -m scripts.garmin_connect download \
+uv run --package fitness-coach-garmin-sidecar garmin-sidecar download \
   2026-07-01 2026-07-31 \
   --token-store ~/.fitness-coach-garmin \
   --output-dir /Volumes/private-activities/garmin
@@ -66,9 +82,9 @@ repeated fresh login attempts after a `429` response.
 Unit tests mock Garmin and never make a live request:
 
 ```bash
-uv run pytest tests/python/test_garmin_connect_cli.py
-uv run ruff check scripts/garmin_connect.py tests/python/test_garmin_connect_cli.py
-uv run ruff format --check scripts/garmin_connect.py tests/python/test_garmin_connect_cli.py
+uv run pytest tools/garmin-sidecar/tests/
+uv run ruff check tools/garmin-sidecar/
+uv run ruff format --check tools/garmin-sidecar/
 uv run ty check
 uv run vulture
 ```

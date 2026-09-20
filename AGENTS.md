@@ -28,7 +28,8 @@ bun run check    # lint + typecheck + test
 # Python backend and uv workspace tools
 uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
-uv run pytest tools/self-data-backup/tests/  # single workspace tool
+uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
+uv run pytest tools/self-data-backup/tests/  # backup workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
@@ -276,6 +277,21 @@ an activity silently fail to match its planned workout — and potentially match
 else's. `"general"` is the honest answer when the file does not say, and the coach is
 instructed to ask.
 
+### Activity ingestion is being redesigned — read the design before changing a write path
+
+Activities are stored today exactly as ingested, so one workout arriving twice (a FIT upload
+plus the Intervals sync of the same ride, a re-uploaded file) becomes two rows that
+double-count training load and invent an unplanned session in compliance.
+
+`docs/ACTIVITY_MATERIALIZATION_DESIGN.md` (issue #397) is the proposed replacement: each
+ingested input stored immutably in `activity_sources`, with the `activities` row becoming a
+projection derived from that set. **Read it before changing any `activities` write path** —
+the upload handlers, `intervals_sync`, `repo.update_activity`, or
+`backend/services/activity_text.py`.
+
+Nothing in it is built. It describes intent, not current behaviour, so never cite it as a
+description of how the code works today.
+
 ### Unsupported file attachments → text (do not send to the model as `input_file`)
 
 OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
@@ -326,6 +342,7 @@ Runs in parallel on staged files only. Fixes are re-staged automatically (`stage
 | ---------------- | --------------------------------------------------------------------------------------------------------------- |
 | `eslint-fix`     | ESLint `--fix` on staged `*.{ts,tsx,js,mjs,cjs}`                                                                |
 | `prettier-write` | Prettier on staged `*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}`                                                     |
+| `stylelint-fix`  | Stylelint `--fix` on staged `*.css`                                                                             |
 | `ruff-fix`       | `ruff check --fix` on staged `*.py`                                                                             |
 | `ruff-format`    | `ruff format` on staged `*.py`                                                                                  |
 | `actionlint`     | Lints `.github/workflows/` files (only when they are staged); gracefully skips if `actionlint` is not installed |
@@ -339,6 +356,7 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | Step                | Command                                                                       |
 | ------------------- | ----------------------------------------------------------------------------- |
 | `lint`              | `bun run lint`                                                                |
+| `stylelint`         | `bun run lint:css`                                                            |
 | `ruff-check`        | `uv run ruff check .`                                                         |
 | `ruff-format-check` | `uv run ruff format --check .`                                                |
 | `typecheck`         | `bun run typecheck`                                                           |

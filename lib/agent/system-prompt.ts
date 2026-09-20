@@ -141,8 +141,39 @@ function loadLine(context: AthleteContextBundle): string {
     : "no current load snapshot";
 }
 
-function currentDateLine(): string {
-  return `Current date: ${new Date().toISOString().slice(0, 10)}. Do not guess the current date or age math; use this date when interpreting relative dates, birth years, and target timelines.`;
+function browserTimeContext(timeZone?: string): {
+  date: string;
+  timeZone: string;
+} {
+  let resolvedTimeZone = "UTC";
+  if (timeZone !== undefined && timeZone.length <= 64) {
+    try {
+      resolvedTimeZone = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+      }).resolvedOptions().timeZone;
+    } catch {
+      // A client header is untrusted; UTC remains a safe, deterministic fallback.
+    }
+  }
+
+  const dateParts = new Intl.DateTimeFormat("en-US", {
+    day: "2-digit",
+    month: "2-digit",
+    timeZone: resolvedTimeZone,
+    year: "numeric",
+  }).formatToParts(new Date());
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    dateParts.find((item) => item.type === type)?.value ?? "00";
+
+  return {
+    date: `${part("year")}-${part("month")}-${part("day")}`,
+    timeZone: resolvedTimeZone,
+  };
+}
+
+function currentDateLine(timeZone?: string): string {
+  const context = browserTimeContext(timeZone);
+  return `Current date: ${context.date} in the athlete's browser timezone (${context.timeZone}). Do not guess the current date or age math; use this date when interpreting relative dates, birth years, and target timelines. activity_date and workout_date are athlete-local calendar dates. started_at timestamps are UTC; convert them to this browser timezone before stating a clock time to the athlete.`;
 }
 
 function buildContextualLines(context: AthleteContextBundle): string[] {
@@ -194,10 +225,11 @@ function roleLabel(role: InternalSpecialistRole): string {
 export function buildSpecialistPrompt(
   role: InternalSpecialistRole,
   contextSlice: unknown,
+  timeZone?: string,
 ): string {
   return [
     `${roleLabel(role)}.`,
-    currentDateLine(),
+    currentDateLine(timeZone),
     trainingModelSection({
       active_plan: null,
       computed_age: null,
@@ -242,6 +274,7 @@ export function buildLeadCoachPrompt(
   context: AthleteContextBundle,
   specialistReports: SpecialistReport[] = [],
   dueFollowUp?: string,
+  timeZone?: string,
 ): string {
   const sports = listOrFallback(context.profile.primary_sports, "unknown");
   const goals = context.goals.map(goalSummary).join("; ") || "none recorded";
@@ -252,7 +285,7 @@ export function buildLeadCoachPrompt(
 
   return [
     "You are the Lead coach for a sport-agnostic endurance coaching team.",
-    currentDateLine(),
+    currentDateLine(timeZone),
     trainingModelSection(context),
     "Be inclusive and ask about sex or hormone context only when it improves training-load guidance.",
     `Athlete: ${context.profile.display_name ?? context.profile.user_id}. Age: ${age}. Sports: ${sports}.`,
@@ -273,6 +306,7 @@ export function buildLeadCoachPrompt(
     "For recalibrate_thresholds results, describe threshold status accurately: candidate_queued means a threshold proposal is awaiting athlete review; insufficient_evidence, no_change, already_user_confirmed, and cadence_gated mean no threshold was applied. Do not offer to auto-apply or schedule future threshold changes; ask whether the athlete wants to review, accept, keep current values, enter a manual value, or provide more evidence.",
     "Never end a turn with only tool calls or tool output. End with one context-aware prompt to continue the conversation, based on the athlete's latest ask and the current coaching state.",
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",
+    'When the user provides a block beginning "=== WELLNESS EXPORT v1 source=garmin_sidecar ===" and ending "=== END WELLNESS EXPORT ===", treat each field=value line as one recovery entry and call save_recovery_data. The export omits unavailable metrics; pass null for their required tool fields and never infer zero. Never route a wellness export to save_activity_from_text.',
     'When the user message is an "Uploaded file:" stub with content_type gpx/fit/tcx or zip (or a filename ending in .gpx/.fit/.tcx/.zip), always call process_uploaded_file with that stub\'s filename, content_type, object_key, and public_url. Never call save_activity_from_text for a file upload — it cannot read file contents and must not guess numeric fields like duration.',
     'A process_uploaded_file result with kind "course" is a route the athlete is planning to ride or run, not one they have done. Nothing was logged and no planned workout was matched, so never congratulate them on it, never describe it as completed or saved, and never claim it counts toward compliance. Use the terrain and any analysis to talk about pacing, fuelling, gearing, and what to train between now and the event, then offer to attach it to the relevant goal with update_goals (course_distance_meters, course_elevation_gain_meters, course_profile_notes). If analysis_unavailable_reason is set, the terrain is still accurate — ask for the missing number it names rather than estimating one. If sport is "general" the file did not say which sport it is for, so ask before advising.',
   ].join("\n\n");

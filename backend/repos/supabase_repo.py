@@ -583,6 +583,23 @@ class SupabaseRepository:
             return None
         return DailyLoadSnapshot.model_validate(rows[0])
 
+    async def get_load_snapshot_on_or_before(
+        self, user_id: str, on_date: date, sport: str | None = None
+    ) -> DailyLoadSnapshot | None:
+        client = self._require_client()
+        query = client.table("daily_load_snapshots").select("*").eq("user_id", user_id)
+        query = query.is_("sport", "null") if sport is None else query.eq("sport", sport)
+        response = (
+            query.lte("snapshot_date", on_date.isoformat())
+            .order("snapshot_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        return DailyLoadSnapshot.model_validate(rows[0])
+
     # ── Goals ─────────────────────────────────────────────────
 
     async def create_goal(self, goal: Goal) -> Goal:
@@ -650,7 +667,15 @@ class SupabaseRepository:
 
     async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
         client = self._require_client()
-        payload = log.model_dump(mode="json", exclude={"created_at"})
+        # Partial recovery writes cannot clear a stored value back to null through this path;
+        # a future clear operation needs explicit design rather than accidental nulling.
+        payload = {
+            key: value
+            for key, value in log.model_dump(mode="json", exclude={"created_at"}).items()
+            if value is not None
+        }
+        if "source" not in log.model_fields_set:
+            payload.pop("source", None)
         if not payload.get("id"):
             payload["id"] = str(uuid4())
         response = (

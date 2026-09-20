@@ -1,0 +1,11 @@
+id: no-supabase-sdk-in-integration-tests
+valid:
+  - 'import { SupabaseAgentSession } from "../../lib/agent/supabase-agent-session";'
+  - 'import { prepareFunctionItemForModelInput } from "../../lib/agent/responses-item-shapes";'
+  - 'const client = "@supabase/supabase-js";'
+invalid:
+  - 'import { createClient } from "@supabase/supabase-js";'
+  - "import { createClient } from '@supabase/supabase-js';"
+  - 'import type { SupabaseClient } from "@supabase/supabase-js";'
+  - 'import { createBrowserClient } from "@supabase/ssr";'
+  - 'import supabase from "@supabase/supabase-js";'

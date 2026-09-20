@@ -36,7 +36,13 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.config import settings
-from backend.engine.gpx_parser import ParsedActivity, ParsedCourse
+from backend.engine.gpx_parser import (
+    ParsedActivity,
+    ParsedCourse,
+    parse_fit,
+    parse_gpx,
+    parse_tcx,
+)
 from backend.logging_config import configure_logging
 from backend.models.athlete import (
     AthleteProfile as _AthleteProfile,
@@ -50,6 +56,7 @@ from backend.models.athlete import (
     ThresholdRecalibrationCandidate,
 )
 from backend.models.auth import (
+    BrowserSessionContext,
     BrowserSessionRequest,
     BrowserTokenResponse,
     OAuthAuthorizeRequest,
@@ -412,6 +419,18 @@ async def oauth_revoke(payload: OAuthRevokeRequest) -> Mapping[str, bool]:
     return {"revoked": revoked}
 
 
+def _set_browser_session_cookie(response: Response, browser_session: BrowserSessionContext) -> None:
+    response.set_cookie(
+        key=auth_service.browser_session_cookie_name,
+        value=auth_service.create_browser_session_token(browser_session),
+        httponly=True,
+        max_age=auth_service.browser_session_max_age_seconds,
+        path="/",
+        samesite="lax",
+        secure=settings.base_url.startswith("https://"),
+    )
+
+
 @app.post("/api/oauth/browser-session")
 async def oauth_browser_session(
     payload: BrowserSessionRequest, response: Response
@@ -423,15 +442,7 @@ async def oauth_browser_session(
     except Exception as exc:
         logger.warning("browser session creation failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=401, detail="Unable to verify browser session.") from exc
-    response.set_cookie(
-        key=auth_service.browser_session_cookie_name,
-        value=auth_service.create_browser_session_token(session),
-        httponly=True,
-        max_age=12 * 60 * 60,
-        path="/",
-        samesite="lax",
-        secure=settings.base_url.startswith("https://"),
-    )
+    _set_browser_session_cookie(response, session)
     logger.info("browser session created user_id=%s", session.user_id)
     return {"ok": True}
 
@@ -445,23 +456,32 @@ async def oauth_browser_session_logout() -> Response:
         httponly=True,
         path="/",
         samesite="lax",
-        secure=settings.app_base_url.startswith("https://"),
+        # Mirror _set_browser_session_cookie: base_url is the effective URL, so the
+        # clearing cookie keeps its Secure attribute on Vercel where app_base_url is blank.
+        secure=settings.base_url.startswith("https://"),
     )
     return response
 
 
 @app.post("/api/oauth/browser-token")
 async def oauth_browser_token(
+    response: Response,
     coach_browser_session: str | None = Cookie(default=None),
 ) -> BrowserTokenResponse:
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
-        token = auth_service.create_browser_token(browser_session)
+        # OAuthRepository still uses the synchronous supabase-py client, and its bounded
+        # gateway retry may sleep. Offload that blocking work until the repository itself
+        # has an async implementation so one slow token write cannot stall the event loop.
+        token = await asyncio.to_thread(auth_service.create_browser_token, browser_session)
     except OAuthLoginRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     else:
+        # Sliding renewal keeps an actively used browser signed in while the
+        # 12-hour cookie still provides an inactivity timeout.
+        _set_browser_session_cookie(response, browser_session)
         logger.debug("browser token issued user_id=%s", browser_session.user_id)
         return token
 
@@ -1419,6 +1439,11 @@ class RecomputeLoadRequest(BaseModel):
     sport: str | None = None
 
 
+# Bounded candidate query for the rebuild window. Part two of #447 replaces it with keyset
+# pagination; until then the endpoint fails closed rather than persisting a truncated rebuild.
+_RECOMPUTE_ACTIVITY_LIMIT = 500
+
+
 @app.post("/api/engine/recompute-load")
 async def recompute_load_endpoint(
     payload: RecomputeLoadRequest,
@@ -1428,39 +1453,84 @@ async def recompute_load_endpoint(
 
     user_id = user_context.user_id
     since = payload.since or date.today()
-    activities = await repo.list_activities(user_id, sport=payload.sport, since=since, limit=500)
+
+    seed = await repo.get_load_snapshot_on_or_before(
+        user_id, since - timedelta(days=1), sport=payload.sport
+    )
+    # A seed older than `since - 1 day` is stale at `since`: applying it verbatim would skip the
+    # intervening days' load and their zero-load decay, writing wrong CTL/ATL/TSB. Rebuild that
+    # gap instead of starting at `since`. The gap provably holds no snapshot for this sport --
+    # the seed is the newest one at or before `since - 1 day` -- so filling it in never
+    # overwrites recorded history. An absent seed still starts from zero at `since`; widening
+    # back to first-ever activity needs the unbounded candidates deferred to part two of #447.
+    rebuild_start = seed.snapshot_date + timedelta(days=1) if seed else since
+    initial_ctl = seed.ctl if seed else 0.0
+    initial_atl = seed.atl if seed else 0.0
+
+    # Fetch one past the cap purely to detect overflow: `list_activities` returns newest first,
+    # so a truncated page silently drops the *oldest* activities. Those days would then be
+    # recomputed as zero TSS and upserted over the real snapshots, so overflow must fail closed
+    # before any write rather than merely warn.
+    activities = await repo.list_activities(
+        user_id, sport=payload.sport, since=rebuild_start, limit=_RECOMPUTE_ACTIVITY_LIMIT + 1
+    )
     logger.debug(
-        "recompute_load user_id=%s sport=%s since=%s activities=%d",
+        "recompute_load user_id=%s sport=%s since=%s rebuild_start=%s activities=%d",
         user_id,
         payload.sport,
         since,
+        rebuild_start,
         len(activities),
     )
+    if len(activities) > _RECOMPUTE_ACTIVITY_LIMIT:
+        logger.warning(
+            "recompute_load activity cap exceeded user_id=%s sport=%s rebuild_start=%s limit=%d",
+            user_id,
+            payload.sport,
+            rebuild_start,
+            _RECOMPUTE_ACTIVITY_LIMIT,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Rebuild window from {rebuild_start.isoformat()} holds more than "
+                f"{_RECOMPUTE_ACTIVITY_LIMIT} activities; recomputing it would discard the "
+                "oldest and overwrite load history. Request a later `since`."
+            ),
+        )
 
     daily_tss: dict[date, float] = {}
     for a in activities:
         daily_tss[a.activity_date] = daily_tss.get(a.activity_date, 0) + (a.tss or 0)
 
-    prev = await repo.get_latest_load(user_id, sport=payload.sport)
-    initial_ctl = prev.ctl if prev else 0.0
-    initial_atl = prev.atl if prev else 0.0
-
-    snapshots = recompute_load_series(daily_tss, since, date.today(), initial_ctl, initial_atl)
+    snapshots = recompute_load_series(
+        daily_tss, rebuild_start, date.today(), initial_ctl, initial_atl
+    )
 
     await repo.upsert_load_snapshots(user_id, snapshots, sport=payload.sport)
 
     latest = snapshots[-1] if snapshots else {}
+    seed_date = seed.snapshot_date.isoformat() if seed else None
     logger.info(
-        "load recomputed user_id=%s sport=%s snapshots=%d ctl=%.1f atl=%.1f tsb=%.1f",
+        "load recomputed user_id=%s sport=%s snapshots=%d rebuild_start=%s seed_date=%s "
+        "seed_ctl=%.1f seed_atl=%.1f ctl=%.1f atl=%.1f tsb=%.1f",
         user_id,
         payload.sport,
         len(snapshots),
+        rebuild_start,
+        seed_date,
+        initial_ctl,
+        initial_atl,
         latest.get("ctl", 0),
         latest.get("atl", 0),
         latest.get("tsb", 0),
     )
     return {
         "snapshots_written": len(snapshots),
+        "rebuild_start": rebuild_start.isoformat(),
+        "seed_date": seed_date,
+        "seed_ctl": initial_ctl,
+        "seed_atl": initial_atl,
         "latest_ctl": latest.get("ctl", 0),
         "latest_atl": latest.get("atl", 0),
         "latest_tsb": latest.get("tsb", 0),
@@ -1493,64 +1563,50 @@ async def analyze_screenshot_endpoint(
     }
 
 
-def _activity_source_for_filename(filename: str) -> str:
-    """Return the upload source label associated with a filename extension.
-    
-    Parameters:
-    	filename (str): The uploaded filename.
-    
-    Returns:
-    	str: The source label for FIT, GPX, or TCX files, or a generic file-upload label for other extensions.
-    """
+ActivityFileFormat = Literal["gpx", "fit", "tcx"]
+ActivityUploadSource = Literal["gpx_upload", "fit_upload", "tcx_upload"]
+
+
+def _resolve_activity_file_format(filename: str, content_type: str) -> ActivityFileFormat:
     suffix = Path(filename).suffix.lower()
-    if suffix == ".fit":
-        return "fit_upload"
-    if suffix == ".gpx":
-        return "gpx_upload"
-    if suffix == ".tcx":
-        return "tcx_upload"
-    return "file_upload"
+    if content_type == "application/gpx+xml" or suffix == ".gpx":
+        return "gpx"
+    if content_type == "application/vnd.garmin.fit" or suffix == ".fit":
+        return "fit"
+    if content_type == "application/vnd.garmin.tcx+xml" or suffix == ".tcx":
+        return "tcx"
+    raise HTTPException(status_code=415, detail="Unsupported activity file type.")
+
+
+def _activity_source_for_format(file_format: ActivityFileFormat) -> ActivityUploadSource:
+    match file_format:
+        case "gpx":
+            return "gpx_upload"
+        case "fit":
+            return "fit_upload"
+        case "tcx":
+            return "tcx_upload"
 
 
 def _parse_uploaded_activity_file(
-    filename: str, content_type: str, file_bytes: bytes
+    file_format: ActivityFileFormat, file_bytes: bytes
 ) -> ParsedActivity | ParsedCourse:
-    """
-    Parse uploaded GPX, FIT, or TCX data into an activity or course representation.
-    
-    Parameters:
-        filename (str): Name of the uploaded file used to identify its format.
-        content_type (str): MIME type of the uploaded file.
-        file_bytes (bytes): Raw uploaded file contents.
-    
-    Returns:
-        ParsedActivity | ParsedCourse: Parsed activity or course data.
-    
-    Raises:
-        HTTPException: If the file format is unsupported.
-    """
-    from backend.engine.gpx_parser import parse_fit, parse_gpx, parse_tcx
+    match file_format:
+        case "gpx":
+            parser = parse_gpx
+        case "fit":
+            parser = parse_fit
+        case "tcx":
+            parser = parse_tcx
 
-    suffix = Path(filename).suffix.lower()
-    if content_type == "application/gpx+xml" or suffix == ".gpx":
-        parser = parse_gpx
-        suffix = ".gpx"
-    elif content_type == "application/vnd.garmin.fit" or suffix == ".fit":
-        parser = parse_fit
-        suffix = ".fit"
-    elif content_type == "application/vnd.garmin.tcx+xml" or suffix == ".tcx":
-        parser = parse_tcx
-        suffix = ".tcx"
-    else:
-        raise HTTPException(status_code=415, detail="Unsupported activity file type.")
-
-    with NamedTemporaryFile(suffix=suffix) as tmp:
+    with NamedTemporaryFile(suffix=f".{file_format}") as tmp:
         tmp.write(file_bytes)
         tmp.flush()
         return parser(tmp.name)
 
 
-def _build_uploaded_activity(  # noqa: PLR0913
+# The keyword-only arguments keep the two upload call sites explicit.
+def _build_uploaded_activity_or_course(  # noqa: PLR0913
     *,
     user_id: str,
     filename: str,
@@ -1559,22 +1615,9 @@ def _build_uploaded_activity(  # noqa: PLR0913
     public_url: str | None,
     file_bytes: bytes,
 ) -> Activity | ParsedCourse:
-    """
-    Parse uploaded activity data into an `Activity` or `ParsedCourse`.
-    
-    Parameters:
-        user_id (str): Identifier of the athlete who uploaded the file.
-        filename (str): Original uploaded filename.
-        content_type (str): MIME type of the uploaded file.
-        object_key (str): Storage key for the uploaded file.
-        public_url (str | None): Public URL associated with the uploaded file.
-        file_bytes (bytes): Uploaded file contents.
-    
-    Returns:
-        Activity | ParsedCourse: A summarized activity with upload metadata, or
-        an unpersisted course when the file describes a planned route.
-    """
-    parsed = _parse_uploaded_activity_file(filename, content_type, file_bytes)
+    """Parse an upload into an activity or an unpersisted course."""
+    file_format = _resolve_activity_file_format(filename, content_type)
+    parsed = _parse_uploaded_activity_file(file_format, file_bytes)
     if isinstance(parsed, ParsedCourse):
         logger.info(
             "course parsed user_id=%s sport=%s distance_m=%.0f gain_m=%.0f",
@@ -1597,7 +1640,7 @@ def _build_uploaded_activity(  # noqa: PLR0913
         max_hr_bpm=parsed.max_hr_bpm,
         avg_power_watts=parsed.avg_power_watts,
         avg_cadence_rpm=parsed.avg_cadence_rpm,
-        source=_activity_source_for_filename(filename),
+        source=_activity_source_for_format(file_format),
         source_file_key=object_key,
         raw_extraction={
             "activity_date_source": (
@@ -1631,16 +1674,6 @@ async def process_uploaded_file_endpoint(
     payload: ProcessUploadedFileRequest,
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
-    """
-    Process an uploaded GPX, FIT, or TCX file as either a course analysis or an activity.
-    
-    Parameters:
-    	payload (ProcessUploadedFileRequest): Uploaded file metadata and storage location.
-    	user_context (UserContext): Authenticated user context.
-    
-    Returns:
-    	Mapping[str, object]: Course analysis data for course files, or the persisted activity data for activity files.
-    """
     logger.info(
         "processing uploaded file user_id=%s filename_suffix=%s content_type=%s",
         user_context.user_id,
@@ -1655,7 +1688,7 @@ async def process_uploaded_file_endpoint(
         user_id=user_context.user_id,
         object_key=object_key,
     )
-    parsed = _build_uploaded_activity(
+    parsed = _build_uploaded_activity_or_course(
         user_id=user_context.user_id,
         filename=payload.filename,
         content_type=payload.content_type,
@@ -1682,17 +1715,11 @@ async def _build_course_response(
     object_key: str,
     public_url: str | None,
 ) -> Mapping[str, object]:
-    """
-    Analyze a parsed course and prepare its terrain and pacing information.
-    
-    Parameters:
-        user_id (str): Identifier of the athlete whose profile and thresholds inform the analysis.
-        course (ParsedCourse): Parsed course data to analyze.
-        object_key (str): Storage key for the uploaded course file.
-        public_url (str | None): Public URL for the uploaded course file, if available.
-    
-    Returns:
-        Mapping[str, object]: Course analysis payload containing terrain data and, when possible, pacing estimates.
+    """Analyze a course and return it. Deliberately writes nothing.
+
+    The athlete has not done this route, so there is no activity to save and no
+    plan workout to match. The coach gets the terrain and, where the athlete's
+    thresholds allow it, a pacing estimate.
     """
     athlete = await _athlete_context_for_course(user_id)
     logger.info("course analyzed user_id=%s sport=%s", user_id, course.sport)
@@ -1711,18 +1738,23 @@ _COURSE_CONTEXT_FAULTS = (PostgRESTAPIError, httpx.HTTPError, RepositoryNotConfi
 
 
 async def _athlete_context_for_course(user_id: str) -> AthleteCourseContext:
-    """
-    Load optional athlete profile and threshold data for course analysis.
-    
-    Database lookup failures are recorded in the returned context so course analysis
-    can continue with degraded estimates.
-    
-    Parameters:
-        user_id (str): Identifier of the athlete.
-    
-    Returns:
-        AthleteCourseContext: Athlete data and a flag indicating whether a lookup
-            failed.
+    """Fetch the athlete's profile and thresholds, tolerating their absence.
+
+    These only sharpen the estimate — the terrain is useful without them. A DB
+    problem here is caught rather than propagated (unlike the usual contract in
+    AGENTS.md, which lets ``PostgRESTAPIError`` reach the centralized handler)
+    because failing the whole upload over a missing FTP would be a worse answer
+    than returning distance and vertical with a note explaining the gap.
+
+    The two fetches are independent on purpose. Sharing one ``try`` meant a new
+    athlete with no ``athlete_profiles`` row never reached the threshold query at
+    all, and it also let ``RecordNotFoundError`` — a ``LookupError``, caught by
+    none of the DB fault classes and by no registered exception handler — escape as
+    a 500, losing the very upload this function exists to protect.
+
+    ``lookup_failed`` reports whether a *fault* occurred, so the coach can tell the
+    athlete "we couldn't read your profile just now" instead of wrongly insisting
+    they never supplied an FTP.
     """
     lookup_failed = False
 
@@ -1797,21 +1829,8 @@ def _empty_zip_result(skipped_count: int = 0) -> dict[str, object]:
 async def _zip_activity_entry(
     *, user_id: str, filename: str, content_type: str, zip_object_key: str, member_bytes: bytes
 ) -> dict[str, object] | None:
-    """
-    Process an activity or course extracted from a ZIP archive.
-    
-    Parameters:
-    	user_id (str): Identifier of the user who uploaded the archive.
-    	filename (str): Archive member filename.
-    	content_type (str): MIME type of the archive member.
-    	zip_object_key (str): Storage key of the uploaded ZIP archive.
-    	member_bytes (bytes): Raw bytes of the archive member.
-    
-    Returns:
-    	dict[str, object] | None: Serialized activity or course data, or `None` if processing fails.
-    """
     try:
-        parsed = _build_uploaded_activity(
+        parsed = _build_uploaded_activity_or_course(
             user_id=user_id,
             filename=filename,
             content_type=content_type,
@@ -2482,17 +2501,6 @@ async def _finalize_persisted_activity(
     *,
     calling_endpoint: ActivityPersistenceEndpoint,
 ) -> Mapping[str, object]:
-    """
-    Finalize a persisted activity and optionally associate it with a planned workout.
-    
-    Parameters:
-        user_id (str): Identifier of the user who owns the activity.
-        activity (Activity): Persisted activity to finalize.
-        calling_endpoint (ActivityPersistenceEndpoint): Endpoint responsible for the persistence operation.
-    
-    Returns:
-        Mapping[str, object]: Response containing the saved activity, its status, kind, and any matched planned workout.
-    """
     logger.info("%s user_id=%s status=saved", calling_endpoint, user_id)
     matched = await _try_match_activity_to_plan(user_id, activity)
     response: dict[str, object] = {

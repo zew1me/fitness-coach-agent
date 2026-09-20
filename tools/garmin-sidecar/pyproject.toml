@@ -1,0 +1,16 @@
+[project]
+name = "fitness-coach-garmin-sidecar"
+version = "0.1.0"
+description = "Local Garmin Connect activity downloader for fitness-coach."
+requires-python = ">=3.12"
+dependencies = [
+  "garminconnect>=0.3.6,<0.4.0",
+  "typer>=0.16.0,<1.0.0",
+]
+
+[project.scripts]
+garmin-sidecar = "fitness_coach_garmin_sidecar.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"

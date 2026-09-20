@@ -30,6 +30,20 @@ import type {
 
 type FetchLike = typeof fetch;
 
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export function isAuthenticationError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
+
 // Backoff schedule for transient fetch drops. iOS WebKit aborts an in-flight
 // fetch (tab suspended, cell↔Wi-Fi handoff, low-memory kill) with a TypeError
 // whose message is "Load failed"; a single silent retry recovers the request
@@ -151,7 +165,10 @@ async function readJson<T>(response: Response): Promise<T> {
       status: response.status,
       url: response.url,
     });
-    throw new Error(detail || `Request failed with status ${response.status}`);
+    throw new ApiError(
+      response.status,
+      detail || `Request failed with status ${response.status}`,
+    );
   }
   return (await response.json()) as T;
 }

@@ -23,11 +23,12 @@ import { useBrowserSession } from "../lib/use-browser-session";
 import { useChatThread } from "../lib/use-chat-thread";
 import { useIsMobile } from "../lib/use-is-mobile";
 
+import { AccountMenuButton } from "./account-menu";
 import { useChatTurnLease } from "./chat-turn-lease-provider";
 import styles from "./coach-chat.module.css";
+import { ProfileDrawer } from "./profile-drawer";
 import { SessionLoading } from "./session-loading";
 import { StatusCard } from "./status-card";
-import { ThemeSwitcher } from "./theme-switcher";
 
 type LocalAttachment = {
   id: string;
@@ -97,6 +98,10 @@ function onlyWelcomeMessage(messages: ChatMessage[]): boolean {
   );
 }
 
+function browserTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
 function readableTime(timestamp: string): string {
   return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
@@ -114,12 +119,6 @@ function removePreviewUrls(attachments: LocalAttachment[]): void {
 
 function coachingStatusLabel(profileComplete: boolean): string {
   return profileComplete ? "Coaching ready" : "Building your athlete profile";
-}
-
-function accountLabel(profile: AthleteProfile | null): string {
-  if (profile === null) return "Account";
-  const displayName = profile.display_name?.trim();
-  return displayName ? displayName : "Account";
 }
 
 function readString(
@@ -335,22 +334,29 @@ function SendIcon(): JSX.Element {
 }
 
 function LoggedOutLanding({
+  authenticationRequired,
   error,
-}: Readonly<{ error: string | null }>): JSX.Element {
+}: Readonly<{
+  authenticationRequired: boolean;
+  error: string | null;
+}>): JSX.Element {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.landingCard}>
-        <p className={styles.eyebrow}>Athlete Coach</p>
+        <p className={styles.eyebrow}>
+          {authenticationRequired ? "Session ended" : "Athlete Coach"}
+        </p>
         <h1 className={styles.landingTitle}>
-          A simpler coaching experience, built like chat.
+          {authenticationRequired
+            ? "Sign in to keep coaching."
+            : "A simpler coaching experience, built like chat."}
         </h1>
         <p className={styles.landingText}>
-          Sign in once, then use a single focused conversation for check-ins,
-          plan requests, and photo-backed coaching updates. The forms are gone
-          from the main surface so the experience feels closer to a modern chat
-          assistant than a dashboard.
+          {authenticationRequired
+            ? "Your browser sign-in has expired or is no longer available. Your coaching history is safe—sign in again to continue where you left off."
+            : "Sign in once, then use a single focused conversation for check-ins, plan requests, and photo-backed coaching updates. The forms are gone from the main surface so the experience feels closer to a modern chat assistant than a dashboard."}
         </p>
-        {error ? (
+        {error && !authenticationRequired ? (
           <p className={styles.landingHint}>
             Sign in to start your coaching chat. If the app feels slow to wake
             up, give it a moment and try again.
@@ -358,7 +364,9 @@ function LoggedOutLanding({
         ) : null}
         <div className={styles.actionRow}>
           <Link className={styles.primaryButton} href="/login?return_to=/">
-            Continue with magic link
+            {authenticationRequired
+              ? "Sign in again"
+              : "Continue with magic link"}
           </Link>
         </div>
       </section>
@@ -521,6 +529,50 @@ function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): JSX.Element {
   );
 }
 
+/**
+ * Indeterminate "the coach is working" affordance for an in-flight assistant
+ * bubble that has no renderable content yet (issue #406).
+ *
+ * Visual only: `ComposerHint` already announces WAITING_STATUSES through an
+ * aria-live region while `sending`, so a second live region here would
+ * double-announce to screen readers.
+ */
+function ThinkingIndicator(): JSX.Element {
+  return (
+    <span
+      aria-hidden="true"
+      className={styles.thinkingIndicator}
+      data-testid="thinking-indicator"
+    >
+      <span className={styles.thinkingDot} />
+      <span className={styles.thinkingDot} />
+      <span className={styles.thinkingDot} />
+    </span>
+  );
+}
+
+/**
+ * The SDK pushes a `step-start` part (and reasoning parts) into a live assistant
+ * message before any text or tool part exists; `uiPartText` returns null for
+ * those, so the bubble would otherwise mount visibly empty (#406). The check is
+ * deliberately trigger-agnostic, so a future unrenderable part type is covered
+ * too.
+ *
+ * Scoped to the *streaming* message: persisted rows with no renderable content
+ * (e.g. an old tool-only turn) keep their timestamp-only appearance rather than
+ * pinning a permanent spinner into the transcript.
+ */
+function shouldShowThinking(
+  message: ChatMessage,
+  { hasRenderableContent }: Readonly<{ hasRenderableContent: boolean }>,
+): boolean {
+  if (hasRenderableContent) return false;
+  return (
+    message.role === "assistant" &&
+    message.metadata.message_kind === "streaming"
+  );
+}
+
 function MessageBubble({
   message,
 }: Readonly<{ message: ChatMessage }>): JSX.Element {
@@ -538,6 +590,10 @@ function MessageBubble({
   const fileParts = parts.filter(
     (part): part is FileUIPart => part.type === "file",
   );
+  const showThinking = shouldShowThinking(message, {
+    hasRenderableContent:
+      textBlocks.length > 0 || fileParts.length > 0 || Boolean(plan),
+  });
 
   return (
     <div className={rowClass}>
@@ -546,6 +602,7 @@ function MessageBubble({
         data-role={message.role}
         data-testid="chat-bubble"
       >
+        {showThinking ? <ThinkingIndicator /> : null}
         {textBlocks.map((text, idx) => (
           <p className={styles.messageText} key={`text-${idx}`}>
             {text}
@@ -686,53 +743,6 @@ function MessagesSection({
   );
 }
 
-function AccountMenu({
-  profile,
-  onOpenProfile,
-  onExport,
-}: Readonly<{
-  profile: AthleteProfile | null;
-  onOpenProfile: () => void;
-  onExport: () => void;
-}>): JSX.Element {
-  return (
-    <div aria-label="Account" className={styles.accountMenu} role="menu">
-      <div className={styles.accountSummary}>
-        <span>Signed in</span>
-        <strong>{accountLabel(profile)}</strong>
-      </div>
-      <div className={styles.menuThemeRow}>
-        <ThemeSwitcher />
-      </div>
-      <button
-        className={styles.menuItem}
-        onClick={onOpenProfile}
-        role="menuitem"
-        type="button"
-      >
-        Profile
-      </button>
-      <button
-        className={styles.menuItem}
-        onClick={onExport}
-        role="menuitem"
-        type="button"
-      >
-        Export JSONL
-      </button>
-      <form
-        action="/api/oauth/browser-session/logout"
-        className={styles.menuForm}
-        method="post"
-      >
-        <button className={styles.menuItem} role="menuitem" type="submit">
-          Sign out
-        </button>
-      </form>
-    </div>
-  );
-}
-
 function ChatTopbar({
   profile,
   coachingStatus,
@@ -744,7 +754,6 @@ function ChatTopbar({
   onOpenDrawer: () => void;
   onExport: () => void;
 }>): JSX.Element {
-  const [open, setOpen] = useState(false);
   return (
     <header className={styles.topbar}>
       <div className={styles.brandBlock}>
@@ -786,52 +795,20 @@ function ChatTopbar({
             <circle cx="15.5" cy="13.5" fill="currentColor" r="1.2" />
           </svg>
         </Link>
-        <div className={styles.accountMenuWrap}>
-          <button
-            aria-expanded={open}
-            aria-haspopup="menu"
-            aria-label="Account menu"
-            className={styles.accountButton}
-            onClick={() => setOpen((prev) => !prev)}
-            title="Account"
-            type="button"
-          >
-            <svg
-              aria-hidden="true"
-              className={styles.accountIcon}
-              viewBox="0 0 24 24"
+        <AccountMenuButton
+          extraItems={
+            <button
+              className={styles.menuItem}
+              onClick={onExport}
+              role="menuitem"
+              type="button"
             >
-              <circle
-                cx="12"
-                cy="8"
-                fill="none"
-                r="3.5"
-                stroke="currentColor"
-                strokeWidth="1.8"
-              />
-              <path
-                d="M5 19.5a7 7 0 0 1 14 0"
-                fill="none"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeWidth="1.8"
-              />
-            </svg>
-          </button>
-          {open ? (
-            <AccountMenu
-              profile={profile}
-              onOpenProfile={() => {
-                setOpen(false);
-                onOpenDrawer();
-              }}
-              onExport={() => {
-                setOpen(false);
-                onExport();
-              }}
-            />
-          ) : null}
-        </div>
+              Export JSONL
+            </button>
+          }
+          onOpenProfile={onOpenDrawer}
+          profile={profile}
+        />
       </div>
     </header>
   );
@@ -1104,185 +1081,31 @@ function Composer({
   );
 }
 
-function ProfileDrawerFields({
-  profile,
-  setProfile,
-  saving,
-  status,
-  onSave,
-}: Readonly<{
-  profile: AthleteProfile;
-  setProfile: (_profile: AthleteProfile) => void;
-  saving: boolean;
-  status: string | null;
-  onSave: () => void;
-}>): JSX.Element {
-  return (
-    <div className={styles.fieldGrid}>
-      <label className={styles.fieldLabel}>
-        Display name
-        <input
-          className={styles.fieldInput}
-          onChange={(event) =>
-            setProfile({
-              ...profile,
-              display_name: event.target.value || null,
-            })
-          }
-          placeholder="Your name (optional)"
-          value={profile.display_name ?? ""}
-        />
-      </label>
-      <label className={styles.fieldLabel}>
-        Sports (comma-separated)
-        <input
-          className={styles.fieldInput}
-          onChange={(event) =>
-            setProfile({
-              ...profile,
-              primary_sports: event.target.value
-                .split(",")
-                .map((s) => s.trim())
-                .filter((s) => s.length > 0),
-            })
-          }
-          placeholder="e.g. running, cycling, strength"
-          value={profile.primary_sports.join(", ")}
-        />
-      </label>
-      <label className={styles.fieldLabel}>
-        Weekly training hours
-        <input
-          className={styles.fieldInput}
-          min="0"
-          onChange={(event) =>
-            setProfile({
-              ...profile,
-              weekly_available_hours:
-                event.target.value === "" ? null : Number(event.target.value),
-            })
-          }
-          step="0.5"
-          type="number"
-          value={profile.weekly_available_hours ?? ""}
-        />
-      </label>
-      <div className={styles.actionRow}>
-        <button
-          className={styles.primaryButton}
-          disabled={saving}
-          onClick={onSave}
-          type="button"
-        >
-          {saving ? "Saving..." : "Save profile"}
-        </button>
-      </div>
-      {status !== null ? <p className={styles.drawerStatus}>{status}</p> : null}
-    </div>
-  );
-}
-
-function ProfileDrawer({
-  open,
-  onClose,
-  profile,
-  setProfile,
-  saving,
-  status,
-  onSave,
-}: Readonly<{
-  open: boolean;
-  onClose: () => void;
-  profile: AthleteProfile | null;
-  setProfile: (_profile: AthleteProfile) => void;
-  saving: boolean;
-  status: string | null;
-  onSave: () => void;
-}>): JSX.Element | null {
-  if (!open) return null;
-  return (
-    <div
-      className={styles.drawerBackdrop}
-      onClick={onClose}
-      role="presentation"
-    >
-      <aside
-        aria-label="Profile and preferences"
-        className={styles.drawer}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className={styles.drawerHeader}>
-          <div>
-            <h2 className={styles.drawerTitle}>Profile</h2>
-            <p className={styles.drawerText}>
-              Review the profile details your coach uses for training guidance.
-            </p>
-          </div>
-          <button
-            className={styles.drawerClose}
-            onClick={onClose}
-            type="button"
-          >
-            Close
-          </button>
-        </div>
-
-        <ProfileDrawerBody
-          profile={profile}
-          saving={saving}
-          setProfile={setProfile}
-          status={status}
-          onSave={onSave}
-        />
-      </aside>
-    </div>
-  );
-}
-
-function ProfileDrawerBody({
-  profile,
-  setProfile,
-  saving,
-  status,
-  onSave,
-}: Readonly<{
-  profile: AthleteProfile | null;
-  setProfile: (_profile: AthleteProfile) => void;
-  saving: boolean;
-  status: string | null;
-  onSave: () => void;
-}>): JSX.Element {
-  if (saving && profile === null) {
-    return <p className={styles.drawerStatus}>Loading your settings…</p>;
-  }
-  if (profile === null) {
-    return <p className={styles.drawerStatus}>No profile loaded yet.</p>;
-  }
-  return (
-    <ProfileDrawerFields
-      profile={profile}
-      saving={saving}
-      setProfile={setProfile}
-      status={status}
-      onSave={onSave}
-    />
-  );
-}
-
 export function CoachChat(): JSX.Element {
   const session = useBrowserSession();
   if (session.loading) {
     return <SessionLoading />;
   }
   if (session.token === null) {
-    return <LoggedOutLanding error={session.error} />;
+    return (
+      <LoggedOutLanding
+        authenticationRequired={session.authenticationRequired}
+        error={session.error}
+      />
+    );
   }
-  return <SignedInChat token={session.token} />;
+  return (
+    <SignedInChat refreshSession={session.refresh} token={session.token} />
+  );
 }
 
 function SignedInChat({
   token,
-}: Readonly<{ token: BrowserTokenResponse }>): JSX.Element {
+  refreshSession,
+}: Readonly<{
+  token: BrowserTokenResponse;
+  refreshSession: () => Promise<void>;
+}>): JSX.Element {
   const thread = useChatThread(token);
   const athleteProfile = useAthleteProfile(token);
   if (thread.loading) {
@@ -1298,6 +1121,7 @@ function SignedInChat({
       loadingOlder={thread.loadingOlder}
       olderAvailable={thread.olderAvailable}
       refetchThread={thread.refetch}
+      refreshSession={refreshSession}
       setThreadError={thread.setError}
       threadData={thread.data}
       threadError={thread.error}
@@ -1314,6 +1138,7 @@ function CoachChatBody({
   loadingOlder,
   olderAvailable,
   refetchThread,
+  refreshSession,
   setThreadError,
   athleteProfile,
 }: Readonly<{
@@ -1324,6 +1149,7 @@ function CoachChatBody({
   loadingOlder: boolean;
   olderAvailable: boolean;
   refetchThread: () => Promise<void>;
+  refreshSession: () => Promise<void>;
   setThreadError: (_error: string | null) => void;
   athleteProfile: AthleteProfileHook;
 }>): JSX.Element {
@@ -1386,6 +1212,9 @@ function CoachChatBody({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       credentials: "include",
+      headers: (): Record<string, string> => ({
+        "X-Athlete-Timezone": browserTimeZone(),
+      }),
       prepareSendMessagesRequest: ({
         messages,
       }): { body: Record<string, unknown> } => ({
@@ -1678,6 +1507,10 @@ function CoachChatBody({
         removePreviewUrls(pendingAttachments);
       }
       setThreadError(errorMessage(error, "Unable to send your message."));
+      // A chat turn uses the cookie-backed Next.js route directly rather than
+      // authorizedFetch. Revalidate here so an expired cookie replaces the
+      // vague inline send error with the explicit sign-in-again screen.
+      void refreshSession();
     } finally {
       sendInFlightRef.current = false;
       setSending(false);

@@ -57,6 +57,10 @@ function vercelProtectionBypassHeaders(): Record<string, string> {
   return bypassSecret ? { "x-vercel-protection-bypass": bypassSecret } : {};
 }
 
+function browserTimeZone(request: Request): string | undefined {
+  return request.headers.get("x-athlete-timezone") ?? undefined;
+}
+
 function safeErrorMessage(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
   return msg.replace(/((?:tavilyApiKey|api[_-]?key|key)=)[^&\s]+/gi, "$1***");
@@ -242,6 +246,9 @@ async function handleChatRequest(
   const strategy = process.env["COACH_CONTEXT_STRATEGY"] ?? "session";
   const messages = messagesForContextStrategy(parsedBody, strategy);
   const baseUrl = requestOrigin(request);
+  // The browser supplies an IANA timezone so coach dates and clock times agree
+  // with what the athlete sees; prompt construction validates it before use.
+  const timeZone = browserTimeZone(request);
   const extraHeaders = vercelProtectionBypassHeaders();
   const leaseId = crypto.randomUUID();
 
@@ -304,6 +311,7 @@ async function handleChatRequest(
     useDurableSession: strategy !== "full_history",
     signal: request.signal,
     streamErrorMessage: COACH_UNAVAILABLE_MESSAGE,
+    timeZone,
     ...(tavilyMcpUrl ? { tavilyMcpUrl } : {}),
   });
 }

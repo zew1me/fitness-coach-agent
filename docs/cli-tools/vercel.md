@@ -40,8 +40,8 @@ vercel env run -- <command>
 vercel env pull .env.local
 ```
 
-`vercel env pull` writes secrets to disk. Keep the destination ignored  and never commit it. Adding,
-updating, or removing a variable changes shared cloud state: verify the target environment and obtain 
+`vercel env pull` writes secrets to disk. Keep the destination ignored and never commit it. Adding,
+updating, or removing a variable changes shared cloud state: verify the target environment and obtain
 interactive confirmation from the user before doing so.
 
 ## Deployments and safety

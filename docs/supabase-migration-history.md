@@ -24,6 +24,7 @@
 - `20260719000000_replace_intervals_connection_atomic.sql` — service-role RPC for atomic Intervals.icu connection replacement
 - `20260721000000_update_goal_course_profile_notes_atomic.sql` — service-role RPC for atomic course-profile note merging
 - `20260806003910_unlink_plan_workout_from_activity_atomic.sql` — service-role RPC for atomic bidirectional workout/activity unlinking
+- `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -537,3 +538,27 @@ and grants execution only to `service_role`.
 locally). Additive migration; no backfill or data rewrite required. The
 application change that calls the RPC must not be deployed before the
 migration is applied.
+
+## 20260816191358 — RLS and function search-path hardening (2026-08-16)
+
+**File:** `supabase/migrations/20260816191358_rls_and_security.sql`
+
+**Change:** Recreates `public.set_updated_at()` as a security-invoker trigger
+function with an empty `search_path`, enables RLS across the application tables,
+and gives authenticated athletes owner-scoped access to the existing user-facing
+tables. OAuth authorization codes, OAuth refresh tokens, threshold recalibration
+candidates, and durable chat model state remain server-only with no client RLS
+policies. Tables already locked down by their introducing migrations retain that
+access model.
+
+**Why (issues #111 and #112):** Supabase's database advisors reported a mutable
+function search path and public tables without RLS. The forward migration closes
+those gaps without changing stored application data. Its timestamped version
+also avoids the canonical `0004_chat_messages_parts.sql` version that was added
+while the original PR #122 remained open.
+
+**All environments:** Apply via `supabase db push` after confirming migration
+history is aligned. This is the intentional forward reintroduction of the RLS
+work described in the preview-repair section above; do not restore or mark the
+old remote-only `20260426192302` version as applied. Enabling RLS takes brief
+table locks, but the migration performs no backfill or data rewrite.

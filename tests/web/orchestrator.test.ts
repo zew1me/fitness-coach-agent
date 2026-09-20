@@ -1,6 +1,11 @@
+import type { AgentInputItem } from "@openai/agents";
 import type { UIMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  DEFAULT_AUTO_COMPACT_TOKENS,
+  estimateStoredContext,
+} from "../../lib/agent/durable-compaction-session";
 import { modelCircuitBreaker } from "../../lib/agent/model-circuit-breaker";
 import {
   CHAT_TURN_LEASE_RENEW_INTERVAL_MS,
@@ -183,6 +188,15 @@ function rateLimitError(
         ? new Headers()
         : new Headers({ "Retry-After": retryAfter }),
   });
+}
+
+function responsesStreamRateLimitError(): Error {
+  // The Responses API can emit a provider error inside an otherwise-200 SSE
+  // stream. The SDK surfaces that as a plain Error, with the useful retry
+  // window only in the message and no numeric 429 status.
+  return new Error(
+    "Rate limit reached for gpt-5.6-luna in organization org-test on tokens per min: Limit 200000, Used 177605, Requested 37998. Please try again in 4.68s.",
+  );
 }
 
 function messages(): UIMessage[] {
@@ -918,6 +932,62 @@ describe("streamCoachTurn", () => {
     expect(sentryMocks.captureException).not.toHaveBeenCalled();
   });
 
+  it("handles a status-less Responses stream rate limit after a tool", async () => {
+    orchestratorMocks.agentsRun.mockResolvedValueOnce({
+      completed: Promise.resolve(),
+      finalOutput: null,
+      output: [],
+      state: { usage: undefined },
+      async *[Symbol.asyncIterator]() {
+        await Promise.resolve();
+        yield {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "update_goals",
+              arguments: "{}",
+            },
+          },
+        };
+        yield {
+          type: "run_item_stream_event",
+          name: "tool_output",
+          item: {
+            rawItem: {
+              type: "function_call_result",
+              callId: "call-1",
+              name: "update_goals",
+            },
+            output: { updated: true },
+          },
+        };
+        throw responsesStreamRateLimitError();
+      },
+    } as never);
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+    });
+    const text = await response.text();
+
+    expect(text).toContain("I'm tracking that as a goal of yours.");
+    expect(text).toContain("Please try again in about 5 seconds.");
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(1);
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
+    expect(sentryMocks.captureMessage).toHaveBeenCalledWith(
+      "OpenAI rate limit hit",
+      expect.objectContaining({
+        tags: expect.objectContaining({ outcome: "exhausted" }),
+      }),
+    );
+  });
+
   it("records an acknowledgement 429 without closing the model circuit", async () => {
     orchestratorMocks.runEventSequences.push([
       {
@@ -1323,7 +1393,7 @@ describe("streamCoachTurn", () => {
     expect(String(persistCall?.[1]?.body)).toContain("Coach is unavailable");
   });
 
-  it("seeds a partial durable session when the first history page exceeds the lazy budget", async () => {
+  it("bounds a partial cold seed to the compaction token threshold", async () => {
     const historyMessages = Array.from({ length: 60 }, (_, index) => ({
       id: `history-${index}`,
       parts: [{ type: "text", text: "x".repeat(20_000) }],
@@ -1415,6 +1485,17 @@ describe("streamCoachTurn", () => {
     };
     expect(body.items.length).toBeGreaterThan(0);
     expect(body.items.length).toBeLessThan(historyMessages.length);
+    // The seed is stored history only. The lead-coach system prompt plus tool
+    // definitions measure ~10.4k tokens and land on top of it before the athlete's
+    // message, while shouldTriggerCompaction fires at >= DEFAULT_AUTO_COMPACT_TOKENS.
+    // So "at or under the threshold" is not enough — the seed has to leave at least
+    // that overhead as headroom, or a fresh session compacts on its very first turn.
+    const PER_TURN_OVERHEAD_TOKENS = 10_400;
+    expect(
+      estimateStoredContext(body.items as AgentInputItem[]).estimatedTokens,
+    ).toBeLessThanOrEqual(
+      DEFAULT_AUTO_COMPACT_TOKENS - PER_TURN_OVERHEAD_TOKENS,
+    );
   });
 
   it("releases a durable-session lease when the acquired lease response has malformed JSON", async () => {

@@ -7,6 +7,7 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.models.athlete import (
     AthleteProfile,
+    RecoveryLog,
     SportThreshold,
     ThresholdRecalibrationCandidate,
 )
@@ -227,6 +228,7 @@ class FakeSupabaseClient:
         daily_load_snapshot_rows: list[dict[str, object]] | None = None,
         goal_rows: list[dict[str, object]] | None = None,
         plan_workout_rows: list[dict[str, object]] | None = None,
+        recovery_rows: list[dict[str, object]] | None = None,
         training_plan_rows: list[dict[str, object]] | None = None,
         schedule_override_rows: list[dict[str, object]] | None = None,
         threshold_recalibration_candidate_rows: list[dict[str, object]] | None = None,
@@ -242,6 +244,7 @@ class FakeSupabaseClient:
             "chat_model_states": FakeTableQuery(chat_model_state_rows or []),
             "goals": FakeTableQuery(goal_rows or []),
             "plan_workouts": FakeTableQuery(plan_workout_rows or []),
+            "recovery_logs": FakeTableQuery(recovery_rows or []),
             "training_plans": FakeTableQuery(training_plan_rows or []),
             "schedule_overrides": FakeTableQuery(schedule_override_rows or []),
             "schedule_availability": FakeTableQuery([]),
@@ -378,6 +381,41 @@ def _plan_workout_row(**overrides: object) -> dict[str, object]:
         "status": "completed",
         "actual_activity_id": "00000000-0000-0000-0000-000000000012",
         "completion_source": "auto_matched",
+    }
+    row.update(overrides)
+    return row
+
+
+def _recovery_log_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "recovery-log-1",
+        "user_id": "athlete-1",
+        "log_date": "2026-07-03",
+        "sleep_duration_hours": 7.5,
+        "sleep_score": 82,
+        "sleep_consistency_pct": 91.0,
+        "hrv_ms": 47.0,
+        "resting_hr_bpm": 52,
+        "body_battery": 61,
+        "stress_score": 22,
+        "subjective_energy": 4,
+        "notes": "seeded from watch",
+        "source": "garmin_api",
+    }
+    row.update(overrides)
+    return row
+
+
+def _daily_load_snapshot_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "load-1",
+        "user_id": "athlete-1",
+        "snapshot_date": "2026-07-03",
+        "sport": None,
+        "daily_tss": 50.0,
+        "ctl": 20.0,
+        "atl": 25.0,
+        "tsb": -5.0,
     }
     row.update(overrides)
     return row
@@ -584,6 +622,129 @@ async def test_upsert_load_snapshots_handles_batch_payloads() -> None:
     assert [row["snapshot_date"] for row in rows] == ["2026-06-28", "2026-06-29"]
     assert all(row["user_id"] == "athlete-1" for row in rows)
     assert all(row["sport"] == "cycling" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_returns_exact_date() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[
+                _daily_load_snapshot_row(snapshot_date="2026-07-02", ctl=19.0),
+                _daily_load_snapshot_row(id="load-2", snapshot_date="2026-07-03", ctl=20.0),
+            ]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 3))
+
+    assert snapshot is not None
+    assert snapshot.snapshot_date == date(2026, 7, 3)
+    assert snapshot.ctl == 20.0
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_returns_nearest_earlier_date() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[
+                _daily_load_snapshot_row(snapshot_date="2026-07-01", ctl=18.0),
+                _daily_load_snapshot_row(id="load-2", snapshot_date="2026-07-03", ctl=20.0),
+            ]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 2))
+
+    assert snapshot is not None
+    assert snapshot.snapshot_date == date(2026, 7, 1)
+    assert snapshot.ctl == 18.0
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_returns_none_when_all_rows_are_later() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[_daily_load_snapshot_row(snapshot_date="2026-07-03")]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 2))
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_get_load_snapshot_on_or_before_aggregate_excludes_sport_rows() -> None:
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            daily_load_snapshot_rows=[
+                _daily_load_snapshot_row(snapshot_date="2026-07-02", ctl=19.0),
+                _daily_load_snapshot_row(
+                    id="cycling-load",
+                    snapshot_date="2026-07-03",
+                    sport="cycling",
+                    ctl=40.0,
+                ),
+            ]
+        )
+    )
+
+    snapshot = await repo.get_load_snapshot_on_or_before("athlete-1", date(2026, 7, 3))
+
+    assert snapshot is not None
+    assert snapshot.sport is None
+    assert snapshot.snapshot_date == date(2026, 7, 2)
+    assert snapshot.ctl == 19.0
+
+
+@pytest.mark.asyncio
+async def test_upsert_recovery_log_preserves_existing_fields_on_second_partial_write() -> None:
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    first = await repo.upsert_recovery_log(
+        RecoveryLog(user_id="athlete-1", log_date=date(2026, 7, 3), hrv_ms=48.0)
+    )
+    second = await repo.upsert_recovery_log(
+        RecoveryLog(user_id="athlete-1", log_date=date(2026, 7, 3), notes="slept badly")
+    )
+
+    assert first.hrv_ms == 48.0
+    assert second.hrv_ms == 48.0
+    assert second.notes == "slept badly"
+
+
+@pytest.mark.asyncio
+async def test_upsert_recovery_log_preserves_seeded_source_and_metrics() -> None:
+    client = FakeSupabaseClient(recovery_rows=[_recovery_log_row()])
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.upsert_recovery_log(
+        RecoveryLog(user_id="athlete-1", log_date=date(2026, 7, 3), notes="sleep got worse")
+    )
+
+    assert updated.source == "garmin_api"
+    assert updated.hrv_ms == 47.0
+    assert updated.sleep_duration_hours == 7.5
+    assert updated.notes == "sleep got worse"
+
+
+@pytest.mark.asyncio
+async def test_upsert_recovery_log_persists_an_explicit_source_update() -> None:
+    client = FakeSupabaseClient(recovery_rows=[_recovery_log_row(source="manual")])
+    repo = SupabaseRepository(client=client)
+
+    updated = await repo.upsert_recovery_log(
+        RecoveryLog(
+            user_id="athlete-1",
+            log_date=date(2026, 7, 3),
+            source="apple_health",
+            notes="imported from Apple Health",
+        )
+    )
+
+    assert updated.source == "apple_health"
+    assert updated.notes == "imported from Apple Health"
 
 
 @pytest.mark.asyncio

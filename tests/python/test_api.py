@@ -1306,7 +1306,30 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
     assert body["public_url"] == public_url
 
 
-def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("filename", "content_type", "expected"),
+    [
+        ("activity", "application/gpx+xml", "gpx"),
+        ("activity", "application/vnd.garmin.fit", "fit"),
+        ("activity", "application/vnd.garmin.tcx+xml", "tcx"),
+        ("activity.GPX", "application/octet-stream", "gpx"),
+    ],
+)
+def test_resolve_activity_file_format(filename: str, content_type: str, expected: str) -> None:
+    assert api_index._resolve_activity_file_format(filename, content_type) == expected
+
+
+def test_resolve_activity_file_format_rejects_unknown_type() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        api_index._resolve_activity_file_format("activity", "application/octet-stream")
+
+    assert exc_info.value.status_code == 415
+    assert exc_info.value.detail == "Unsupported activity file type."
+
+
+def test_build_uploaded_activity_uses_resolved_format_for_source_and_date_provenance(
+    monkeypatch,
+) -> None:
     from backend.engine.gpx_parser import ParsedActivity
 
     parsed = ParsedActivity(
@@ -1315,11 +1338,17 @@ def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) 
         started_at=datetime(2026, 7, 6, 3, 31, 48, tzinfo=UTC),
         utc_offset_seconds=-25200,
     )
-    monkeypatch.setattr(api_index, "_parse_uploaded_activity_file", lambda *_args: parsed)
+    captured: dict[str, str] = {}
 
-    activity = api_index._build_uploaded_activity(
+    def mock_parse(file_format: str, _file_bytes: bytes) -> ParsedActivity:
+        captured["file_format"] = file_format
+        return parsed
+
+    monkeypatch.setattr(api_index, "_parse_uploaded_activity_file", mock_parse)
+
+    activity = api_index._build_uploaded_activity_or_course(
         user_id="athlete-1",
-        filename="ride.fit",
+        filename="ride",
         content_type="application/vnd.garmin.fit",
         object_key="users/athlete-1/ride.fit",
         public_url="https://cdn.example.com/ride.fit",
@@ -1327,6 +1356,8 @@ def test_build_uploaded_activity_records_fit_local_date_provenance(monkeypatch) 
     )
 
     assert isinstance(activity, Activity)
+    assert activity.source == "fit_upload"
+    assert captured == {"file_format": "fit"}
     assert activity.raw_extraction is not None
     assert activity.raw_extraction["utc_offset_seconds"] == -25200
     assert activity.raw_extraction["activity_date_source"] == "fit_local_timestamp"
@@ -4788,26 +4819,10 @@ class _CourseRepository(EngineRepository):
         self.created: list[Activity] = []
 
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-        """Return the athlete profile with its weight set to 72 kilograms.
-        
-        Parameters:
-        	user_id (str): Identifier of the athlete whose profile to retrieve.
-        
-        Returns:
-        	AthleteProfile: The athlete profile with `weight_kg` set to `72.0`.
-        """
         profile = await super().get_athlete_profile(user_id)
         return profile.model_copy(update={"weight_kg": 72.0})
 
     async def create_activity(self, activity: Activity) -> Activity:
-        """Record an activity and return it with its assigned identifier.
-        
-        Parameters:
-        	activity (Activity): Activity to record.
-        
-        Returns:
-        	Activity: A copy of the activity with its identifier set to ``"activity-1"``.
-        """
         self.created.append(activity)
         return activity.model_copy(update={"id": "activity-1"})
 
@@ -4815,30 +4830,10 @@ class _CourseRepository(EngineRepository):
 async def _post_uploaded_course(
     monkeypatch, file_bytes: bytes, filename: str = "course.gpx"
 ) -> tuple[dict[str, Any], _CourseRepository]:
-    """
-    Post a course upload request using the supplied file contents.
-    
-    Parameters:
-    	file_bytes (bytes): Course file contents returned by the mocked download service.
-    	filename (str): Name of the uploaded course file.
-    
-    Returns:
-    	tuple[dict[str, Any], _CourseRepository]: Response JSON and the repository used during processing.
-    """
     repo = _CourseRepository()
     monkeypatch.setattr(api_index, "repo", repo)
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        """
-        Return mocked file contents for an object requested by a user.
-        
-        Parameters:
-        	user_id (str): Identifier of the user requesting the object.
-        	object_key (str): Storage key for the requested object.
-        
-        Returns:
-        	bytes: The mocked file contents.
-        """
         return file_bytes
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
@@ -4898,21 +4893,12 @@ async def test_process_uploaded_course_degrades_when_thresholds_are_missing(
     # worse answer than terrain plus an explanation.
     class _NoThresholdRepository(_CourseRepository):
         async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
-            """Retrieve the active sport thresholds for a user.
-            
-            Parameters:
-            	user_id (str): Identifier of the user whose thresholds are requested.
-            
-            Returns:
-            	list[SportThreshold]: The user's active sport thresholds.
-            """
             return []
 
     repo = _NoThresholdRepository()
     monkeypatch.setattr(api_index, "repo", repo)
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        """Return sample course GPX bytes for a requested user and object key."""
         return _SAMPLE_COURSE_GPX
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
@@ -4951,16 +4937,6 @@ async def test_process_uploaded_zip_analyzes_a_course_member_without_saving_it(
     zip_bytes = _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        """
-        Provide the mocked ZIP file contents for a requested object.
-        
-        Parameters:
-            user_id (str): Authenticated user requesting the object.
-            object_key (str): Storage key identifying the object.
-        
-        Returns:
-            bytes: The mocked file contents.
-        """
         return zip_bytes
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
@@ -5018,30 +4994,15 @@ async def test_process_uploaded_course_admits_a_lookup_failure_instead_of_blamin
     # FTP they already gave us, on every upload, would be a falsehood.
     class _BrokenRepository(_CourseRepository):
         async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-            """
-            Simulate an unavailable athlete profile service.
-            
-            Raises:
-                httpx.ConnectError: If the profile service cannot be reached.
-            """
             raise httpx.ConnectError("supabase unreachable")
 
         async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
-            """Retrieve the active sport thresholds for a user.
-            
-            Parameters:
-            	user_id (str): Identifier of the user whose thresholds are requested.
-            
-            Raises:
-            	httpx.ConnectError: If the Supabase service is unreachable.
-            """
             raise httpx.ConnectError("supabase unreachable")
 
     repo = _BrokenRepository()
     monkeypatch.setattr(api_index, "repo", repo)
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        """Return sample course GPX bytes for a requested user and object key."""
         return _SAMPLE_COURSE_GPX
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
@@ -5082,25 +5043,12 @@ async def test_process_uploaded_course_survives_an_athlete_with_no_profile_row(
     # uploading a goal event's course file.
     class _NoProfileRepository(_CourseRepository):
         async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-            """
-            Retrieve the athlete profile for a user.
-            
-            Parameters:
-                user_id (str): Identifier of the user whose profile is requested.
-            
-            Returns:
-                AthleteProfile: The user's athlete profile.
-            
-            Raises:
-                RecordNotFoundError: If no athlete profile exists for the user.
-            """
             raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
 
     repo = _NoProfileRepository()
     monkeypatch.setattr(api_index, "repo", repo)
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        """Return sample course GPX bytes for a requested user and object key."""
         return _SAMPLE_COURSE_GPX
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
@@ -5140,31 +5088,15 @@ async def test_process_uploaded_course_degrades_when_the_database_is_unavailable
     # a 5xx that loses the athlete's upload.
     class _BrokenRepository(_CourseRepository):
         async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
-            """
-            Retrieve the athlete profile for a user.
-            
-            Raises:
-                PostgRESTAPIError: If the profile service connection is unavailable.
-            """
             raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
 
         async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
-            """
-            Retrieve the user's active sport thresholds.
-            
-            Parameters:
-            	user_id (str): The authenticated user's identifier.
-            
-            Raises:
-            	PostgRESTAPIError: If the threshold repository connection is unavailable.
-            """
             raise PostgRESTAPIError({"message": "connection refused", "code": "08006"})
 
     repo = _BrokenRepository()
     monkeypatch.setattr(api_index, "repo", repo)
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        """Return sample course GPX bytes for a requested user and object key."""
         return _SAMPLE_COURSE_GPX
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
@@ -5208,7 +5140,6 @@ async def test_process_uploaded_zip_survives_a_course_member_that_cannot_be_anal
     monkeypatch.setattr(api_index, "repo", repo)
 
     def explode(*_args: object, **_kwargs: object) -> dict[str, object]:
-        """Raise an error indicating that a threshold row is malformed."""
         raise ValueError("malformed threshold row")
 
     monkeypatch.setattr(api_index, "build_course_payload", explode)
@@ -5216,16 +5147,6 @@ async def test_process_uploaded_zip_survives_a_course_member_that_cannot_be_anal
     zip_bytes = _make_zip({"course.gpx": _SAMPLE_COURSE_GPX, "run.gpx": _SAMPLE_GPX})
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        """
-        Provide the mocked ZIP file contents for a requested object.
-        
-        Parameters:
-            user_id (str): Authenticated user requesting the object.
-            object_key (str): Storage key identifying the object.
-        
-        Returns:
-            bytes: The mocked file contents.
-        """
         return zip_bytes
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
