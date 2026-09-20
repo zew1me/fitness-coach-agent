@@ -17,14 +17,6 @@ from supabase import Client, create_client
 __all__ = ["OAuthRepository", "OAuthRepositoryNotConfiguredError"]
 
 
-# Supabase's gateway can time out after forwarding a write, so the response does not
-# reveal whether Postgres committed it. Retrying the complete read-then-write operation
-# lets the next read observe a successful ambiguous write before deciding what to do.
-_GATEWAY_RETRYABLE_CODES = frozenset({"502", "503", "504"})
-_GATEWAY_RETRY_ATTEMPTS = 2
-_GATEWAY_RETRY_BACKOFF_SECONDS = 0.25
-
-
 class OAuthRepository(_OAuthRepositoryBase):
     """Synchronous Supabase-backed OAuth persistence."""
 
@@ -60,7 +52,7 @@ class OAuthRepository(_OAuthRepositoryBase):
     def upsert_grant(
         self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
     ) -> OAuthGrantRecord:
-        for attempt in range(_GATEWAY_RETRY_ATTEMPTS):
+        for attempt in range(self._GATEWAY_RETRY_ATTEMPTS):
             try:
                 return self._upsert_grant_once(
                     user_id=user_id,
@@ -69,12 +61,9 @@ class OAuthRepository(_OAuthRepositoryBase):
                     scopes=scopes,
                 )
             except PostgRESTAPIError as exc:
-                code = str(exc.code) if exc.code is not None else None
-                if code not in _GATEWAY_RETRYABLE_CODES:
+                if not self._should_retry_gateway_error(exc, attempt):
                     raise
-                if attempt == _GATEWAY_RETRY_ATTEMPTS - 1:
-                    raise
-                time.sleep(_GATEWAY_RETRY_BACKOFF_SECONDS)
+                time.sleep(self._GATEWAY_RETRY_BACKOFF_SECONDS)
         raise AssertionError("unreachable: OAuth grant retry loop exited without returning")
 
     def _upsert_grant_once(

@@ -6,6 +6,7 @@ from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
+from postgrest.exceptions import APIError as PostgRESTAPIError
 from postgrest.types import JSON
 
 from backend.models.auth import (
@@ -21,6 +22,12 @@ class OAuthRepositoryNotConfiguredError(RuntimeError):
 
 class _OAuthRepositoryBase:
     """Share configuration and pure helpers across OAuth repository runtimes."""
+
+    # A gateway timeout can hide a committed write. Both runtimes therefore retry the
+    # complete read-then-write grant operation, allowing the next read to observe it.
+    _GATEWAY_RETRYABLE_CODES = frozenset({"502", "503", "504"})
+    _GATEWAY_RETRY_ATTEMPTS = 2
+    _GATEWAY_RETRY_BACKOFF_SECONDS = 0.25
 
     def __init__(
         self,
@@ -47,6 +54,12 @@ class _OAuthRepositoryBase:
                 "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
             )
         return self._client
+
+    @classmethod
+    def _should_retry_gateway_error(cls, exc: PostgRESTAPIError, attempt: int) -> bool:
+        """Return whether a gateway failure warrants another complete grant upsert."""
+        code = str(exc.code) if exc.code is not None else None
+        return code in cls._GATEWAY_RETRYABLE_CODES and attempt < cls._GATEWAY_RETRY_ATTEMPTS - 1
 
     @staticmethod
     def _resolve_grant_scopes(

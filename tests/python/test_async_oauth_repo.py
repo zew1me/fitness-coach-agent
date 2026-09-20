@@ -3,8 +3,10 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from inspect import iscoroutinefunction, signature
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.config import settings
 from backend.repos import async_oauth_repo
@@ -56,14 +58,27 @@ class AsyncFakeTableQuery:
         return self
 
     async def execute(self) -> FakeResponse:
-        operation = "select"
-        if self._insert_payload is not None:
-            operation = "insert"
-        elif self._update_payload is not None:
-            operation = "update"
-        self._client.operations[(self._table_name, operation)] += 1
+        operation_key = (self._table_name, self._operation_name())
+        self._client.operations[operation_key] += 1
+        failures = self._client.failures.get(operation_key, [])
+        pending = failures.pop(0) if failures else None
+        if pending is not None and not pending[1]:
+            raise pending[0]
 
-        if (self._table_name, operation) in self._client.empty_responses:
+        response = self._perform_operation(operation_key)
+        if pending is not None:
+            raise pending[0]
+        return response
+
+    def _operation_name(self) -> str:
+        if self._insert_payload is not None:
+            return "insert"
+        if self._update_payload is not None:
+            return "update"
+        return "select"
+
+    def _perform_operation(self, operation_key: tuple[str, str]) -> FakeResponse:
+        if operation_key in self._client.empty_responses:
             return FakeResponse([])
         if self._insert_payload is not None:
             row = dict(self._insert_payload)
@@ -114,10 +129,32 @@ class AsyncFakeSupabaseClient:
         }
         self.empty_responses = empty_responses or set()
         self.operations: Counter[tuple[str, str]] = Counter()
+        self.failures: dict[tuple[str, str], list[tuple[PostgRESTAPIError, bool]]] = {}
         self.postgrest = AsyncFakePostgRESTClient()
 
     def table(self, table_name: str) -> AsyncFakeTableQuery:
         return AsyncFakeTableQuery(self, table_name)
+
+    def fail_next(
+        self,
+        table_name: str,
+        operation: str,
+        error: PostgRESTAPIError,
+        *,
+        after_operation: bool = False,
+    ) -> None:
+        self.failures.setdefault((table_name, operation), []).append((error, after_operation))
+
+
+def _api_error(code: str | int) -> PostgRESTAPIError:
+    return PostgRESTAPIError(
+        {
+            "message": "JSON could not be generated",
+            "code": code,
+            "hint": None,
+            "details": None,
+        }
+    )
 
 
 def _grant_row(
@@ -280,6 +317,124 @@ async def test_upsert_grant_normalizes_scopes_before_insert() -> None:
     assert grant.scopes == ["metrics:write", "profile:read"]
     assert client.operations[(GRANTS_TABLE, "select")] == 1
     assert client.operations[(GRANTS_TABLE, "insert")] == 1
+
+
+@pytest.mark.parametrize("code", ["502", "503", "504", 502, 503, 504])
+async def test_upsert_grant_retries_transient_gateway_errors(
+    code: str | int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = AsyncFakeSupabaseClient(grants=[_grant_row(scopes=["metrics:write", "profile:read"])])
+    client.fail_next(GRANTS_TABLE, "select", _api_error(code))
+    repo = AsyncOAuthRepository(client=client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(async_oauth_repo.asyncio, "sleep", sleep)
+
+    grant = await repo.upsert_grant(
+        user_id="user-1",
+        client_id="client-1",
+        redirect_uri="https://example.com/callback",
+        scopes=["profile:read"],
+    )
+
+    assert grant.id == "grant-1"
+    assert client.operations[(GRANTS_TABLE, "select")] == 2
+    assert client.operations[(GRANTS_TABLE, "update")] == 0
+    sleep.assert_awaited_once_with(0.25)
+
+
+async def test_upsert_grant_retry_observes_ambiguous_insert_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncFakeSupabaseClient()
+    client.fail_next(GRANTS_TABLE, "insert", _api_error("504"), after_operation=True)
+    repo = AsyncOAuthRepository(client=client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(async_oauth_repo.asyncio, "sleep", sleep)
+
+    grant = await repo.upsert_grant(
+        user_id="user-1",
+        client_id="client-1",
+        redirect_uri="https://example.com/callback",
+        scopes=["profile:read"],
+    )
+
+    assert grant.scopes == ["profile:read"]
+    assert client.operations[(GRANTS_TABLE, "select")] == 2
+    assert client.operations[(GRANTS_TABLE, "insert")] == 1
+    assert client.operations[(GRANTS_TABLE, "update")] == 0
+    assert len(client.tables[GRANTS_TABLE]) == 1
+    sleep.assert_awaited_once_with(0.25)
+
+
+async def test_upsert_grant_retry_observes_ambiguous_update_without_rewriting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncFakeSupabaseClient(grants=[_grant_row()])
+    client.fail_next(GRANTS_TABLE, "update", _api_error("504"), after_operation=True)
+    repo = AsyncOAuthRepository(client=client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(async_oauth_repo.asyncio, "sleep", sleep)
+
+    grant = await repo.upsert_grant(
+        user_id="user-1",
+        client_id="client-1",
+        redirect_uri="https://example.com/callback",
+        scopes=["metrics:write"],
+    )
+
+    assert grant.scopes == ["metrics:write", "profile:read"]
+    assert client.operations[(GRANTS_TABLE, "select")] == 2
+    assert client.operations[(GRANTS_TABLE, "update")] == 1
+    sleep.assert_awaited_once_with(0.25)
+
+
+async def test_upsert_grant_stops_after_one_gateway_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncFakeSupabaseClient(grants=[_grant_row()])
+    first_error = _api_error("504")
+    final_error = _api_error("504")
+    client.fail_next(GRANTS_TABLE, "select", first_error)
+    client.fail_next(GRANTS_TABLE, "select", final_error)
+    repo = AsyncOAuthRepository(client=client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(async_oauth_repo.asyncio, "sleep", sleep)
+
+    with pytest.raises(PostgRESTAPIError) as excinfo:
+        await repo.upsert_grant(
+            user_id="user-1",
+            client_id="client-1",
+            redirect_uri="https://example.com/callback",
+            scopes=["profile:read"],
+        )
+
+    assert excinfo.value is final_error
+    assert client.operations[(GRANTS_TABLE, "select")] == 2
+    sleep.assert_awaited_once_with(0.25)
+
+
+async def test_upsert_grant_does_not_retry_unique_violation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncFakeSupabaseClient()
+    error = _api_error("23505")
+    client.fail_next(GRANTS_TABLE, "insert", error)
+    repo = AsyncOAuthRepository(client=client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(async_oauth_repo.asyncio, "sleep", sleep)
+
+    with pytest.raises(PostgRESTAPIError) as excinfo:
+        await repo.upsert_grant(
+            user_id="user-1",
+            client_id="client-1",
+            redirect_uri="https://example.com/callback",
+            scopes=["profile:read"],
+        )
+
+    assert excinfo.value is error
+    assert client.operations[(GRANTS_TABLE, "select")] == 1
+    assert client.operations[(GRANTS_TABLE, "insert")] == 1
+    sleep.assert_not_awaited()
 
 
 async def test_get_active_grant_ignores_revoked_matching_grant() -> None:

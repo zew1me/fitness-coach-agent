@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.config import settings
 from backend.models.auth import (
@@ -48,6 +51,23 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
         return self._parse_grant(rows[0])
 
     async def upsert_grant(
+        self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
+    ) -> OAuthGrantRecord:
+        for attempt in range(self._GATEWAY_RETRY_ATTEMPTS):
+            try:
+                return await self._upsert_grant_once(
+                    user_id=user_id,
+                    client_id=client_id,
+                    redirect_uri=redirect_uri,
+                    scopes=scopes,
+                )
+            except PostgRESTAPIError as exc:
+                if not self._should_retry_gateway_error(exc, attempt):
+                    raise
+                await asyncio.sleep(self._GATEWAY_RETRY_BACKOFF_SECONDS)
+        raise AssertionError("unreachable: OAuth grant retry loop exited without returning")
+
+    async def _upsert_grant_once(
         self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
     ) -> OAuthGrantRecord:
         existing = await self.get_active_grant(
