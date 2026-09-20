@@ -49,6 +49,19 @@ class _OAuthRepositoryBase:
         return self._client
 
     @staticmethod
+    def _resolve_grant_scopes(
+        existing: OAuthGrantRecord | None, scopes: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """Canonicalize requested scopes and merge them with an existing grant."""
+        requested_scopes = sorted(set(scopes))
+        merged_scopes = (
+            sorted(set(existing.scopes).union(requested_scopes))
+            if existing is not None
+            else requested_scopes
+        )
+        return requested_scopes, merged_scopes
+
+    @staticmethod
     def _grant_insert_payload(
         *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
     ) -> dict[str, JSON]:

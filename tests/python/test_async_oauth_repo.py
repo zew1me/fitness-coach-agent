@@ -230,6 +230,58 @@ async def test_upsert_grant_updates_existing_grant_and_merges_scopes() -> None:
     assert client.operations[(GRANTS_TABLE, "insert")] == 0
 
 
+async def test_upsert_grant_returns_existing_grant_when_scopes_are_unchanged() -> None:
+    updated_at = "2026-01-01T00:00:00+00:00"
+    row = _grant_row(scopes=["metrics:write", "profile:read"])
+    row["updated_at"] = updated_at
+    client = AsyncFakeSupabaseClient(grants=[row])
+    repo = AsyncOAuthRepository(client=client)
+
+    grant = await repo.upsert_grant(
+        user_id="user-1",
+        client_id="client-1",
+        redirect_uri="https://example.com/callback",
+        scopes=["profile:read"],
+    )
+
+    assert grant.scopes == ["metrics:write", "profile:read"]
+    assert client.tables[GRANTS_TABLE][0]["updated_at"] == updated_at
+    assert client.operations[(GRANTS_TABLE, "select")] == 1
+    assert client.operations[(GRANTS_TABLE, "update")] == 0
+
+
+async def test_upsert_grant_normalizes_existing_duplicate_scopes() -> None:
+    client = AsyncFakeSupabaseClient(grants=[_grant_row(scopes=["profile:read", "profile:read"])])
+    repo = AsyncOAuthRepository(client=client)
+
+    grant = await repo.upsert_grant(
+        user_id="user-1",
+        client_id="client-1",
+        redirect_uri="https://example.com/callback",
+        scopes=["profile:read"],
+    )
+
+    assert grant.scopes == ["profile:read"]
+    assert client.operations[(GRANTS_TABLE, "select")] == 1
+    assert client.operations[(GRANTS_TABLE, "update")] == 1
+
+
+async def test_upsert_grant_normalizes_scopes_before_insert() -> None:
+    client = AsyncFakeSupabaseClient()
+    repo = AsyncOAuthRepository(client=client)
+
+    grant = await repo.upsert_grant(
+        user_id="user-1",
+        client_id="client-1",
+        redirect_uri="https://example.com/callback",
+        scopes=["profile:read", "metrics:write", "profile:read"],
+    )
+
+    assert grant.scopes == ["metrics:write", "profile:read"]
+    assert client.operations[(GRANTS_TABLE, "select")] == 1
+    assert client.operations[(GRANTS_TABLE, "insert")] == 1
+
+
 async def test_get_active_grant_ignores_revoked_matching_grant() -> None:
     client = AsyncFakeSupabaseClient(grants=[_grant_row(revoked_at=datetime.now(UTC).isoformat())])
     repo = AsyncOAuthRepository(client=client)

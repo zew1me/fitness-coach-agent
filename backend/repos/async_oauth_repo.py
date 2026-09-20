@@ -53,17 +53,21 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
         existing = await self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
+        requested_scopes, merged_scopes = self._resolve_grant_scopes(existing, scopes)
+        if existing is not None and existing.scopes == merged_scopes:
+            return existing
+
         client = self._require_client()
         if existing is None:
             payload = self._grant_insert_payload(
                 user_id=user_id,
                 client_id=client_id,
                 redirect_uri=redirect_uri,
-                scopes=scopes,
+                scopes=requested_scopes,
             )
             response = await client.table(self._grants_table).insert(payload).execute()
         else:
-            payload = self._grant_update_payload(existing, scopes)
+            payload = self._grant_update_payload(existing, requested_scopes)
             query = client.table(self._grants_table).update(payload).eq("id", existing.id)
             response = await query.execute()
         return self._parse_grant(self._require_grant_row(response.data or []))

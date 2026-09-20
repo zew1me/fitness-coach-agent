@@ -83,12 +83,7 @@ class OAuthRepository(_OAuthRepositoryBase):
         existing = self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
-        requested_scopes = sorted(set(scopes))
-        merged_scopes = (
-            sorted(set(existing.scopes).union(requested_scopes))
-            if existing is not None
-            else requested_scopes
-        )
+        requested_scopes, merged_scopes = self._resolve_grant_scopes(existing, scopes)
         if existing is not None and existing.scopes == merged_scopes:
             return existing
 
