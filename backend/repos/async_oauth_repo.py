@@ -15,6 +15,10 @@ from supabase import AsyncClient as SupabaseAsyncClient
 class AsyncOAuthRepository(_OAuthRepositoryBase):
     """Asynchronous Supabase-backed OAuth persistence."""
 
+    async def aclose(self) -> None:
+        """Close the PostgREST HTTP connections used by this repository."""
+        await self._require_client().postgrest.aclose()
+
     async def get_active_grant(
         self, *, user_id: str, client_id: str, redirect_uri: str
     ) -> OAuthGrantRecord | None:

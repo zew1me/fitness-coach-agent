@@ -90,6 +90,14 @@ class AsyncFakeTableQuery:
         ]
 
 
+class AsyncFakePostgRESTClient:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class AsyncFakeSupabaseClient:
     def __init__(
         self,
@@ -106,6 +114,7 @@ class AsyncFakeSupabaseClient:
         }
         self.empty_responses = empty_responses or set()
         self.operations: Counter[tuple[str, str]] = Counter()
+        self.postgrest = AsyncFakePostgRESTClient()
 
     def table(self, table_name: str) -> AsyncFakeTableQuery:
         return AsyncFakeTableQuery(self, table_name)
@@ -174,6 +183,15 @@ def _refresh_token_row(
         "created_at": now.isoformat(),
         "rotated_from_id": None,
     }
+
+
+async def test_aclose_closes_postgrest_connections() -> None:
+    client = AsyncFakeSupabaseClient()
+    repo = AsyncOAuthRepository(client=client)
+
+    await repo.aclose()
+
+    assert client.postgrest.closed is True
 
 
 async def test_upsert_grant_inserts_when_active_grant_is_absent() -> None:

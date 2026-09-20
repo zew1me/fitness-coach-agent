@@ -50,11 +50,6 @@ def _single_row(data: object) -> dict[str, Any]:
     return cast(dict[str, Any], row)
 
 
-async def _close_repository(repo: AsyncOAuthRepository) -> None:
-    """Close the lazy PostgREST HTTP client opened by a live repository."""
-    await repo._require_client().postgrest.aclose()
-
-
 @pytest.fixture()
 async def live_repository() -> AsyncIterator[tuple[AsyncOAuthRepository, str]]:
     """Provide a directly constructed repository and clean up its isolated grant tree."""
@@ -65,7 +60,7 @@ async def live_repository() -> AsyncIterator[tuple[AsyncOAuthRepository, str]]:
     finally:
         client = repo._require_client()
         await client.table(_GRANTS_TABLE).delete().eq("user_id", user_id).execute()
-        await _close_repository(repo)
+        await repo.aclose()
 
 
 async def test_direct_async_client_construction_reaches_postgrest() -> None:
@@ -80,7 +75,7 @@ async def test_direct_async_client_construction_reaches_postgrest() -> None:
 
         assert isinstance(response.data, list)
     finally:
-        await _close_repository(repo)
+        await repo.aclose()
 
 
 async def test_full_async_oauth_lifecycle_persists_hashes_and_revocations(
