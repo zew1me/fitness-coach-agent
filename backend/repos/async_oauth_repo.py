@@ -224,3 +224,6 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
         if not settings.supabase_url or not settings.supabase_service_role_key:
             return None
         return SupabaseAsyncClient(settings.supabase_url, settings.supabase_service_role_key)
+
+    def _require_client(self) -> SupabaseAsyncClient:
+        return super()._require_client()

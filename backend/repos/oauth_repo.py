@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
+
+from postgrest.types import JSON
 
 from backend.config import settings
 from backend.models.auth import (
@@ -47,7 +50,7 @@ class _OAuthRepositoryBase:
     @staticmethod
     def _grant_insert_payload(
         *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
-    ) -> dict[str, object]:
+    ) -> dict[str, JSON]:
         now = datetime.now(UTC).isoformat()
         return {
             "id": str(uuid4()),
@@ -61,7 +64,7 @@ class _OAuthRepositoryBase:
         }
 
     @staticmethod
-    def _grant_update_payload(existing: OAuthGrantRecord, scopes: list[str]) -> dict[str, object]:
+    def _grant_update_payload(existing: OAuthGrantRecord, scopes: list[str]) -> dict[str, JSON]:
         return {
             "scopes": sorted(set(existing.scopes).union(scopes)),
             "updated_at": datetime.now(UTC).isoformat(),
@@ -81,7 +84,7 @@ class _OAuthRepositoryBase:
         scopes: list[str],
         code_challenge: str,
         code_challenge_method: str,
-    ) -> dict[str, object]:
+    ) -> dict[str, JSON]:
         return {
             "id": str(uuid4()),
             "grant_id": grant_id,
@@ -108,7 +111,7 @@ class _OAuthRepositoryBase:
         client_id: str,
         scopes: list[str],
         rotated_from_id: str | None,
-    ) -> dict[str, object]:
+    ) -> dict[str, JSON]:
         return {
             "id": str(uuid4()),
             "grant_id": grant_id,
@@ -123,35 +126,35 @@ class _OAuthRepositoryBase:
         }
 
     @staticmethod
-    def _revocation_payload() -> dict[str, object]:
+    def _revocation_payload() -> dict[str, JSON]:
         return {"revoked_at": datetime.now(UTC).isoformat()}
 
     @staticmethod
-    def _require_grant_row(rows: list[object]) -> object:
+    def _require_grant_row(rows: Sequence[object]) -> object:
         if not rows:
             raise RuntimeError("Supabase did not return the OAuth grant row.")
         return rows[0]
 
     @staticmethod
-    def _require_authorization_code_row(rows: list[object]) -> object:
+    def _require_authorization_code_row(rows: Sequence[object]) -> object:
         if not rows:
             raise RuntimeError("Supabase did not return the OAuth authorization code row.")
         return rows[0]
 
     @staticmethod
-    def _require_consumed_authorization_code_row(rows: list[object]) -> object:
+    def _require_consumed_authorization_code_row(rows: Sequence[object]) -> object:
         if not rows:
             raise RuntimeError("Supabase did not return the consumed OAuth code row.")
         return rows[0]
 
     @staticmethod
-    def _require_refresh_token_row(rows: list[object]) -> object:
+    def _require_refresh_token_row(rows: Sequence[object]) -> object:
         if not rows:
             raise RuntimeError("Supabase did not return the OAuth refresh token row.")
         return rows[0]
 
     @staticmethod
-    def _require_revoked_refresh_token_row(rows: list[object]) -> object:
+    def _require_revoked_refresh_token_row(rows: Sequence[object]) -> object:
         if not rows:
             raise RuntimeError("Supabase did not return the revoked OAuth refresh token row.")
         return rows[0]
