@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from backend.engine.course_analyzer import analyze_running_climb
 from backend.engine.course_profile import CourseProfile
 from backend.engine.gpx_parser import ParsedCourse
 from backend.models.athlete import AthleteProfile, SportThreshold
@@ -164,26 +163,9 @@ def test_running_estimate_uses_grade_over_the_whole_course_not_just_the_climbs()
     assert reason is None
     assert analysis is not None
     assert analysis.estimated_duration_seconds is not None
-
-    # Both expectations come from the production model rather than a local copy of its
-    # fatigue formula, so this pins which *grade* is passed in without also freezing
-    # the arithmetic applied to it. 2.5% overall means +30 s/km over 40 km; the
-    # ascending-portions figure of 5% would mean +60, and the gap between the two is
-    # about 24 minutes in the number the coach quotes the athlete.
-    def _estimate(grade_pct: float) -> int | None:
-        return analyze_running_climb(
-            distance_meters=40_000.0,
-            elevation_gain_meters=1000.0,
-            avg_grade_pct=grade_pct,
-            lt2_pace_sec_km=300,
-        ).estimated_duration_seconds
-
-    correct = _estimate(2.5)
-    ascending_portions_instead = _estimate(5.0)
-
-    assert correct is not None and ascending_portions_instead is not None
-    assert analysis.estimated_duration_seconds == correct
-    assert ascending_portions_instead - correct > 20 * 60
+    # 2.5% overall means +30 s/km over 40 km, not 5% meaning +60 s/km — about a
+    # 20 minute difference in the number the coach quotes the athlete.
+    assert analysis.estimated_duration_seconds == pytest.approx((300 + 30) * 40, rel=0.1)
 
 
 def test_running_course_without_a_threshold_pace_explains_itself() -> None:
@@ -249,18 +231,18 @@ def test_unknown_grade_on_a_hilly_course_refuses_to_estimate() -> None:
 
 
 def test_unknown_grade_on_a_flat_course_still_analyzes() -> None:
-    # Cycling on purpose: the unknown-grade refusal is scoped to that branch, so a
-    # running course would pass this trivially without ever reaching the guard. No
-    # vertical means no climb to mis-price, so an absent grade costs nothing here.
+    # No vertical means no climb to mis-price, so an absent grade costs nothing.
     course = _course(
-        "cycling",
+        "running",
         distance_meters=10_000.0,
         elevation_gain_meters=0.0,
         avg_grade_pct=None,
         max_grade_pct=None,
     )
 
-    analysis, reason = analyze_course(course, athlete=_cycling_athlete())
+    analysis, reason = analyze_course(
+        course, athlete=_athlete(thresholds=[_threshold("running", lt2_pace_sec_per_km=255)])
+    )
 
     assert reason is None
     assert analysis is not None

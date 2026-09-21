@@ -1605,11 +1605,7 @@ def _parse_uploaded_activity_file(
         return parser(tmp.name)
 
 
-# PLR0913: seven keyword-only parameters, deliberately not bundled. Each is a
-# distinct fact about one upload that both call sites already hold separately, and
-# every one is keyword-only, so the call reads as a labelled list rather than a
-# positional puzzle. A parameter object here would only move the same seven names
-# somewhere else and add a construction step at each site.
+# The keyword-only arguments keep the two upload call sites explicit.
 def _build_uploaded_activity_or_course(  # noqa: PLR0913
     *,
     user_id: str,
@@ -1619,16 +1615,7 @@ def _build_uploaded_activity_or_course(  # noqa: PLR0913
     public_url: str | None,
     file_bytes: bytes,
 ) -> Activity | ParsedCourse:
-    """Parse an upload's bytes into a summarized ``Activity`` — or a ``ParsedCourse``.
-
-    Shared by the single-file and zip upload endpoints so both derive the same
-    ``source``/``source_file_key``/``raw_extraction`` shape from the parsed metrics.
-
-    A course is a route the athlete plans to do, not one they have done, so it is
-    returned unchanged for the caller to report rather than being coerced into an
-    ``Activity``. Callers must branch; persisting a course would put a workout the
-    athlete never did into their training log.
-    """
+    """Parse an upload into an activity or an unpersisted course."""
     file_format = _resolve_activity_file_format(filename, content_type)
     parsed = _parse_uploaded_activity_file(file_format, file_bytes)
     if isinstance(parsed, ParsedCourse):

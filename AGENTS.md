@@ -228,11 +228,10 @@ Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST 
 
 ### Courses versus recorded activities (uploaded GPX/FIT/TCX)
 
-An upload is a **course** — something the athlete plans to do — only when the file's own
-evidence says so; anything carrying recording evidence is an activity and takes the normal
-persistence path. Once classified as a course, it must never reach `activities`. Persisting
-one credits the athlete with a workout they have not done, dates it today (a course has no
-real start time), and lets it compete to satisfy a planned workout.
+An uploaded route file is a **course** — something the athlete plans to do — not a
+completed activity. It must never reach `activities`. Persisting one credits the athlete
+with a workout they have not done, dates it today (a course has no real start time), and lets
+it compete to satisfy a planned workout.
 
 Classification is **from the file only**; there is deliberately no model-judged override
 and no `treat_as` parameter, because the file answers the question definitively and
@@ -245,19 +244,11 @@ different evidence, so each is tested separately (`backend/engine/gpx_parser.py`
 | FIT    | no `session`, plus a `course` message or `file_id.type=course` | FIT course timestamps are synthetic, so absence-of-time would misfire                       |
 | TCX    | no `Activity` anywhere, but a `Course` exists                  | `<Activities>` vs `<Courses>` is structural; Course trackpoints legitimately carry `<Time>` |
 
-**Elapsed time, not the presence of `<time>` — and this is a GPX rule only.** Route
-builders stamp synthetic timestamps, one on the first point or the same instant on
-every point, so testing for absence-of-any-timestamp let those through as recordings.
-A GPX recording always spans a positive interval; a GPX course never does. That also
-covers empty and waypoint-only files, where reporting a zero-distance course beats
-writing a phantom workout dated today.
-
-**Do not generalise it to the other two formats.** FIT and TCX say what they are
-structurally, and their course files legitimately carry timestamps — a FIT course
-message writes synthetic ones, and a TCX Course trackpoint carries a real `<Time>`.
-Applying the elapsed-time test to either would classify genuine courses as recordings
-and put them straight back into `activities`, which is the bug this whole section
-exists to prevent. Each format uses the evidence in its own row of the table above.
+**Elapsed time, not the presence of `<time>`.** Route builders stamp synthetic
+timestamps — one on the first point, or the same instant on every point — so testing
+for absence-of-any-timestamp let those through as recordings. A recording always spans
+a positive interval; a course never does. This also covers empty and waypoint-only
+files, where reporting a zero-distance course beats writing a phantom workout dated today.
 
 Each format checks the _recording_ evidence first: TCX looks for `Activity` before
 `Course`, and FIT for `session` before either course signal, so a file carrying both —

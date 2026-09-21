@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from backend.engine.course_profile import (
-    CoursePoint,
     CourseProfile,
     build_course_points,
     summarize_course,
@@ -150,21 +149,15 @@ class _GpxSummary:
         many timestamps someone stamped on it. An empty or waypoint-only file has no
         interval either, and reporting it as a zero-distance course beats writing a
         phantom workout dated today.
-
-        Strictly positive, so out-of-order timestamps cannot slip through: a file
-        whose last point predates its first produced a negative duration, which is
-        truthy, so it was saved as an activity lasting minus five minutes.
         """
-        duration = self.duration
-        return duration is None or duration <= 0
+        return not self.duration
 
     @property
     def sport(self) -> str:
         if self.declared_sport:
             return self.declared_sport
-        duration = self.duration
-        if duration is not None and duration > 0 and self.total_distance > 0:
-            pace_sec_km = duration / (self.total_distance / 1000)
+        if self.duration and self.total_distance > 0:
+            pace_sec_km = self.duration / (self.total_distance / 1000)
             if pace_sec_km < CYCLING_INFERRED_PACE_SEC_KM:
                 return "cycling"
             return "running"
@@ -174,7 +167,7 @@ class _GpxSummary:
 
 
 def parse_gpx(file_path: str | Path) -> ParsedActivity | ParsedCourse:
-    """Parse a GPX file into a recorded activity, or a course if it spans no elapsed time."""
+    """Parse a GPX file into a recorded activity, or a course if it has no timestamps."""
     import gpxpy
 
     with Path(file_path).open() as f:
@@ -261,15 +254,10 @@ def _accumulate_gpx_segment(summary: _GpxSummary, points: list[Any]) -> None:
     if not points:
         return
 
-    # First and last point *carrying a time*, not strictly the first and last point.
-    # A unit that drops the timestamp on its opening fix left start_time unset, which
-    # makes the elapsed span None — so a genuine recording was classified as a course
-    # and never logged at all. Scanning past the gap costs nothing and closes it.
-    if summary.start_time is None:
-        summary.start_time = next((point.time for point in points if point.time), None)
-    last_timed = next((point.time for point in reversed(points) if point.time), None)
-    if last_timed:
-        summary.end_time = last_timed
+    if summary.start_time is None and points[0].time:
+        summary.start_time = points[0].time
+    if points[-1].time:
+        summary.end_time = points[-1].time
 
     summary.point_count += len(points)
 
@@ -292,13 +280,9 @@ def _accumulate_gpx_point_distance(summary: _GpxSummary, point: Any, previous_po
     """Add one point-to-point step to the running totals, returning its distance."""
     step = point.distance_2d(previous_point) or 0
     summary.total_distance += step
-    # Both elevations have to be present. Coalescing a missing one to 0 turned the
-    # first reading in a partial stream into a climb from sea level: a track whose
-    # opening point has no <ele> followed by one at 500 m reported 500 m of ascent.
-    if point.elevation is not None and previous_point.elevation is not None:
-        ele_diff = point.elevation - previous_point.elevation
-        if ele_diff > 0:
-            summary.total_elevation_gain += ele_diff
+    ele_diff = (point.elevation or 0) - (previous_point.elevation or 0)
+    if ele_diff > 0:
+        summary.total_elevation_gain += ele_diff
     return step
 
 
@@ -522,7 +506,7 @@ def _extract_fit_course(fit: Any) -> ParsedCourse | None:
     )
 
 
-def _fit_course_points(fit: Any) -> list[CoursePoint]:
+def _fit_course_points(fit: Any) -> list[Any]:
     """Course points from the record stream: cumulative distance plus altitude."""
     segments: list[tuple[float, float | None]] = []
     # None until the first record with a distance, which anchors the scale rather
@@ -694,37 +678,6 @@ def _tcx_trackpoint_position(trackpoint: ET.Element) -> tuple[float, float] | No
     return float(latitude), float(longitude)
 
 
-def _tcx_lap_distance(course: ET.Element) -> float | None:
-    """Total DistanceMeters declared on the Course's own ``<Lap>`` elements.
-
-    Direct children only, for the same reason as ``_tcx_course_name``: a Lap can
-    nest its ``<Track>``, and a descendant search then returns the first
-    *trackpoint's* reading as the lap total — a marathon course came back as 7 m.
-    """
-    total: float | None = None
-    for lap in course.iter():
-        if _local_name(lap.tag) != "Lap":
-            continue
-        for child in lap:
-            if _local_name(child.tag) == "DistanceMeters" and child.text:
-                total = (total or 0.0) + float(child.text)
-                break
-    return total
-
-
-def _tcx_course_name(course: ET.Element) -> str | None:
-    """The Course's own ``<Name>``, never a ``<CoursePoint>`` waypoint label.
-
-    ``_first_text`` walks descendants, so a course with no name of its own but with
-    course points took the first waypoint's name — the coach then told the athlete
-    their route was called "Water stop".
-    """
-    for child in course:
-        if _local_name(child.tag) == "Name" and child.text:
-            return child.text.strip() or None
-    return None
-
-
 def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
     """Build a course from a TCX ``<Course>`` element.
 
@@ -753,26 +706,13 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
         position = _tcx_trackpoint_position(trackpoint)
 
         # One running total, advanced by every step whatever its source. A declared
-        # DistanceMeters is cumulative, so its step is the gap up to that total. The
-        # clamp makes it one-sided on purpose: a declared reading can pull the total
-        # forward, but never drags it back below distance already measured from
-        # positions. Keeping a separate declared-only baseline got both orders wrong —
-        # a course declaring 178 m came out at 267 m when the declared reading came
+        # DistanceMeters is cumulative, so its step is the gap to that total — which
+        # re-anchors the scale no matter how much position-derived movement came
+        # first. Keeping a separate declared-only baseline got both orders wrong: a
+        # course declaring 178 m came out at 267 m when the declared reading came
         # first, and at 89 m when it came last.
         if distance_text:
-            declared = float(distance_text)
-            if segments:
-                step = max(0.0, declared - traveled)
-            else:
-                # The file's very first trackpoint. A course exported part-way along
-                # its route opens at a non-zero cumulative reading, which is where the
-                # route starts rather than distance the athlete covers — charging it
-                # as a step turned a 1 km course opening at 5 km into a 6 km one.
-                # Anchoring only here, rather than on the first *declared* reading,
-                # keeps a declared value that arrives after position-derived movement
-                # working as the cumulative total it is.
-                traveled = declared
-                step = 0.0
+            step = max(0.0, float(distance_text) - traveled)
         elif position is not None and previous_position is not None:
             step = haversine_distance(*previous_position, *position) or 0.0
         else:
@@ -783,24 +723,10 @@ def _parse_tcx_course(course: ET.Element) -> ParsedCourse:
             previous_position = position
         segments.append((step, elevation))
 
-    # A Course whose trackpoints carry neither DistanceMeters nor Position leaves the
-    # stream at zero. The Lap's own total is the only distance the file states, so use
-    # it rather than reporting a coherent-looking "0 m course with 800 m of climbing".
-    # Scoped to the Lap element: `_first_text` over the whole Course would happily
-    # return a trackpoint's reading instead. Trackpoint-derived distance stays
-    # authoritative whenever there is any.
-    lap_distance = _tcx_lap_distance(course)
-    points = build_course_points(segments)
-    profile = summarize_course(points)
-    if profile.distance_meters <= 0 and lap_distance:
-        profile = summarize_course_with_totals(
-            points, distance_meters=lap_distance, elevation_gain_meters=None
-        )
-
     return ParsedCourse(
         sport=UNKNOWN_SPORT,
-        profile=profile,
-        name=_tcx_course_name(course),
+        profile=summarize_course(build_course_points(segments)),
+        name=_first_text(course, "Name"),
     )
 
 
