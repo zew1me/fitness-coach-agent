@@ -541,6 +541,132 @@ describe("app/api/chat route", () => {
     });
   });
 
+  it("queues images beyond the four-call concurrency limit", async () => {
+    // Five images cross the production boundary: four may run while the fifth must wait
+    // for a slot. Deferred completions keep the calls meaningfully in flight rather than
+    // letting immediately resolved promises hide an unbounded implementation.
+    const filenames = ["a.png", "b.png", "c.png", "d.png", "e.png"];
+    const messages = [
+      {
+        id: "message-with-images",
+        parts: [
+          { text: "Five screenshots.", type: "text" as const },
+          ...filenames.map((filename) => ({
+            filename,
+            mediaType: "image/png",
+            type: "file" as const,
+            url: `https://example.com/${filename}`,
+          })),
+        ],
+        role: "user" as const,
+      },
+    ];
+
+    let inflight = 0;
+    let peakInflight = 0;
+    const started: string[] = [];
+    const release: Array<() => void> = [];
+
+    const enrichedPromise = appendImageExtractionsToMessages(
+      messages,
+      ({ filename }) => {
+        started.push(filename);
+        inflight += 1;
+        peakInflight = Math.max(peakInflight, inflight);
+        return new Promise((resolve) => {
+          release.push(() => {
+            inflight -= 1;
+            resolve({ data: { filename }, screenshot_type: "unknown" });
+          });
+        });
+      },
+    );
+
+    await vi.waitFor(() => expect(started).toHaveLength(4));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(started).toEqual(filenames.slice(0, 4));
+    expect(peakInflight).toBe(4);
+
+    const firstDone = release.shift();
+    expect(firstDone).toBeDefined();
+    firstDone!();
+
+    await vi.waitFor(() => expect(started).toHaveLength(5));
+    expect(started).toEqual(filenames);
+    expect(peakInflight).toBe(4);
+
+    release.splice(0).forEach((done) => {
+      done();
+    });
+    const enriched = await enrichedPromise;
+    const extractedText = enriched[0]!.parts.filter(
+      (part) =>
+        part.type === "text" && part.text.startsWith("Extracted image content"),
+    );
+    expect(extractedText).toHaveLength(5);
+  });
+
+  it("keeps extracted text in image order across messages", async () => {
+    const imagePart = (
+      filename: string,
+    ): { filename: string; mediaType: string; type: "file"; url: string } => ({
+      filename,
+      mediaType: "image/png",
+      type: "file" as const,
+      url: `https://example.com/${filename}`,
+    });
+    const messages = [
+      {
+        id: "first",
+        parts: [imagePart("a.png"), imagePart("b.png")],
+        role: "user" as const,
+      },
+      { id: "second", parts: [imagePart("c.png")], role: "user" as const },
+    ];
+
+    // Resolve out of order: the slowest image is the first one.
+    const delays: Record<string, number> = {
+      "a.png": 30,
+      "b.png": 10,
+      "c.png": 0,
+    };
+    const enriched = await appendImageExtractionsToMessages(
+      messages,
+      async ({ filename }) => {
+        await new Promise((resolve) => setTimeout(resolve, delays[filename]));
+        return { data: {}, screenshot_type: "unknown" };
+      },
+    );
+
+    const textOf = (message: (typeof enriched)[number]): string[] =>
+      message.parts
+        .filter((part) => part.type === "text")
+        .map((part) => (part as { text: string }).text);
+
+    expect(textOf(enriched[0]!)[0]).toContain("a.png");
+    expect(textOf(enriched[0]!)[1]).toContain("b.png");
+    expect(textOf(enriched[1]!)[0]).toContain("c.png");
+  });
+
+  it("returns the original messages untouched when there is nothing to extract", async () => {
+    const messages = [
+      {
+        id: "text-only",
+        parts: [{ text: "No images here.", type: "text" as const }],
+        role: "user" as const,
+      },
+    ];
+
+    const extractImage = vi.fn();
+    const enriched = await appendImageExtractionsToMessages(
+      messages,
+      extractImage,
+    );
+
+    expect(enriched[0]).toBe(messages[0]);
+    expect(extractImage).not.toHaveBeenCalled();
+  });
+
   describe("convertUnsupportedFilePartsToText", () => {
     it("converts a GPX file part to a text descriptor", () => {
       const messages = [
