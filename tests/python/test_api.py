@@ -831,6 +831,66 @@ async def test_process_uploaded_zip_isolates_postgrest_persist_failure(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_analyze_screenshot_endpoint_returns_the_service_result(monkeypatch) -> None:
+    """The route itself had no coverage — only the zip path exercised the service."""
+    from backend.models.screenshot import ExtractionResult
+
+    seen: dict[str, str] = {}
+
+    async def mock_analyze_screenshot(image_url: str) -> ExtractionResult:
+        seen["image_url"] = image_url
+        return ExtractionResult(
+            screenshot_type="training_load_chart",
+            data={"series": [{"date": "2026-04-20", "metric": "ctl", "value": 42}]},
+            raw_response='{"series": []}',
+        )
+
+    monkeypatch.setattr("backend.services.screenshot.analyze_screenshot", mock_analyze_screenshot)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/engine/analyze-screenshot",
+                json={"image_url": "https://cdn.example.com/chart.png"},
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert seen["image_url"] == "https://cdn.example.com/chart.png"
+    assert body["screenshot_type"] == "training_load_chart"
+    assert body["data"]["series"][0]["metric"] == "ctl"
+    assert body["raw_response"] == '{"series": []}'
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_endpoint_requires_an_image_url() -> None:
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post("/api/engine/analyze-screenshot", json={})
+    finally:
+        restore_override()
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_analyze_screenshot_endpoint_rejects_an_anonymous_caller() -> None:
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/analyze-screenshot",
+            json={"image_url": "https://cdn.example.com/chart.png"},
+        )
+
+    assert response.status_code in {401, 403}
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_processes_activity_and_image(monkeypatch) -> None:
     from backend.models.screenshot import ExtractionResult
     from backend.models.storage import PresignUploadResponse

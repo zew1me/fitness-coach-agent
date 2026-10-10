@@ -17,14 +17,6 @@ ScreenshotType = Literal[
 ]
 
 
-class ConfidenceEntry(BaseModel):
-    """Per-field extraction confidence. A list of these replaces a free-form
-    {field: score} map, which strict structured outputs cannot represent."""
-
-    field: str
-    confidence: float = Field(ge=0.0, le=1.0)
-
-
 class GenericObservation(BaseModel):
     """A single label/value datum read off a screenshot we have no typed schema for."""
 
@@ -39,7 +31,56 @@ class ScreenshotClassificationModel(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class DisplayedDate(BaseModel):
+    """Calendar components read from a displayed date."""
+
+    year: int | None = Field(default=None, ge=1, le=9999)
+    month: int | None = Field(default=None, ge=1, le=12)
+    day: int | None = Field(default=None, ge=1, le=31)
+
+
+class DisplayedDistance(BaseModel):
+    """A distance exactly as displayed, before deterministic unit conversion."""
+
+    value: float | None = None
+    unit: Literal["meters", "kilometers", "feet", "yards", "miles"] | None = None
+
+
+class DisplayedDuration(BaseModel):
+    """A duration exactly as displayed, including its clock/numeric unit."""
+
+    value: str | None = None
+    unit: Literal["h:mm:ss", "m:ss", "seconds", "minutes", "hours"] | None = None
+
+
+class DisplayedPace(BaseModel):
+    """A pace exactly as displayed; application code converts it to seconds/km."""
+
+    value: str | None = None
+    unit: Literal["min/km", "min/mi", "sec/km", "sec/mi"] | None = None
+
+
+class ActivityScreenshotExtraction(BaseModel):
+    """Raw vision output. Unit-bearing fields are normalized after model execution."""
+
+    sport: Literal["running", "cycling", "swimming", "rowing", "hiking", "general"] | None = None
+    activity_date: DisplayedDate | None = None
+    duration: DisplayedDuration | None = None
+    distance: DisplayedDistance | None = None
+    elevation_gain: DisplayedDistance | None = None
+    avg_hr_bpm: int | None = None
+    max_hr_bpm: int | None = None
+    avg_power_watts: int | None = None
+    normalized_power_watts: int | None = None
+    avg_pace: DisplayedPace | None = None
+    avg_cadence_rpm: int | None = None
+    tss: float | None = None
+    additional_observations: list[GenericObservation] = Field(default_factory=list)
+
+
 class ActivityExtraction(BaseModel):
+    """Stable, normalized activity payload returned to screenshot-analysis callers."""
+
     sport: Literal["running", "cycling", "swimming", "rowing", "hiking", "general"] | None = None
     activity_date: str | None = None
     duration_seconds: int | None = None
@@ -52,7 +93,6 @@ class ActivityExtraction(BaseModel):
     avg_pace_sec_per_km: int | None = None
     avg_cadence_rpm: int | None = None
     tss: float | None = None
-    confidence: list[ConfidenceEntry] = Field(default_factory=list)
     additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
@@ -64,7 +104,6 @@ class WellnessDayEntry(BaseModel):
     resting_hr_bpm: int | None = None
     body_battery: int | None = None
     stress_score: int | None = None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
@@ -83,7 +122,6 @@ class WellnessSingleExtraction(BaseModel):
     body_battery: int | None = None
     stress_score: int | None = None
     subjective_energy: int | None = None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     additional_observations: list[GenericObservation] = Field(default_factory=list)
 
 
@@ -110,7 +148,6 @@ class TrainingLoadPoint(BaseModel):
     ) = None
     label: str | None = None
     value: float | None = None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class TrainingLoadChartExtraction(BaseModel):
@@ -130,6 +167,32 @@ class GenericExtraction(BaseModel):
 
     summary: str | None = None
     observations: list[GenericObservation] = Field(default_factory=list)
+
+
+class ScreenshotAnalysis(BaseModel):
+    """Classification and extraction in one response.
+
+    Classifying and extracting used to be two serialized vision calls against the same
+    image, where the first call existed only to choose the second one's schema. This
+    model lets one call do both: the model picks `screenshot_type` and fills the single
+    matching payload field, leaving the rest null.
+
+    The activity branch carries displayed values and units; the service normalizes it
+    after the model call so downstream `data` keeps the established metric shape.
+    """
+
+    screenshot_type: ScreenshotType
+    source_app_hint: str | None = None
+    date_range_hint: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    activity: ActivityScreenshotExtraction | None = None
+    wellness_multi: WellnessMultiExtraction | None = None
+    wellness_single: WellnessSingleExtraction | None = None
+    training_load_chart: TrainingLoadChartExtraction | None = None
+    # Filled for plan_or_calendar and unknown, and as the fallback whenever the typed
+    # branch the model chose came back empty.
+    generic: GenericExtraction | None = None
 
 
 @dataclass

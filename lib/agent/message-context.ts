@@ -102,39 +102,88 @@ export function selectMessagesForModel(messages: UIMessage[]): UIMessage[] {
   ];
 }
 
+// Screenshot extraction is a multi-second vision call per image, so a turn carrying
+// several screenshots is the worst case. Bounded rather than unbounded because each
+// slot holds an inflight model call.
+const IMAGE_EXTRACTION_CONCURRENCY = 4;
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await run(items[index] as T);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  );
+  return results;
+}
+
 export async function appendImageExtractionsToMessages(
   messages: UIMessage[],
   extractImage: ImageExtractor,
 ): Promise<UIMessage[]> {
-  return Promise.all(
-    messages.map(async (message) => {
-      const nextParts = [...message.parts];
-
-      for (const part of message.parts) {
-        const image = imageFilePart(part);
-        if (
-          image === null ||
-          hasExtractionForFilename(message, image.filename)
-        ) {
-          continue;
-        }
-
-        const extraction = await extractImage(image);
-        if (extraction === null) {
-          continue;
-        }
-
-        nextParts.push({
-          type: "text",
-          text: extractedImageText(image.filename, extraction),
-        });
+  // Collect every pending image across every message first, then extract them as one
+  // bounded pool. These used to be awaited one at a time within each message, which
+  // serialized a multi-screenshot turn into N back-to-back round-trips — visible in
+  // production traces as consecutive analyze-screenshot transactions, each starting as
+  // the previous one finished.
+  const pending = messages.flatMap((message, messageIndex) =>
+    message.parts.flatMap((part) => {
+      const image = imageFilePart(part);
+      if (image === null || hasExtractionForFilename(message, image.filename)) {
+        return [];
       }
-
-      return nextParts.length === message.parts.length
-        ? message
-        : { ...message, parts: nextParts };
+      return [{ image, messageIndex }];
     }),
   );
+
+  if (pending.length === 0) {
+    return messages;
+  }
+
+  const extractions = await mapWithConcurrency(
+    pending,
+    IMAGE_EXTRACTION_CONCURRENCY,
+    ({ image }) => extractImage(image),
+  );
+
+  // `pending` is built in message order, then part order, so appending in index order
+  // reproduces the sequential version's output exactly.
+  const textsByMessage = new Map<number, string[]>();
+  pending.forEach((entry, index) => {
+    const extraction = extractions[index];
+    if (extraction === undefined || extraction === null) {
+      return;
+    }
+    const texts = textsByMessage.get(entry.messageIndex) ?? [];
+    texts.push(extractedImageText(entry.image.filename, extraction));
+    textsByMessage.set(entry.messageIndex, texts);
+  });
+
+  return messages.map((message, messageIndex) => {
+    const texts = textsByMessage.get(messageIndex);
+    if (texts === undefined || texts.length === 0) {
+      return message;
+    }
+    return {
+      ...message,
+      parts: [
+        ...message.parts,
+        ...texts.map((text) => ({ type: "text" as const, text })),
+      ],
+    };
+  });
 }
 
 export type NonImageFilePart = {
