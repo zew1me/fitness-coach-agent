@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime, timedelta
-from hashlib import sha256
-from typing import Any
-from uuid import uuid4
+from datetime import UTC, datetime
 
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
@@ -14,36 +11,14 @@ from backend.models.auth import (
     OAuthGrantRecord,
     OAuthRefreshTokenRecord,
 )
+from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError, _OAuthRepositoryBase
 from supabase import Client, create_client
 
-
-class OAuthRepositoryNotConfiguredError(RuntimeError):
-    """Raised when OAuth persistence is requested without Supabase config."""
+__all__ = ["OAuthRepository", "OAuthRepositoryNotConfiguredError"]
 
 
-# Supabase's gateway can time out after forwarding a write, so the response does not
-# reveal whether Postgres committed it. Retrying the complete read-then-write operation
-# lets the next read observe a successful ambiguous write before deciding what to do.
-_GATEWAY_RETRYABLE_CODES = frozenset({"502", "503", "504"})
-_GATEWAY_RETRY_ATTEMPTS = 2
-_GATEWAY_RETRY_BACKOFF_SECONDS = 0.25
-
-
-class OAuthRepository:
-    """Supabase-backed persistence for durable OAuth grants, codes, and refresh tokens."""
-
-    def __init__(
-        self,
-        client: Any | None = None,
-        *,
-        grants_table: str = "oauth_grants",
-        authorization_codes_table: str = "oauth_authorization_codes",
-        refresh_tokens_table: str = "oauth_refresh_tokens",
-    ) -> None:
-        self._client = client or self._build_client()
-        self._grants_table = grants_table
-        self._authorization_codes_table = authorization_codes_table
-        self._refresh_tokens_table = refresh_tokens_table
+class OAuthRepository(_OAuthRepositoryBase):
+    """Synchronous Supabase-backed OAuth persistence."""
 
     def get_active_grant(
         self, *, user_id: str, client_id: str, redirect_uri: str
@@ -79,11 +54,11 @@ class OAuthRepository:
     ) -> OAuthGrantRecord:
         """Return the active grant, creating it or canonicalizing its scopes as needed.
 
-        The complete operation is retried once for a 502, 503, or 504 gateway error so
-        a read can observe whether an earlier write succeeded before another write.
-        Other PostgREST errors, or a second gateway error, are propagated.
+        The complete operation is retried for a 502, 503, or 504 gateway error so a read
+        can observe whether an earlier write succeeded before another write is attempted.
+        Other PostgREST errors, or a gateway error after the final attempt, are propagated.
         """
-        for attempt in range(_GATEWAY_RETRY_ATTEMPTS):
+        for attempt in range(self._GATEWAY_RETRY_ATTEMPTS):
             try:
                 return self._upsert_grant_once(
                     user_id=user_id,
@@ -92,12 +67,9 @@ class OAuthRepository:
                     scopes=scopes,
                 )
             except PostgRESTAPIError as exc:
-                code = str(exc.code) if exc.code is not None else None
-                if code not in _GATEWAY_RETRYABLE_CODES:
+                if not self._should_retry_gateway_error(exc, attempt):
                     raise
-                if attempt == _GATEWAY_RETRY_ATTEMPTS - 1:
-                    raise
-                time.sleep(_GATEWAY_RETRY_BACKOFF_SECONDS)
+                time.sleep(self._GATEWAY_RETRY_BACKOFF_SECONDS)
         raise AssertionError("unreachable: OAuth grant retry loop exited without returning")
 
     def _upsert_grant_once(
@@ -107,43 +79,27 @@ class OAuthRepository:
         existing = self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
-        requested_scopes = sorted(set(scopes))
-        merged_scopes = (
-            sorted(set(existing.scopes).union(requested_scopes))
-            if existing is not None
-            else requested_scopes
-        )
+        requested_scopes, merged_scopes = self._resolve_grant_scopes(existing, scopes)
         if existing is not None and existing.scopes == merged_scopes:
             return existing
 
         client = self._require_client()
-        now = datetime.now(UTC).isoformat()
         if existing is None:
-            payload = {
-                "id": str(uuid4()),
-                "user_id": user_id,
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "scopes": requested_scopes,
-                "created_at": now,
-                "updated_at": now,
-                "revoked_at": None,
-            }
+            payload = self._grant_insert_payload(
+                user_id=user_id,
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scopes=requested_scopes,
+            )
             response = client.table(self._grants_table).insert(payload).execute()
         else:
-            payload = {
-                "scopes": merged_scopes,
-                "updated_at": now,
-                "revoked_at": None,
-            }
+            payload = self._grant_update_payload(existing, requested_scopes)
             response = (
                 client.table(self._grants_table).update(payload).eq("id", existing.id).execute()
             )
-        rows = response.data or []
-        if not rows:
-            raise RuntimeError("Supabase did not return the OAuth grant row.")
-        return self._parse_grant(rows[0])
+        return self._parse_grant(self._require_grant_row(response.data or []))
 
+    # This signature is permanently flat so the public boundary mirrors the OAuth protocol fields.
     def create_authorization_code(  # noqa: PLR0913
         self,
         *,
@@ -157,24 +113,18 @@ class OAuthRepository:
     ) -> str:
         client = self._require_client()
         raw_code = self._issue_secret()
-        payload = {
-            "id": str(uuid4()),
-            "grant_id": grant_id,
-            "user_id": user_id,
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "scopes": scopes,
-            "code_challenge": code_challenge,
-            "code_challenge_method": code_challenge_method,
-            "token_hash": self._hash_secret(raw_code),
-            "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
-            "consumed_at": None,
-            "created_at": datetime.now(UTC).isoformat(),
-        }
+        payload = self._authorization_code_payload(
+            raw_code=raw_code,
+            grant_id=grant_id,
+            user_id=user_id,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scopes=scopes,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+        )
         response = client.table(self._authorization_codes_table).insert(payload).execute()
-        rows = response.data or []
-        if not rows:
-            raise RuntimeError("Supabase did not return the OAuth authorization code row.")
+        self._require_authorization_code_row(response.data or [])
         return raw_code
 
     def get_authorization_code(self, raw_code: str) -> OAuthAuthorizationCodeRecord | None:
@@ -194,10 +144,8 @@ class OAuthRepository:
             .eq("id", record.id)
             .execute()
         )
-        rows = response.data or []
-        if not rows:
-            raise RuntimeError("Supabase did not return the consumed OAuth code row.")
-        return self._parse_authorization_code(rows[0])
+        row = self._require_consumed_authorization_code_row(response.data or [])
+        return self._parse_authorization_code(row)
 
     def create_refresh_token(
         self,
@@ -210,22 +158,16 @@ class OAuthRepository:
     ) -> str:
         client = self._require_client()
         raw_token = self._issue_secret()
-        payload = {
-            "id": str(uuid4()),
-            "grant_id": grant_id,
-            "user_id": user_id,
-            "client_id": client_id,
-            "scopes": scopes,
-            "token_hash": self._hash_secret(raw_token),
-            "expires_at": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
-            "revoked_at": None,
-            "created_at": datetime.now(UTC).isoformat(),
-            "rotated_from_id": rotated_from_id,
-        }
+        payload = self._refresh_token_payload(
+            raw_token=raw_token,
+            grant_id=grant_id,
+            user_id=user_id,
+            client_id=client_id,
+            scopes=scopes,
+            rotated_from_id=rotated_from_id,
+        )
         response = client.table(self._refresh_tokens_table).insert(payload).execute()
-        rows = response.data or []
-        if not rows:
-            raise RuntimeError("Supabase did not return the OAuth refresh token row.")
+        self._require_refresh_token_row(response.data or [])
         return raw_token
 
     def get_refresh_token(self, raw_token: str) -> OAuthRefreshTokenRecord | None:
@@ -245,10 +187,8 @@ class OAuthRepository:
             .eq("id", existing.id)
             .execute()
         )
-        rows = response.data or []
-        if not rows:
-            raise RuntimeError("Supabase did not return the revoked OAuth refresh token row.")
-        revoked = self._parse_refresh_token(rows[0])
+        row = self._require_revoked_refresh_token_row(response.data or [])
+        revoked = self._parse_refresh_token(row)
         replacement = self.create_refresh_token(
             grant_id=revoked.grant_id,
             user_id=revoked.user_id,
@@ -265,25 +205,21 @@ class OAuthRepository:
             return False
         response = (
             client.table(self._refresh_tokens_table)
-            .update({"revoked_at": datetime.now(UTC).isoformat()})
+            .update(self._revocation_payload())
             .eq("id", existing.id)
             .execute()
         )
-        rows = response.data or []
-        return bool(rows)
+        return bool(response.data or [])
 
     def revoke_grant(self, grant_id: str) -> bool:
         client = self._require_client()
-        now = datetime.now(UTC).isoformat()
+        payload = self._revocation_payload()
         grant_response = (
-            client.table(self._grants_table)
-            .update({"revoked_at": now})
-            .eq("id", grant_id)
-            .execute()
+            client.table(self._grants_table).update(payload).eq("id", grant_id).execute()
         )
-        client.table(self._refresh_tokens_table).update({"revoked_at": now}).eq(
-            "grant_id", grant_id
-        ).is_("revoked_at", "null").execute()
+        client.table(self._refresh_tokens_table).update(payload).eq("grant_id", grant_id).is_(
+            "revoked_at", "null"
+        ).execute()
         return bool(grant_response.data or [])
 
     def _find_authorization_code_by_hash(
@@ -320,36 +256,3 @@ class OAuthRepository:
         if not settings.supabase_url or not settings.supabase_service_role_key:
             return None
         return create_client(settings.supabase_url, settings.supabase_service_role_key)
-
-    def _require_client(self) -> Any:
-        if self._client is None:
-            raise OAuthRepositoryNotConfiguredError(
-                "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
-            )
-        return self._client
-
-    @staticmethod
-    def _issue_secret() -> str:
-        return uuid4().hex + uuid4().hex
-
-    @staticmethod
-    def _hash_secret(raw_secret: str) -> str:
-        return sha256(raw_secret.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _parse_grant(row: object) -> OAuthGrantRecord:
-        if not isinstance(row, dict):
-            raise TypeError("Supabase OAuth grant rows must be objects.")
-        return OAuthGrantRecord.model_validate(row)
-
-    @staticmethod
-    def _parse_authorization_code(row: object) -> OAuthAuthorizationCodeRecord:
-        if not isinstance(row, dict):
-            raise TypeError("Supabase OAuth authorization code rows must be objects.")
-        return OAuthAuthorizationCodeRecord.model_validate(row)
-
-    @staticmethod
-    def _parse_refresh_token(row: object) -> OAuthRefreshTokenRecord:
-        if not isinstance(row, dict):
-            raise TypeError("Supabase OAuth refresh token rows must be objects.")
-        return OAuthRefreshTokenRecord.model_validate(row)

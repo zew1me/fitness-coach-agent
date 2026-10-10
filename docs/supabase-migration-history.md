@@ -25,6 +25,7 @@
 - `20260721000000_update_goal_course_profile_notes_atomic.sql` — service-role RPC for atomic course-profile note merging
 - `20260806003910_unlink_plan_workout_from_activity_atomic.sql` — service-role RPC for atomic bidirectional workout/activity unlinking
 - `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
+- `20260920021259_restore_service_role_table_privileges.sql` — restores PostgREST DML privileges required by server-side repositories after a fresh bootstrap
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the
@@ -562,3 +563,24 @@ history is aligned. This is the intentional forward reintroduction of the RLS
 work described in the preview-repair section above; do not restore or mark the
 old remote-only `20260426192302` version as applied. Enabling RLS takes brief
 table locks, but the migration performs no backfill or data rewrite.
+
+## 20260920021259 — restore service-role table privileges (2026-09-20)
+
+**File:** `supabase/migrations/20260920021259_restore_service_role_table_privileges.sql`
+
+**Change:** Grants `service_role` schema usage plus `SELECT`, `INSERT`, `UPDATE`,
+and `DELETE` on every existing application table, grants sequence usage, and
+sets matching `postgres` default privileges for tables created by later
+migrations. It does not grant browser roles any additional access.
+
+**Why:** RLS bypass and ordinary SQL privileges are independent. A clean local
+Supabase bootstrap created the application tables without PostgREST DML grants
+for `service_role`, so both the existing live-DB suite and the async OAuth
+repository lifecycle failed with SQLSTATE `42501` immediately after
+`bun run db:reset`. The application already treats its service-role credential
+as the server-only persistence identity; this migration makes that declared
+access model explicit and reproducible instead of relying on environment drift.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). This is privilege metadata only; it does not rewrite application data
+or weaken RLS/browser policies.
