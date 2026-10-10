@@ -262,6 +262,14 @@ export function buildSpecialistPrompt(
   ].join("\n\n");
 }
 
+/**
+ * Builds the lead coach system prompt from athlete context, specialist reports, and optional coaching-memory follow-up data.
+ *
+ * @param context - The athlete profile, goals, training load, coaching state, and related context.
+ * @param specialistReports - Specialist findings to incorporate into the lead coach's guidance.
+ * @param dueFollowUp - Optional athlete-authored coaching-memory follow-up data.
+ * @returns The assembled lead coach system prompt.
+ */
 export function buildLeadCoachPrompt(
   context: AthleteContextBundle,
   specialistReports: SpecialistReport[] = [],
@@ -300,7 +308,7 @@ export function buildLeadCoachPrompt(
     "Use tools for persistence and deterministic calculations. Do not invent metrics that are missing.",
     'When the user provides a block beginning "=== WELLNESS EXPORT v1 source=garmin_sidecar ===" and ending "=== END WELLNESS EXPORT ===", treat each field=value line as one recovery entry and call save_recovery_data. The export omits unavailable metrics; pass null for their required tool fields and never infer zero. Never route a wellness export to save_activity_from_text.',
     'When the user message is an "Uploaded file:" stub with content_type gpx/fit/tcx or zip (or a filename ending in .gpx/.fit/.tcx/.zip), always call process_uploaded_file with that stub\'s filename, content_type, object_key, and public_url. Never call save_activity_from_text for a file upload — it cannot read file contents and must not guess numeric fields like duration.',
-    'A process_uploaded_file result with kind "course" is a route the athlete is planning to do, not one they have done. Nothing was logged and no planned workout was matched, so never congratulate them on it, never describe it as completed or saved, and never claim it counts toward compliance. Read the sport on the result before advising: use the terrain and any analysis to talk about pacing, fuelling, and what to train before they do it, keeping equipment advice to what that sport actually uses. If there is a goal this course belongs to, offer to attach it with update_goals (course_distance_meters, course_elevation_gain_meters, course_profile_notes); if there is not, do not invent one. If analysis_unavailable_reason is set, the terrain is still accurate — ask for the missing number it names rather than estimating one. If sport is "general" the file did not say which sport it is for, so ask before advising.',
+    'A process_uploaded_file result with kind "course" is a route the athlete is planning to ride or run, not one they have done. Nothing was logged and no planned workout was matched, so never congratulate them on it, never describe it as completed or saved, and never claim it counts toward compliance. Use the terrain and any analysis to talk about pacing, fuelling, gearing, and what to train between now and the event, then offer to attach it to the relevant goal with update_goals (course_distance_meters, course_elevation_gain_meters, course_profile_notes). If analysis_unavailable_reason is set, the terrain is still accurate — ask for the missing number it names rather than estimating one. If sport is "general" the file did not say which sport it is for, so ask before advising.',
   ].join("\n\n");
 }
 

@@ -1,8 +1,7 @@
 """Terrain math for uploaded *course* files (planned routes, not recorded activities).
 
 A course carries no time signal, so the only things it can tell us are geometric:
-how far, how much vertical, and how steep (average and maximum). Those four
-numbers map one-to-one onto
+how far, how much vertical, and how steep. Those four numbers map one-to-one onto
 the ``goals.course_*`` columns and are the inputs
 ``backend/engine/course_analyzer.py`` needs to estimate pacing and training emphasis.
 """
@@ -37,30 +36,12 @@ MAX_GRADE_WINDOW_METERS = 200.0
 # one: 15 000 samples packed into 150 m never reach the ceiling at all, so the scan
 # walked the whole tail for every origin and took 3.2s.
 #
-# Thinning is an approximation, and its error is bounded and small: dropping a
-# candidate endpoint can only shift a window boundary by up to the spacing, so the
-# reported grade moves by at most spacing/MIN_GRADE_WINDOW_METERS — 1/50, or 2%.
-# Points at 0 m, 0.9 m and 50.9 m are the worst case: the exact 50 m window from
-# 0.9 m is lost and 9.8% is reported instead of 10.0%. That is an order of magnitude
-# below the input's own accuracy, since a +/-3 m elevation error over a 50 m window
-# is +/-6% of grade on its own.
-#
 # One metre is deliberately below GPS precision, so for any real file this thins
-# nothing and the scan is exact. It engages only on sub-metre sampling, where the
-# extra points cannot describe real terrain anyway, and there it is the difference
-# between bounded work and none.
-#
-# A coarser threshold is tempting and costs accuracy: at 5 m, points at 0 m, 4.9 m,
-# and 54.9 m lose the exact 50 m window between the last two and report 91.1%
-# instead of 100%.
-#
-# Thinning by distance can also drop a point whose elevation is an outlier, and that
-# is the right trade rather than a gap to close. Two samples less than a metre apart
-# with tens of metres of elevation between them describe a slope in the thousands of
-# percent — barometric drift, or a GPS fix jumping, recorded while the athlete was
-# effectively stationary. Preserving such extrema so they can anchor a window would
-# make max grade *more* sensitive to precisely the noise MIN_GRADE_WINDOW_METERS
-# exists to suppress, and would report terrain that is not there.
+# nothing and the scan is exact. It only engages on sub-metre sampling, where the
+# extra points cannot describe real terrain anyway — and there it is the difference
+# between bounded work and none. A coarser threshold is tempting and costs accuracy:
+# at 5 m, points at 0 m, 4.9 m, and 54.9 m lose the exact 50 m window between the
+# last two and report 91.1% instead of 100%.
 GRADE_SCAN_MIN_SPACING_METERS = 1.0
 
 
@@ -119,31 +100,19 @@ def build_course_points(
 
 
 def _finite_points(points: Sequence[CoursePoint]) -> list[CoursePoint]:
-    """Normalize the sequence at the boundary so nothing downstream sees a surprise.
+    """Normalize the sequence at the boundary so nothing downstream sees a NaN.
 
     ``build_course_points`` already sanitizes what it builds, but points reach here
-    directly too, and this function has to restore the same two invariants that path
-    establishes, not just the first:
-
-    * **Finite distances.** One non-finite cumulative distance propagates into
-      ``distance_meters`` and every grade, landing in the response as bare ``NaN``,
-      which is not valid JSON. Such a point is dropped — it says nothing about where
-      it sits.
-    * **Non-decreasing distances.** Cumulative distance only moves forward.
-      A backwards jump collapses the total (a course reaching 500 m and stepping back
-      to 100 m reported 100 m) and breaks the monotonic window pointer in
-      ``_max_windowed_grade``, which relies on the ordering to skip work safely.
-      Clamping keeps the elevation reading while pinning it where the course had
-      actually got to.
+    directly too, and a single non-finite cumulative distance propagates into
+    ``distance_meters`` and every grade — landing in the response as bare ``NaN``,
+    which is not valid JSON. Non-finite distances are dropped rather than zeroed,
+    since a point with no position tells us nothing about where it sits.
     """
-    normalized: list[CoursePoint] = []
-    furthest = 0.0
-    for point in points:
-        if not isfinite(point.cumulative_distance_meters):
-            continue
-        furthest = max(furthest, point.cumulative_distance_meters)
-        normalized.append(CoursePoint(furthest, _elevation_of(point)))
-    return normalized
+    return [
+        CoursePoint(point.cumulative_distance_meters, _elevation_of(point))
+        for point in points
+        if isfinite(point.cumulative_distance_meters)
+    ]
 
 
 def _elevation_of(point: CoursePoint) -> float | None:
@@ -228,30 +197,22 @@ def _has_elevation(points: Sequence[CoursePoint]) -> bool:
 
 
 def _accumulate_ascent(points: Sequence[CoursePoint]) -> tuple[float, float]:
-    """Total positive elevation change and the distance covered while ascending.
-
-    Points without an elevation are dropped before pairing rather than breaking the
-    chain, which is what ``_max_windowed_grade`` already does. Skipping the pair
-    instead left the two disagreeing: a course with readings at 0 m and 200 m but a
-    gap between them reported a 30% max grade alongside 0 m of total climbing.
-    """
-    elevated = [
-        CoursePoint(point.cumulative_distance_meters, elevation)
-        for point in points
-        if (elevation := _elevation_of(point)) is not None
-    ]
-
+    """Total positive elevation change and the distance covered while ascending."""
     gain = 0.0
     ascending_distance = 0.0
-    for previous, current in pairwise(elevated):
+    for previous, current in pairwise(points):
+        previous_elevation = _elevation_of(previous)
+        current_elevation = _elevation_of(current)
+        if previous_elevation is None or current_elevation is None:
+            continue
         span = current.cumulative_distance_meters - previous.cumulative_distance_meters
         # A rise over zero horizontal distance is a vertical teleport: duplicated
-        # points with differing elevations, or a backwards jump clamped to zero.
-        # Counting it inflates the vertical while contributing nothing to the
-        # distance it is averaged over.
+        # points with differing elevations, or a backwards jump that
+        # `build_course_points` clamped to zero. Counting it inflates the vertical
+        # while contributing nothing to the distance it is averaged over.
         if span <= 0:
             continue
-        rise = (current.elevation_meters or 0.0) - (previous.elevation_meters or 0.0)
+        rise = current_elevation - previous_elevation
         if rise <= 0:
             continue
         gain += rise
@@ -312,7 +273,7 @@ def _max_windowed_grade(points: Sequence[CoursePoint]) -> float | None:
             span = candidate.cumulative_distance_meters - origin.cumulative_distance_meters
             # `elevation_meters` is non-None for every member of `elevated`; the
             # explicit reads keep the type checker honest without a cast.
-            rise = (candidate.elevation_meters or 0.0) - (origin.elevation_meters or 0.0)
+            rise = (_elevation_of(candidate) or 0.0) - (_elevation_of(origin) or 0.0)
             grade = rise / span * 100
             if steepest is None or grade > steepest:
                 steepest = grade
