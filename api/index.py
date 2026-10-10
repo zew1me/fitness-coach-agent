@@ -468,6 +468,7 @@ async def oauth_browser_token(
     response: Response,
     coach_browser_session: str | None = Cookie(default=None),
 ) -> BrowserTokenResponse:
+    """Issue a browser API token and renew the authenticated session cookie."""
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
         # OAuthRepository still uses the synchronous supabase-py client, and its bounded
