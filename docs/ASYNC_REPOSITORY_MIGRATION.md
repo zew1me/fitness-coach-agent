@@ -47,9 +47,13 @@ bearer validation's existing invalid-token response handling.
 For the shared `SupabaseRepository`, use a domain-scoped async client alongside the legacy
 client during intermediate slices, or extract a domain adapter if needed. Do not globally
 swap the client while unmigrated methods still expect synchronous responses. Remove the
-legacy client only after the final domain has cut over. Prefer extending a stack with
-`gh stack add`, then `gh stack submit`; start from current `main` when a prior layer was
-squash-merged, instead of replaying the merged branch's old commits.
+legacy client only after the final domain has cut over. Each independently functional
+slice should branch from current `main` and open its own PR against `main`; sharing a
+file or async theme is not a dependency. Keep an adapter's client cutover, affected callers,
+and async fakes together when they must land atomically. Use `gh stack add` / `gh stack submit`
+only when a slice genuinely requires another unmerged PR, or combine the changes into one
+PR when they cannot function independently. After a squash merge, start from current `main`
+instead of replaying the merged branch's old commits.
 
 ## Not async-migration targets
 
