@@ -6,6 +6,7 @@ import {
   withTrace,
   type AgentInputItem,
   type MCPServer,
+  type Tool,
 } from "@openai/agents";
 import * as Sentry from "@sentry/nextjs";
 import {
@@ -62,6 +63,12 @@ import {
   SupabaseAgentSession,
 } from "./supabase-agent-session";
 import { buildLeadCoachPrompt } from "./system-prompt";
+import {
+  FINAL_RESPONSE_INSTRUCTION,
+  listBudgetedMcpTools,
+  MAX_COACH_TURNS,
+  ToolRoundBudget,
+} from "./tool-round-budget";
 import type { AthleteContextBundle } from "./types";
 import { recordStageUsage } from "./usage-metrics";
 
@@ -91,7 +98,6 @@ export type StreamCoachTurnOptions = StreamCoachTurnBaseOptions &
     | { acquiredLease?: undefined; leaseId?: string }
   );
 
-const MAX_COACH_STEPS = 4;
 // Seeding all the way to DEFAULT_AUTO_COMPACT_TOKENS makes a fresh session compact
 // on its very first turn: trimBootstrapToBudget accepts a suffix at exactly the
 // budget, and shouldTriggerCompaction fires at >= that same number. The seed is only
@@ -513,11 +519,9 @@ function latestUserTurnMessages(messages: UIMessage[]): UIMessage[] {
 
 function createTavilyServer(url: string | undefined): MCPServer | null {
   if (url === undefined) return null;
-  return new MCPServerStreamableHttp({
-    cacheToolsList: true,
-    name: "tavily",
-    url,
-  });
+  // No cacheToolsList: the tools are listed once per turn by listBudgetedMcpTools,
+  // and the SDK's module-wide list cache is exactly what must not decide them.
+  return new MCPServerStreamableHttp({ name: "tavily", url });
 }
 
 function startLeaseRenewal({
@@ -590,6 +594,7 @@ export function streamCoachTurn({
   const runContext: CoachAgentRunContext = {
     hasActivityFileAttachment: hasActivityFileAttachment(latestUserTurn),
     toolCalled: false,
+    toolRounds: new ToolRoundBudget(),
   };
 
   const stream = createUIMessageStream<UIMessage>({
@@ -812,7 +817,20 @@ export function streamCoachTurn({
                 const tavilyServer = createTavilyServer(tavilyMcpUrl);
 
                 try {
-                  if (tavilyServer !== null) await tavilyServer.connect();
+                  let tavilyTools: Tool<CoachAgentRunContext>[] = [];
+                  if (tavilyServer !== null) {
+                    await tavilyServer.connect();
+                    tavilyTools =
+                      await listBudgetedMcpTools<CoachAgentRunContext>(
+                        tavilyServer,
+                      );
+                  }
+                  const leadInstructions = buildLeadCoachPrompt(
+                    context,
+                    reports,
+                    oldestDueFollowUp(coachingMemory)?.statement,
+                    timeZone,
+                  );
                   let admission = startingAdmission;
                   let tier: ModelTier = startingTier;
                   let tierIndex = startingTierIndex;
@@ -827,28 +845,43 @@ export function streamCoachTurn({
                         async () => {
                           const lead = new Agent<CoachAgentRunContext>({
                             name: "Lead coach",
-                            instructions: buildLeadCoachPrompt(
-                              context,
-                              reports,
-                              oldestDueFollowUp(coachingMemory)?.statement,
-                              timeZone,
-                            ),
+                            // Resolved once per model call, which makes it the
+                            // turn boundary for the tool-round budget. Once the
+                            // budget is spent the call has no tools, so it is
+                            // also told to write the reply.
+                            instructions: (activeContext): string => {
+                              const { toolRounds } = activeContext.context;
+                              toolRounds.noteModelCall();
+                              return toolRounds.hasRoundsLeft()
+                                ? leadInstructions
+                                : `${leadInstructions}\n\n${FINAL_RESPONSE_INSTRUCTION}`;
+                            },
                             model: tier.model,
                             modelSettings: buildModelSettings(tier),
-                            mcpServers:
-                              tavilyServer === null ? [] : [tavilyServer],
-                            tools: createAgentCoachTools({
-                              accessToken,
-                              baseUrl,
-                              ...(extraHeaders ? { extraHeaders } : {}),
-                              ...(underlyingSession
-                                ? { modelSession: underlyingSession }
-                                : {}),
-                            }),
+                            // Tavily rides in `tools`, never `mcpServers`: the SDK
+                            // ignores isEnabled for MCP tools, so they would escape
+                            // the round budget (see listBudgetedMcpTools).
+                            tools: [
+                              ...createAgentCoachTools({
+                                accessToken,
+                                baseUrl,
+                                ...(extraHeaders ? { extraHeaders } : {}),
+                                ...(underlyingSession
+                                  ? { modelSession: underlyingSession }
+                                  : {}),
+                              }),
+                              ...tavilyTools,
+                            ],
                           });
-                          lead.on("agent_tool_start", (activeContext) => {
-                            activeContext.context.toolCalled = true;
-                          });
+                          lead.on(
+                            "agent_tool_start",
+                            (activeContext, startedTool) => {
+                              activeContext.context.toolCalled = true;
+                              activeContext.context.toolRounds.noteToolStart(
+                                startedTool.name,
+                              );
+                            },
+                          );
 
                           const runner = new Runner({
                             traceIncludeSensitiveData: true,
@@ -860,7 +893,7 @@ export function streamCoachTurn({
                             toAgentInputItems(selectedMessages),
                             {
                               context: runContext,
-                              maxTurns: MAX_COACH_STEPS,
+                              maxTurns: MAX_COACH_TURNS,
                               signal: effectiveSignal,
                               ...(durableSession
                                 ? { session: durableSession }
@@ -869,10 +902,12 @@ export function streamCoachTurn({
                             },
                           );
 
-                          // The runner throws MaxTurnsExceededError only after
-                          // this turn's tool calls have completed. Preserve that
-                          // completed work by falling through to the
-                          // acknowledgement/deterministic response below.
+                          // The tool-round budget makes MaxTurnsExceededError
+                          // unreachable in normal operation; this is the backstop
+                          // if that invariant ever breaks. The runner throws only
+                          // after the turn's tool calls have completed, so fall
+                          // through to the acknowledgement/deterministic response
+                          // below to preserve that work.
                           try {
                             for await (const event of result) {
                               attemptProgress.eventStarted = true;
@@ -884,12 +919,24 @@ export function streamCoachTurn({
                               throw error;
                             }
                             if (!isTurnAborted()) {
+                              const { toolRounds } = runContext;
+                              const extra = {
+                                max_turns: MAX_COACH_TURNS,
+                                tool_names: toolRounds.toolNames.join(","),
+                                tool_rounds_used: toolRounds.roundsUsed,
+                              };
+                              // Warning, not error: the athlete still gets a reply
+                              // from the salvage path below. Its own fingerprint
+                              // keeps it apart from the pre-budget spin events.
                               Sentry.captureException(error, {
+                                extra,
+                                fingerprint: ["coach-max-turns-salvaged"],
+                                level: "warning",
                                 tags: { subsystem: "coach-max-turns" },
                               });
                               Sentry.logger.warn(
                                 "coach: max turns exceeded; salvaging completed tool work",
-                                { max_turns: MAX_COACH_STEPS },
+                                extra,
                               );
                             }
                           }

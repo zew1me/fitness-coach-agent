@@ -13,6 +13,10 @@ import {
 } from "../../lib/agent/orchestrator";
 import { runSpecialists } from "../../lib/agent/specialists";
 import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
+import {
+  FINAL_RESPONSE_INSTRUCTION,
+  ToolRoundBudget,
+} from "../../lib/agent/tool-round-budget";
 
 import { athleteContextFixture } from "./agent-fixtures";
 
@@ -310,19 +314,29 @@ describe("streamCoachTurn", () => {
       expect.anything(),
       expect.any(Array),
       expect.objectContaining({
-        maxTurns: 4,
+        maxTurns: 3,
         stream: true,
       }),
     );
-    expect(
-      orchestratorMocks.agentConfigs.find(
-        (config) => config["name"] === "Lead coach",
-      ),
-    ).toMatchObject({
-      instructions: "system prompt",
+    const leadConfig = orchestratorMocks.agentConfigs.find(
+      (config) => config["name"] === "Lead coach",
+    );
+    expect(leadConfig).toMatchObject({
       model: "gpt-5.6-luna",
       name: "Lead coach",
     });
+    // Tavily must never ride in mcpServers: the SDK skips isEnabled for MCP
+    // tools, which is how a turn escaped the tool gate (Sentry 7633993901).
+    expect(leadConfig?.["mcpServers"]).toBeUndefined();
+    const instructions = leadConfig?.["instructions"] as (runContext: {
+      context: { toolRounds: ToolRoundBudget };
+    }) => string;
+    const toolRounds = new ToolRoundBudget(1);
+    expect(instructions({ context: { toolRounds } })).toBe("system prompt");
+    toolRounds.noteToolStart("update_goals");
+    expect(instructions({ context: { toolRounds } })).toBe(
+      `system prompt\n\n${FINAL_RESPONSE_INSTRUCTION}`,
+    );
     expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(
       "fitness-coach-turn",
       expect.any(Function),
@@ -358,7 +372,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: true, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: true,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(false);
@@ -386,7 +404,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: true, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: true,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(false);
@@ -416,7 +438,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: false, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: false,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(true);
@@ -446,7 +472,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: false, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: false,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(true);
@@ -1348,6 +1378,16 @@ describe("streamCoachTurn", () => {
       orchestratorMocks.agentsRun.mock.calls as unknown as unknown[][]
     )[1];
     expect(followupCall?.[1]).toEqual(leadOutput);
+    // The athlete got a reply, so this is a warning under its own fingerprint,
+    // not an error that reads as an outage in the weekly report.
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      maxTurns,
+      expect.objectContaining({
+        fingerprint: ["coach-max-turns-salvaged"],
+        level: "warning",
+        tags: { subsystem: "coach-max-turns" },
+      }),
+    );
   });
 
   it("still propagates non-max-turns errors from the lead run", async () => {
