@@ -1440,11 +1440,6 @@ class RecomputeLoadRequest(BaseModel):
     sport: str | None = None
 
 
-# Bounded candidate query for the rebuild window. Part two of #447 replaces it with keyset
-# pagination; until then the endpoint fails closed rather than persisting a truncated rebuild.
-_RECOMPUTE_ACTIVITY_LIMIT = 500
-
-
 @app.post("/api/engine/recompute-load")
 async def recompute_load_endpoint(
     payload: RecomputeLoadRequest,
@@ -1453,7 +1448,10 @@ async def recompute_load_endpoint(
     from backend.engine.training_load import recompute_load_series
 
     user_id = user_context.user_id
-    since = payload.since or date.today()
+    today = date.today()
+    since = payload.since or today
+    if since > today:
+        raise HTTPException(status_code=422, detail="Load rebuild start must not be in the future.")
 
     seed = await repo.get_load_snapshot_on_or_before(
         user_id, since - timedelta(days=1), sport=payload.sport
@@ -1462,51 +1460,31 @@ async def recompute_load_endpoint(
     # intervening days' load and their zero-load decay, writing wrong CTL/ATL/TSB. Rebuild that
     # gap instead of starting at `since`. The gap provably holds no snapshot for this sport --
     # the seed is the newest one at or before `since - 1 day` -- so filling it in never
-    # overwrites recorded history. An absent seed still starts from zero at `since`; widening
-    # back to first-ever activity needs the unbounded candidates deferred to part two of #447.
+    # overwrites recorded history. An absent seed still explicitly starts from zero at `since`;
+    # callers wanting a full-history rebuild must request the beginning of that history.
     rebuild_start = seed.snapshot_date + timedelta(days=1) if seed else since
     initial_ctl = seed.ctl if seed else 0.0
     initial_atl = seed.atl if seed else 0.0
 
-    # Fetch one past the cap purely to detect overflow: `list_activities` returns newest first,
-    # so a truncated page silently drops the *oldest* activities. Those days would then be
-    # recomputed as zero TSS and upserted over the real snapshots, so overflow must fail closed
-    # before any write rather than merely warn.
-    activities = await repo.list_activities(
-        user_id, sport=payload.sport, since=rebuild_start, limit=_RECOMPUTE_ACTIVITY_LIMIT + 1
-    )
+    # Finish every page before writing any snapshots. A failed read must never replace load
+    # history with a series derived from partial input.
+    try:
+        daily_tss = await repo.get_daily_activity_tss(
+            user_id, sport=payload.sport, since=rebuild_start, through=today
+        )
+    except httpx.HTTPError as exc:  # PostgREST errors use the centralized SQLSTATE handler.
+        logger.exception("load input read unavailable user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Unable to read training load inputs.") from exc
     logger.debug(
-        "recompute_load user_id=%s sport=%s since=%s rebuild_start=%s activities=%d",
+        "recompute_load user_id=%s sport=%s since=%s rebuild_start=%s activity_days=%d",
         user_id,
         payload.sport,
         since,
         rebuild_start,
-        len(activities),
+        len(daily_tss),
     )
-    if len(activities) > _RECOMPUTE_ACTIVITY_LIMIT:
-        logger.warning(
-            "recompute_load activity cap exceeded user_id=%s sport=%s rebuild_start=%s limit=%d",
-            user_id,
-            payload.sport,
-            rebuild_start,
-            _RECOMPUTE_ACTIVITY_LIMIT,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Rebuild window from {rebuild_start.isoformat()} holds more than "
-                f"{_RECOMPUTE_ACTIVITY_LIMIT} activities; recomputing it would discard the "
-                "oldest and overwrite load history. Request a later `since`."
-            ),
-        )
 
-    daily_tss: dict[date, float] = {}
-    for a in activities:
-        daily_tss[a.activity_date] = daily_tss.get(a.activity_date, 0) + (a.tss or 0)
-
-    snapshots = recompute_load_series(
-        daily_tss, rebuild_start, date.today(), initial_ctl, initial_atl
-    )
+    snapshots = recompute_load_series(daily_tss, rebuild_start, today, initial_ctl, initial_atl)
 
     await repo.upsert_load_snapshots(user_id, snapshots, sport=payload.sport)
 
