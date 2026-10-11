@@ -385,6 +385,28 @@ export type CoachAgentRunContext = ToolRoundBudgetContext & {
   hasActivityFileAttachment: boolean;
 };
 
+// Activity writes have no dedup yet (docs/ACTIVITY_MATERIALIZATION_DESIGN.md), so
+// re-running one of these in a later tool round would store the same workout
+// twice and inflate training load for weeks. One round of them per reply is all a
+// legitimate upload needs; later rounds keep every other tool.
+const FIRST_ROUND_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  "process_uploaded_file",
+  "save_activity_from_text",
+]);
+
+function isCoachToolEnabled(
+  name: string,
+  context: CoachAgentRunContext,
+): boolean {
+  const { toolRounds } = context;
+  if (!toolRounds.hasRoundsLeft()) return false;
+  if (FIRST_ROUND_ONLY_TOOLS.has(name) && toolRounds.roundsUsed > 0)
+    return false;
+  return (
+    name !== "save_activity_from_text" || !context.hasActivityFileAttachment
+  );
+}
+
 export function createAgentCoachTools(
   context: CoachToolContext,
 ): Tool<CoachAgentRunContext>[] {
@@ -396,9 +418,7 @@ export function createAgentCoachTools(
       description: definition.description,
       parameters: definition.inputSchema,
       isEnabled: ({ runContext }) =>
-        runContext.context.toolRounds.hasRoundsLeft() &&
-        (name !== "save_activity_from_text" ||
-          !runContext.context.hasActivityFileAttachment),
+        isCoachToolEnabled(name, runContext.context),
       execute: (input: unknown) => executeCoachTool(name, input, context),
     }),
   );

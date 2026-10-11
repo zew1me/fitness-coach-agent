@@ -1,5 +1,6 @@
 import {
   mcpToFunctionTool,
+  type Agent,
   type MCPServer,
   type RunContext,
   type Tool,
@@ -69,6 +70,31 @@ export class ToolRoundBudget {
 }
 
 export type ToolRoundBudgetContext = { toolRounds: ToolRoundBudget };
+
+/**
+ * Wraps an agent's instructions so each model call advances the budget's turn
+ * boundary, and the tool-free call after the last round is told to reply.
+ */
+export function budgetedInstructions<TContext extends ToolRoundBudgetContext>(
+  instructions: string,
+): (runContext: RunContext<TContext>) => string {
+  return (runContext) => {
+    const { toolRounds } = runContext.context;
+    toolRounds.noteModelCall();
+    return toolRounds.hasRoundsLeft()
+      ? instructions
+      : `${instructions}\n\n${FINAL_RESPONSE_INSTRUCTION}`;
+  };
+}
+
+/** Attributes every tool call the agent starts to the current tool round. */
+export function trackToolRounds<TContext extends ToolRoundBudgetContext>(
+  agent: Agent<TContext>,
+): void {
+  agent.on("agent_tool_start", (runContext, startedTool) => {
+    runContext.context.toolRounds.noteToolStart(startedTool.name);
+  });
+}
 
 /**
  * Exposes an MCP server's tools as function tools behind the round budget.

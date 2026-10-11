@@ -64,10 +64,11 @@ import {
 } from "./supabase-agent-session";
 import { buildLeadCoachPrompt } from "./system-prompt";
 import {
-  FINAL_RESPONSE_INSTRUCTION,
+  budgetedInstructions,
   listBudgetedMcpTools,
   MAX_COACH_TURNS,
   ToolRoundBudget,
+  trackToolRounds,
 } from "./tool-round-budget";
 import type { AthleteContextBundle } from "./types";
 import { recordStageUsage } from "./usage-metrics";
@@ -846,16 +847,11 @@ export function streamCoachTurn({
                           const lead = new Agent<CoachAgentRunContext>({
                             name: "Lead coach",
                             // Resolved once per model call, which makes it the
-                            // turn boundary for the tool-round budget. Once the
-                            // budget is spent the call has no tools, so it is
-                            // also told to write the reply.
-                            instructions: (activeContext): string => {
-                              const { toolRounds } = activeContext.context;
-                              toolRounds.noteModelCall();
-                              return toolRounds.hasRoundsLeft()
-                                ? leadInstructions
-                                : `${leadInstructions}\n\n${FINAL_RESPONSE_INSTRUCTION}`;
-                            },
+                            // turn boundary for the tool-round budget.
+                            instructions:
+                              budgetedInstructions<CoachAgentRunContext>(
+                                leadInstructions,
+                              ),
                             model: tier.model,
                             modelSettings: buildModelSettings(tier),
                             // Tavily rides in `tools`, never `mcpServers`: the SDK
@@ -873,15 +869,10 @@ export function streamCoachTurn({
                               ...tavilyTools,
                             ],
                           });
-                          lead.on(
-                            "agent_tool_start",
-                            (activeContext, startedTool) => {
-                              activeContext.context.toolCalled = true;
-                              activeContext.context.toolRounds.noteToolStart(
-                                startedTool.name,
-                              );
-                            },
-                          );
+                          trackToolRounds(lead);
+                          lead.on("agent_tool_start", (activeContext) => {
+                            activeContext.context.toolCalled = true;
+                          });
 
                           const runner = new Runner({
                             traceIncludeSensitiveData: true,
