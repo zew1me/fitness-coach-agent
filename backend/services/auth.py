@@ -20,8 +20,7 @@ from backend.models.auth import (
     TokenBundle,
     UserContext,
 )
-from backend.repos.async_oauth_repo import AsyncOAuthRepository
-from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError
+from backend.repos.oauth_repo import OAuthRepository, OAuthRepositoryNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +54,8 @@ class AuthService:
     _browser_session_cookie_name: ClassVar[str] = "coach_browser_session"
     _browser_session_max_age_seconds: ClassVar[int] = 12 * 60 * 60
 
-    def __init__(self, oauth_repo: AsyncOAuthRepository | None = None) -> None:
-        self._oauth_repo = oauth_repo or AsyncOAuthRepository()
+    def __init__(self, oauth_repo: OAuthRepository | None = None) -> None:
+        self._oauth_repo = oauth_repo or OAuthRepository()
 
     async def aclose(self) -> None:
         """Release the OAuth repository's HTTP connections at application shutdown."""
