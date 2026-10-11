@@ -121,13 +121,15 @@ class TokenCipher:
 
 
 class IntervalsConnectionRepository(Protocol):
-    def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None: ...
+    async def aclose(self) -> None: ...
 
-    def replace_connection(
+    async def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None: ...
+
+    async def replace_connection(
         self, connection: IntervalsConnectionCreate
     ) -> IntervalsConnectionRecord: ...
 
-    def revoke_active_connection(self, user_id: str) -> bool: ...
+    async def revoke_active_connection(self, user_id: str) -> bool: ...
 
 
 class IntervalsOAuthService:
@@ -141,6 +143,10 @@ class IntervalsOAuthService:
     ) -> None:
         self._repository = repository or IntervalsRepository()
         self._http_client_factory = http_client_factory or (lambda: httpx.AsyncClient(timeout=10.0))
+
+    async def aclose(self) -> None:
+        """Release connection persistence resources at application shutdown."""
+        await self._repository.aclose()
 
     def build_authorization_url(self, user_id: str) -> IntervalsAuthorizationResponse:
         client_id = self._require_client_id()
@@ -195,7 +201,7 @@ class IntervalsOAuthService:
         if token.token_type.lower() != "bearer":
             raise IntervalsOAuthExchangeError("Intervals returned an unsupported token type.")
         cipher = TokenCipher(settings.intervals_token_encryption_secret)
-        connection = self._repository.replace_connection(
+        connection = await self._repository.replace_connection(
             IntervalsConnectionCreate(
                 user_id=state_context.user_id,
                 intervals_athlete_id=token.athlete.id,
@@ -208,8 +214,8 @@ class IntervalsOAuthService:
         logger.info("intervals connection stored scopes=%s", token.scopes)
         return self._status_from_record(connection)
 
-    def get_status(self, user_id: str) -> IntervalsConnectionStatus:
-        record = self._repository.get_active_connection(user_id)
+    async def get_status(self, user_id: str) -> IntervalsConnectionStatus:
+        record = await self._repository.get_active_connection(user_id)
         if record is None and _dev_bypass_state() == "active":
             return IntervalsConnectionStatus(
                 connected=True,
@@ -218,7 +224,7 @@ class IntervalsOAuthService:
             )
         return self._status_from_record(record)
 
-    def resolve_auth(self, user_id: str) -> IntervalsAuthContext:
+    async def resolve_auth(self, user_id: str) -> IntervalsAuthContext:
         bypass_state = _dev_bypass_state()
         if bypass_state == "half_configured":
             raise IntervalsConfigurationError(
@@ -238,7 +244,7 @@ class IntervalsOAuthService:
                 mode="dev_api_key",
             )
 
-        connection = self._repository.get_active_connection(user_id)
+        connection = await self._repository.get_active_connection(user_id)
         if connection is None:
             raise IntervalsNotConnectedError("Intervals.icu is not connected.")
         token = TokenCipher(settings.intervals_token_encryption_secret).decrypt(
@@ -280,8 +286,8 @@ class IntervalsOAuthService:
             raise IntervalsSyncError("Intervals.icu returned an invalid activities response.")
         return [cast(dict[str, Any], item) for item in payload]
 
-    def disconnect(self, user_id: str) -> IntervalsConnectionStatus:
-        self._repository.revoke_active_connection(user_id)
+    async def disconnect(self, user_id: str) -> IntervalsConnectionStatus:
+        await self._repository.revoke_active_connection(user_id)
         return IntervalsConnectionStatus(connected=False)
 
     async def _exchange_code(self, code: str) -> IntervalsTokenResponse:

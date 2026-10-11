@@ -20,7 +20,7 @@ class FakeRpcQuery:
     def __init__(self, data: object) -> None:
         self._data = data
 
-    def execute(self) -> SimpleNamespace:
+    async def execute(self) -> SimpleNamespace:
         return SimpleNamespace(data=self._data)
 
 
@@ -79,11 +79,11 @@ def _connection(athlete_id: str = "i135168") -> IntervalsConnectionCreate:
     )
 
 
-def test_replace_connection_swaps_via_single_atomic_rpc() -> None:
+async def test_replace_connection_swaps_via_single_atomic_rpc() -> None:
     client = FakeAtomicIntervalsClient()
     repo = IntervalsRepository(client)
 
-    record = repo.replace_connection(_connection())
+    record = await repo.replace_connection(_connection())
 
     assert client.rpc_calls == [
         (
@@ -103,12 +103,12 @@ def test_replace_connection_swaps_via_single_atomic_rpc() -> None:
     assert record.revoked_at is None
 
 
-def test_replace_connection_revokes_prior_active_row_in_the_same_call() -> None:
+async def test_replace_connection_revokes_prior_active_row_in_the_same_call() -> None:
     client = FakeAtomicIntervalsClient()
     repo = IntervalsRepository(client)
 
-    first = repo.replace_connection(_connection("i111"))
-    second = repo.replace_connection(_connection("i222"))
+    first = await repo.replace_connection(_connection("i111"))
+    second = await repo.replace_connection(_connection("i222"))
 
     assert first.id != second.id
     active_rows = [row for row in client.rows if row["revoked_at"] is None]
@@ -117,20 +117,20 @@ def test_replace_connection_revokes_prior_active_row_in_the_same_call() -> None:
     assert [row["id"] for row in revoked_rows] == [first.id]
 
 
-def test_replace_connection_raises_when_rpc_returns_no_row() -> None:
+async def test_replace_connection_raises_when_rpc_returns_no_row() -> None:
     repo = IntervalsRepository(FakeAtomicIntervalsClient(rpc_data_override={}))
 
     with pytest.raises(RuntimeError, match="did not return the Intervals connection row"):
-        repo.replace_connection(_connection())
+        await repo.replace_connection(_connection())
 
 
-def test_replace_connection_rejects_non_object_rpc_payload() -> None:
+async def test_replace_connection_rejects_non_object_rpc_payload() -> None:
     repo = IntervalsRepository(
         FakeAtomicIntervalsClient(rpc_data_override=["unexpected-array-shape"])
     )
 
     with pytest.raises(TypeError, match="rows must be objects"):
-        repo.replace_connection(_connection())
+        await repo.replace_connection(_connection())
 
 
 class _StaticRpcClient:
@@ -152,31 +152,31 @@ class _StaticRpcClient:
         return FakeRpcQuery(self._data)
 
 
-def test_replace_connection_raises_when_rpc_returns_none() -> None:
+async def test_replace_connection_raises_when_rpc_returns_none() -> None:
     """A literal `response.data is None` (distinct from `{}`) must also surface as
     the same RuntimeError rather than falling through to `_parse_connection(None)`."""
     repo = IntervalsRepository(_StaticRpcClient(None))
 
     with pytest.raises(RuntimeError, match="did not return the Intervals connection row"):
-        repo.replace_connection(_connection())
+        await repo.replace_connection(_connection())
 
 
-def test_replace_connection_rejects_scalar_rpc_payload() -> None:
+async def test_replace_connection_rejects_scalar_rpc_payload() -> None:
     """A truthy but non-dict, non-list payload (e.g. a bare string) must also be
     rejected — the guard is about the row shape, not just "not a list"."""
     repo = IntervalsRepository(FakeAtomicIntervalsClient(rpc_data_override="not-a-row"))
 
     with pytest.raises(TypeError, match="rows must be objects"):
-        repo.replace_connection(_connection())
+        await repo.replace_connection(_connection())
 
 
-def test_replace_connection_parses_every_field_from_the_composite_row() -> None:
+async def test_replace_connection_parses_every_field_from_the_composite_row() -> None:
     """The composite-row response must round-trip every `IntervalsConnectionRecord`
     field, not just the few spot-checked in the happy-path test above."""
     client = FakeAtomicIntervalsClient()
     repo = IntervalsRepository(client)
 
-    record = repo.replace_connection(_connection())
+    record = await repo.replace_connection(_connection())
 
     row = client.rows[0]
     assert record.id == row["id"]
@@ -191,7 +191,7 @@ def test_replace_connection_parses_every_field_from_the_composite_row() -> None:
     assert record.revoked_at is None
 
 
-def test_replace_connection_forwards_model_defaults_for_scopes_and_token_type() -> None:
+async def test_replace_connection_forwards_model_defaults_for_scopes_and_token_type() -> None:
     """`IntervalsConnectionCreate` defaults (empty scopes, `token_type="Bearer"`) must
     be forwarded to the RPC verbatim rather than silently dropped or re-defaulted
     client-side — the migration's own `coalesce()` fallbacks only apply server-side."""
@@ -203,7 +203,7 @@ def test_replace_connection_forwards_model_defaults_for_scopes_and_token_type() 
         access_token_ciphertext="ciphertext-2",
     )
 
-    record = repo.replace_connection(connection)
+    record = await repo.replace_connection(connection)
 
     _, params = client.rpc_calls[0]
     assert params["p_scopes"] == []

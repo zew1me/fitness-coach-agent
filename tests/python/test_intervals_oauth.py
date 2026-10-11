@@ -44,13 +44,16 @@ class InMemoryIntervalsRepository:
     def __init__(self) -> None:
         self.rows: list[IntervalsConnectionRecord] = []
 
-    def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None:
+    async def aclose(self) -> None:
+        pass
+
+    async def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None:
         for row in reversed(self.rows):
             if row.user_id == user_id and row.revoked_at is None:
                 return row
         return None
 
-    def replace_connection(
+    async def replace_connection(
         self, connection: IntervalsConnectionCreate
     ) -> IntervalsConnectionRecord:
         now = datetime.now(UTC)
@@ -72,8 +75,8 @@ class InMemoryIntervalsRepository:
         self.rows.append(row)
         return row
 
-    def revoke_active_connection(self, user_id: str) -> bool:
-        row = self.get_active_connection(user_id)
+    async def revoke_active_connection(self, user_id: str) -> bool:
+        row = await self.get_active_connection(user_id)
         if row is None:
             return False
         row.revoked_at = datetime.now(UTC)
@@ -308,7 +311,7 @@ async def test_callback_redirects_normalize_base_url_trailing_slash(
 @pytest.mark.asyncio
 async def test_status_and_disconnect_are_user_scoped() -> None:
     repo = InMemoryIntervalsRepository()
-    repo.replace_connection(
+    await repo.replace_connection(
         IntervalsConnectionCreate(
             user_id="coach-user-1",
             intervals_athlete_id="i135168",
@@ -371,4 +374,4 @@ async def test_callback_success_exchanges_code_and_redirects_connected() -> None
 
     assert response.status_code == 302
     assert response.headers["location"] == "https://coach.nigels.dev/profile?intervals=connected"
-    assert repo.get_active_connection("coach-user-1") is not None
+    assert await repo.get_active_connection("coach-user-1") is not None
