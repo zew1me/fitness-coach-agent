@@ -1378,13 +1378,13 @@ describe("streamCoachTurn", () => {
       orchestratorMocks.agentsRun.mock.calls as unknown as unknown[][]
     )[1];
     expect(followupCall?.[1]).toEqual(leadOutput);
-    // The athlete got a reply, so this is a warning under its own fingerprint,
-    // not an error that reads as an outage in the weekly report.
+    // The tool-round budget should make this unreachable, so reaching it is an
+    // error — reported under its own fingerprint, apart from pre-budget events.
     expect(sentryMocks.captureException).toHaveBeenCalledWith(
       maxTurns,
       expect.objectContaining({
         fingerprint: ["coach-max-turns-salvaged"],
-        level: "warning",
+        level: "error",
         tags: { subsystem: "coach-max-turns" },
       }),
     );

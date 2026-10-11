@@ -916,13 +916,16 @@ export function streamCoachTurn({
                                 tool_names: toolRounds.toolNames.join(","),
                                 tool_rounds_used: toolRounds.roundsUsed,
                               };
-                              // Warning, not error: the athlete still gets a reply
-                              // from the salvage path below. Its own fingerprint
-                              // keeps it apart from the pre-budget spin events.
+                              // Error, not warning: the tool-round budget makes
+                              // this unreachable, so reaching it means that
+                              // invariant broke — even though the athlete still
+                              // gets a reply from the salvage path below. Its own
+                              // fingerprint keeps it apart from the pre-budget
+                              // spin events.
                               Sentry.captureException(error, {
                                 extra,
                                 fingerprint: ["coach-max-turns-salvaged"],
-                                level: "warning",
+                                level: "error",
                                 tags: { subsystem: "coach-max-turns" },
                               });
                               Sentry.logger.warn(
