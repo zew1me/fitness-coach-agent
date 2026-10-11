@@ -646,3 +646,46 @@ async def test_save_activity_from_text_endpoint_persists_real_activity_summary(
     assert saved_activity.activity_summary["fueling"]["calories_kcal"] > 0
     assert saved_activity.activity_summary["food_items"]
     assert saved_activity.activity_summary["thresholds_used"]["ftp_w"] == 250
+
+
+@pytest.mark.asyncio
+async def test_daily_activity_tss_pages_and_isolates_live_rows(repo: SupabaseRepository) -> None:
+    """Exercise real UUID ordering, date filters, and pagination beyond the API row limit."""
+    owner = f"test-load-{uuid.uuid4()}"
+    other = f"test-load-{uuid.uuid4()}"
+    day = date(2026, 7, 3)
+    previous = date(2026, 7, 2)
+    client = repo._require_client()
+    try:
+        for user_id in (owner, other):
+            await repo.upsert_athlete_profile(AthleteProfile(user_id=user_id))
+        rows: list[dict[str, Any]] = [
+            {
+                "user_id": owner,
+                "sport": "cycling",
+                "activity_date": day.isoformat(),
+                "tss": 1.0,
+            }
+            for _ in range(1101)
+        ]
+        rows.extend(
+            [
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-02", "tss": 84},
+                {"user_id": owner, "sport": "running", "activity_date": "2026-07-03", "tss": 42},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-03", "tss": None},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-01", "tss": 999},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-04", "tss": 999},
+                {"user_id": other, "sport": "cycling", "activity_date": "2026-07-03", "tss": 999},
+            ]
+        )
+        client.table("activities").insert(rows).execute()
+
+        aggregate = await repo.get_daily_activity_tss(owner, since=previous, through=day)
+        cycling = await repo.get_daily_activity_tss(
+            owner, since=previous, through=day, sport="cycling"
+        )
+        assert aggregate == {previous: 84.0, day: 1143.0}
+        assert cycling == {previous: 84.0, day: 1101.0}
+        assert await repo.get_daily_activity_tss(other, since=day, through=day) == {day: 999.0}
+    finally:
+        client.table("athlete_profiles").delete().in_("user_id", [owner, other]).execute()
