@@ -23,7 +23,7 @@ import os
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, cast
 
 import pytest
@@ -31,6 +31,7 @@ from httpx import ASGITransport, AsyncClient
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
+from backend.engine.training_load import compute_next_load
 from backend.models.athlete import (
     AthleteProfile,
     RecoveryLog,
@@ -772,3 +773,78 @@ async def test_load_snapshot_upserts_replace_aggregate_and_preserve_sports(
         assert other_snapshot is not None and other_snapshot.daily_tss == 21.0
     finally:
         client.table("athlete_profiles").delete().in_("user_id", [owner, other]).execute()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sport", [None, "cycling"])
+async def test_large_history_rebuild_is_idempotent_through_live_database(
+    repo: SupabaseRepository, monkeypatch, sport: str | None
+) -> None:
+    owner = f"test-rebuild-{uuid.uuid4()}"
+    today = date.today()
+    since = today - timedelta(days=2)
+    seed_date = since - timedelta(days=1)
+    client = repo._require_client()
+
+    def context() -> UserContext:
+        return UserContext(user_id=owner, scopes=["plans:write"], client_id="test", grant_id="test")
+
+    try:
+        await repo.upsert_athlete_profile(AthleteProfile(user_id=owner))
+        await repo.upsert_load_snapshots(
+            owner, [{"snapshot_date": seed_date, "ctl": 12.0, "atl": 18.0}], sport=sport
+        )
+        client.table("activities").insert(
+            [
+                {"user_id": owner, "sport": "cycling", "activity_date": today.isoformat(), "tss": 1}
+                for _ in range(1101)
+            ]
+            + [
+                {
+                    "user_id": owner,
+                    "sport": "cycling",
+                    "activity_date": since.isoformat(),
+                    "tss": 84,
+                }
+            ]
+        ).execute()
+        monkeypatch.setattr(api_index, "repo", repo)
+        api_index.app.dependency_overrides[api_index.require_user_context] = context
+        async with AsyncClient(
+            transport=ASGITransport(app=api_index.app), base_url="http://testserver"
+        ) as http:
+            first = await http.post(
+                "/api/engine/recompute-load", json={"since": since.isoformat(), "sport": sport}
+            )
+            second = await http.post(
+                "/api/engine/recompute-load", json={"since": since.isoformat(), "sport": sport}
+            )
+        assert first.status_code == second.status_code == 200
+        assert first.json() == second.json()
+        assert second.json()["seed_date"] == seed_date.isoformat()
+        assert second.json()["snapshots_written"] == 3
+        rows = (
+            client.table("daily_load_snapshots")
+            .select("snapshot_date,sport,daily_tss,ctl,atl,tsb")
+            .eq("user_id", owner)
+            .order("snapshot_date")
+            .execute()
+            .data
+        )
+        assert len(rows) == 4  # One seed plus three days, even after two aggregate rebuilds.
+        ctl, atl = 12.0, 18.0
+        for row, tss in zip(rows[1:], [84.0, 0.0, 1101.0], strict=True):
+            ctl, atl, tsb = compute_next_load(ctl, atl, tss)
+            assert row["sport"] == sport
+            assert row["daily_tss"] == tss
+            assert (row["ctl"], row["atl"], row["tsb"]) == (
+                round(ctl, 1),
+                round(atl, 1),
+                round(tsb, 1),
+            )
+        current = await repo.get_latest_load(owner, sport=sport)
+        assert current is not None
+        assert current.snapshot_date == today
+        assert current.ctl == second.json()["latest_ctl"] == round(ctl, 1)
+    finally:
+        client.table("athlete_profiles").delete().eq("user_id", owner).execute()
