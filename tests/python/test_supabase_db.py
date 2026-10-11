@@ -42,6 +42,7 @@ from backend.models.intervals import IntervalsConnectionCreate
 from backend.models.training import Goal, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepository
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
+from backend.services.intervals import IntervalsOAuthService, TokenCipher
 
 _SUPABASE_CONFIGURED = bool(
     os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -450,6 +451,41 @@ async def test_replace_intervals_connection_serializes_concurrent_replaces(
     assert sum(1 for row in rows if row["revoked_at"] is None) == 1
     active = await intervals_repo.get_active_connection(unique_user)
     assert active is not None
+
+
+@pytest.mark.asyncio
+async def test_async_intervals_connection_lifecycle(
+    repo: SupabaseRepository,
+    unique_user: str,
+    intervals_repo: IntervalsRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read, decrypt, and revoke a connection through the service and real async client."""
+    monkeypatch.setattr(api_index.settings, "intervals_token_encryption_secret", "db-test-key")
+    monkeypatch.setattr(api_index.settings, "intervals_dev_api_key", "")
+    monkeypatch.setattr(api_index.settings, "intervals_dev_athlete_id", "")
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["cycling"], coaching_state="active")
+    )
+    service = IntervalsOAuthService(repository=intervals_repo)
+    assert not (await service.get_status(unique_user)).connected
+    saved = await intervals_repo.replace_connection(
+        IntervalsConnectionCreate(
+            user_id=unique_user,
+            intervals_athlete_id="i123",
+            access_token_ciphertext=TokenCipher("db-test-key").encrypt("db-upstream-token"),
+            scopes=["ACTIVITY:READ"],
+        )
+    )
+    status = await service.get_status(unique_user)
+    assert status.connected
+    assert status.intervals_athlete_id == saved.intervals_athlete_id
+    assert (await service.resolve_auth(unique_user)).auth_header == {
+        "Authorization": "Bearer db-upstream-token"
+    }
+    assert not (await service.disconnect(unique_user)).connected
+    assert await intervals_repo.get_active_connection(unique_user) is None
+    assert not await intervals_repo.revoke_active_connection(unique_user)
 
 
 @pytest.mark.asyncio

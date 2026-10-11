@@ -133,7 +133,7 @@ class IntervalsConnectionRepository(Protocol):
 
 
 class IntervalsOAuthService:
-    """Owns Intervals.icu OAuth URL construction, token exchange, and status."""
+    """Owns Intervals.icu OAuth URL construction, token exchange, and async persistence."""
 
     def __init__(
         self,
