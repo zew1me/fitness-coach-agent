@@ -646,3 +646,85 @@ async def test_save_activity_from_text_endpoint_persists_real_activity_summary(
     assert saved_activity.activity_summary["fueling"]["calories_kcal"] > 0
     assert saved_activity.activity_summary["food_items"]
     assert saved_activity.activity_summary["thresholds_used"]["ftp_w"] == 250
+
+
+@pytest.mark.asyncio
+async def test_daily_activity_tss_pages_and_isolates_live_rows(repo: SupabaseRepository) -> None:
+    """Exercise real UUID ordering, date filters, and pagination beyond the API row limit."""
+    owner = f"test-load-{uuid.uuid4()}"
+    other = f"test-load-{uuid.uuid4()}"
+    day = date(2026, 7, 3)
+    previous = date(2026, 7, 2)
+    client = repo._require_client()
+    try:
+        for user_id in (owner, other):
+            await repo.upsert_athlete_profile(AthleteProfile(user_id=user_id))
+        rows: list[dict[str, Any]] = [
+            {
+                "user_id": owner,
+                "sport": "cycling",
+                "activity_date": day.isoformat(),
+                "tss": 1.0,
+            }
+            for _ in range(1101)
+        ]
+        rows.extend(
+            [
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-02", "tss": 84},
+                {"user_id": owner, "sport": "running", "activity_date": "2026-07-03", "tss": 42},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-03", "tss": None},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-01", "tss": 999},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-04", "tss": 999},
+                {"user_id": other, "sport": "cycling", "activity_date": "2026-07-03", "tss": 999},
+            ]
+        )
+        client.table("activities").insert(rows).execute()
+
+        aggregate = await repo.get_daily_activity_tss(owner, since=previous, through=day)
+        cycling = await repo.get_daily_activity_tss(
+            owner, since=previous, through=day, sport="cycling"
+        )
+        assert aggregate == {previous: 84.0, day: 1143.0}
+        assert cycling == {previous: 84.0, day: 1101.0}
+        assert await repo.get_daily_activity_tss(other, since=day, through=day) == {day: 999.0}
+    finally:
+        client.table("athlete_profiles").delete().in_("user_id", [owner, other]).execute()
+
+
+@pytest.mark.asyncio
+async def test_load_snapshot_upserts_replace_aggregate_and_preserve_sports(
+    repo: SupabaseRepository,
+) -> None:
+    """NULL aggregate keys must conflict just like concrete sport keys."""
+    owner = f"test-snapshot-{uuid.uuid4()}"
+    other = f"test-snapshot-{uuid.uuid4()}"
+    day = date(2026, 7, 3)
+    client = repo._require_client()
+    try:
+        for user_id in (owner, other):
+            await repo.upsert_athlete_profile(AthleteProfile(user_id=user_id))
+        await repo.upsert_load_snapshots(other, [{"snapshot_date": day, "daily_tss": 21.0}])
+        for sport in (None, "cycling", "running"):
+            await repo.upsert_load_snapshots(
+                owner, [{"snapshot_date": day, "daily_tss": 42.0}], sport=sport
+            )
+            await repo.upsert_load_snapshots(
+                owner, [{"snapshot_date": day, "daily_tss": 84.0}], sport=sport
+            )
+        rows = (
+            client.table("daily_load_snapshots")
+            .select("sport,daily_tss")
+            .eq("user_id", owner)
+            .execute()
+            .data
+        )
+        assert len(rows) == 3
+        assert {row["sport"]: row["daily_tss"] for row in rows} == {
+            None: 84.0,
+            "cycling": 84.0,
+            "running": 84.0,
+        }
+        other_snapshot = await repo.get_latest_load(other)
+        assert other_snapshot is not None and other_snapshot.daily_tss == 21.0
+    finally:
+        client.table("athlete_profiles").delete().in_("user_id", [owner, other]).execute()

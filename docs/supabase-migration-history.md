@@ -26,6 +26,14 @@
 - `20260806003910_unlink_plan_workout_from_activity_atomic.sql` — service-role RPC for atomic bidirectional workout/activity unlinking
 - `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
 - `20260920021259_restore_service_role_table_privileges.sql` — restores PostgREST DML privileges required by server-side repositories after a fresh bootstrap
+- `20261011183239_load_snapshot_null_identity.sql` — deduplicates aggregate load snapshots and makes `(user_id, snapshot_date, sport)` unique with NULLs treated as equal
+
+`20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
+aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
+only older duplicate aggregate snapshots. Concrete sport series are preserved. Cleanup and
+constraint replacement take an exclusive table lock in one transaction, so apply during an
+appropriate migration window. Rebuilding the affected dates afterward can correct previously
+computed values; this migration fixes row identity, not historical TSS calculations.
 
 `20260625172251` deliberately stores compactable model context separately from
 `chat_messages`. Applying or resetting model state must never rewrite the

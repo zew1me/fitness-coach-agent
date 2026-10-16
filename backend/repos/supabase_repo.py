@@ -25,7 +25,14 @@ from backend.models.chat import (
     MessageAttachment,
     MessagePart,
 )
-from backend.models.training import Activity, DailyLoadSnapshot, Goal, PlanWorkout, TrainingPlan
+from backend.models.training import (
+    Activity,
+    ActivityLoadInput,
+    DailyLoadSnapshot,
+    Goal,
+    PlanWorkout,
+    TrainingPlan,
+)
 from supabase import Client, create_client
 
 
@@ -524,6 +531,52 @@ class SupabaseRepository:
             .execute()
         )
         return [Activity.model_validate(r) for r in (response.data or [])]
+
+    async def get_daily_activity_tss(
+        self,
+        user_id: str,
+        *,
+        since: date,
+        through: date,
+        sport: str | None = None,
+    ) -> dict[date, float]:
+        """Read all load inputs before returning totals; never return a partial history.
+
+        The immutable primary key is the cursor: dates need not be sorted to sum daily TSS.
+        An empty page ends the scan, so a server row cap below our page size cannot truncate it.
+        Separate requests are not a transactional snapshot; callers coordinating concurrent
+        activity changes must retry their invalidated window after those changes commit.
+        """
+        if since > through:
+            raise ValueError("Load window start must not be after its end.")
+        client = self._require_client()
+        daily_tss: dict[date, float] = {}
+        cursor: UUID | None = None
+        while True:
+            query = (
+                client.table("activities")
+                .select("id,activity_date,tss")
+                .eq("user_id", user_id)
+                .gte("activity_date", since.isoformat())
+                .lte("activity_date", through.isoformat())
+                .order("id")
+                .limit(500)
+            )
+            if sport is not None:
+                query = query.eq("sport", sport)
+            if cursor is not None:
+                query = query.gt("id", str(cursor))
+            response = await asyncio.to_thread(query.execute)
+            rows = response.data or []
+            if not rows:
+                return daily_tss
+            for row in rows:
+                activity = ActivityLoadInput.model_validate(row)
+                if cursor is not None and activity.id <= cursor:
+                    raise ValueError("Load input cursor did not advance.")
+                cursor = activity.id
+                day = activity.activity_date
+                daily_tss[day] = daily_tss.get(day, 0.0) + (activity.tss or 0.0)
 
     async def list_synced_intervals_keys(self, user_id: str) -> set[str]:
         client = self._require_client()
