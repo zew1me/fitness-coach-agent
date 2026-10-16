@@ -5,8 +5,10 @@ Run this suite specifically:
     uv run pytest tests/python/test_auth_flow.py -v
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -19,7 +21,7 @@ from tests.python.test_api import FakeAuthService, InMemoryOAuthRepository
 class AuthFlowFakeService(FakeAuthService):
     """Raises ValueError for bad tokens, matching what the real Supabase HTTP call raises."""
 
-    def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
+    async def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
         if supabase_access_token != "supabase-access-token":
             raise ValueError("Supabase rejected the access token.")
         return BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
@@ -112,28 +114,48 @@ async def test_otp_login_round_trip(
 
 
 @pytest.mark.asyncio
-async def test_browser_token_offloads_sync_repository_work(
+async def test_browser_token_awaits_repository_without_blocking_other_requests(
     auth_client: tuple[AsyncClient, AuthFlowFakeService],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, service = auth_client
     browser_session = BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
     cookie = service.create_browser_session_token(browser_session)
-    calls: list[tuple[Any, tuple[Any, ...]]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = service._oauth_repo.upsert_grant
 
-    async def fake_to_thread(function: Any, *args: Any) -> Any:
-        calls.append((function, args))
-        return function(*args)
+    async def slow_upsert(**kwargs: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await original(**kwargs)
 
-    monkeypatch.setattr(api_index.asyncio, "to_thread", fake_to_thread)
+    upsert = AsyncMock(side_effect=slow_upsert)
+    monkeypatch.setattr(service._oauth_repo, "upsert_grant", upsert)
 
-    response = await client.post(
-        "/api/oauth/browser-token",
-        cookies={"coach_browser_session": cookie},
+    def forbidden_offload(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("OAuth must await async persistence, not use a thread bridge")
+
+    monkeypatch.setattr(asyncio, "to_thread", forbidden_offload)
+    pending = asyncio.create_task(
+        client.post("/api/oauth/browser-token", cookies={"coach_browser_session": cookie})
     )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        health = await asyncio.wait_for(client.get("/health"), timeout=1)
+        assert health.status_code == 200
+        assert not pending.done()
+    finally:
+        release.set()
+        response = await pending
 
     assert response.status_code == 200
-    assert calls == [(service.create_browser_token, (browser_session,))]
+    upsert.assert_awaited_once_with(
+        user_id=browser_session.user_id,
+        client_id=api_index.settings.base_url,
+        redirect_uri=api_index.settings.base_url,
+        scopes=sorted(service._supported_scopes),
+    )
 
 
 @pytest.mark.asyncio

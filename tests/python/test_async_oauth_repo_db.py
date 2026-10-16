@@ -12,16 +12,25 @@ The explicit opt-in prevents accidental writes when hosted credentials are prese
 
 from __future__ import annotations
 
+import base64
 import os
 import uuid
 from collections.abc import AsyncIterator
 from hashlib import sha256
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from backend.config import settings
+from backend.models.auth import (
+    BrowserSessionContext,
+    OAuthAuthorizeRequest,
+    OAuthRevokeRequest,
+    OAuthTokenRequest,
+)
 from backend.repos.async_oauth_repo import AsyncOAuthRepository
+from backend.services.auth import AuthService, OAuthInvalidGrantError
 from supabase import AsyncClient as SupabaseAsyncClient
 
 _GRANTS_TABLE = "oauth_grants"
@@ -167,3 +176,50 @@ async def test_full_async_oauth_lifecycle_persists_hashes_and_revocations(
     cascaded_token = await repo.get_refresh_token(replacement_raw_token)
     assert revoked_grant is not None and revoked_grant.revoked_at is not None
     assert cascaded_token is not None and cascaded_token.revoked_at is not None
+
+
+async def test_auth_service_awaits_live_oauth_persistence(
+    live_repository: tuple[AsyncOAuthRepository, str],
+) -> None:
+    """The service cutover must work with actual async responses, not just async fakes."""
+    repo, user_id = live_repository
+    service = AuthService(oauth_repo=repo)
+    session = BrowserSessionContext(user_id=user_id)
+    browser_token = await service.create_browser_token(session)
+    assert (
+        await service.get_user_context_from_bearer(browser_token.access_token)
+    ).user_id == user_id
+
+    verifier = "integration-test-verifier"
+    challenge = base64.urlsafe_b64encode(sha256(verifier.encode()).digest()).decode().rstrip("=")
+    request = OAuthAuthorizeRequest(
+        client_id=f"db-service-client-{uuid.uuid4()}",
+        redirect_uri="https://example.com/oauth/callback",
+        scope="profile:read",
+        code_challenge=challenge,
+        code_challenge_method="S256",
+    )
+    await service.approve_consent(request=request, browser_session=session)
+    redirect = await service.build_authorize_redirect(request=request, browser_session=session)
+    code = parse_qs(urlparse(redirect).query)["code"][0]
+    token = await service.exchange_token_request(
+        OAuthTokenRequest(
+            grant_type="authorization_code",
+            client_id=request.client_id,
+            redirect_uri=request.redirect_uri,
+            code=code,
+            code_verifier=verifier,
+        )
+    )
+    refreshed = await service.exchange_token_request(
+        OAuthTokenRequest(
+            grant_type="refresh_token",
+            client_id=request.client_id,
+            refresh_token=token.refresh_token,
+        )
+    )
+    assert refreshed.refresh_token != token.refresh_token
+    assert (await service.get_user_context_from_bearer(refreshed.access_token)).user_id == user_id
+    assert await service.revoke(OAuthRevokeRequest(token=refreshed.access_token))
+    with pytest.raises(OAuthInvalidGrantError, match="revoked"):
+        await service.get_user_context_from_bearer(refreshed.access_token)
