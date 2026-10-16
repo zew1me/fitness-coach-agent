@@ -47,7 +47,10 @@ class InMemoryIntervalsRepository:
     def __init__(self) -> None:
         self.rows: list[IntervalsConnectionRecord] = []
 
-    def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None:
+    async def aclose(self) -> None:
+        pass
+
+    async def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None:
         return next(
             (
                 row
@@ -57,7 +60,7 @@ class InMemoryIntervalsRepository:
             None,
         )
 
-    def replace_connection(
+    async def replace_connection(
         self, connection: IntervalsConnectionCreate
     ) -> IntervalsConnectionRecord:
         now = datetime.now(UTC)
@@ -76,8 +79,8 @@ class InMemoryIntervalsRepository:
         self.rows.append(row)
         return row
 
-    def revoke_active_connection(self, user_id: str) -> bool:
-        row = self.get_active_connection(user_id)
+    async def revoke_active_connection(self, user_id: str) -> bool:
+        row = await self.get_active_connection(user_id)
         if row is None:
             return False
         row.revoked_at = datetime.now(UTC)
@@ -138,7 +141,7 @@ def configured_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VERCEL_URL", raising=False)
 
 
-def test_dev_bypass_resolves_basic_auth(
+async def test_dev_bypass_resolves_basic_auth(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -151,7 +154,7 @@ def test_dev_bypass_resolves_basic_auth(
         "i135168",
     )
 
-    auth = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth(
+    auth = await IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth(
         "any-logged-in-user"
     )
 
@@ -162,7 +165,7 @@ def test_dev_bypass_resolves_basic_auth(
     assert "using local Intervals API-key bypass athlete_id=i135168" in caplog.text
 
 
-def test_dev_bypass_is_disabled_on_vercel(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dev_bypass_is_disabled_on_vercel(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "backend.services.intervals.settings.intervals_dev_api_key",
         "local-api-key",
@@ -174,14 +177,16 @@ def test_dev_bypass_is_disabled_on_vercel(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("VERCEL_URL", "coach-preview.vercel.app")
 
     with pytest.raises(IntervalsNotConnectedError):
-        _ = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth("user-1")
+        _ = await IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth(
+            "user-1"
+        )
 
 
 @pytest.mark.parametrize(
     ("api_key", "athlete_id"),
     [("local-api-key", ""), ("", "i135168")],
 )
-def test_half_configured_dev_bypass_fails_closed(
+async def test_half_configured_dev_bypass_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     api_key: str,
     athlete_id: str,
@@ -196,12 +201,14 @@ def test_half_configured_dev_bypass_fails_closed(
     )
 
     with pytest.raises(IntervalsConfigurationError, match="must both be configured"):
-        _ = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth("user-1")
+        _ = await IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth(
+            "user-1"
+        )
 
 
-def test_oauth_auth_decrypts_stored_token() -> None:
+async def test_oauth_auth_decrypts_stored_token() -> None:
     repo = InMemoryIntervalsRepository()
-    _ = repo.replace_connection(
+    _ = await repo.replace_connection(
         IntervalsConnectionCreate(
             user_id="user-1",
             intervals_athlete_id="i135168",
@@ -214,19 +221,21 @@ def test_oauth_auth_decrypts_stored_token() -> None:
         )
     )
 
-    auth = IntervalsOAuthService(repository=repo).resolve_auth("user-1")
+    auth = await IntervalsOAuthService(repository=repo).resolve_auth("user-1")
 
     assert auth.athlete_id == "i135168"
     assert auth.auth_header == {"Authorization": "Bearer oauth-access-token"}
     assert auth.mode == "oauth"
 
 
-def test_oauth_auth_requires_active_connection() -> None:
+async def test_oauth_auth_requires_active_connection() -> None:
     with pytest.raises(IntervalsNotConnectedError, match="not connected"):
-        _ = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth("user-1")
+        _ = await IntervalsOAuthService(repository=InMemoryIntervalsRepository()).resolve_auth(
+            "user-1"
+        )
 
 
-def test_dev_bypass_returns_synthetic_connected_status(
+async def test_dev_bypass_returns_synthetic_connected_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -238,7 +247,9 @@ def test_dev_bypass_returns_synthetic_connected_status(
         "i135168",
     )
 
-    status = IntervalsOAuthService(repository=InMemoryIntervalsRepository()).get_status("user-1")
+    status = await IntervalsOAuthService(repository=InMemoryIntervalsRepository()).get_status(
+        "user-1"
+    )
 
     assert status.connected is True
     assert status.intervals_athlete_id == "i135168"

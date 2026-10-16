@@ -194,7 +194,10 @@ async def log_startup() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await log_startup()
-    yield
+    try:
+        yield
+    finally:
+        await intervals_service.aclose()
 
 
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
@@ -536,7 +539,7 @@ async def intervals_status(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        status = intervals_service.get_status(user_context.user_id)
+        status = await intervals_service.get_status(user_context.user_id)
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
@@ -547,7 +550,7 @@ async def intervals_disconnect(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        status = intervals_service.disconnect(user_context.user_id)
+        status = await intervals_service.disconnect(user_context.user_id)
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
@@ -564,7 +567,7 @@ async def intervals_sync(  # noqa: C901
 ) -> Mapping[str, object]:
     user_id = user_context.user_id
     try:
-        auth = intervals_service.resolve_auth(user_id)
+        auth = await intervals_service.resolve_auth(user_id)
     except IntervalsNotConnectedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (
