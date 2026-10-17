@@ -1575,9 +1575,10 @@ the narrow-viewport dot mode (`coach-calendar.module.css`, `.chipLabel { display
    which is what removes the one-sided-link failure mode rather than merely detecting it.
 3. **The load rebuild is the only eventually-consistent seam**, and it depends on #447, whose absence is
    invisible until you specifically test a backward window.
-4. **The coach gets exactly one tool call per turn** (`lib/agent/coach-tools.ts:382`,
-   `isEnabled: !runContext.context.toolCalled`). A dedup conversation that needs _find → present →
-   merge_ therefore spans multiple turns by construction. The Tier-B flow must be designed around that.
+4. **The coach gets at most two tool rounds per turn** (`MAX_TOOL_ROUNDS` in
+   `lib/agent/tool-round-budget.ts`). A dedup conversation that needs _find → present → merge_ therefore
+   spans multiple turns by construction, because the athlete must confirm between present and merge.
+   The Tier-B flow must be designed around that.
 5. **Backend/frontend activity shapes drift silently.** `calendarActivitySchema` is a `z.looseObject`
    and the backend dumps the full Pydantic `Activity`, so new fields cross the wire unvalidated. Adding
    `source_count` will "just work", which is exactly the hazard.

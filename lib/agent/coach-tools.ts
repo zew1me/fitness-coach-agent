@@ -3,6 +3,7 @@ import { type ToolSet } from "ai";
 
 import { coachingMemoryToolSchema } from "./coaching-memory";
 import type { SupabaseAgentSession } from "./supabase-agent-session";
+import type { ToolRoundBudgetContext } from "./tool-round-budget";
 import { coachToolDefinitions } from "./tools";
 import { parseUploadedFileText } from "./uploaded-file-stub";
 
@@ -62,9 +63,9 @@ async function safePostEngine<TInput extends object>(
   } catch {
     // Deliberately cause-neutral: this catch also covers timeouts and auth
     // failures, so it must not assert why the upload failed. It must also not
-    // instruct a retry — every coach tool is disabled for the rest of the turn
-    // once one has run (see the isEnabled gate in createAgentCoachTools), so a
-    // retry is structurally impossible and only burns turns against maxTurns.
+    // instruct a retry: a turn has only a small tool-round budget (see
+    // ToolRoundBudget), and re-sending the same reference fails the same way, so a
+    // retry only spends the round the coach needs for anything else.
     return {
       status: "error",
       detail:
@@ -371,7 +372,10 @@ export function executeCoachTool(
   throw new Error(`Unknown coach tool: ${name}`);
 }
 
-export type CoachAgentRunContext = {
+export type CoachAgentRunContext = ToolRoundBudgetContext & {
+  // True once any tool has started this turn. Drives the post-run recovery paths
+  // (acknowledgement follow-up, no tier fallback after a write); availability of
+  // tools is governed by toolRounds, not by this flag.
   toolCalled: boolean;
   // True when this turn's messages include a gpx/fit/tcx activity file or a .zip
   // archive attachment. Gates save_activity_from_text so the model can't route a
@@ -380,6 +384,28 @@ export type CoachAgentRunContext = {
   // case). Zip archives belong to process_uploaded_file, which unpacks them.
   hasActivityFileAttachment: boolean;
 };
+
+// Activity writes have no dedup yet (docs/ACTIVITY_MATERIALIZATION_DESIGN.md), so
+// re-running one of these in a later tool round would store the same workout
+// twice and inflate training load for weeks. One round of them per reply is all a
+// legitimate upload needs; later rounds keep every other tool.
+const FIRST_ROUND_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  "process_uploaded_file",
+  "save_activity_from_text",
+]);
+
+function isCoachToolEnabled(
+  name: string,
+  context: CoachAgentRunContext,
+): boolean {
+  const { toolRounds } = context;
+  if (!toolRounds.hasRoundsLeft()) return false;
+  if (FIRST_ROUND_ONLY_TOOLS.has(name) && toolRounds.roundsUsed > 0)
+    return false;
+  return (
+    name !== "save_activity_from_text" || !context.hasActivityFileAttachment
+  );
+}
 
 export function createAgentCoachTools(
   context: CoachToolContext,
@@ -392,9 +418,7 @@ export function createAgentCoachTools(
       description: definition.description,
       parameters: definition.inputSchema,
       isEnabled: ({ runContext }) =>
-        !runContext.context.toolCalled &&
-        (name !== "save_activity_from_text" ||
-          !runContext.context.hasActivityFileAttachment),
+        isCoachToolEnabled(name, runContext.context),
       execute: (input: unknown) => executeCoachTool(name, input, context),
     }),
   );
@@ -405,7 +429,8 @@ export function createAgentCoachTools(
         description:
           "Maintain non-authoritative coaching commitments, preferences, follow-ups, insights, and outcomes. Never duplicate profile, goal, schedule, plan, threshold, load, or recovery data.",
         parameters: coachingMemoryToolSchema,
-        isEnabled: ({ runContext }) => !runContext.context.toolCalled,
+        isEnabled: ({ runContext }) =>
+          runContext.context.toolRounds.hasRoundsLeft(),
         execute: async (input) => {
           await context.modelSession?.updateCoachingMemory(input.operation);
           return { status: "updated" };
