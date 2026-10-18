@@ -101,7 +101,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("CoachChat", () => {
+describe("CoachChat session loading", () => {
   it("shows a branded and accessible session loading experience", () => {
     globalThis.fetch = vi.fn(
       () => new Promise<Response>(() => undefined),
@@ -274,7 +274,9 @@ describe("CoachChat", () => {
       }),
     );
   });
+});
 
+describe("CoachChat thread pagination", () => {
   it("renders a bounded recent message buffer until older history is requested", async () => {
     const threadMessages = Array.from({ length: 70 }, (_, index) => ({
       id: `message-${index}`,
@@ -681,7 +683,9 @@ describe("CoachChat", () => {
     expect(screen.queryByText("Unable to load older messages.")).toBeNull();
     expect(screen.queryByText("stale older page failed")).toBeNull();
   });
+});
 
+describe("CoachChat local and remote history", () => {
   it("restores locally persisted chat history when the local thread endpoint is unavailable", async () => {
     localStorage.setItem(
       "fitness-coach.local-chat-thread.athlete-1",
@@ -955,7 +959,9 @@ describe("CoachChat", () => {
       ]);
     });
   });
+});
 
+describe("CoachChat onboarding", () => {
   it("uses friendly signed-in copy instead of showing a raw user id", async () => {
     const userId = "aa687ce1-5189-4c28-bf24-e8b1574ebc5b";
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -1187,7 +1193,9 @@ describe("CoachChat", () => {
       ).toBe("I'm training for running and want help building consistency.");
     });
   });
+});
 
+describe("CoachChat account menu", () => {
   it("opens profile preferences from the account menu without raw id editing", async () => {
     const userId = "aa687ce1-5189-4c28-bf24-e8b1574ebc5b";
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -1436,7 +1444,9 @@ describe("CoachChat", () => {
 
     createElementSpy.mockRestore();
   });
+});
 
+describe("CoachChat message sending", () => {
   it("sends composer messages through the AI SDK useChat hook", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -1781,7 +1791,9 @@ describe("CoachChat", () => {
     expect(screen.getByRole("link", { name: /Sign in again/i })).toBeTruthy();
     expect(screen.queryByText(/^Unauthorized$/i)).toBeNull();
   });
+});
 
+describe("CoachChat send status", () => {
   it("shows a thread sync status while reloading after a sent message", async () => {
     let resolveThreadReload: (() => void) | null = null;
     let threadRequestCount = 0;
@@ -1958,7 +1970,9 @@ describe("CoachChat", () => {
 
     await act(() => Promise.resolve(resolveSend?.()));
   });
+});
 
+describe("CoachChat message rendering", () => {
   it("renders persisted file parts inline so images survive a reload (issue #149)", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -2314,7 +2328,9 @@ describe("CoachChat", () => {
     expect(screen.getByText(/Looking up your info/i)).toBeTruthy();
     expect(screen.queryByText(/Using get_athlete_context/i)).toBeNull();
   });
+});
 
+describe("CoachChat image attachments", () => {
   it("passes uploaded image attachments to the AI SDK message", async () => {
     Object.defineProperty(URL, "createObjectURL", {
       configurable: true,
@@ -2699,7 +2715,9 @@ describe("CoachChat", () => {
       });
     });
   });
+});
 
+describe("CoachChat file attachments", () => {
   it("uploads GPX attachments through the chat attachment endpoint and shows a file badge", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -2967,7 +2985,9 @@ describe("CoachChat", () => {
       });
     });
   });
+});
 
+describe("CoachChat clipboard paste", () => {
   it("pasting an image from the clipboard attaches it via the presign upload flow", async () => {
     Object.defineProperty(URL, "createObjectURL", {
       configurable: true,
