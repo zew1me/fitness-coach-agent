@@ -113,8 +113,10 @@ def configured_async_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "intervals_dev_api_key", "")
     monkeypatch.setattr(settings, "intervals_dev_athlete_id", "")
     monkeypatch.delenv("VERCEL_URL", raising=False)
-    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
-        user_id="user-1"
+    monkeypatch.setitem(
+        api_index.app.dependency_overrides,
+        api_index.require_user_context,
+        lambda: UserContext(user_id="user-1"),
     )
 
 
