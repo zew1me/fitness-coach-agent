@@ -22,6 +22,7 @@ jobs:
       - run: bun install
       - run: bun run lint
       - run: bun run lint:css
+      - run: bun run lint:actions
       - run: bun run ast-grep:check
       - run: bun run typecheck
       - run: bun run test
