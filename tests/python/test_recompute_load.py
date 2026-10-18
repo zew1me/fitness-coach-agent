@@ -1,14 +1,17 @@
 from copy import deepcopy
 from datetime import date, timedelta
+from uuid import NAMESPACE_URL, UUID, uuid5
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient, Response
+from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
 from backend.engine.training_load import compute_next_load
 from backend.models.auth import UserContext
 from backend.repos.supabase_repo import SupabaseRepository
-from tests.python.test_supabase_repo import FakeSupabaseClient
+from tests.python.test_supabase_repo import FakeSupabaseClient, FakeTableQuery
 
 USER_ID = "athlete-1"
 
@@ -56,7 +59,7 @@ def _load_values(rows: list[dict[str, object]]) -> list[dict[str, object]]:
 
 def _activity_row(activity_date: date, tss: float) -> dict[str, object]:
     return {
-        "id": f"activity-{activity_date.isoformat()}",
+        "id": str(uuid5(NAMESPACE_URL, activity_date.isoformat())),
         "user_id": USER_ID,
         "sport": "cycling",
         "activity_date": activity_date.isoformat(),
@@ -240,33 +243,13 @@ async def test_stale_seed_rebuild_is_stable_across_runs(monkeypatch) -> None:
 
 
 @pytest.mark.usefixtures("as_athlete")
-async def test_rebuild_window_over_the_activity_cap_is_rejected_before_writing(monkeypatch) -> None:
+@pytest.mark.parametrize("activity_count", [500, 501, 1102])
+async def test_large_history_rebuild_includes_every_day(monkeypatch, activity_count) -> None:
     today = date.today()
-    over_cap = api_index._RECOMPUTE_ACTIVITY_LIMIT + 1
-    since = today - timedelta(days=over_cap - 1)
+    since = today - timedelta(days=activity_count - 1)
     client = FakeSupabaseClient(
         activity_rows=[
-            _activity_row(today - timedelta(days=offset), 50.0) for offset in range(over_cap)
-        ],
-    )
-    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
-
-    response = await _post_recompute_load({"since": since.isoformat()})
-
-    assert response.status_code == 409, response.text
-    # The oldest activities would have been dropped by the newest-first cap and recomputed as
-    # zero TSS, so nothing may be persisted.
-    assert _load_rows(client) == []
-
-
-@pytest.mark.usefixtures("as_athlete")
-async def test_rebuild_window_exactly_at_the_activity_cap_still_recomputes(monkeypatch) -> None:
-    today = date.today()
-    at_cap = api_index._RECOMPUTE_ACTIVITY_LIMIT
-    since = today - timedelta(days=at_cap - 1)
-    client = FakeSupabaseClient(
-        activity_rows=[
-            _activity_row(today - timedelta(days=offset), 50.0) for offset in range(at_cap)
+            _activity_row(today - timedelta(days=offset), 50.0) for offset in range(activity_count)
         ],
     )
     monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
@@ -274,4 +257,117 @@ async def test_rebuild_window_exactly_at_the_activity_cap_still_recomputes(monke
     response = await _post_recompute_load({"since": since.isoformat()})
 
     assert response.status_code == 200, response.text
-    assert response.json()["snapshots_written"] == at_cap
+    assert response.json()["snapshots_written"] == activity_count
+    rows = sorted(_load_rows(client), key=lambda row: _text(row["snapshot_date"]))
+    assert len(rows) == activity_count
+    assert rows[0]["snapshot_date"] == since.isoformat()
+    ctl, atl = 0.0, 0.0
+    for row in rows:
+        ctl, atl, tsb = compute_next_load(ctl, atl, 50.0)
+        assert row["daily_tss"] == 50.0
+        assert (row["ctl"], row["atl"], row["tsb"]) == (round(ctl, 1), round(atl, 1), round(tsb, 1))
+
+
+@pytest.mark.usefixtures("as_athlete")
+async def test_dense_same_day_rebuild_is_repeatable_and_excludes_future(monkeypatch) -> None:
+    today = date.today()
+    client = FakeSupabaseClient(
+        activity_rows=[
+            {**_activity_row(today, 1.0), "id": str(UUID(int=number))} for number in range(1, 1103)
+        ]
+        + [_activity_row(today + timedelta(days=1), 999.0)],
+    )
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+    first = await _post_recompute_load({})
+    second = await _post_recompute_load({})
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert len(_load_rows(client)) == 1
+    assert _load_rows(client)[0]["daily_tss"] == 1102.0
+
+
+@pytest.mark.usefixtures("as_athlete")
+async def test_multi_day_rebuild_aggregates_across_pages_and_is_repeatable(monkeypatch) -> None:
+    """Keep distinct daily totals when UUID-ordered pages interleave activity dates."""
+    today = date.today()
+    since = today - timedelta(days=2)
+    # Both days appear in all three nonempty pages, with a rest day between them.
+    client = FakeSupabaseClient(
+        activity_rows=[
+            {
+                **_activity_row(since if number % 2 else today, 1.0 if number % 2 else 2.0),
+                "id": str(UUID(int=number)),
+            }
+            for number in range(1, 1103)
+        ]
+        + [_activity_row(today + timedelta(days=1), 999.0)],
+    )
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+    body: dict[str, object] = {"since": since.isoformat()}
+
+    first = await _post_recompute_load(body)
+    assert first.status_code == 200, first.text
+    assert first.json()["snapshots_written"] == 3
+    first_rows = deepcopy(_load_values(_load_rows(client)))
+
+    second = await _post_recompute_load(body)
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert _load_values(_load_rows(client)) == first_rows
+
+    rows = sorted(_load_rows(client), key=lambda row: _text(row["snapshot_date"]))
+    assert len(rows) == 3
+    ctl, atl = 0.0, 0.0
+    for offset, (row, daily_tss) in enumerate(zip(rows, (551.0, 0.0, 1102.0), strict=True)):
+        assert row["snapshot_date"] == (since + timedelta(days=offset)).isoformat()
+        assert row["daily_tss"] == daily_tss
+        ctl, atl, tsb = compute_next_load(ctl, atl, daily_tss)
+        assert (row["ctl"], row["atl"], row["tsb"]) == (round(ctl, 1), round(atl, 1), round(tsb, 1))
+
+
+@pytest.mark.usefixtures("as_athlete")
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PostgRESTAPIError({"code": "PGRST000", "message": "unavailable"}),
+        httpx.ReadTimeout("timed out"),
+    ],
+)
+async def test_late_page_failure_preserves_all_existing_snapshots(monkeypatch, failure) -> None:
+    today = date.today()
+    client = FakeSupabaseClient(
+        activity_rows=[
+            {**_activity_row(today, 1.0), "id": str(UUID(int=number))} for number in range(1, 502)
+        ],
+        daily_load_snapshot_rows=[_snapshot_row(today, ctl=30.0, atl=40.0, daily_tss=99.0)],
+    )
+    original = FakeTableQuery.execute
+    input_reads = 0
+
+    def execute(query):
+        nonlocal input_reads
+        if "activity_date" in query._gte_filters:
+            input_reads += 1
+            if query._gt_filters:
+                raise failure
+        return original(query)
+
+    monkeypatch.setattr(FakeTableQuery, "execute", execute)
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+    before = deepcopy(_load_rows(client))
+
+    response = await _post_recompute_load({})
+
+    assert response.status_code == 503, response.text
+    assert input_reads == 2
+    assert _load_rows(client) == before
+
+
+@pytest.mark.usefixtures("as_athlete")
+async def test_future_window_is_rejected_without_reading_or_writing(monkeypatch) -> None:
+    def unexpected_read(*_args, **_kwargs):
+        raise AssertionError("Future windows must be rejected before touching the database")
+
+    monkeypatch.setattr(api_index.repo, "get_load_snapshot_on_or_before", unexpected_read)
+    response = await _post_recompute_load({"since": (date.today() + timedelta(days=1)).isoformat()})
+    assert response.status_code == 422
