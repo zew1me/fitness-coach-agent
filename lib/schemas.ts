@@ -17,7 +17,7 @@ const chatMessagePartSchema = z.looseObject({
   type: z.string().trim().min(1),
 });
 
-export const chatRequestMessageSchema = z.looseObject({
+const chatRequestMessageSchema = z.looseObject({
   id: z.string().min(1),
   role: z.enum(["system", "user", "assistant"]),
   parts: z.array(chatMessagePartSchema),
@@ -173,7 +173,7 @@ export const calendarPlannedWorkoutSchema = z.looseObject({
   actual_activity_id: z.string().nullable().optional(),
 });
 
-export const calendarActivitySchema = z.looseObject({
+const calendarActivitySchema = z.looseObject({
   id: z.string().min(1),
   sport: z.string().min(1),
   activity_date: isoDateSchema,

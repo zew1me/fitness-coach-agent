@@ -319,7 +319,7 @@ function executeDeterministicEngineTool(
   return null;
 }
 
-export function executeCoachTool(
+function executeCoachTool(
   name: string,
   input: unknown,
   context: CoachToolContext,

@@ -31,7 +31,7 @@ const newRecordSchema = coachingMemoryRecordSchema
   .omit({ lifecycle: true })
   .partial({ followUpAt: true });
 
-export const coachingMemoryOperationSchema = z.discriminatedUnion("action", [
+const coachingMemoryOperationSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("upsert"), record: newRecordSchema }),
   z.object({
     action: z.literal("supersede"),
