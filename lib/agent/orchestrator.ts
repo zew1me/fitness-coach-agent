@@ -525,6 +525,40 @@ function createTavilyServer(url: string | undefined): MCPServer | null {
   return new MCPServerStreamableHttp({ name: "tavily", url });
 }
 
+// Web search enriches a reply but is never the reply: a Tavily outage degrades the
+// turn to one without its tools instead of failing it. Listing now happens every
+// turn (no module-wide cache), so this guard covers more than connect alone.
+async function connectTavilyTools(
+  server: MCPServer,
+  signal: AbortSignal,
+): Promise<Tool<CoachAgentRunContext>[]> {
+  try {
+    await server.connect();
+    return await listBudgetedMcpTools<CoachAgentRunContext>(server);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    Sentry.captureException(error, {
+      tags: { subsystem: "tavily-setup", degrading: "true" },
+    });
+    Sentry.logger.warn("coach: Tavily setup failed; continuing without it", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+}
+
+// Runs in the turn's finally block, where a throw would replace the turn's own
+// outcome — including after a degraded setup that never connected.
+async function closeTavilyServer(server: MCPServer): Promise<void> {
+  try {
+    await server.close();
+  } catch (error) {
+    Sentry.logger.warn("coach: Tavily close failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 function startLeaseRenewal({
   accessToken,
   baseUrl,
@@ -818,14 +852,10 @@ export function streamCoachTurn({
                 const tavilyServer = createTavilyServer(tavilyMcpUrl);
 
                 try {
-                  let tavilyTools: Tool<CoachAgentRunContext>[] = [];
-                  if (tavilyServer !== null) {
-                    await tavilyServer.connect();
-                    tavilyTools =
-                      await listBudgetedMcpTools<CoachAgentRunContext>(
-                        tavilyServer,
-                      );
-                  }
+                  const tavilyTools =
+                    tavilyServer === null
+                      ? []
+                      : await connectTavilyTools(tavilyServer, effectiveSignal);
                   const leadInstructions = buildLeadCoachPrompt(
                     context,
                     reports,
@@ -1160,7 +1190,8 @@ export function streamCoachTurn({
                     );
                     breakerRecordedModels.add(rateLimit.tier.model);
                   }
-                  if (tavilyServer !== null) await tavilyServer.close();
+                  if (tavilyServer !== null)
+                    await closeTavilyServer(tavilyServer);
                 }
               },
               {
