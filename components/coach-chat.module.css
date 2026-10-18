@@ -59,15 +59,12 @@
 
 /* ── Shared button base ──────────────────────────────────── */
 
-.ghostButton,
-.settingsButton,
 .accountButton,
 .menuItem,
 .sendButton,
 .attachButton,
 .starterButton,
 .primaryButton,
-.secondaryButton,
 .drawerClose {
   appearance: none;
   border: none;
@@ -78,10 +75,7 @@
     opacity 160ms ease;
 }
 
-.ghostButton,
-.settingsButton,
 .accountButton,
-.secondaryButton,
 .drawerClose {
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -90,10 +84,7 @@
   padding: 10px 14px;
 }
 
-.ghostButton:hover,
-.settingsButton:hover,
 .accountButton:hover,
-.secondaryButton:hover,
 .drawerClose:hover {
   background: var(--accent-soft);
 }
