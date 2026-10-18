@@ -1,5 +1,5 @@
 # Pre-commit: fast autofix on staged files only.
-# Pre-push: full CI gate — mirrors .github/workflows/ci.yml exactly, plus jscpd/knip/actionlint.
+# Pre-push: full CI gate — mirrors .github/workflows/ci.yml exactly, plus jscpd/knip/actionlint (pinned zew1me fork via scripts/actionlint.sh).
 
 pre-commit:
   parallel: true
@@ -26,10 +26,7 @@ pre-commit:
       stage_fixed: true
     actionlint:
       glob: ".github/workflows/*.{yml,yaml}"
-      run: >
-        command -v actionlint > /dev/null 2>&1
-        && actionlint {staged_files}
-        || (echo "actionlint not installed — run: brew install actionlint" && exit 0)
+      run: bash scripts/actionlint.sh {staged_files}
 
 pre-push:
   parallel: false
@@ -38,6 +35,8 @@ pre-push:
       run: bun run lint
     stylelint:
       run: bun run lint:css
+    actionlint:
+      run: bun run lint:actions
     ast-grep:
       run: bun run ast-grep:check
     ruff-check:

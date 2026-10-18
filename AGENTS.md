@@ -21,6 +21,7 @@ bun run db:reset    # wipe + replay all migrations locally
 bun dev          # Next.js dev server
 bun run build    # Production build
 bun run lint     # ESLint (zero warnings)
+bun run lint:actions  # actionlint (pinned zew1me fork) on GitHub workflows
 bun run typecheck  # tsc + Next.js typegen
 bun run test     # Vitest unit tests (tests/web/)
 bun run check    # lint + typecheck + test
@@ -338,16 +339,16 @@ See `.env.example`. Required:
 
 Runs in parallel on staged files only. Fixes are re-staged automatically (`stage_fixed: true`):
 
-| Hook             | What it does                                                                                                    |
-| ---------------- | --------------------------------------------------------------------------------------------------------------- |
-| `eslint-fix`     | ESLint `--fix` on staged `*.{ts,tsx,js,mjs,cjs}`                                                                |
-| `prettier-write` | Prettier on staged `*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}`                                                     |
-| `stylelint-fix`  | Stylelint `--fix` on staged `*.css`                                                                             |
-| `ruff-fix`       | `ruff check --fix` on staged `*.py`                                                                             |
-| `ruff-format`    | `ruff format` on staged `*.py`                                                                                  |
-| `actionlint`     | Lints `.github/workflows/` files (only when they are staged); gracefully skips if `actionlint` is not installed |
+| Hook             | What it does                                                                                               |
+| ---------------- | ---------------------------------------------------------------------------------------------------------- |
+| `eslint-fix`     | ESLint `--fix` on staged `*.{ts,tsx,js,mjs,cjs}`                                                           |
+| `prettier-write` | Prettier on staged `*.{ts,tsx,js,mjs,cjs,json,md,yml,yaml}`                                                |
+| `stylelint-fix`  | Stylelint `--fix` on staged `*.css`                                                                        |
+| `ruff-fix`       | `ruff check --fix` on staged `*.py`                                                                        |
+| `ruff-format`    | `ruff format` on staged `*.py`                                                                             |
+| `actionlint`     | Lints staged `.github/workflows/` files with the pinned `zew1me/actionlint` fork (`scripts/actionlint.sh`) |
 
-Install actionlint once with `brew install actionlint` to get GitHub Actions workflow linting on commit.
+actionlint needs no manual install: `scripts/actionlint.sh` downloads the pinned `zew1me/actionlint` release (checksum-verified) into `.cache/`. Run it via `bun run lint:actions`; bump the version and digests together in that script.
 
 ### Pre-push (full CI gate)
 
@@ -357,6 +358,7 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus th
 | ------------------- | ----------------------------------------------------------------------------- |
 | `lint`              | `bun run lint`                                                                |
 | `stylelint`         | `bun run lint:css`                                                            |
+| `actionlint`        | `bun run lint:actions`                                                        |
 | `ruff-check`        | `uv run ruff check .`                                                         |
 | `ruff-format-check` | `uv run ruff format --check .`                                                |
 | `typecheck`         | `bun run typecheck`                                                           |
