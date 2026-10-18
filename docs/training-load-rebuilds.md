@@ -41,22 +41,10 @@ can differ by that rounding from a continuous full-precision computation.
 
 Pagination is not a transaction spanning all reads. Concurrent insertions, deletions, or TSS/date
 changes can invalidate a scanned window. Automatic writers must coordinate and retry invalidated
-windows using the pending-work design in `ACTIVITY_MATERIALIZATION_DESIGN.md` and #474. This endpoint
+windows using the pending-work design in `ACTIVITY_MATERIALIZATION_DESIGN.md`. This endpoint
 does not add that queue, merge/unmerge hooks, or the automatic horizon policy. It also does not
 exclude duplicate activities that have not yet been materialized under that design.
 
 All input pages are read before the single snapshot upsert. A timeout during input collection
 leaves snapshots unchanged. Large rebuilds remain synchronous and subject to the deployment's
 request budget; durable scheduling is separate work.
-
-## Automated verification
-
-- `uv run pytest tests/python/test_load_inputs.py tests/python/test_recompute_load.py` checks real
-  SDK query serialization, lower server caps, more than 500 activities, same-day page boundaries,
-  complete daily CTL/ATL/TSB values, stale seeds, repeated requests, and failures after page one.
-- `bun run test:db` includes live query isolation, aggregate/sport upsert identity, and API-to-DB
-  rebuilds with 1,102 activities. Run against an isolated local database with all migrations.
-- Reducing PostgREST's row limit below 500 provides an additional pagination stress test. The
-  database tests clean up their own new pagination/identity/rebuild fixtures.
-
-No model call is involved in this deterministic calculation; live OpenAI tests are not required.
