@@ -5,7 +5,7 @@ from typing import Any
 
 from backend.config import settings
 from backend.models.intervals import IntervalsConnectionCreate, IntervalsConnectionRecord
-from supabase import Client, create_client
+from supabase import AsyncClient as SupabaseAsyncClient
 
 
 class IntervalsRepositoryNotConfiguredError(RuntimeError):
@@ -13,14 +13,19 @@ class IntervalsRepositoryNotConfiguredError(RuntimeError):
 
 
 class IntervalsRepository:
-    """Supabase-backed persistence for user Intervals.icu connections."""
+    """Async Supabase-backed persistence for user Intervals.icu connections."""
 
     def __init__(self, client: Any | None = None, *, table: str = "intervals_connections") -> None:
         self._client = client or self._build_client()
         self._table = table
 
-    def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None:
-        response = (
+    async def aclose(self) -> None:
+        """Close the PostgREST pool; unconfigured repositories have nothing to close."""
+        if self._client is not None:
+            await self._client.postgrest.aclose()
+
+    async def get_active_connection(self, user_id: str) -> IntervalsConnectionRecord | None:
+        response = await (
             self._require_client()
             .table(self._table)
             .select("*")
@@ -35,11 +40,11 @@ class IntervalsRepository:
             return None
         return self._parse_connection(rows[0])
 
-    def replace_connection(
+    async def replace_connection(
         self, connection: IntervalsConnectionCreate
     ) -> IntervalsConnectionRecord:
         client = self._require_client()
-        response = client.rpc(
+        response = await client.rpc(
             "replace_intervals_connection",
             {
                 "p_user_id": connection.user_id,
@@ -57,9 +62,9 @@ class IntervalsRepository:
             raise RuntimeError("Supabase did not return the Intervals connection row.")
         return self._parse_connection(row)
 
-    def revoke_active_connection(self, user_id: str) -> bool:
+    async def revoke_active_connection(self, user_id: str) -> bool:
         now = datetime.now(UTC).isoformat()
-        response = (
+        response = await (
             self._require_client()
             .table(self._table)
             .update({"revoked_at": now, "updated_at": now})
@@ -69,12 +74,12 @@ class IntervalsRepository:
         )
         return bool(response.data or [])
 
-    def _build_client(self) -> Client | None:
+    def _build_client(self) -> SupabaseAsyncClient | None:
         if not settings.supabase_url or not settings.supabase_service_role_key:
             return None
-        return create_client(settings.supabase_url, settings.supabase_service_role_key)
+        return SupabaseAsyncClient(settings.supabase_url, settings.supabase_service_role_key)
 
-    def _require_client(self) -> Any:
+    def _require_client(self) -> SupabaseAsyncClient:
         if self._client is None:
             raise IntervalsRepositoryNotConfiguredError(
                 "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."

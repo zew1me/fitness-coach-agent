@@ -278,7 +278,7 @@ class InMemoryOAuthRepository:
         self.codes: dict[str, AuthorizationCodeRecord] = {}
         self.refresh_tokens: dict[str, RefreshTokenRecord] = {}
 
-    def get_active_grant(self, *, user_id: str, client_id: str, redirect_uri: str):
+    async def get_active_grant(self, *, user_id: str, client_id: str, redirect_uri: str):
         for grant in self.grants.values():
             if (
                 grant["user_id"] == user_id
@@ -289,14 +289,16 @@ class InMemoryOAuthRepository:
                 return type("Grant", (), grant)()
         return None
 
-    def get_grant_by_id(self, grant_id: str):
+    async def get_grant_by_id(self, grant_id: str):
         grant = self.grants.get(grant_id)
         if grant is None:
             return None
         return type("Grant", (), grant)()
 
-    def upsert_grant(self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]):
-        existing = self.get_active_grant(
+    async def upsert_grant(
+        self, *, user_id: str, client_id: str, redirect_uri: str, scopes: list[str]
+    ):
+        existing = await self.get_active_grant(
             user_id=user_id, client_id=client_id, redirect_uri=redirect_uri
         )
         now = datetime.now().astimezone()
@@ -319,7 +321,7 @@ class InMemoryOAuthRepository:
         current["updated_at"] = now
         return type("Grant", (), current)()
 
-    def create_authorization_code(
+    async def create_authorization_code(
         self,
         *,
         grant_id: str,
@@ -346,13 +348,13 @@ class InMemoryOAuthRepository:
         }
         return code
 
-    def get_authorization_code(self, raw_code: str):
+    async def get_authorization_code(self, raw_code: str):
         code = self.codes.get(raw_code)
         if code is None:
             return None
         return type("AuthorizationCode", (), code)()
 
-    def consume_authorization_code(self, raw_code: str):
+    async def consume_authorization_code(self, raw_code: str):
         code = self.codes.get(raw_code)
         if code is None:
             raise ValueError("Invalid authorization code.")
@@ -361,7 +363,7 @@ class InMemoryOAuthRepository:
         code["consumed_at"] = datetime.now().astimezone()
         return type("AuthorizationCode", (), code)()
 
-    def create_refresh_token(
+    async def create_refresh_token(
         self,
         *,
         grant_id: str,
@@ -384,18 +386,18 @@ class InMemoryOAuthRepository:
         }
         return token
 
-    def get_refresh_token(self, raw_token: str):
+    async def get_refresh_token(self, raw_token: str):
         token = self.refresh_tokens.get(raw_token)
         if token is None:
             return None
         return type("RefreshToken", (), token)()
 
-    def rotate_refresh_token(self, raw_token: str):
+    async def rotate_refresh_token(self, raw_token: str):
         current = self.refresh_tokens.get(raw_token)
         if current is None:
             raise ValueError("Invalid refresh token.")
         current["revoked_at"] = datetime.now().astimezone()
-        replacement = self.create_refresh_token(
+        replacement = await self.create_refresh_token(
             grant_id=current["grant_id"],
             user_id=current["user_id"],
             client_id=current["client_id"],
@@ -404,14 +406,14 @@ class InMemoryOAuthRepository:
         )
         return type("RefreshToken", (), current)(), replacement
 
-    def revoke_refresh_token(self, raw_token: str) -> bool:
+    async def revoke_refresh_token(self, raw_token: str) -> bool:
         current = self.refresh_tokens.get(raw_token)
         if current is None or current["revoked_at"] is not None:
             return False
         current["revoked_at"] = datetime.now().astimezone()
         return True
 
-    def revoke_grant(self, grant_id: str) -> bool:
+    async def revoke_grant(self, grant_id: str) -> bool:
         grant = self.grants.get(grant_id)
         if grant is None:
             return False
@@ -488,7 +490,7 @@ class ModelStateChatService:
 
 
 class FakeAuthService(AuthService):
-    def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
+    async def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
         if supabase_access_token != "supabase-access-token":
             raise OAuthRepositoryNotConfiguredError("Unable to verify browser session.")
         return BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
@@ -1820,7 +1822,7 @@ async def test_oauth_authorize_prompt_consent_forces_consent(
     browser_cookie = auth_service_fixture.create_browser_session_token(
         BrowserSessionContext(user_id="athlete-1", email="athlete@example.com")
     )
-    auth_service_fixture._oauth_repo.upsert_grant(
+    await auth_service_fixture._oauth_repo.upsert_grant(
         user_id="athlete-1",
         client_id="https://chat.openai.com",
         redirect_uri="https://chat.openai.com/callback",
@@ -1981,7 +1983,7 @@ async def test_oauth_browser_session_failure_does_not_log_token(
 ) -> None:
     sensitive_token = "supabase-sensitive-token"
 
-    def fail_browser_session(supabase_access_token: str) -> BrowserSessionContext:
+    async def fail_browser_session(supabase_access_token: str) -> BrowserSessionContext:
         raise RuntimeError(f"bad token {supabase_access_token}")
 
     monkeypatch.setattr(auth_service_fixture, "create_browser_session", fail_browser_session)
@@ -2178,7 +2180,7 @@ async def test_oauth_token_rejects_reused_authorization_code(auth_service_fixtur
 async def test_oauth_refresh_rejects_client_mismatch_without_revoking_token(
     auth_service_fixture,
 ) -> None:
-    refresh_token = auth_service_fixture._oauth_repo.create_refresh_token(
+    refresh_token = await auth_service_fixture._oauth_repo.create_refresh_token(
         grant_id="grant-1",
         user_id="athlete-1",
         client_id="https://chat.openai.com",

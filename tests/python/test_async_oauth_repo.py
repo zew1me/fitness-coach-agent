@@ -1,7 +1,7 @@
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from inspect import iscoroutinefunction, signature
+from inspect import iscoroutinefunction
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -11,7 +11,7 @@ from postgrest.exceptions import APIError as PostgRESTAPIError
 from backend.config import settings
 from backend.repos import async_oauth_repo
 from backend.repos.async_oauth_repo import AsyncOAuthRepository
-from backend.repos.oauth_repo import OAuthRepository, OAuthRepositoryNotConfiguredError
+from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError
 
 GRANTS_TABLE = "oauth_grants"
 CODES_TABLE = "oauth_authorization_codes"
@@ -725,8 +725,7 @@ def test_build_client_constructs_authenticated_async_client_synchronously(
     assert calls == [("https://supabase.example", "service-role-key")]
 
 
-def test_async_repository_has_coroutine_signature_parity() -> None:
-    assert signature(AsyncOAuthRepository) == signature(OAuthRepository)
+def test_all_persistence_methods_are_coroutines() -> None:
     method_names = [
         "get_active_grant",
         "get_grant_by_id",
@@ -742,7 +741,4 @@ def test_async_repository_has_coroutine_signature_parity() -> None:
     ]
 
     for method_name in method_names:
-        async_method = getattr(AsyncOAuthRepository, method_name)
-        sync_method = getattr(OAuthRepository, method_name)
-        assert iscoroutinefunction(async_method), method_name
-        assert signature(async_method) == signature(sync_method), method_name
+        assert iscoroutinefunction(getattr(AsyncOAuthRepository, method_name)), method_name

@@ -6,7 +6,7 @@ import logging
 import os
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
@@ -74,7 +74,7 @@ from backend.models.chat import (
 from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
-from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
+from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
@@ -194,7 +194,10 @@ async def log_startup() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await log_startup()
-    yield
+    async with AsyncExitStack() as shutdown:
+        shutdown.push_async_callback(auth_service.aclose)
+        shutdown.push_async_callback(intervals_service.aclose)
+        yield
 
 
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
@@ -277,7 +280,7 @@ r2_service = R2Service()
 RECOVERY_WEEK_AGE_BREAKPOINT = 40
 
 
-def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
+async def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
     if authorization is None or not authorization.startswith("Bearer "):
         resource = auth_service.protected_resource_metadata()["resource"]
         raise HTTPException(
@@ -287,7 +290,7 @@ def require_user_context(authorization: str | None = Header(default=None)) -> Us
         )
     token = authorization.removeprefix("Bearer ").strip()
     try:
-        return auth_service.get_user_context_from_bearer(token)
+        return await auth_service.get_user_context_from_bearer(token)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -322,7 +325,7 @@ async def health() -> Mapping[str, str]:
     return {"status": "ok"}
 
 
-# ── OAuth (unchanged) ────────────────────────────────────────
+# ── OAuth ───────────────────────────────────────────────────
 
 
 @app.get("/.well-known/oauth-authorization-server")
@@ -379,7 +382,7 @@ async def oauth_authorize(  # noqa: PLR0913
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        redirect_target = auth_service.build_authorize_redirect(
+        redirect_target = await auth_service.build_authorize_redirect(
             request=request, browser_session=browser_session
         )
     except OAuthConsentRequiredError:
@@ -396,7 +399,7 @@ async def oauth_authorize(  # noqa: PLR0913
 @app.post("/api/oauth/token")
 async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
     try:
-        bundle = auth_service.exchange_token_request(payload)
+        bundle = await auth_service.exchange_token_request(payload)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OAuthInvalidGrantError as exc:
@@ -412,7 +415,7 @@ async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
 @app.post("/api/oauth/revoke")
 async def oauth_revoke(payload: OAuthRevokeRequest) -> Mapping[str, bool]:
     try:
-        revoked = auth_service.revoke(payload)
+        revoked = await auth_service.revoke(payload)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     logger.info("oauth revoke revoked=%s", revoked)
@@ -436,7 +439,7 @@ async def oauth_browser_session(
     payload: BrowserSessionRequest, response: Response
 ) -> Mapping[str, bool]:
     try:
-        session = auth_service.create_browser_session(payload.access_token)
+        session = await auth_service.create_browser_session(payload.access_token)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -471,10 +474,7 @@ async def oauth_browser_token(
     """Issue a browser API token and renew the authenticated session cookie."""
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
-        # OAuthRepository still uses the synchronous supabase-py client, and its bounded
-        # gateway retry may sleep. Offload that blocking work until the repository itself
-        # has an async implementation so one slow token write cannot stall the event loop.
-        token = await asyncio.to_thread(auth_service.create_browser_token, browser_session)
+        token = await auth_service.create_browser_token(browser_session)
     except OAuthLoginRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except OAuthRepositoryNotConfiguredError as exc:
@@ -536,7 +536,7 @@ async def intervals_status(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        status = intervals_service.get_status(user_context.user_id)
+        status = await intervals_service.get_status(user_context.user_id)
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
@@ -547,7 +547,7 @@ async def intervals_disconnect(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        status = intervals_service.disconnect(user_context.user_id)
+        status = await intervals_service.disconnect(user_context.user_id)
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
@@ -564,7 +564,7 @@ async def intervals_sync(  # noqa: C901
 ) -> Mapping[str, object]:
     user_id = user_context.user_id
     try:
-        auth = intervals_service.resolve_auth(user_id)
+        auth = await intervals_service.resolve_auth(user_id)
     except IntervalsNotConnectedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (
@@ -665,7 +665,7 @@ async def oauth_authorize_decision(  # noqa: PLR0913
         )
         return RedirectResponse(denial_redirect, status_code=302)
     try:
-        redirect_target = auth_service.approve_consent(
+        redirect_target = await auth_service.approve_consent(
             request=request, browser_session=browser_session
         )
     except OAuthRepositoryNotConfiguredError as exc:
@@ -1440,11 +1440,6 @@ class RecomputeLoadRequest(BaseModel):
     sport: str | None = None
 
 
-# Bounded candidate query for the rebuild window. Part two of #447 replaces it with keyset
-# pagination; until then the endpoint fails closed rather than persisting a truncated rebuild.
-_RECOMPUTE_ACTIVITY_LIMIT = 500
-
-
 @app.post("/api/engine/recompute-load")
 async def recompute_load_endpoint(
     payload: RecomputeLoadRequest,
@@ -1453,7 +1448,10 @@ async def recompute_load_endpoint(
     from backend.engine.training_load import recompute_load_series
 
     user_id = user_context.user_id
-    since = payload.since or date.today()
+    today = date.today()
+    since = payload.since or today
+    if since > today:
+        raise HTTPException(status_code=422, detail="Load rebuild start must not be in the future.")
 
     seed = await repo.get_load_snapshot_on_or_before(
         user_id, since - timedelta(days=1), sport=payload.sport
@@ -1462,51 +1460,31 @@ async def recompute_load_endpoint(
     # intervening days' load and their zero-load decay, writing wrong CTL/ATL/TSB. Rebuild that
     # gap instead of starting at `since`. The gap provably holds no snapshot for this sport --
     # the seed is the newest one at or before `since - 1 day` -- so filling it in never
-    # overwrites recorded history. An absent seed still starts from zero at `since`; widening
-    # back to first-ever activity needs the unbounded candidates deferred to part two of #447.
+    # overwrites recorded history. An absent seed still explicitly starts from zero at `since`;
+    # callers wanting a full-history rebuild must request the beginning of that history.
     rebuild_start = seed.snapshot_date + timedelta(days=1) if seed else since
     initial_ctl = seed.ctl if seed else 0.0
     initial_atl = seed.atl if seed else 0.0
 
-    # Fetch one past the cap purely to detect overflow: `list_activities` returns newest first,
-    # so a truncated page silently drops the *oldest* activities. Those days would then be
-    # recomputed as zero TSS and upserted over the real snapshots, so overflow must fail closed
-    # before any write rather than merely warn.
-    activities = await repo.list_activities(
-        user_id, sport=payload.sport, since=rebuild_start, limit=_RECOMPUTE_ACTIVITY_LIMIT + 1
-    )
+    # Finish every page before writing any snapshots. A failed read must never replace load
+    # history with a series derived from partial input.
+    try:
+        daily_tss = await repo.get_daily_activity_tss(
+            user_id, sport=payload.sport, since=rebuild_start, through=today
+        )
+    except httpx.HTTPError as exc:  # PostgREST errors use the centralized SQLSTATE handler.
+        logger.exception("load input read unavailable user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="Unable to read training load inputs.") from exc
     logger.debug(
-        "recompute_load user_id=%s sport=%s since=%s rebuild_start=%s activities=%d",
+        "recompute_load user_id=%s sport=%s since=%s rebuild_start=%s activity_days=%d",
         user_id,
         payload.sport,
         since,
         rebuild_start,
-        len(activities),
+        len(daily_tss),
     )
-    if len(activities) > _RECOMPUTE_ACTIVITY_LIMIT:
-        logger.warning(
-            "recompute_load activity cap exceeded user_id=%s sport=%s rebuild_start=%s limit=%d",
-            user_id,
-            payload.sport,
-            rebuild_start,
-            _RECOMPUTE_ACTIVITY_LIMIT,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Rebuild window from {rebuild_start.isoformat()} holds more than "
-                f"{_RECOMPUTE_ACTIVITY_LIMIT} activities; recomputing it would discard the "
-                "oldest and overwrite load history. Request a later `since`."
-            ),
-        )
 
-    daily_tss: dict[date, float] = {}
-    for a in activities:
-        daily_tss[a.activity_date] = daily_tss.get(a.activity_date, 0) + (a.tss or 0)
-
-    snapshots = recompute_load_series(
-        daily_tss, rebuild_start, date.today(), initial_ctl, initial_atl
-    )
+    snapshots = recompute_load_series(daily_tss, rebuild_start, today, initial_ctl, initial_atl)
 
     await repo.upsert_load_snapshots(user_id, snapshots, sport=payload.sport)
 

@@ -22,8 +22,8 @@ import asyncio
 import os
 import threading
 import uuid
-from collections.abc import Callable
-from datetime import date
+from collections.abc import AsyncIterator, Callable
+from datetime import date, timedelta
 from typing import Any, cast
 
 import pytest
@@ -31,6 +31,7 @@ from httpx import ASGITransport, AsyncClient
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
 import api.index as api_index
+from backend.engine.training_load import compute_next_load
 from backend.models.athlete import (
     AthleteProfile,
     RecoveryLog,
@@ -42,6 +43,7 @@ from backend.models.intervals import IntervalsConnectionCreate
 from backend.models.training import Goal, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepository
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
+from backend.services.intervals import IntervalsOAuthService, TokenCipher
 
 _SUPABASE_CONFIGURED = bool(
     os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -65,6 +67,15 @@ pytestmark = [
 @pytest.fixture()
 def repo() -> SupabaseRepository:
     return SupabaseRepository()
+
+
+@pytest.fixture()
+async def intervals_repo() -> AsyncIterator[IntervalsRepository]:
+    repository = IntervalsRepository()
+    try:
+        yield repository
+    finally:
+        await repository.aclose()
 
 
 @pytest.fixture()
@@ -394,7 +405,7 @@ async def test_recalibration_candidate_decision_claim_and_threshold_write_are_at
 
 @pytest.mark.asyncio
 async def test_replace_intervals_connection_serializes_concurrent_replaces(
-    repo: SupabaseRepository, unique_user: str
+    repo: SupabaseRepository, unique_user: str, intervals_repo: IntervalsRepository
 ) -> None:
     """Concurrent replaces both succeed and leave exactly one active connection.
 
@@ -407,12 +418,11 @@ async def test_replace_intervals_connection_serializes_concurrent_replaces(
     await repo.upsert_athlete_profile(
         AthleteProfile(user_id=unique_user, primary_sports=["cycling"], coaching_state="active")
     )
-    barrier = threading.Barrier(2)
+    barrier = asyncio.Barrier(2)
 
-    def replace(athlete_id: str) -> object:
-        local_repo = IntervalsRepository()
-        barrier.wait(timeout=5)
-        return local_repo.replace_connection(
+    async def replace(athlete_id: str) -> object:
+        await asyncio.wait_for(barrier.wait(), timeout=5)
+        return await intervals_repo.replace_connection(
             IntervalsConnectionCreate(
                 user_id=unique_user,
                 intervals_athlete_id=athlete_id,
@@ -424,8 +434,8 @@ async def test_replace_intervals_connection_serializes_concurrent_replaces(
         )
 
     outcomes = await asyncio.gather(
-        asyncio.to_thread(replace, "i111"),
-        asyncio.to_thread(replace, "i222"),
+        replace("i111"),
+        replace("i222"),
         return_exceptions=True,
     )
 
@@ -440,13 +450,48 @@ async def test_replace_intervals_connection_serializes_concurrent_replaces(
     rows = rows_response.data or []
     assert len(rows) == 2
     assert sum(1 for row in rows if row["revoked_at"] is None) == 1
-    active = IntervalsRepository().get_active_connection(unique_user)
+    active = await intervals_repo.get_active_connection(unique_user)
     assert active is not None
 
 
 @pytest.mark.asyncio
+async def test_async_intervals_connection_lifecycle(
+    repo: SupabaseRepository,
+    unique_user: str,
+    intervals_repo: IntervalsRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read, decrypt, and revoke a connection through the service and real async client."""
+    monkeypatch.setattr(api_index.settings, "intervals_token_encryption_secret", "db-test-key")
+    monkeypatch.setattr(api_index.settings, "intervals_dev_api_key", "")
+    monkeypatch.setattr(api_index.settings, "intervals_dev_athlete_id", "")
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=unique_user, primary_sports=["cycling"], coaching_state="active")
+    )
+    service = IntervalsOAuthService(repository=intervals_repo)
+    assert not (await service.get_status(unique_user)).connected
+    saved = await intervals_repo.replace_connection(
+        IntervalsConnectionCreate(
+            user_id=unique_user,
+            intervals_athlete_id="i123",
+            access_token_ciphertext=TokenCipher("db-test-key").encrypt("db-upstream-token"),
+            scopes=["ACTIVITY:READ"],
+        )
+    )
+    status = await service.get_status(unique_user)
+    assert status.connected
+    assert status.intervals_athlete_id == saved.intervals_athlete_id
+    assert (await service.resolve_auth(unique_user)).auth_header == {
+        "Authorization": "Bearer db-upstream-token"
+    }
+    assert not (await service.disconnect(unique_user)).connected
+    assert await intervals_repo.get_active_connection(unique_user) is None
+    assert not await intervals_repo.revoke_active_connection(unique_user)
+
+
+@pytest.mark.asyncio
 async def test_replace_intervals_connection_rpc_rejects_empty_required_fields(
-    repo: SupabaseRepository, unique_user: str
+    repo: SupabaseRepository, unique_user: str, intervals_repo: IntervalsRepository
 ) -> None:
     """The migration's own guard clauses reject blank required inputs.
 
@@ -497,7 +542,7 @@ async def test_replace_intervals_connection_rpc_rejects_empty_required_fields(
             },
         ).execute()
 
-    active = IntervalsRepository().get_active_connection(unique_user)
+    active = await intervals_repo.get_active_connection(unique_user)
     assert active is None, "a rejected replacement must not leave a partial row behind"
 
 
@@ -646,3 +691,160 @@ async def test_save_activity_from_text_endpoint_persists_real_activity_summary(
     assert saved_activity.activity_summary["fueling"]["calories_kcal"] > 0
     assert saved_activity.activity_summary["food_items"]
     assert saved_activity.activity_summary["thresholds_used"]["ftp_w"] == 250
+
+
+@pytest.mark.asyncio
+async def test_daily_activity_tss_pages_and_isolates_live_rows(repo: SupabaseRepository) -> None:
+    """Exercise real UUID ordering, date filters, and pagination beyond the API row limit."""
+    owner = f"test-load-{uuid.uuid4()}"
+    other = f"test-load-{uuid.uuid4()}"
+    day = date(2026, 7, 3)
+    previous = date(2026, 7, 2)
+    client = repo._require_client()
+    try:
+        for user_id in (owner, other):
+            await repo.upsert_athlete_profile(AthleteProfile(user_id=user_id))
+        rows: list[dict[str, Any]] = [
+            {
+                "user_id": owner,
+                "sport": "cycling",
+                "activity_date": day.isoformat(),
+                "tss": 1.0,
+            }
+            for _ in range(1101)
+        ]
+        rows.extend(
+            [
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-02", "tss": 84},
+                {"user_id": owner, "sport": "running", "activity_date": "2026-07-03", "tss": 42},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-03", "tss": None},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-01", "tss": 999},
+                {"user_id": owner, "sport": "cycling", "activity_date": "2026-07-04", "tss": 999},
+                {"user_id": other, "sport": "cycling", "activity_date": "2026-07-03", "tss": 999},
+            ]
+        )
+        client.table("activities").insert(rows).execute()
+
+        aggregate = await repo.get_daily_activity_tss(owner, since=previous, through=day)
+        cycling = await repo.get_daily_activity_tss(
+            owner, since=previous, through=day, sport="cycling"
+        )
+        assert aggregate == {previous: 84.0, day: 1143.0}
+        assert cycling == {previous: 84.0, day: 1101.0}
+        assert await repo.get_daily_activity_tss(other, since=day, through=day) == {day: 999.0}
+    finally:
+        client.table("athlete_profiles").delete().in_("user_id", [owner, other]).execute()
+
+
+@pytest.mark.asyncio
+async def test_load_snapshot_upserts_replace_aggregate_and_preserve_sports(
+    repo: SupabaseRepository,
+) -> None:
+    """NULL aggregate keys must conflict just like concrete sport keys."""
+    owner = f"test-snapshot-{uuid.uuid4()}"
+    other = f"test-snapshot-{uuid.uuid4()}"
+    day = date(2026, 7, 3)
+    client = repo._require_client()
+    try:
+        for user_id in (owner, other):
+            await repo.upsert_athlete_profile(AthleteProfile(user_id=user_id))
+        await repo.upsert_load_snapshots(other, [{"snapshot_date": day, "daily_tss": 21.0}])
+        for sport in (None, "cycling", "running"):
+            await repo.upsert_load_snapshots(
+                owner, [{"snapshot_date": day, "daily_tss": 42.0}], sport=sport
+            )
+            await repo.upsert_load_snapshots(
+                owner, [{"snapshot_date": day, "daily_tss": 84.0}], sport=sport
+            )
+        rows = (
+            client.table("daily_load_snapshots")
+            .select("sport,daily_tss")
+            .eq("user_id", owner)
+            .execute()
+            .data
+        )
+        assert len(rows) == 3
+        assert {row["sport"]: row["daily_tss"] for row in rows} == {
+            None: 84.0,
+            "cycling": 84.0,
+            "running": 84.0,
+        }
+        other_snapshot = await repo.get_latest_load(other)
+        assert other_snapshot is not None and other_snapshot.daily_tss == 21.0
+    finally:
+        client.table("athlete_profiles").delete().in_("user_id", [owner, other]).execute()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sport", [None, "cycling"])
+async def test_large_history_rebuild_is_idempotent_through_live_database(
+    repo: SupabaseRepository, monkeypatch, sport: str | None
+) -> None:
+    owner = f"test-rebuild-{uuid.uuid4()}"
+    today = date.today()
+    since = today - timedelta(days=2)
+    seed_date = since - timedelta(days=1)
+    client = repo._require_client()
+
+    def context() -> UserContext:
+        return UserContext(user_id=owner, scopes=["plans:write"], client_id="test", grant_id="test")
+
+    try:
+        await repo.upsert_athlete_profile(AthleteProfile(user_id=owner))
+        await repo.upsert_load_snapshots(
+            owner, [{"snapshot_date": seed_date, "ctl": 12.0, "atl": 18.0}], sport=sport
+        )
+        client.table("activities").insert(
+            [
+                {"user_id": owner, "sport": "cycling", "activity_date": today.isoformat(), "tss": 1}
+                for _ in range(1101)
+            ]
+            + [
+                {
+                    "user_id": owner,
+                    "sport": "cycling",
+                    "activity_date": since.isoformat(),
+                    "tss": 84,
+                }
+            ]
+        ).execute()
+        monkeypatch.setattr(api_index, "repo", repo)
+        api_index.app.dependency_overrides[api_index.require_user_context] = context
+        async with AsyncClient(
+            transport=ASGITransport(app=api_index.app), base_url="http://testserver"
+        ) as http:
+            first = await http.post(
+                "/api/engine/recompute-load", json={"since": since.isoformat(), "sport": sport}
+            )
+            second = await http.post(
+                "/api/engine/recompute-load", json={"since": since.isoformat(), "sport": sport}
+            )
+        assert first.status_code == second.status_code == 200
+        assert first.json() == second.json()
+        assert second.json()["seed_date"] == seed_date.isoformat()
+        assert second.json()["snapshots_written"] == 3
+        rows = (
+            client.table("daily_load_snapshots")
+            .select("snapshot_date,sport,daily_tss,ctl,atl,tsb")
+            .eq("user_id", owner)
+            .order("snapshot_date")
+            .execute()
+            .data
+        )
+        assert len(rows) == 4  # One seed plus three days, even after two aggregate rebuilds.
+        ctl, atl = 12.0, 18.0
+        for row, tss in zip(rows[1:], [84.0, 0.0, 1101.0], strict=True):
+            ctl, atl, tsb = compute_next_load(ctl, atl, tss)
+            assert row["sport"] == sport
+            assert row["daily_tss"] == tss
+            assert (row["ctl"], row["atl"], row["tsb"]) == (
+                round(ctl, 1),
+                round(atl, 1),
+                round(tsb, 1),
+            )
+        current = await repo.get_latest_load(owner, sport=sport)
+        assert current is not None
+        assert current.snapshot_date == today
+        assert current.ctl == second.json()["latest_ctl"] == round(ctl, 1)
+    finally:
+        client.table("athlete_profiles").delete().eq("user_id", owner).execute()

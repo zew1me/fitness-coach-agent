@@ -1,7 +1,16 @@
 from datetime import UTC, date, datetime
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
+
+
+class ActivityLoadInput(BaseModel):
+    """Compact, validated input for daily load aggregation."""
+
+    id: UUID
+    activity_date: date
+    tss: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class Activity(BaseModel):

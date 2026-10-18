@@ -21,10 +21,10 @@ class OAuthRepositoryNotConfiguredError(RuntimeError):
 
 
 class _OAuthRepositoryBase:
-    """Share configuration and pure helpers across OAuth repository runtimes."""
+    """Keep OAuth configuration and pure payload/validation helpers separate from I/O."""
 
-    # A gateway timeout can hide a committed write. Both runtimes therefore retry the
-    # complete read-then-write grant operation, allowing the next read to observe it.
+    # A gateway timeout can hide a committed write. Retry the complete read-then-write
+    # grant operation, allowing the next read to observe it.
     _GATEWAY_RETRYABLE_CODES = frozenset({"502", "503", "504"})
     _GATEWAY_RETRY_ATTEMPTS = 2
     _GATEWAY_RETRY_BACKOFF_SECONDS = 0.25
@@ -44,7 +44,7 @@ class _OAuthRepositoryBase:
         self._refresh_tokens_table = refresh_tokens_table
 
     def _build_client(self) -> Any | None:
-        """Build the runtime-specific Supabase client when configuration is present."""
+        """Build the concrete repository's client when configuration is present."""
         raise NotImplementedError
 
     def _require_client(self) -> Any:
