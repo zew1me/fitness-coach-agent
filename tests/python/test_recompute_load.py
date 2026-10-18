@@ -287,6 +287,45 @@ async def test_dense_same_day_rebuild_is_repeatable_and_excludes_future(monkeypa
 
 
 @pytest.mark.usefixtures("as_athlete")
+async def test_multi_day_rebuild_aggregates_across_pages_and_is_repeatable(monkeypatch) -> None:
+    """Keep distinct daily totals when UUID-ordered pages interleave activity dates."""
+    today = date.today()
+    since = today - timedelta(days=2)
+    # Both days appear in all three nonempty pages, with a rest day between them.
+    client = FakeSupabaseClient(
+        activity_rows=[
+            {
+                **_activity_row(since if number % 2 else today, 1.0 if number % 2 else 2.0),
+                "id": str(UUID(int=number)),
+            }
+            for number in range(1, 1103)
+        ]
+        + [_activity_row(today + timedelta(days=1), 999.0)],
+    )
+    monkeypatch.setattr(api_index, "repo", SupabaseRepository(client=client))
+    body: dict[str, object] = {"since": since.isoformat()}
+
+    first = await _post_recompute_load(body)
+    assert first.status_code == 200, first.text
+    assert first.json()["snapshots_written"] == 3
+    first_rows = deepcopy(_load_values(_load_rows(client)))
+
+    second = await _post_recompute_load(body)
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert _load_values(_load_rows(client)) == first_rows
+
+    rows = sorted(_load_rows(client), key=lambda row: _text(row["snapshot_date"]))
+    assert len(rows) == 3
+    ctl, atl = 0.0, 0.0
+    for offset, (row, daily_tss) in enumerate(zip(rows, (551.0, 0.0, 1102.0), strict=True)):
+        assert row["snapshot_date"] == (since + timedelta(days=offset)).isoformat()
+        assert row["daily_tss"] == daily_tss
+        ctl, atl, tsb = compute_next_load(ctl, atl, daily_tss)
+        assert (row["ctl"], row["atl"], row["tsb"]) == (round(ctl, 1), round(atl, 1), round(tsb, 1))
+
+
+@pytest.mark.usefixtures("as_athlete")
 @pytest.mark.parametrize(
     "failure",
     [
