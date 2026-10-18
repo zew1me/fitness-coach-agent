@@ -22,6 +22,9 @@ const ENV_KEYS = [
   "VERCEL_AUTOMATION_BYPASS_SECRET",
 ] as const;
 const originalFetch = globalThis.fetch;
+const originalEnv = Object.fromEntries(
+  ENV_KEYS.map((key) => [key, process.env[key]]),
+);
 const fetchMock = vi.fn();
 
 function buildRequest(
@@ -65,7 +68,11 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  for (const key of ENV_KEYS) delete process.env[key];
+  for (const key of ENV_KEYS) {
+    const value = originalEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe("GET /auth/callback", () => {
