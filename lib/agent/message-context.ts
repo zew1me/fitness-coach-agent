@@ -24,9 +24,14 @@ function partRecord(part: UIMessage["parts"][number]): Record<string, unknown> {
   return part as unknown as Record<string, unknown>;
 }
 
-function imageFilePart(
+// Shared by the image and non-image classifiers: both need a `file` part with a string
+// media type and a non-empty url, differing only in which media types they accept and
+// what an unnamed file is called.
+function parseFilePart(
   part: UIMessage["parts"][number],
-): ImageExtractionRequest | null {
+  acceptsMediaType: (mediaType: string) => boolean,
+  fallbackFilename: string,
+): NonImageFilePart | null {
   const record = partRecord(part);
   const type = record["type"];
   const mediaType = record["mediaType"];
@@ -35,7 +40,7 @@ function imageFilePart(
   if (
     type !== "file" ||
     typeof mediaType !== "string" ||
-    !mediaType.startsWith("image/")
+    !acceptsMediaType(mediaType)
   ) {
     return null;
   }
@@ -47,9 +52,26 @@ function imageFilePart(
   const filename =
     typeof record["filename"] === "string" && record["filename"].length > 0
       ? record["filename"]
-      : "uploaded image";
+      : fallbackFilename;
 
-  return { filename, imageUrl: url, mediaType };
+  return { filename, url, mediaType };
+}
+
+function imageFilePart(
+  part: UIMessage["parts"][number],
+): ImageExtractionRequest | null {
+  const file = parseFilePart(
+    part,
+    (mediaType) => mediaType.startsWith("image/"),
+    "uploaded image",
+  );
+  return file === null
+    ? null
+    : {
+        filename: file.filename,
+        imageUrl: file.url,
+        mediaType: file.mediaType,
+      };
 }
 
 function hasExtractionForFilename(
@@ -195,29 +217,11 @@ export type NonImageFilePart = {
 export function nonImageFilePart(
   part: UIMessage["parts"][number],
 ): NonImageFilePart | null {
-  const record = partRecord(part);
-  const type = record["type"];
-  const mediaType = record["mediaType"];
-  const url = record["url"];
-
-  if (
-    type !== "file" ||
-    typeof mediaType !== "string" ||
-    mediaType.startsWith("image/")
-  ) {
-    return null;
-  }
-
-  if (typeof url !== "string" || url.length === 0) {
-    return null;
-  }
-
-  const filename =
-    typeof record["filename"] === "string" && record["filename"].length > 0
-      ? record["filename"]
-      : "uploaded file";
-
-  return { filename, url, mediaType };
+  return parseFilePart(
+    part,
+    (mediaType) => !mediaType.startsWith("image/"),
+    "uploaded file",
+  );
 }
 
 export function convertUnsupportedFilePartsToText(
