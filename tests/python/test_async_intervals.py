@@ -225,6 +225,25 @@ async def test_routes_preserve_centralized_postgrest_error_mapping(
     await service.aclose()
 
 
+@pytest.mark.parametrize("failing_service", ["auth_service", "intervals_service"])
+async def test_lifespan_attempts_both_pool_cleanups_when_one_fails(
+    monkeypatch: pytest.MonkeyPatch, failing_service: str
+) -> None:
+    auth = Mock(aclose=AsyncMock())
+    intervals = Mock(aclose=AsyncMock())
+    services = {"auth_service": auth, "intervals_service": intervals}
+    services[failing_service].aclose.side_effect = RuntimeError("pool cleanup failed")
+    for name, service in services.items():
+        monkeypatch.setattr(api_index, name, service)
+
+    with pytest.raises(RuntimeError, match="pool cleanup failed"):
+        async with api_index.lifespan(api_index.app):
+            pass
+
+    auth.aclose.assert_awaited_once()
+    intervals.aclose.assert_awaited_once()
+
+
 async def test_lifespan_closes_intervals_pool_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     database, _query = _database([])
     monkeypatch.setattr(api_index, "intervals_service", _service(database))
