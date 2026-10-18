@@ -209,7 +209,9 @@ describe("runSpecialists with the Agents SDK", () => {
     expect(instructions).toContain("\\`\\`\\`");
     expect(instructions).not.toContain("Lead-generated brief:");
   });
+});
 
+describe("runSpecialists failure handling", () => {
   it("keeps other specialists' reports when one specialist's report fails schema validation", async () => {
     agentsMocks.run.mockImplementation((agent: { name: string }) => {
       if (agentsMocks.roleName(agent) === "recovery") {
@@ -440,7 +442,9 @@ describe("runSpecialists with the Agents SDK", () => {
       expect.objectContaining({ level: "warning" }),
     );
   });
+});
 
+describe("runSpecialists reporting and concurrency", () => {
   it("reports dropped proposedUpdates and unrecoverable reports to Sentry", async () => {
     const Sentry = await import("@sentry/nextjs");
 

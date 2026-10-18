@@ -191,7 +191,9 @@ describe("SupabaseAgentSession", () => {
 
     await expect(session.getSessionId()).rejects.toThrow();
   });
+});
 
+describe("SupabaseAgentSession model replay preparation", () => {
   it("removes historical image inputs before model replay while retaining extracted text", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
@@ -456,6 +458,9 @@ describe("SupabaseAgentSession", () => {
   // window therefore needs a deterministic raw→SDK adapter for the conditional
   // case. A live compaction probe cannot force this output shape; this fixture
   // can, and then exercises the locked SDK's real request conversion.
+});
+
+describe("SupabaseAgentSession raw tool output replay", () => {
   it("converts a synthetic retained raw tool pair into replayable SDK input", () => {
     const session = new SupabaseAgentSession({
       accessToken: "token",
