@@ -6,7 +6,7 @@ import { loadProfile, saveProfile } from "./coach-api";
 import { errorMessage } from "./errors";
 import type { AthleteProfile, BrowserTokenResponse } from "./types";
 
-export function emptyProfile(userId: string): AthleteProfile {
+function emptyProfile(userId: string): AthleteProfile {
   return {
     user_id: userId,
     coaching_state: "onboarding",
