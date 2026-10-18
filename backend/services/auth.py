@@ -57,6 +57,10 @@ class AuthService:
     def __init__(self, oauth_repo: OAuthRepository | None = None) -> None:
         self._oauth_repo = oauth_repo or OAuthRepository()
 
+    async def aclose(self) -> None:
+        """Release the OAuth repository's HTTP connections at application shutdown."""
+        await self._oauth_repo.aclose()
+
     @property
     def browser_session_cookie_name(self) -> str:
         return self._browser_session_cookie_name
@@ -115,11 +119,11 @@ class AuthService:
         }
         return f"{settings.base_url}/consent?{urlencode(query)}"
 
-    def build_authorize_redirect(
+    async def build_authorize_redirect(
         self, *, request: OAuthAuthorizeRequest, browser_session: BrowserSessionContext
     ) -> str:
         scopes = self.parse_authorize_request(request)
-        grant = self._oauth_repo.get_active_grant(
+        grant = await self._oauth_repo.get_active_grant(
             user_id=browser_session.user_id,
             client_id=request.client_id,
             redirect_uri=request.redirect_uri,
@@ -130,7 +134,7 @@ class AuthService:
             or not set(scopes).issubset(set(grant.scopes))
         ):
             raise OAuthConsentRequiredError("Browser consent is required.")
-        code = self._oauth_repo.create_authorization_code(
+        code = await self._oauth_repo.create_authorization_code(
             grant_id=grant.id,
             user_id=browser_session.user_id,
             client_id=request.client_id,
@@ -143,18 +147,18 @@ class AuthService:
             request.redirect_uri, {"code": code, "state": request.state or ""}
         )
 
-    def approve_consent(
+    async def approve_consent(
         self, *, request: OAuthAuthorizeRequest, browser_session: BrowserSessionContext
     ) -> str:
         scopes = self.parse_scope_string(request.scope)
         self.parse_authorize_request(request)
-        grant = self._oauth_repo.upsert_grant(
+        grant = await self._oauth_repo.upsert_grant(
             user_id=browser_session.user_id,
             client_id=request.client_id,
             redirect_uri=request.redirect_uri,
             scopes=scopes,
         )
-        code = self._oauth_repo.create_authorization_code(
+        code = await self._oauth_repo.create_authorization_code(
             grant_id=grant.id,
             user_id=browser_session.user_id,
             client_id=request.client_id,
@@ -173,21 +177,21 @@ class AuthService:
             request.redirect_uri, {"code": code, "state": request.state or ""}
         )
 
-    def exchange_token_request(self, request: OAuthTokenRequest) -> TokenBundle:
+    async def exchange_token_request(self, request: OAuthTokenRequest) -> TokenBundle:
         if request.grant_type == "authorization_code":
-            return self.exchange_code(request)
+            return await self.exchange_code(request)
         if request.grant_type == "refresh_token":
-            return self.refresh_access_token(request)
+            return await self.refresh_access_token(request)
         raise OAuthError("Unsupported grant type.")
 
-    def exchange_code(self, request: OAuthTokenRequest) -> TokenBundle:
+    async def exchange_code(self, request: OAuthTokenRequest) -> TokenBundle:
         if request.code is None or request.redirect_uri is None:
             raise OAuthInvalidGrantError(
                 "Authorization code requests require code and redirect_uri."
             )
         if request.code_verifier is None:
             raise OAuthInvalidGrantError("PKCE code_verifier is required.")
-        code_record = self._oauth_repo.get_authorization_code(request.code)
+        code_record = await self._oauth_repo.get_authorization_code(request.code)
         if code_record is None:
             raise OAuthInvalidGrantError("Invalid authorization code.")
         if (
@@ -208,13 +212,13 @@ class AuthService:
             method=code_record.code_challenge_method,
         )
         try:
-            code_record = self._oauth_repo.consume_authorization_code(request.code)
+            code_record = await self._oauth_repo.consume_authorization_code(request.code)
         except ValueError as exc:
             raise OAuthInvalidGrantError(str(exc)) from exc
-        grant = self._oauth_repo.get_grant_by_id(code_record.grant_id)
+        grant = await self._oauth_repo.get_grant_by_id(code_record.grant_id)
         if grant is None or grant.revoked_at is not None:
             raise OAuthInvalidGrantError("The associated OAuth grant is no longer active.")
-        refresh_token = self._oauth_repo.create_refresh_token(
+        refresh_token = await self._oauth_repo.create_refresh_token(
             grant_id=grant.id,
             user_id=grant.user_id,
             client_id=grant.client_id,
@@ -236,21 +240,21 @@ class AuthService:
             refresh_token=refresh_token,
         )
 
-    def refresh_access_token(self, request: OAuthTokenRequest) -> TokenBundle:
+    async def refresh_access_token(self, request: OAuthTokenRequest) -> TokenBundle:
         if request.refresh_token is None:
             raise OAuthInvalidGrantError("Refresh requests require a refresh_token.")
-        refresh_record = self._oauth_repo.get_refresh_token(request.refresh_token)
+        refresh_record = await self._oauth_repo.get_refresh_token(request.refresh_token)
         if refresh_record is None:
             raise OAuthInvalidGrantError("Invalid refresh token.")
         if refresh_record.client_id != request.client_id:
             raise OAuthInvalidGrantError("Refresh token client mismatch.")
         try:
-            refresh_record, replacement = self._oauth_repo.rotate_refresh_token(
+            refresh_record, replacement = await self._oauth_repo.rotate_refresh_token(
                 request.refresh_token
             )
         except ValueError as exc:
             raise OAuthInvalidGrantError(str(exc)) from exc
-        grant = self._oauth_repo.get_grant_by_id(refresh_record.grant_id)
+        grant = await self._oauth_repo.get_grant_by_id(refresh_record.grant_id)
         if grant is None or grant.revoked_at is not None:
             raise OAuthInvalidGrantError("The associated OAuth grant is no longer active.")
         logger.info(
@@ -268,20 +272,20 @@ class AuthService:
             refresh_token=replacement,
         )
 
-    def revoke(self, request: OAuthRevokeRequest) -> bool:
+    async def revoke(self, request: OAuthRevokeRequest) -> bool:
         if request.token_type_hint == "refresh_token":
-            revoked = self._oauth_repo.revoke_refresh_token(request.token)
+            revoked = await self._oauth_repo.revoke_refresh_token(request.token)
             logger.info("oauth refresh_token revoked=%s", revoked)
             return revoked
         grant_id = self._decode_access_token_grant_id(request.token)
         if grant_id is not None:
-            revoked = self._oauth_repo.revoke_grant(grant_id)
+            revoked = await self._oauth_repo.revoke_grant(grant_id)
             logger.info("oauth grant revoked grant_id=%s revoked=%s", grant_id, revoked)
             return revoked
-        return self._oauth_repo.revoke_refresh_token(request.token)
+        return await self._oauth_repo.revoke_refresh_token(request.token)
 
-    def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
-        user = self._fetch_supabase_user(supabase_access_token)
+    async def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
+        user = await self._fetch_supabase_user(supabase_access_token)
         user_id = str(user.get("id", ""))
         if not user_id:
             raise OAuthLoginRequiredError("Supabase did not return a user id.")
@@ -304,9 +308,9 @@ class AuthService:
             algorithm="HS256",
         )
 
-    def create_browser_token(self, session: BrowserSessionContext) -> BrowserTokenResponse:
+    async def create_browser_token(self, session: BrowserSessionContext) -> BrowserTokenResponse:
         scopes = sorted(self._supported_scopes)
-        grant = self._oauth_repo.upsert_grant(
+        grant = await self._oauth_repo.upsert_grant(
             user_id=session.user_id,
             client_id=settings.base_url,
             redirect_uri=settings.base_url,
@@ -337,7 +341,7 @@ class AuthService:
             email=str(claims.get("email", "")) or None,
         )
 
-    def get_user_context_from_bearer(self, token: str) -> UserContext:
+    async def get_user_context_from_bearer(self, token: str) -> UserContext:
         claims = jwt.decode(
             token,
             settings.app_jwt_secret,
@@ -347,7 +351,7 @@ class AuthService:
         grant_id = str(claims.get("jti", "")) or None
         if grant_id is None:
             raise OAuthInvalidGrantError("Access token is missing a grant id.")
-        grant = self._oauth_repo.get_grant_by_id(grant_id)
+        grant = await self._oauth_repo.get_grant_by_id(grant_id)
         if grant is None or grant.revoked_at is not None:
             logger.warning("bearer auth: grant revoked or missing grant_id=%s", grant_id)
             raise OAuthInvalidGrantError("The OAuth grant for this token has been revoked.")
@@ -373,21 +377,21 @@ class AuthService:
             return None
         return str(claims.get("jti", "")) or None
 
-    def _fetch_supabase_user(self, access_token: str) -> dict[str, Any]:
+    async def _fetch_supabase_user(self, access_token: str) -> dict[str, Any]:
         if not settings.supabase_url or not settings.supabase_service_role_key:
             raise OAuthRepositoryNotConfiguredError(
                 "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
             )
         url = f"{settings.supabase_url.rstrip('/')}/auth/v1/user"
         logger.debug("supabase user fetch start")
-        response = httpx.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "apikey": settings.supabase_service_role_key,
-            },
-            timeout=10.0,
-        )
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "apikey": settings.supabase_service_role_key,
+                },
+            )
         logger.debug("supabase user fetch status=%d", response.status_code)
         response.raise_for_status()
         payload = response.json()

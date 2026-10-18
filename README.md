@@ -88,7 +88,9 @@ public URL. Configure:
 
 Database schema changes live in `supabase/migrations/`. See
 `docs/supabase-migration-history.md` for migration ordering and Supabase Preview
-history repair notes.
+history repair notes. OAuth persistence is async end to end; see
+[`docs/ASYNC_REPOSITORY_MIGRATION.md`](docs/ASYNC_REPOSITORY_MIGRATION.md) for the
+remaining repository migration slices and their validation boundaries.
 
 Configure:
 
