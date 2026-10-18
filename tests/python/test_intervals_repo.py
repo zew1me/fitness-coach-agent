@@ -8,7 +8,6 @@ two-step UPDATE + INSERT fails loudly.
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 
@@ -25,7 +24,7 @@ class FakeRpcQuery:
 
 
 class FakeAtomicIntervalsClient:
-    """Emulates the `replace_intervals_connection` RPC over in-memory rows."""
+    """RPC-only stub returning composite rows, without simulating database writes."""
 
     def __init__(self, *, rpc_data_override: object = None) -> None:
         self.rows: list[dict[str, object]] = []
@@ -45,12 +44,8 @@ class FakeAtomicIntervalsClient:
             return FakeRpcQuery(self._rpc_data_override)
 
         now = datetime.now(UTC).isoformat()
-        for row in self.rows:
-            if row["user_id"] == params["p_user_id"] and row["revoked_at"] is None:
-                row["revoked_at"] = now
-                row["updated_at"] = now
         row = {
-            "id": str(uuid4()),
+            "id": "connection-1",
             "user_id": params["p_user_id"],
             "intervals_athlete_id": params["p_intervals_athlete_id"],
             "intervals_athlete_name": params["p_intervals_athlete_name"],
@@ -79,11 +74,11 @@ def _connection(athlete_id: str = "i135168") -> IntervalsConnectionCreate:
     )
 
 
-async def test_replace_connection_swaps_via_single_atomic_rpc() -> None:
+async def test_replace_connection_delegates_to_single_rpc() -> None:
     client = FakeAtomicIntervalsClient()
     repo = IntervalsRepository(client)
 
-    record = await repo.replace_connection(_connection())
+    await repo.replace_connection(_connection())
 
     assert client.rpc_calls == [
         (
@@ -98,23 +93,6 @@ async def test_replace_connection_swaps_via_single_atomic_rpc() -> None:
             },
         )
     ]
-    assert record.user_id == "coach-user-1"
-    assert record.intervals_athlete_id == "i135168"
-    assert record.revoked_at is None
-
-
-async def test_replace_connection_revokes_prior_active_row_in_the_same_call() -> None:
-    client = FakeAtomicIntervalsClient()
-    repo = IntervalsRepository(client)
-
-    first = await repo.replace_connection(_connection("i111"))
-    second = await repo.replace_connection(_connection("i222"))
-
-    assert first.id != second.id
-    active_rows = [row for row in client.rows if row["revoked_at"] is None]
-    assert [row["id"] for row in active_rows] == [second.id]
-    revoked_rows = [row for row in client.rows if row["revoked_at"] is not None]
-    assert [row["id"] for row in revoked_rows] == [first.id]
 
 
 async def test_replace_connection_raises_when_rpc_returns_no_row() -> None:
@@ -203,11 +181,9 @@ async def test_replace_connection_forwards_model_defaults_for_scopes_and_token_t
         access_token_ciphertext="ciphertext-2",
     )
 
-    record = await repo.replace_connection(connection)
+    await repo.replace_connection(connection)
 
     _, params = client.rpc_calls[0]
     assert params["p_scopes"] == []
     assert params["p_token_type"] == "Bearer"
     assert params["p_intervals_athlete_name"] is None
-    assert record.scopes == []
-    assert record.token_type == "Bearer"

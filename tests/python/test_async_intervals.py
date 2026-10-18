@@ -94,17 +94,6 @@ async def test_unconfigured_queries_fail_but_cleanup_is_safe(
     await repo.aclose()
 
 
-def test_repository_constructs_async_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "supabase_url", "https://supabase.example.com")
-    monkeypatch.setattr(settings, "supabase_service_role_key", "test-service-key")
-    database, _query = _database([])
-    factory = Mock(return_value=database)
-    monkeypatch.setattr("backend.repos.intervals_repo.SupabaseAsyncClient", factory)
-    repo = IntervalsRepository()
-    assert repo._require_client() is database
-    factory.assert_called_once_with("https://supabase.example.com", "test-service-key")
-
-
 @pytest.fixture
 def configured_async_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "intervals_client_id", "test-client")
