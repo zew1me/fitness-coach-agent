@@ -42,7 +42,6 @@ declare const styles: {
   readonly fieldInput: string;
   readonly fieldLabel: string;
   readonly frame: string;
-  readonly ghostButton: string;
   readonly historyLoadButton: string;
   readonly hiddenInput: string;
   readonly landingCard: string;
@@ -68,11 +67,9 @@ declare const styles: {
   readonly primaryButton: string;
   readonly rowAssistant: string;
   readonly rowUser: string;
-  readonly secondaryButton: string;
   readonly sendButton: string;
   readonly sendButtonText: string;
   readonly sendIcon: string;
-  readonly settingsButton: string;
   readonly shell: string;
   readonly starterButton: string;
   readonly starterRow: string;

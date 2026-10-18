@@ -3,7 +3,7 @@ import { z } from "zod";
 import { coachToolDefinitions } from "./tools";
 import type { AthleteContextBundle } from "./types";
 
-export const internalSpecialistRoleSchema = z.enum([
+const internalSpecialistRoleSchema = z.enum([
   "intake",
   "nutrition",
   "recovery",
@@ -13,7 +13,7 @@ export type InternalSpecialistRole = z.infer<
   typeof internalSpecialistRoleSchema
 >;
 
-export const specialistDelegationSchema = z
+const specialistDelegationSchema = z
   .object({
     role: internalSpecialistRoleSchema,
     objective: z.string().min(1),
@@ -245,7 +245,7 @@ const proposedUpdateWireSchema = z
   })
   .strict();
 
-export const proposedUpdateSchema = proposedUpdateWireSchema.superRefine(
+const proposedUpdateSchema = proposedUpdateWireSchema.superRefine(
   (update, context) => {
     let parsed: unknown;
     try {

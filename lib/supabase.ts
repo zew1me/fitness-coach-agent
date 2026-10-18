@@ -4,19 +4,24 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 const supabaseUrl = process.env["NEXT_PUBLIC_SUPABASE_URL"];
 const supabaseAnonKey = process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"];
 
-export function createBrowserSupabaseClient(url: string, anonKey: string): SupabaseClient {
+function createBrowserSupabaseClient(
+  url: string,
+  anonKey: string,
+): SupabaseClient {
   return createBrowserClient(url, anonKey);
 }
 
-export const supabaseBrowserClient =
+const supabaseBrowserClient =
   supabaseUrl && supabaseAnonKey
     ? createBrowserSupabaseClient(supabaseUrl, supabaseAnonKey)
     : null;
 
-export function getBrowserSupabaseClient(): NonNullable<typeof supabaseBrowserClient> {
+export function getBrowserSupabaseClient(): NonNullable<
+  typeof supabaseBrowserClient
+> {
   if (supabaseBrowserClient === null) {
     throw new Error(
-      "Supabase browser client is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY before using login."
+      "Supabase browser client is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY before using login.",
     );
   }
 
