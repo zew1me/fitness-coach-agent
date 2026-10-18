@@ -312,7 +312,9 @@ describe("coachToolDefinitions", () => {
       },
     });
   });
+});
 
+describe("coachToolDefinitions engine routing", () => {
   it("routes athlete profile updates to the engine with nutrition fields", async () => {
     const requests: Array<{ body: unknown; url: string }> = [];
     const fetchImpl = (
@@ -577,7 +579,9 @@ describe("coachToolDefinitions", () => {
       },
     ]);
   });
+});
 
+describe("coachToolDefinitions plan and profile routing", () => {
   it("routes get_compliance_summary to the engine compliance endpoint", async () => {
     const requests: Array<{ body: unknown; url: string }> = [];
     const fetchImpl = (
@@ -896,7 +900,9 @@ describe("coachToolDefinitions", () => {
       },
     ]);
   });
+});
 
+describe("coachToolDefinitions upload handling", () => {
   it("keeps long activity text extraction requests alive past 30 seconds", async () => {
     vi.useFakeTimers();
     let requestSignal: AbortSignal | undefined;

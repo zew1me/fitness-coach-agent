@@ -338,7 +338,9 @@ describe("DurableCompactionSession", () => {
     await expect(session.runCompaction()).rejects.toBe(conflict);
     expect(underlying.replaceAll).toHaveBeenCalledTimes(1);
   });
+});
 
+describe("DurableCompactionSession thresholds", () => {
   it("returns null and skips the API call when items is empty", async () => {
     const underlying = {
       addItems: vi.fn(),
@@ -522,7 +524,9 @@ describe("DurableCompactionSession", () => {
     expect(request).not.toHaveProperty("responseId");
     expect(request).not.toHaveProperty("store");
   });
+});
 
+describe("DurableCompactionSession input normalization", () => {
   it("strips provider metadata from compaction input items", async () => {
     const output = [userItem("compacted")];
     const underlying = {
