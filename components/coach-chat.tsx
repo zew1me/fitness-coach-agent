@@ -1,17 +1,13 @@
 "use client";
 
-import { useChat } from "@ai-sdk/react";
 import * as Sentry from "@sentry/nextjs";
-import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
 import Link from "next/link";
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, JSX, ReactNode, RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { JSX } from "react";
 
-import { createChatUploadIntent, uploadFile } from "../lib/coach-api";
-import { errorMessage } from "../lib/errors";
+import { onlyWelcomeMessage } from "../lib/chat-ui-messages";
 import { siteConfig } from "../lib/site";
 import type {
-  AdaptedPlan,
   AthleteProfile,
   BrowserTokenResponse,
   ChatMessage,
@@ -20,154 +16,25 @@ import type {
 import type { AthleteProfileHook } from "../lib/use-athlete-profile";
 import { useAthleteProfile } from "../lib/use-athlete-profile";
 import { useBrowserSession } from "../lib/use-browser-session";
-import { useChatThread } from "../lib/use-chat-thread";
+import { useChatDraft } from "../lib/use-chat-draft";
+import { useChatSend } from "../lib/use-chat-send";
+import { type ChatThreadHook, useChatThread } from "../lib/use-chat-thread";
 import { useIsMobile } from "../lib/use-is-mobile";
+import { useLiveChatMessages } from "../lib/use-live-chat-messages";
+import { useMessageWindow } from "../lib/use-message-window";
+import { useProfileDrawer } from "../lib/use-profile-drawer";
+import { useWaitingStatus } from "../lib/use-waiting-status";
 
 import { AccountMenuButton } from "./account-menu";
+import { Composer } from "./chat-composer";
+import { MessagesSection } from "./chat-messages";
 import { useChatTurnLease } from "./chat-turn-lease-provider";
 import styles from "./coach-chat.module.css";
 import { ProfileDrawer } from "./profile-drawer";
 import { SessionLoading } from "./session-loading";
-import { StatusCard } from "./status-card";
-
-type LocalAttachment = {
-  id: string;
-  content_type: string;
-  filename: string;
-  object_key: string;
-  preview_url: string | null;
-  public_url: string | null;
-  status: "error" | "uploaded" | "uploading";
-};
-
-type StarterPrompt = {
-  label: string;
-  prompt: string;
-};
-
-const ONBOARDING_STARTERS: StarterPrompt[] = [
-  {
-    label: "Running base and consistency",
-    prompt: "I'm training for running and want help building consistency.",
-  },
-  {
-    label: "Cycling race prep",
-    prompt:
-      "I'm training for a cycling race and want help balancing intensity and recovery.",
-  },
-  {
-    label: "Triathlon build",
-    prompt:
-      "I'm training for triathlon and want help building toward my next event.",
-  },
-];
-const COACHING_STARTERS: StarterPrompt[] = [
-  {
-    label: "Log a training session",
-    prompt: "I just finished a training session and want to log how it felt.",
-  },
-  {
-    label: "Generate next plan",
-    prompt: "Build my next 14-day training plan.",
-  },
-  {
-    label: "Adapt around fatigue",
-    prompt: "I have some soreness and travel coming up this week.",
-  },
-];
-
-const CHAT_ATTACHMENT_ACCEPT =
-  "image/*,application/gpx+xml,.gpx,.fit,.tcx,application/zip,.zip";
-const MESSAGE_RENDER_BATCH_SIZE = 60;
-const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20_000;
-const WAITING_STATUS_INTERVAL_MS = 1600;
-const WAITING_STATUSES = [
-  "Thinking...",
-  "Still working...",
-  "Checking the coaching notes...",
-  "Almost there...",
-];
-
-function onlyWelcomeMessage(messages: ChatMessage[]): boolean {
-  const firstMessage = messages[0];
-  return (
-    messages.length === 1 &&
-    firstMessage !== undefined &&
-    firstMessage.role === "assistant" &&
-    firstMessage.metadata.message_kind === "welcome"
-  );
-}
-
-function browserTimeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-}
-
-function readableTime(timestamp: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(timestamp));
-}
-
-function removePreviewUrls(attachments: LocalAttachment[]): void {
-  for (const attachment of attachments) {
-    if (attachment.preview_url !== null) {
-      URL.revokeObjectURL(attachment.preview_url);
-    }
-  }
-}
 
 function coachingStatusLabel(profileComplete: boolean): string {
   return profileComplete ? "Coaching ready" : "Building your athlete profile";
-}
-
-function readString(
-  record: Record<string, unknown>,
-  key: string,
-): string | null {
-  const value = record[key];
-  return typeof value === "string" ? value : null;
-}
-
-function legacyAttachmentToFilePart(
-  attachment: Record<string, unknown>,
-): UIMessage["parts"][number] | null {
-  const url = readString(attachment, "public_url");
-  if (url === null) return null;
-  const mediaType =
-    readString(attachment, "content_type") ??
-    readString(attachment, "mediaType") ??
-    "application/octet-stream";
-  const filename = readString(attachment, "filename") ?? "attachment";
-  return { type: "file", mediaType, filename, url };
-}
-
-// Real persisted messages always have `parts` populated (the chat-parts migration
-// backfilled every legacy row). This shim covers in-flight test fixtures and
-// any callers still constructing the legacy shape: synthesize parts from the
-// text `content` + legacy `attachments` join so the renderer never has to
-// branch on shape.
-function deriveParts(message: ChatMessage): UIMessage["parts"] {
-  if (message.parts && message.parts.length > 0) {
-    return message.parts as UIMessage["parts"];
-  }
-  const synthesized: UIMessage["parts"] = [];
-  if (message.content && message.content.length > 0) {
-    synthesized.push({ type: "text", text: message.content });
-  }
-  for (const attachment of message.attachments) {
-    const part = legacyAttachmentToFilePart(attachment);
-    if (part !== null) synthesized.push(part);
-  }
-  return synthesized;
-}
-
-function toUiMessage(message: ChatMessage): UIMessage {
-  return {
-    id: message.id,
-    parts: deriveParts(message),
-    role: message.role,
-  };
 }
 
 function serializeChatHistoryJsonl(messages: ChatMessage[]): string {
@@ -184,122 +51,13 @@ function downloadTextFile(filename: string, text: string, type: string): void {
   URL.revokeObjectURL(url);
 }
 
-function friendlyToolStatus(toolName: string): string {
-  const statuses: Record<string, string> = {
-    analyze_screenshot: "Reviewing your uploaded image...",
-    calculate_zones: "Calculating your training zones...",
-    get_athlete_context: "Looking up your info...",
-    process_uploaded_file: "Reading your file...",
-    save_check_in: "Saving your check-in...",
-    update_athlete_profile: "Updating your profile...",
-  };
-
-  return statuses[toolName] ?? "Working on that...";
-}
-
-function uiPartText(part: UIMessage["parts"][number]): string | null {
-  if (part.type === "text") {
-    return part.text;
-  }
-
-  if (part.type === "dynamic-tool") {
-    return friendlyToolStatus(part.toolName);
-  }
-
-  if (part.type.startsWith("tool-")) {
-    return friendlyToolStatus(part.type.slice("tool-".length));
-  }
-
-  return null;
-}
-
-function toLiveChatMessage(
-  message: UIMessage,
-  threadId: string,
-  userId: string,
-): ChatMessage | null {
-  if (message.role !== "assistant" && message.role !== "user") {
-    return null;
-  }
-
-  return {
-    attachments: [],
-    parts: message.parts as NonNullable<ChatMessage["parts"]>,
-    created_at: new Date().toISOString(),
-    id: message.id,
-    metadata: { message_kind: "streaming" },
-    role: message.role,
-    thread_id: threadId,
-    user_id: userId,
-  };
-}
-
-function uploadedFileParts(attachments: LocalAttachment[]): FileUIPart[] {
-  return attachments.flatMap((attachment) => {
-    if (attachment.status !== "uploaded" || attachment.public_url === null) {
-      return [];
-    }
-    return [
-      {
-        filename: attachment.filename,
-        mediaType: attachment.content_type,
-        type: "file",
-        url: attachment.public_url,
-      },
-    ];
-  });
-}
-
-function hasSendableContent(
-  composer: string,
-  attachments: LocalAttachment[],
-): boolean {
-  const hasText = composer.trim().length > 0;
-  const hasPendingAttachment = attachments.some(
-    (attachment) => attachment.status === "uploading",
+function exportChatHistoryJsonl(messages: ChatMessage[]): void {
+  const exportDate = new Date().toISOString().slice(0, 10);
+  downloadTextFile(
+    `coaching-history-${exportDate}.jsonl`,
+    serializeChatHistoryJsonl(messages),
+    "application/x-ndjson;charset=utf-8",
   );
-
-  return hasText
-    ? !hasPendingAttachment
-    : attachments.some((attachment) => attachment.status === "uploaded");
-}
-
-function activityContentType(file: File): string {
-  if (file.type) {
-    return file.type;
-  }
-  const name = file.name.toLowerCase();
-  if (name.endsWith(".gpx")) return "application/gpx+xml";
-  if (name.endsWith(".fit")) return "application/vnd.garmin.fit";
-  if (name.endsWith(".tcx")) return "application/vnd.garmin.tcx+xml";
-  if (name.endsWith(".zip")) return "application/zip";
-  return "application/octet-stream";
-}
-
-function isSupportedAttachment(file: File): boolean {
-  if (file.type.startsWith("image/")) {
-    return true;
-  }
-  const name = file.name.toLowerCase();
-  return (
-    name.endsWith(".gpx") ||
-    name.endsWith(".fit") ||
-    name.endsWith(".tcx") ||
-    name.endsWith(".zip")
-  );
-}
-
-function fileTypeBadge(attachment: {
-  content_type: string;
-  filename: string;
-}): string | null {
-  if (attachment.content_type.startsWith("image/")) {
-    return null;
-  }
-  const suffix = attachment.filename.split(".").pop()?.toUpperCase();
-  return suffix && ["GPX", "FIT", "TCX", "ZIP"].includes(suffix)
-    ? suffix
-    : "FILE";
 }
 
 function composerPlaceholderFor(
@@ -311,26 +69,6 @@ function composerPlaceholderFor(
     return "Tell your coach your sport and goal...";
   }
   return "Reply to your coach...";
-}
-
-function SendIcon(): JSX.Element {
-  return (
-    <svg
-      aria-hidden="true"
-      className={styles.sendIcon}
-      focusable="false"
-      viewBox="0 0 20 20"
-    >
-      <path
-        d="M3 10L17 3L13 17L10 11L3 10Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.8"
-      />
-    </svg>
-  );
 }
 
 function LoggedOutLanding({
@@ -487,262 +225,6 @@ function ChatLoadingShell(): JSX.Element {
   );
 }
 
-function PlanCard({ plan }: Readonly<{ plan: AdaptedPlan }>): JSX.Element {
-  return (
-    <section className={styles.planCard}>
-      <div className={styles.planMeta}>
-        <span className={styles.planPill}>{plan.summary}</span>
-        <span className={styles.planPill}>{plan.trend}</span>
-        <span className={styles.planPill}>{plan.hours} hours</span>
-      </div>
-      <div className={styles.planDays}>
-        {plan.days.map((day) => (
-          <article className={styles.planDay} key={day.day_index}>
-            <h3 className={styles.planDayTitle}>
-              Day {day.day_index}: {day.focus}
-            </h3>
-            <p className={styles.planDayNote}>{day.notes}</p>
-          </article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): JSX.Element {
-  const filename = part.filename ?? "attachment";
-  const contentType = part.mediaType;
-  const isImage = contentType.startsWith("image/");
-  const badge = fileTypeBadge({ content_type: contentType, filename });
-  return (
-    <div className={styles.attachmentThumb}>
-      {isImage ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img alt={filename} src={part.url} />
-      ) : (
-        <div className={styles.attachmentFileCard}>
-          <span>{badge ?? "FILE"}</span>
-        </div>
-      )}
-      <span className={styles.attachmentName}>{filename}</span>
-    </div>
-  );
-}
-
-/**
- * Indeterminate "the coach is working" affordance for an in-flight assistant
- * bubble that has no renderable content yet (issue #406).
- *
- * Visual only: `ComposerHint` already announces WAITING_STATUSES through an
- * aria-live region while `sending`, so a second live region here would
- * double-announce to screen readers.
- */
-function ThinkingIndicator(): JSX.Element {
-  return (
-    <span
-      aria-hidden="true"
-      className={styles.thinkingIndicator}
-      data-testid="thinking-indicator"
-    >
-      <span className={styles.thinkingDot} />
-      <span className={styles.thinkingDot} />
-      <span className={styles.thinkingDot} />
-    </span>
-  );
-}
-
-/**
- * The SDK pushes a `step-start` part (and reasoning parts) into a live assistant
- * message before any text or tool part exists; `uiPartText` returns null for
- * those, so the bubble would otherwise mount visibly empty (#406). The check is
- * deliberately trigger-agnostic, so a future unrenderable part type is covered
- * too.
- *
- * Scoped to the *streaming* message: persisted rows with no renderable content
- * (e.g. an old tool-only turn) keep their timestamp-only appearance rather than
- * pinning a permanent spinner into the transcript.
- */
-function shouldShowThinking(
-  message: ChatMessage,
-  { hasRenderableContent }: Readonly<{ hasRenderableContent: boolean }>,
-): boolean {
-  if (hasRenderableContent) return false;
-  return (
-    message.role === "assistant" &&
-    message.metadata.message_kind === "streaming"
-  );
-}
-
-function MessageBubble({
-  message,
-}: Readonly<{ message: ChatMessage }>): JSX.Element {
-  const rowClass =
-    message.role === "assistant" ? styles.rowAssistant : styles.rowUser;
-  const bubbleClass =
-    message.role === "assistant"
-      ? `${styles.bubble} ${styles.assistantBubble}`
-      : `${styles.bubble} ${styles.userBubble}`;
-  const plan = message.metadata.plan;
-  const parts = deriveParts(message);
-  const textBlocks = parts
-    .map((part) => uiPartText(part))
-    .filter((text): text is string => text !== null && text.length > 0);
-  const fileParts = parts.filter(
-    (part): part is FileUIPart => part.type === "file",
-  );
-  const showThinking = shouldShowThinking(message, {
-    hasRenderableContent:
-      textBlocks.length > 0 || fileParts.length > 0 || Boolean(plan),
-  });
-
-  return (
-    <div className={rowClass}>
-      <div
-        className={bubbleClass}
-        data-role={message.role}
-        data-testid="chat-bubble"
-      >
-        {showThinking ? <ThinkingIndicator /> : null}
-        {textBlocks.map((text, idx) => (
-          <p className={styles.messageText} key={`text-${idx}`}>
-            {text}
-          </p>
-        ))}
-        {fileParts.length > 0 ? (
-          <div className={styles.attachmentGrid}>
-            {fileParts.map((part, idx) => (
-              <AttachmentTile key={`file-${part.url}-${idx}`} part={part} />
-            ))}
-          </div>
-        ) : null}
-        {plan ? <PlanCard plan={plan} /> : null}
-        <div className={styles.attachmentName}>
-          {readableTime(message.created_at)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MessageList({
-  messages,
-  hiddenMessageCount,
-  loadingOlder,
-  onShowMore,
-  messageEndRef,
-  olderAvailable,
-}: Readonly<{
-  messages: ChatMessage[];
-  hiddenMessageCount: number;
-  loadingOlder: boolean;
-  onShowMore: () => void;
-  messageEndRef: RefObject<HTMLDivElement | null>;
-  olderAvailable: boolean;
-}>): JSX.Element {
-  return (
-    <div className={styles.messageStack}>
-      {hiddenMessageCount > 0 || olderAvailable ? (
-        <button
-          className={styles.historyLoadButton}
-          disabled={loadingOlder}
-          onClick={onShowMore}
-          type="button"
-        >
-          {hiddenMessageCount > 0
-            ? `Show ${Math.min(MESSAGE_RENDER_BATCH_SIZE, hiddenMessageCount)} older messages`
-            : "Show older messages"}
-        </button>
-      ) : null}
-      {messages.map((message) => (
-        <MessageBubble key={message.id} message={message} />
-      ))}
-      <div ref={messageEndRef} />
-    </div>
-  );
-}
-
-function EmptyChatLandingCard({
-  variant,
-  onPrefill,
-  children,
-}: Readonly<{
-  variant: "coaching" | "onboarding";
-  onPrefill: (_text: string) => void;
-  children: ReactNode;
-}>): JSX.Element {
-  const starters =
-    variant === "onboarding" ? ONBOARDING_STARTERS : COACHING_STARTERS;
-  const title =
-    variant === "onboarding"
-      ? "Start with your sport and goal"
-      : "What should we work on next?";
-  const body =
-    variant === "onboarding"
-      ? "Tell me what you are training for and what you want coaching around. A short answer is enough."
-      : "Use this thread for quick training updates, image-backed check-ins, and your next 14-day plan. I’ll keep the details in the background and keep the surface focused.";
-  return (
-    <div className={styles.emptyState}>
-      <StatusCard body={body} headingLevel="h1" title={title}>
-        <div className={styles.starterRow}>
-          {starters.map((starter) => (
-            <button
-              className={styles.starterButton}
-              key={starter.label}
-              onClick={() => onPrefill(starter.prompt)}
-              type="button"
-            >
-              {starter.label}
-            </button>
-          ))}
-        </div>
-        {children}
-      </StatusCard>
-    </div>
-  );
-}
-
-function MessagesSection({
-  messages,
-  hiddenMessageCount,
-  loadingOlder,
-  onShowMore,
-  onPrefillStarter,
-  messageEndRef,
-  profileComplete,
-  olderAvailable,
-}: Readonly<{
-  messages: ChatMessage[];
-  hiddenMessageCount: number;
-  loadingOlder: boolean;
-  onShowMore: () => void;
-  onPrefillStarter: (_text: string) => void;
-  messageEndRef: RefObject<HTMLDivElement | null>;
-  profileComplete: boolean;
-  olderAvailable: boolean;
-}>): JSX.Element {
-  const messageList = (
-    <MessageList
-      hiddenMessageCount={hiddenMessageCount}
-      loadingOlder={loadingOlder}
-      messageEndRef={messageEndRef}
-      messages={messages}
-      onShowMore={onShowMore}
-      olderAvailable={olderAvailable}
-    />
-  );
-  if (!onlyWelcomeMessage(messages)) {
-    return <section className={styles.messagesPane}>{messageList}</section>;
-  }
-  const variant = profileComplete ? "coaching" : "onboarding";
-  return (
-    <section className={styles.messagesPane}>
-      <EmptyChatLandingCard onPrefill={onPrefillStarter} variant={variant}>
-        {messageList}
-      </EmptyChatLandingCard>
-    </section>
-  );
-}
-
 function ChatTopbar({
   profile,
   coachingStatus,
@@ -814,273 +296,6 @@ function ChatTopbar({
   );
 }
 
-function UploadChip({
-  attachment,
-}: Readonly<{ attachment: LocalAttachment }>): JSX.Element {
-  const badge = fileTypeBadge(attachment);
-  const statusLabel =
-    attachment.status === "uploading"
-      ? "Uploading"
-      : attachment.status === "uploaded"
-        ? "Ready"
-        : "Upload failed";
-  return (
-    <div className={styles.uploadChip}>
-      {badge ? <span className={styles.uploadBadge}>{badge}</span> : null}
-      <span>{attachment.filename}</span>
-      <span className={styles.uploadStatus}>{statusLabel}</span>
-    </div>
-  );
-}
-
-function UploadChips({
-  attachments,
-}: Readonly<{ attachments: LocalAttachment[] }>): JSX.Element | null {
-  if (attachments.length === 0) return null;
-  return (
-    <div className={styles.uploadRow}>
-      {attachments.map((attachment) => (
-        <UploadChip attachment={attachment} key={attachment.id} />
-      ))}
-    </div>
-  );
-}
-
-function SendButton({
-  composer,
-  attachments,
-  composerBusy,
-  sending,
-  syncingThread,
-  onSend,
-}: Readonly<{
-  composer: string;
-  attachments: LocalAttachment[];
-  composerBusy: boolean;
-  sending: boolean;
-  syncingThread: boolean;
-  onSend: () => void;
-}>): JSX.Element {
-  const disabled = composerBusy || !hasSendableContent(composer, attachments);
-  const label = syncingThread ? "Syncing" : sending ? "Sending..." : "Send";
-  return (
-    <button
-      className={styles.sendButton}
-      disabled={disabled}
-      onClick={onSend}
-      type="button"
-    >
-      <SendIcon />
-      <span className={styles.sendButtonText}>{label}</span>
-    </button>
-  );
-}
-
-function ComposerHint({
-  leaseInFlight,
-  syncingThread,
-  sending,
-  threadError,
-  isMobile,
-  waitingStatus,
-}: Readonly<{
-  leaseInFlight: boolean;
-  syncingThread: boolean;
-  sending: boolean;
-  threadError: string | null;
-  isMobile: boolean;
-  waitingStatus: string | undefined;
-}>): JSX.Element {
-  if (syncingThread) {
-    return (
-      <span aria-live="polite" className={styles.waitingStatus} role="status">
-        Syncing coach chat...
-      </span>
-    );
-  }
-  if (sending) {
-    return (
-      <span aria-live="polite" className={styles.waitingStatus} role="status">
-        {waitingStatus}
-      </span>
-    );
-  }
-  if (leaseInFlight) {
-    return (
-      <span aria-live="polite" className={styles.waitingStatus} role="status">
-        Coach is finishing your previous message...
-      </span>
-    );
-  }
-  if (threadError !== null) {
-    return <span className={styles.errorTextInline}>{threadError}</span>;
-  }
-  return (
-    <>
-      {isMobile
-        ? "Tap the send button when you're ready. Add photos with the plus button."
-        : "Use Shift+Enter for a new line. Add photos with the plus button."}
-    </>
-  );
-}
-
-function Composer({
-  composer,
-  onComposerChange,
-  attachments,
-  composerBusy,
-  leaseInFlight,
-  sending,
-  syncingThread,
-  threadError,
-  isMobile,
-  waitingStatus,
-  placeholder,
-  onSend,
-  onFilesAdded,
-}: Readonly<{
-  composer: string;
-  onComposerChange: (_next: string) => void;
-  attachments: LocalAttachment[];
-  composerBusy: boolean;
-  leaseInFlight: boolean;
-  sending: boolean;
-  syncingThread: boolean;
-  threadError: string | null;
-  isMobile: boolean;
-  waitingStatus: string | undefined;
-  placeholder: string;
-  onSend: () => void;
-  onFilesAdded: (_files: File[]) => void;
-}>): JSX.Element {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [dragActive, setDragActive] = useState(false);
-
-  // Dragging a file onto a bare <textarea> makes the browser navigate to the
-  // file URL (issue #161). Capturing dragover/drop on the composer wrapper and
-  // calling preventDefault keeps the file in-app and routes it through the same
-  // upload path as the + button.
-  function handleDragOver(event: React.DragEvent): void {
-    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-    // preventDefault must come before the composerBusy guard: the browser
-    // decides whether to allow a drop based on whether dragover calls
-    // preventDefault. Skipping it here would make the drop target invalid
-    // even if handleDrop also calls preventDefault.
-    event.preventDefault();
-    if (sending || syncingThread) return;
-    setDragActive(true);
-  }
-
-  function handleDragLeave(event: React.DragEvent): void {
-    // Only clear when the pointer actually leaves the wrapper, not when it
-    // crosses into a child element (relatedTarget still inside the wrapper).
-    if (event.currentTarget.contains(event.relatedTarget as Node | null))
-      return;
-    setDragActive(false);
-  }
-
-  function handleDrop(event: React.DragEvent): void {
-    // preventDefault must come first — if called after the composerBusy guard,
-    // a drop while sending would not suppress the browser's default navigation.
-    event.preventDefault();
-    setDragActive(false);
-    if (sending || syncingThread) return;
-    const files = Array.from(event.dataTransfer.files);
-    if (files.length === 0) return;
-    onFilesAdded(files);
-  }
-
-  function handlePaste(event: React.ClipboardEvent): void {
-    const imageFiles = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null);
-    if (imageFiles.length > 0) {
-      event.preventDefault();
-      onFilesAdded(imageFiles);
-    }
-  }
-
-  function handleFileSelect(event: ChangeEvent<HTMLInputElement>): void {
-    onFilesAdded(Array.from(event.target.files ?? []));
-    event.target.value = "";
-  }
-
-  const rowClass = dragActive
-    ? `${styles.composerRow} ${styles.composerRowDragActive}`
-    : styles.composerRow;
-  const attachmentBusy = sending || syncingThread;
-  const attachClass = attachmentBusy
-    ? `${styles.attachButton} ${styles.attachDisabled}`
-    : styles.attachButton;
-
-  return (
-    <div className={styles.composerWrap}>
-      <div className={styles.composerCard}>
-        <UploadChips attachments={attachments} />
-
-        <div
-          className={rowClass}
-          data-testid="composer-row"
-          onDragEnter={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-        >
-          <label
-            aria-label="Add photo or activity file"
-            className={attachClass}
-            title="Add photo or activity file"
-          >
-            <input
-              accept={CHAT_ATTACHMENT_ACCEPT}
-              className={styles.hiddenInput}
-              disabled={attachmentBusy}
-              multiple
-              onChange={handleFileSelect}
-              ref={fileInputRef}
-              type="file"
-            />
-            +
-          </label>
-          <textarea
-            className={styles.composerInput}
-            onChange={(event) => onComposerChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (!isMobile && event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                onSend();
-              }
-            }}
-            onPaste={handlePaste}
-            placeholder={placeholder}
-            rows={1}
-            value={composer}
-          />
-          <SendButton
-            attachments={attachments}
-            composer={composer}
-            composerBusy={composerBusy}
-            onSend={onSend}
-            sending={sending}
-            syncingThread={syncingThread}
-          />
-        </div>
-        <div className={styles.composerHint}>
-          <ComposerHint
-            isMobile={isMobile}
-            leaseInFlight={leaseInFlight}
-            sending={sending}
-            syncingThread={syncingThread}
-            threadError={threadError}
-            waitingStatus={waitingStatus}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function CoachChat(): JSX.Element {
   const session = useBrowserSession();
   if (session.loading) {
@@ -1117,14 +332,9 @@ function SignedInChat({
   return (
     <CoachChatBody
       athleteProfile={athleteProfile}
-      fetchOlderMessages={thread.fetchOlderMessages}
-      loadingOlder={thread.loadingOlder}
-      olderAvailable={thread.olderAvailable}
-      refetchThread={thread.refetch}
       refreshSession={refreshSession}
-      setThreadError={thread.setError}
+      thread={thread}
       threadData={thread.data}
-      threadError={thread.error}
       token={token}
     />
   );
@@ -1132,161 +342,57 @@ function SignedInChat({
 
 function CoachChatBody({
   token,
+  thread,
   threadData,
-  threadError,
-  fetchOlderMessages,
-  loadingOlder,
-  olderAvailable,
-  refetchThread,
   refreshSession,
-  setThreadError,
   athleteProfile,
 }: Readonly<{
   token: BrowserTokenResponse;
+  thread: ChatThreadHook;
+  /** `thread.data`, narrowed to the loaded thread by `SignedInChat`. */
   threadData: ChatThreadResponse;
-  threadError: string | null;
-  fetchOlderMessages: () => Promise<number>;
-  loadingOlder: boolean;
-  olderAvailable: boolean;
-  refetchThread: () => Promise<void>;
   refreshSession: () => Promise<void>;
-  setThreadError: (_error: string | null) => void;
   athleteProfile: AthleteProfileHook;
 }>): JSX.Element {
-  const messageEndRef = useRef<HTMLDivElement | null>(null);
-  const [composer, setComposer] = useState("");
-  const [visibleMessageCount, setVisibleMessageCount] = useState(
-    MESSAGE_RENDER_BATCH_SIZE,
-  );
-  const [sending, setSending] = useState(false);
-  const [syncingThread, setSyncingThread] = useState(false);
-  const [waitingStatusIndex, setWaitingStatusIndex] = useState(0);
-  const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const {
+    error: threadError,
+    fetchOlderMessages,
+    loadingOlder,
+    olderAvailable,
+    refetch: refetchThread,
+    setError: setThreadError,
+  } = thread;
   const isMobile = useIsMobile();
-
   const persistedMessages = threadData.thread.messages;
   const threadId = threadData.thread.id;
-  const knownPersistedMessageIdsRef = useRef<Set<string>>(new Set());
-  const olderRequestVersionRef = useRef(0);
-  // Synchronous guard against double-click: state reads aren't atomic across
-  // rapid events, so this ref is the authoritative in-flight check.
-  const sendInFlightRef = useRef(false);
-  // When we clear attachments optimistically on send, the [attachments] cleanup
-  // effect below would otherwise revoke the preview URLs we still need for the
-  // failure-restore path. This flag tells that cleanup to skip one revocation.
-  const skipNextAttachmentPreviewCleanupRef = useRef(false);
-  // Mirror the latest draft so the failed-send restore path can tell whether the
-  // user has started a new draft since we cleared it (see handleSend's catch).
-  const latestComposerRef = useRef(composer);
-  latestComposerRef.current = composer;
-  const latestAttachmentsRef = useRef(attachments);
-  latestAttachmentsRef.current = attachments;
-
-  const chatMessages = useMemo<UIMessage[]>(
-    () => persistedMessages.map(toUiMessage),
-    [persistedMessages],
-  );
-  // useChat keeps its own initial message state after thread refreshes. Track
-  // loaded DB ids so rows that page out of a refreshed slice are not replayed
-  // later as if they were new live messages.
-  const persistedMessageIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const message of persistedMessages) {
-      ids.add(message.id);
-    }
-    return ids;
-  }, [persistedMessages]);
-  useEffect(() => {
-    for (const message of persistedMessages) {
-      knownPersistedMessageIdsRef.current.add(message.id);
-    }
-  }, [persistedMessages]);
-  const {
-    messages: liveMessages,
-    sendMessage,
-    setMessages,
-  } = useChat({
-    id: threadId,
-    messages: chatMessages,
-    transport: new DefaultChatTransport({
-      api: "/api/chat",
-      credentials: "include",
-      headers: (): Record<string, string> => ({
-        "X-Athlete-Timezone": browserTimeZone(),
-      }),
-      prepareSendMessagesRequest: ({
-        messages,
-      }): { body: Record<string, unknown> } => ({
-        body:
-          process.env["NEXT_PUBLIC_COACH_CONTEXT_STRATEGY"] === "full_history"
-            ? { messages }
-            : { message: messages.at(-1) },
-      }),
-    }),
-  });
-  const { releaseVersion, startTurn, turnInFlight } = useChatTurnLease(
-    token.user_id,
-  );
-  const composerBusy = sending || syncingThread || turnInFlight;
-  const displayedMessages = useMemo<ChatMessage[]>(() => {
-    const knownPersistedMessageIds = knownPersistedMessageIdsRef.current;
-    const additional = liveMessages
-      .filter(
-        (m) =>
-          !persistedMessageIds.has(m.id) && !knownPersistedMessageIds.has(m.id),
-      )
-      .map((m) => toLiveChatMessage(m, threadId, token.user_id))
-      .filter(
-        (m): m is ChatMessage => m !== null && (m.parts ?? []).length > 0,
-      );
-    return [...persistedMessages, ...additional];
-  }, [
-    liveMessages,
-    persistedMessageIds,
+  const { displayedMessages, sendMessage, setMessages } = useLiveChatMessages(
     persistedMessages,
     threadId,
     token.user_id,
-  ]);
-
-  useEffect(() => {
-    const scrollTarget = messageEndRef.current;
-    if (
-      scrollTarget !== null &&
-      typeof scrollTarget.scrollIntoView === "function"
-    ) {
-      scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
-  }, [persistedMessages.length, sending]);
-
-  useEffect(() => {
-    setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
-  }, [threadId]);
-
-  useEffect((): (() => void) | void => {
-    if (!sending) {
-      setWaitingStatusIndex(0);
-      return;
-    }
-    const intervalId = window.setInterval(() => {
-      setWaitingStatusIndex(
-        (current) => (current + 1) % WAITING_STATUSES.length,
-      );
-    }, WAITING_STATUS_INTERVAL_MS);
-    return (): void => {
-      window.clearInterval(intervalId);
-    };
-  }, [sending]);
-
-  useEffect((): (() => void) => {
-    return (): void => {
-      if (skipNextAttachmentPreviewCleanupRef.current) {
-        skipNextAttachmentPreviewCleanupRef.current = false;
-        return;
-      }
-      removePreviewUrls(attachments);
-    };
-  }, [attachments]);
+  );
+  const { releaseVersion, startTurn, turnInFlight } = useChatTurnLease(
+    token.user_id,
+  );
+  const [sending, setSending] = useState(false);
+  const [syncingThread, setSyncingThread] = useState(false);
+  const olderRequestVersionRef = useRef(0);
+  const composerBusy = sending || syncingThread || turnInFlight;
+  // Hook call order keeps the effects in their original sequence: scroll and
+  // window reset, the waiting-status timer, the attachment preview cleanup,
+  // then the lease-release refresh below.
+  const messageWindow = useMessageWindow({
+    fetchOlderMessages,
+    loadingOlder,
+    messages: displayedMessages,
+    olderAvailable,
+    olderRequestVersionRef,
+    persistedMessageCount: persistedMessages.length,
+    sending,
+    setThreadError,
+    threadId,
+  });
+  const waitingStatus = useWaitingStatus(sending);
+  const draft = useChatDraft(setThreadError);
 
   useEffect(() => {
     if (releaseVersion === 0) return;
@@ -1308,251 +414,28 @@ function CoachChatBody({
       });
   }, [refetchThread, releaseVersion, setThreadError]);
 
-  async function uploadOneAttachment(
-    attachmentId: string,
-    file: File,
-  ): Promise<void> {
-    const contentType = activityContentType(file);
-    try {
-      const intent = await createChatUploadIntent({
-        content_length: file.size,
-        content_type: contentType,
-        filename: file.name,
-        purpose: "chat-attachment",
-      });
-      const uploaded = await uploadFile(
-        intent.object_key,
-        file,
-        undefined,
-        AbortSignal.timeout(ATTACHMENT_UPLOAD_TIMEOUT_MS),
-      );
-      if (uploaded.public_url === null) {
-        setAttachments((current) =>
-          current.map((attachment) =>
-            attachment.id === attachmentId
-              ? {
-                  ...attachment,
-                  object_key: uploaded.object_key,
-                  public_url: null,
-                  status: "error",
-                }
-              : attachment,
-          ),
-        );
-        Sentry.logger.error("chat: attachment upload returned no public_url", {
-          filename_suffix: file.name.includes(".")
-            ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
-            : "",
-          content_type: contentType,
-        });
-        setThreadError(
-          "We uploaded the file but couldn't get a shareable link back. Ask an admin to check the storage configuration.",
-        );
-        return;
-      }
-      Sentry.logger.info("chat attachment ready", {
-        filename_suffix: file.name.includes(".")
-          ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
-          : "",
-        content_type: contentType,
-        has_public_url: true,
-      });
-      setAttachments((current) =>
-        current.map((attachment) =>
-          attachment.id === attachmentId
-            ? {
-                ...attachment,
-                object_key: uploaded.object_key,
-                public_url: uploaded.public_url,
-                status: "uploaded",
-              }
-            : attachment,
-        ),
-      );
-    } catch (error) {
-      Sentry.logger.error("chat attachment upload failed", {
-        filename_suffix: file.name.includes(".")
-          ? file.name.slice(file.name.lastIndexOf(".")).slice(0, 16)
-          : "",
-        content_type: contentType,
-      });
-      setAttachments((current) =>
-        current.map((attachment) =>
-          attachment.id === attachmentId
-            ? { ...attachment, status: "error" }
-            : attachment,
-        ),
-      );
-      const timedOut =
-        error instanceof DOMException && error.name === "TimeoutError";
-      console.error("Chat attachment upload failed", error);
-      setThreadError(
-        timedOut
-          ? "That upload took too long and was cancelled. Check your connection and try again."
-          : errorMessage(error, "Unable to upload that attachment."),
-      );
-    }
-  }
-
-  async function handleFilesAdded(files: File[]): Promise<void> {
-    if (files.length === 0) return;
-
-    const uploadQueue: Array<{ attachmentId: string; file: File }> = [];
-    const nextLocalAttachments: LocalAttachment[] = [];
-
-    for (const file of files) {
-      if (!isSupportedAttachment(file)) {
-        setThreadError(
-          "Only image, GPX, FIT, TCX, and ZIP attachments are supported in the coach chat.",
-        );
-        continue;
-      }
-      const attachmentId = crypto.randomUUID();
-      uploadQueue.push({ attachmentId, file });
-      nextLocalAttachments.push({
-        id: attachmentId,
-        content_type: activityContentType(file),
-        filename: file.name,
-        object_key: "",
-        preview_url: file.type.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : null,
-        public_url: null,
-        status: "uploading",
-      });
-    }
-    setAttachments((current) => [...current, ...nextLocalAttachments]);
-
-    for (const { attachmentId, file } of uploadQueue) {
-      await uploadOneAttachment(attachmentId, file);
-    }
-  }
-
-  async function handleSend(): Promise<void> {
-    if (sendInFlightRef.current || composerBusy) return;
-    if (!hasSendableContent(composer, attachments)) return;
-
-    sendInFlightRef.current = true;
-    startTurn();
-    setSending(true);
-    setThreadError(null);
-    // Snapshot the draft before we clear it so the catch block can restore it.
-    const pendingComposer = composer;
-    const pendingAttachments = attachments;
-    const messageId = crypto.randomUUID();
-    try {
-      Sentry.logger.info("user turn submitted", {
-        has_text: pendingComposer.trim().length > 0,
-        attachment_count: pendingAttachments.length,
-        message_id: messageId,
-      });
-      const messageParts: UIMessage["parts"] =
-        pendingComposer.trim().length > 0
-          ? [{ type: "text" as const, text: pendingComposer }]
-          : [];
-      // Clear the draft optimistically, before awaiting the send, so the input
-      // empties the instant the user hits Send. `sendMessage` only resolves once
-      // the entire assistant response has streamed back, so clearing after it
-      // would leave the message sitting in the composer for the whole reply. If
-      // the send fails we restore the snapshot below, so keep the attachment
-      // preview URLs alive — suppress the [attachments] cleanup's revocation for
-      // this one clear.
-      setComposer("");
-      skipNextAttachmentPreviewCleanupRef.current =
-        pendingAttachments.length > 0;
-      setAttachments([]);
-      await sendMessage({
-        id: messageId,
-        parts: [...messageParts, ...uploadedFileParts(pendingAttachments)],
-      });
-      // Send succeeded: free the preview URLs now that we won't restore them.
-      removePreviewUrls(pendingAttachments);
-      setSending(false);
-      setSyncingThread(true);
-      try {
-        olderRequestVersionRef.current += 1;
-        await refetchThread();
-        setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
-      } catch (refreshError) {
-        Sentry.logger.warn("chat thread refresh failed after send");
-        console.error("Chat thread refresh failed after send", refreshError);
-        setThreadError(
-          "Message sent, but the thread failed to refresh. Reload to see the latest.",
-        );
-      } finally {
-        setSyncingThread(false);
-      }
-    } catch (error) {
-      Sentry.logger.error("message send failed");
-      console.error("Sending coach message failed", error);
-      setSyncingThread(false);
-      // The send failed, so drop the optimistic user bubble the SDK added and
-      // restore the draft into the composer — but only if the user hasn't
-      // started a new draft (text or attachments) while the send was in flight,
-      // so we never clobber fresh input. Text and attachments are restored
-      // together under one check so we never pair a new draft with the failed
-      // send's attachments. The preview URLs were kept alive on the optimistic
-      // clear (see skipNextAttachmentPreviewCleanupRef), so restored attachments
-      // still render; if we don't restore, we revoke them here to avoid a leak.
-      setMessages((current) =>
-        current.filter((message) => message.id !== messageId),
-      );
-      const draftUntouched =
-        latestComposerRef.current === "" &&
-        latestAttachmentsRef.current.length === 0;
-      if (draftUntouched) {
-        setComposer(pendingComposer);
-        setAttachments(pendingAttachments);
-      } else {
-        removePreviewUrls(pendingAttachments);
-      }
-      setThreadError(errorMessage(error, "Unable to send your message."));
-      // A chat turn uses the cookie-backed Next.js route directly rather than
-      // authorizedFetch. Revalidate here so an expired cookie replaces the
-      // vague inline send error with the explicit sign-in-again screen.
-      void refreshSession();
-    } finally {
-      sendInFlightRef.current = false;
-      setSending(false);
-    }
-  }
-
-  async function openDrawer(): Promise<void> {
-    setDrawerOpen(true);
-    await athleteProfile.ensureLoaded();
-  }
-
-  async function handleSaveProfile(): Promise<void> {
-    const saved = await athleteProfile.save();
-    if (saved === null) return;
-    try {
-      olderRequestVersionRef.current += 1;
-      await refetchThread();
-      setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
-    } catch (refreshError) {
-      Sentry.logger.warn("chat thread refresh failed after profile save");
-      console.warn(
-        "Profile saved but chat thread refresh failed",
-        refreshError,
-      );
-    }
-  }
-
-  function handleExportJsonl(): void {
-    const exportDate = new Date().toISOString().slice(0, 10);
-    downloadTextFile(
-      `coaching-history-${exportDate}.jsonl`,
-      serializeChatHistoryJsonl(persistedMessages),
-      "application/x-ndjson;charset=utf-8",
-    );
-  }
-
-  const messages = displayedMessages;
-  const hiddenMessageCount = Math.max(0, messages.length - visibleMessageCount);
-  const visibleMessages =
-    hiddenMessageCount > 0 ? messages.slice(hiddenMessageCount) : messages;
+  const handleSend = useChatSend({
+    composerBusy,
+    draft,
+    olderRequestVersionRef,
+    refetchThread,
+    refreshSession,
+    resetWindow: messageWindow.resetWindow,
+    sendMessage,
+    setMessages,
+    setSending,
+    setSyncingThread,
+    setThreadError,
+    startTurn,
+  });
+  const drawer = useProfileDrawer({
+    athleteProfile,
+    olderRequestVersionRef,
+    refetchThread,
+    resetWindow: messageWindow.resetWindow,
+  });
   const composerPlaceholder = composerPlaceholderFor(
-    visibleMessages,
+    messageWindow.visibleMessages,
     threadData.profile_complete,
   );
 
@@ -1562,64 +445,33 @@ function CoachChatBody({
         <div className={styles.frame}>
           <ChatTopbar
             coachingStatus={coachingStatusLabel(threadData.profile_complete)}
-            onExport={handleExportJsonl}
+            onExport={() => exportChatHistoryJsonl(persistedMessages)}
             onOpenDrawer={() => {
-              void openDrawer();
+              void drawer.openDrawer();
             }}
             profile={athleteProfile.profile}
           />
 
           <MessagesSection
-            hiddenMessageCount={hiddenMessageCount}
+            hiddenMessageCount={messageWindow.hiddenMessageCount}
             loadingOlder={loadingOlder}
-            messageEndRef={messageEndRef}
-            messages={visibleMessages}
-            onPrefillStarter={setComposer}
+            messageEndRef={messageWindow.messageEndRef}
+            messages={messageWindow.visibleMessages}
+            onPrefillStarter={draft.setComposer}
             olderAvailable={olderAvailable}
-            onShowMore={() => {
-              if (hiddenMessageCount > 0) {
-                setVisibleMessageCount(
-                  (current) => current + MESSAGE_RENDER_BATCH_SIZE,
-                );
-                return;
-              }
-              if (!olderAvailable || loadingOlder) {
-                return;
-              }
-              const requestVersion = olderRequestVersionRef.current;
-              void fetchOlderMessages()
-                .then((addedCount) => {
-                  if (olderRequestVersionRef.current !== requestVersion) return;
-                  if (addedCount > 0) {
-                    setVisibleMessageCount(
-                      (visibleCount) => visibleCount + addedCount,
-                    );
-                  }
-                })
-                .catch((error) => {
-                  if (olderRequestVersionRef.current !== requestVersion) return;
-                  setThreadError(
-                    errorMessage(error, "Unable to load older messages."),
-                  );
-                })
-                .finally(() => {
-                  if (olderRequestVersionRef.current === requestVersion) {
-                    olderRequestVersionRef.current += 1;
-                  }
-                });
-            }}
+            onShowMore={messageWindow.showMore}
             profileComplete={threadData.profile_complete}
           />
 
           <Composer
-            attachments={attachments}
-            composer={composer}
+            attachments={draft.attachments}
+            composer={draft.composer}
             composerBusy={composerBusy}
             isMobile={isMobile}
             leaseInFlight={turnInFlight}
-            onComposerChange={setComposer}
+            onComposerChange={draft.setComposer}
             onFilesAdded={(files) => {
-              void handleFilesAdded(files);
+              void draft.handleFilesAdded(files);
             }}
             onSend={() => {
               void handleSend();
@@ -1628,17 +480,17 @@ function CoachChatBody({
             sending={sending}
             syncingThread={syncingThread}
             threadError={threadError}
-            waitingStatus={WAITING_STATUSES[waitingStatusIndex]}
+            waitingStatus={waitingStatus}
           />
         </div>
       </div>
 
       <ProfileDrawer
-        onClose={() => setDrawerOpen(false)}
+        onClose={drawer.closeDrawer}
         onSave={() => {
-          void handleSaveProfile();
+          void drawer.saveProfile();
         }}
-        open={drawerOpen}
+        open={drawer.drawerOpen}
         profile={athleteProfile.profile}
         saving={athleteProfile.saving}
         setProfile={athleteProfile.setProfile}

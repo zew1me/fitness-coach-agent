@@ -3,7 +3,7 @@
  *
  * Both bugs were the same render-layer mismatch: a *live* (in-flight) message
  * from `useChat` and the *persisted* (DB) copy reloaded by `loadChatThread`
- * rendered twice because the dedup at `coach-chat.tsx` keys on `message.id` and
+ * rendered twice because the dedup in `lib/use-live-chat-messages.ts` keys on `message.id` and
  * the client/server used different ids for the same logical message.
  *
  * The fix threads the client-chosen id through persistence so the server row
