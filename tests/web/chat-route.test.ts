@@ -453,7 +453,9 @@ describe("app/api/chat route", () => {
     expect(response.status).toBe(413);
     expect(streamCoachTurn).not.toHaveBeenCalled();
   });
+});
 
+describe("app/api/chat route model context", () => {
   it("keeps short conversations intact for model context", () => {
     const messages = Array.from({ length: 4 }, (_, index) => ({
       id: `message-${index}`,
@@ -804,7 +806,9 @@ describe("app/api/chat route", () => {
       expect(result[1]?.parts[0]).toMatchObject({ type: "text" });
     });
   });
+});
 
+describe("app/api/chat route activity file conversion", () => {
   it("converts GPX file parts to text before passing messages to the model", async () => {
     const gpxUrl =
       "https://pub-abc.r2.dev/users/athlete-1/chat-attachment/2026/06/17/uuid.gpx";
@@ -877,7 +881,9 @@ describe("app/api/chat route", () => {
       }),
     );
   });
+});
 
+describe("app/api/chat route error handling", () => {
   it("returns 401 when the browser session cookie is absent", async () => {
     const response = await POST(
       new Request("http://localhost/api/chat", {
@@ -963,7 +969,9 @@ describe("app/api/chat route", () => {
       "Coach is out to lunch. Please try again later.",
     );
   });
+});
 
+describe("app/api/chat route tool execution", () => {
   it("executes get_athlete_context by calling the engine summary endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
@@ -1077,7 +1085,9 @@ describe("app/api/chat route", () => {
       }),
     );
   });
+});
 
+describe("app/api/chat route engine tool execution", () => {
   it("executes calculate_zones by calling the engine zones endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
@@ -1454,7 +1464,9 @@ describe("app/api/chat route", () => {
       }),
     );
   });
+});
 
+describe("app/api/chat route deferred cleanup", () => {
   it("schedules Sentry flush and lease cleanup via after() on every successful chat request", async () => {
     const fetchMock = vi.fn((url: RequestInfo | URL) => {
       if (String(url).endsWith("/api/oauth/browser-token")) {
