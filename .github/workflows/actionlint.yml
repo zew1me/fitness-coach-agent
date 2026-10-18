@@ -1,0 +1,29 @@
+name: Lint GitHub Actions workflows
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: actionlint-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download actionlint
+        id: get_actionlint
+        # Fork's download script pinned to the v1.8.0 tag commit (not a moving branch) and the
+        # same version scripts/actionlint.sh uses locally; bump all three together.
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/zew1me/actionlint/8151ad72ac182a0bc8e7ff7035fc5027c7a5e0f9/scripts/download-actionlint.bash) 1.8.0
+        shell: bash
+      - name: Check workflow files
+        run: ${{ steps.get_actionlint.outputs.executable }} -color
+        shell: bash

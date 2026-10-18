@@ -3,7 +3,7 @@
 #
 # The fork carries newer workflow-schema support (e.g. checkout v7, Ubuntu 26.04 labels) than the
 # upstream release or the Homebrew formula, so everyone — CI, hooks, and local runs — uses this
-# exact build instead of whatever `actionlint` is on PATH. Bump ACTIONLINT_VERSION and the digests
+# exact build (CI's actionlint.yml workflow pins the same version) instead of whatever `actionlint` is on PATH. Bump ACTIONLINT_VERSION and the digests
 # together; digests come from the release asset `digest` field (`gh release view`).
 set -euo pipefail
 
