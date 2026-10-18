@@ -74,7 +74,7 @@ from backend.models.chat import (
 from backend.models.storage import PresignUploadRequest
 from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
-from backend.repos.oauth_repo import OAuthRepositoryNotConfiguredError
+from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
     RepositoryNotConfiguredError,
@@ -194,7 +194,10 @@ async def log_startup() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await log_startup()
-    yield
+    try:
+        yield
+    finally:
+        await auth_service.aclose()
 
 
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
@@ -277,7 +280,7 @@ r2_service = R2Service()
 RECOVERY_WEEK_AGE_BREAKPOINT = 40
 
 
-def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
+async def require_user_context(authorization: str | None = Header(default=None)) -> UserContext:
     if authorization is None or not authorization.startswith("Bearer "):
         resource = auth_service.protected_resource_metadata()["resource"]
         raise HTTPException(
@@ -287,7 +290,7 @@ def require_user_context(authorization: str | None = Header(default=None)) -> Us
         )
     token = authorization.removeprefix("Bearer ").strip()
     try:
-        return auth_service.get_user_context_from_bearer(token)
+        return await auth_service.get_user_context_from_bearer(token)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -322,7 +325,7 @@ async def health() -> Mapping[str, str]:
     return {"status": "ok"}
 
 
-# ── OAuth (unchanged) ────────────────────────────────────────
+# ── OAuth ───────────────────────────────────────────────────
 
 
 @app.get("/.well-known/oauth-authorization-server")
@@ -379,7 +382,7 @@ async def oauth_authorize(  # noqa: PLR0913
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        redirect_target = auth_service.build_authorize_redirect(
+        redirect_target = await auth_service.build_authorize_redirect(
             request=request, browser_session=browser_session
         )
     except OAuthConsentRequiredError:
@@ -396,7 +399,7 @@ async def oauth_authorize(  # noqa: PLR0913
 @app.post("/api/oauth/token")
 async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
     try:
-        bundle = auth_service.exchange_token_request(payload)
+        bundle = await auth_service.exchange_token_request(payload)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OAuthInvalidGrantError as exc:
@@ -412,7 +415,7 @@ async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
 @app.post("/api/oauth/revoke")
 async def oauth_revoke(payload: OAuthRevokeRequest) -> Mapping[str, bool]:
     try:
-        revoked = auth_service.revoke(payload)
+        revoked = await auth_service.revoke(payload)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     logger.info("oauth revoke revoked=%s", revoked)
@@ -436,7 +439,7 @@ async def oauth_browser_session(
     payload: BrowserSessionRequest, response: Response
 ) -> Mapping[str, bool]:
     try:
-        session = auth_service.create_browser_session(payload.access_token)
+        session = await auth_service.create_browser_session(payload.access_token)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -471,10 +474,7 @@ async def oauth_browser_token(
     """Issue a browser API token and renew the authenticated session cookie."""
     try:
         browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
-        # OAuthRepository still uses the synchronous supabase-py client, and its bounded
-        # gateway retry may sleep. Offload that blocking work until the repository itself
-        # has an async implementation so one slow token write cannot stall the event loop.
-        token = await asyncio.to_thread(auth_service.create_browser_token, browser_session)
+        token = await auth_service.create_browser_token(browser_session)
     except OAuthLoginRequiredError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except OAuthRepositoryNotConfiguredError as exc:
@@ -665,7 +665,7 @@ async def oauth_authorize_decision(  # noqa: PLR0913
         )
         return RedirectResponse(denial_redirect, status_code=302)
     try:
-        redirect_target = auth_service.approve_consent(
+        redirect_target = await auth_service.approve_consent(
             request=request, browser_session=browser_session
         )
     except OAuthRepositoryNotConfiguredError as exc:

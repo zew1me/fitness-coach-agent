@@ -20,7 +20,8 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
 
     async def aclose(self) -> None:
         """Close the PostgREST HTTP connections used by this repository."""
-        await self._require_client().postgrest.aclose()
+        if self._client is not None:
+            await self._client.postgrest.aclose()
 
     async def get_active_grant(
         self, *, user_id: str, client_id: str, redirect_uri: str
