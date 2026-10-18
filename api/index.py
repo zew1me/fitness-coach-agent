@@ -6,7 +6,7 @@ import logging
 import os
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
@@ -194,10 +194,10 @@ async def log_startup() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await log_startup()
-    try:
+    async with AsyncExitStack() as shutdown:
+        shutdown.push_async_callback(auth_service.aclose)
+        shutdown.push_async_callback(intervals_service.aclose)
         yield
-    finally:
-        await auth_service.aclose()
 
 
 app = FastAPI(title="Endurance Coaching Agent", lifespan=lifespan)
@@ -536,7 +536,7 @@ async def intervals_status(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        status = intervals_service.get_status(user_context.user_id)
+        status = await intervals_service.get_status(user_context.user_id)
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
@@ -547,7 +547,7 @@ async def intervals_disconnect(
     user_context: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
     try:
-        status = intervals_service.disconnect(user_context.user_id)
+        status = await intervals_service.disconnect(user_context.user_id)
     except IntervalsRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return status.model_dump(mode="json")
@@ -564,7 +564,7 @@ async def intervals_sync(  # noqa: C901
 ) -> Mapping[str, object]:
     user_id = user_context.user_id
     try:
-        auth = intervals_service.resolve_auth(user_id)
+        auth = await intervals_service.resolve_auth(user_id)
     except IntervalsNotConnectedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (
