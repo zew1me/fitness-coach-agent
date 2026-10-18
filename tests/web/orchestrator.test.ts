@@ -1477,6 +1477,7 @@ describe("streamCoachTurn", () => {
         [RequestInfo | URL, RequestInit?]
       >
     ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(persistCall).toBeDefined();
     expect(String(persistCall?.[1]?.body)).not.toContain(
       "Coach is unavailable",
     );
