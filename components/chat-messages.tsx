@@ -4,7 +4,7 @@ import type { FileUIPart, UIMessage } from "ai";
 import type { JSX, ReactNode, RefObject } from "react";
 
 import { fileTypeBadge } from "../lib/chat-attachments";
-import { deriveParts, onlyWelcomeMessage } from "../lib/chat-ui-messages";
+import { onlyWelcomeMessage } from "../lib/chat-ui-messages";
 import type { AdaptedPlan, ChatMessage } from "../lib/types";
 import { MESSAGE_RENDER_BATCH_SIZE } from "../lib/use-message-window";
 
@@ -179,7 +179,7 @@ function MessageBubble({
       ? `${styles.bubble} ${styles.assistantBubble}`
       : `${styles.bubble} ${styles.userBubble}`;
   const plan = message.metadata.plan;
-  const parts = deriveParts(message);
+  const parts = message.parts as UIMessage["parts"];
   const textBlocks = parts
     .map((part) => uiPartText(part))
     .filter((text): text is string => text !== null && text.length > 0);

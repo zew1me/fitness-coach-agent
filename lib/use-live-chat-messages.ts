@@ -76,9 +76,7 @@ export function useLiveChatMessages(
           !persistedMessageIds.has(m.id) && !knownPersistedMessageIds.has(m.id),
       )
       .map((m) => toLiveChatMessage(m, threadId, userId))
-      .filter(
-        (m): m is ChatMessage => m !== null && (m.parts ?? []).length > 0,
-      );
+      .filter((m): m is ChatMessage => m !== null && m.parts.length > 0);
     return [...persistedMessages, ...additional];
   }, [liveMessages, persistedMessageIds, persistedMessages, threadId, userId]);
 

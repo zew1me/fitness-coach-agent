@@ -701,6 +701,7 @@ describe("CoachChat", () => {
               content: "Saved local training note.",
               created_at: "2026-04-04T09:00:00Z",
               metadata: {},
+              parts: [{ type: "text", text: "Saved local training note." }],
               role: "user",
               thread_id: "thread-1",
               user_id: "athlete-1",
