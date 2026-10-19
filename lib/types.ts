@@ -98,10 +98,9 @@ export type ChatMessage = {
     pending_profile_field?: string | null;
     plan?: AdaptedPlan;
   } & Record<string, unknown>;
-  // The chat-parts backfill migration guarantees `parts` is non-empty on every persisted
-  // row. Optional here only because legacy in-flight payloads (tests, transient
-  // local mocks) may omit it; the renderer's `deriveParts` shim covers those.
-  parts?: MessagePart[];
+  // Always present: the backend serializes `parts` on every message, and
+  // `chatMessageSchema` defaults it for any payload that omits it.
+  parts: MessagePart[];
   role: "user" | "assistant";
   thread_id: string;
   user_id: string;
