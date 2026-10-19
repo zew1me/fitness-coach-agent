@@ -1,8 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { RunContext, type FunctionTool } from "@openai/agents";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { createCoachTools } from "../../lib/agent/coach-tools";
+import {
+  type CoachAgentRunContext,
+  createAgentCoachTools,
+  createCoachTools,
+} from "../../lib/agent/coach-tools";
+import type { SupabaseAgentSession } from "../../lib/agent/supabase-agent-session";
 import { coachToolDefinitions } from "../../lib/agent/tools";
+
+const sentryMocks = vi.hoisted(() => ({
+  captureException: vi.fn(),
+}));
+
+vi.mock("@sentry/nextjs", () => sentryMocks);
 
 type RecordedRequest = { body: unknown; url: string };
 
@@ -1274,5 +1286,164 @@ describe("coachToolDefinitions upload handling", () => {
       status: "unsupported_file_type",
       tool: "process_uploaded_file",
     });
+  });
+});
+
+describe("createAgentCoachTools input validation errors", () => {
+  const restDay = {
+    description: "Full rest day.",
+    phase_name: "constrained reset",
+    sport: "rest",
+    target_distance_meters: null,
+    target_duration_minutes: 0,
+    target_tss: null,
+    title: "Rest",
+    workout_date: "2026-10-22",
+    workout_type: "rest",
+  };
+
+  beforeEach(() => {
+    sentryMocks.captureException.mockClear();
+  });
+
+  function agentTool(
+    name: string,
+    fetchImpl: typeof fetch,
+  ): FunctionTool<CoachAgentRunContext> {
+    const modelSession = {
+      updateCoachingMemory: vi.fn(),
+    } as unknown as SupabaseAgentSession;
+    const found = createAgentCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+      modelSession,
+    }).find((candidate) => candidate.name === name);
+    if (found?.type !== "function") {
+      throw new Error(`Missing function tool ${name}`);
+    }
+    return found;
+  }
+
+  function invoke(
+    tool: FunctionTool<CoachAgentRunContext>,
+    rawArgs: string,
+  ): Promise<unknown> {
+    return tool.invoke(
+      new RunContext<CoachAgentRunContext>({
+        hasActivityFileAttachment: false,
+        toolCalled: false,
+      }),
+      rawArgs,
+    );
+  }
+
+  it("names the failing fields to the model and reports them to Sentry at error level", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({});
+    const tool = agentTool("generate_training_plan", fetchImpl);
+
+    const output = await invoke(
+      tool,
+      JSON.stringify({
+        title: "Constrained reset",
+        goal_id: "335cbb02-356c-4faa-8d8b-a21aa493735a",
+        workouts: [restDay, { ...restDay, target_duration_minutes: -5 }],
+        training_model: "performance",
+      }),
+    );
+
+    expect(requests).toEqual([]);
+    expect(output).toEqual(
+      expect.stringContaining(
+        "Invalid input for generate_training_plan: workouts[1].target_duration_minutes:",
+      ),
+    );
+    expect(output).not.toContain("Invalid JSON input for tool");
+    expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
+    const [, captureContext] = sentryMocks.captureException.mock.calls[0] as [
+      unknown,
+      {
+        extra: { issues: string[] };
+        fingerprint: string[];
+        level: string;
+        tags: Record<string, string>;
+      },
+    ];
+    expect(captureContext.level).toBe("error");
+    expect(captureContext.fingerprint).toEqual([
+      "coach-tool-input-invalid",
+      "generate_training_plan",
+    ]);
+    expect(captureContext.tags).toMatchObject({
+      tool: "generate_training_plan",
+    });
+    expect(captureContext.extra.issues).toEqual([
+      expect.stringMatching(/^workouts\[1\]\.target_duration_minutes: /),
+    ]);
+    // Raw arguments carry athlete data and must not be attached.
+    expect(JSON.stringify(captureContext)).not.toContain("Full rest day.");
+  });
+
+  it("reports cross-field update_goals refinements with their path", async () => {
+    const { fetchImpl } = createRecordingFetch({});
+    const tool = agentTool("update_goals", fetchImpl);
+
+    const output = await invoke(
+      tool,
+      JSON.stringify({ action: "complete", goal: null }),
+    );
+
+    expect(output).toEqual(
+      expect.stringContaining(
+        "Invalid input for update_goals: goal_id: goal_id is required for complete/abandon.",
+      ),
+    );
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        fingerprint: ["coach-tool-input-invalid", "update_goals"],
+        level: "error",
+      }),
+    );
+  });
+
+  it("covers update_coaching_memory and malformed JSON arguments", async () => {
+    const { fetchImpl } = createRecordingFetch({});
+    const tool = agentTool("update_coaching_memory", fetchImpl);
+
+    const output = await invoke(tool, "{not json");
+
+    expect(output).toEqual(
+      expect.stringContaining("Invalid input for update_coaching_memory: "),
+    );
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        fingerprint: ["coach-tool-input-invalid", "update_coaching_memory"],
+        level: "error",
+      }),
+    );
+  });
+
+  it("keeps the default tool error for failures after validation", async () => {
+    const fetchImpl = (): Promise<Response> =>
+      Promise.resolve(new Response("boom", { status: 500 }));
+    const tool = agentTool("update_goals", fetchImpl);
+
+    const output = await invoke(
+      tool,
+      JSON.stringify({
+        action: "complete",
+        goal: null,
+        goal_id: "21a5eb90-b47d-49bc-af20-1a19cba0d041",
+      }),
+    );
+
+    expect(output).toEqual(
+      expect.stringContaining(
+        "An error occurred while running the tool. Please try again. Error: Error: Engine request failed for /api/engine/update-goals: HTTP 500",
+      ),
+    );
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
   });
 });
