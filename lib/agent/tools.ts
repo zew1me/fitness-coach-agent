@@ -85,10 +85,13 @@ const updateGoalsInputSchema = z
         path: ["goal_id"],
       });
     }
-    if (input.goal !== undefined) {
+    // The model routinely sends `goal: null` here, which carries no goal data;
+    // the engine ignores the goal for terminal actions, so only a real goal
+    // object is a mistake worth rejecting.
+    if (input.goal != null) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "goal must be omitted for complete/abandon.",
+        message: "goal must be omitted or null for complete/abandon.",
         path: ["goal"],
       });
     }

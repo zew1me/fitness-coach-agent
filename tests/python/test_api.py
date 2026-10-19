@@ -2579,7 +2579,17 @@ async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized
 
 
 @pytest.mark.asyncio
-async def test_update_goals_complete_allows_omitted_goal(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "complete", "goal_id": "goal-1"},
+        # The coach tool forwards the model's explicit `goal: null` unchanged.
+        {"action": "complete", "goal_id": "goal-1", "goal": None},
+    ],
+)
+async def test_update_goals_complete_allows_omitted_goal(
+    monkeypatch, body: dict[str, object]
+) -> None:
     class GoalRepository(EngineRepository):
         def __init__(self) -> None:
             self.update_call: tuple[str, str, dict[str, object]] | None = None
@@ -2604,7 +2614,7 @@ async def test_update_goals_complete_allows_omitted_goal(monkeypatch) -> None:
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
                 "/api/engine/update-goals",
-                json={"action": "complete", "goal_id": "goal-1"},
+                json=body,
             )
     finally:
         restore_override()

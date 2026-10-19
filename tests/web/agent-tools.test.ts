@@ -223,6 +223,22 @@ describe("coachToolDefinitions", () => {
     }
   });
 
+  it("accepts complete and abandon actions with an explicit null goal", () => {
+    // Real preview payload previously rejected as "Invalid JSON input for tool".
+    for (const action of ["complete", "abandon"] as const) {
+      const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
+        goal: null,
+        action,
+        goal_id: "21a5eb90-b47d-49bc-af20-1a19cba0d041",
+      });
+
+      expect(
+        parsed.success,
+        `${action} with goal: null should be a valid update_goals call`,
+      ).toBe(true);
+    }
+  });
+
   it("validates update_goals payloads by action", () => {
     const partialUpdate =
       coachToolDefinitions.update_goals.inputSchema.safeParse({
