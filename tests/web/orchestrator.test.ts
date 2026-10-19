@@ -13,6 +13,10 @@ import {
 } from "../../lib/agent/orchestrator";
 import { runSpecialists } from "../../lib/agent/specialists";
 import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
+import {
+  FINAL_RESPONSE_INSTRUCTION,
+  ToolRoundBudget,
+} from "../../lib/agent/tool-round-budget";
 
 import { athleteContextFixture } from "./agent-fixtures";
 
@@ -38,6 +42,12 @@ const sentryMocks = vi.hoisted(() => ({
   startSpan: vi.fn((_options: unknown, callback: () => Promise<unknown>) =>
     callback(),
   ),
+}));
+
+const tavilyMocks = vi.hoisted(() => ({
+  close: vi.fn(() => Promise.resolve()),
+  connect: vi.fn(() => Promise.resolve()),
+  listTools: vi.fn(() => Promise.resolve([])),
 }));
 
 const orchestratorMocks = vi.hoisted(() => {
@@ -114,7 +124,12 @@ vi.mock("@openai/agents", async (importOriginal) => {
     ...actual,
     Agent: orchestratorMocks.Agent,
     MaxTurnsExceededError: orchestratorMocks.MaxTurnsExceededError,
-    MCPServerStreamableHttp: class MCPServerStreamableHttp {},
+    MCPServerStreamableHttp: class MCPServerStreamableHttp {
+      name = "tavily";
+      close = tavilyMocks.close;
+      connect = tavilyMocks.connect;
+      listTools = tavilyMocks.listTools;
+    },
     Runner: orchestratorMocks.Runner,
     tool: vi.fn((definition: Record<string, unknown>) => ({
       ...definition,
@@ -310,19 +325,29 @@ describe("streamCoachTurn", () => {
       expect.anything(),
       expect.any(Array),
       expect.objectContaining({
-        maxTurns: 4,
+        maxTurns: 3,
         stream: true,
       }),
     );
-    expect(
-      orchestratorMocks.agentConfigs.find(
-        (config) => config["name"] === "Lead coach",
-      ),
-    ).toMatchObject({
-      instructions: "system prompt",
+    const leadConfig = orchestratorMocks.agentConfigs.find(
+      (config) => config["name"] === "Lead coach",
+    );
+    expect(leadConfig).toMatchObject({
       model: "gpt-5.6-luna",
       name: "Lead coach",
     });
+    // Tavily must never ride in mcpServers: the SDK skips isEnabled for MCP
+    // tools, which is how a turn escaped the tool gate (Sentry 7633993901).
+    expect(leadConfig?.["mcpServers"]).toBeUndefined();
+    const instructions = leadConfig?.["instructions"] as (runContext: {
+      context: { toolRounds: ToolRoundBudget };
+    }) => string;
+    const toolRounds = new ToolRoundBudget(1);
+    expect(instructions({ context: { toolRounds } })).toBe("system prompt");
+    toolRounds.noteToolStart("update_goals");
+    expect(instructions({ context: { toolRounds } })).toBe(
+      `system prompt\n\n${FINAL_RESPONSE_INSTRUCTION}`,
+    );
     expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(
       "fitness-coach-turn",
       expect.any(Function),
@@ -358,7 +383,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: true, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: true,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(false);
@@ -386,7 +415,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: true, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: true,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(false);
@@ -416,7 +449,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: false, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: false,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(true);
@@ -446,7 +483,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: false, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: false,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(true);
@@ -1348,6 +1389,16 @@ describe("streamCoachTurn", () => {
       orchestratorMocks.agentsRun.mock.calls as unknown as unknown[][]
     )[1];
     expect(followupCall?.[1]).toEqual(leadOutput);
+    // The tool-round budget should make this unreachable, so reaching it is an
+    // error — reported under its own fingerprint, apart from pre-budget events.
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      maxTurns,
+      expect.objectContaining({
+        fingerprint: ["coach-max-turns-salvaged"],
+        level: "error",
+        tags: { subsystem: "coach-max-turns" },
+      }),
+    );
   });
 
   it("still propagates non-max-turns errors from the lead run", async () => {
@@ -1391,6 +1442,45 @@ describe("streamCoachTurn", () => {
       >
     ).find(([url]) => String(url).endsWith("/api/chat/messages"));
     expect(String(persistCall?.[1]?.body)).toContain("Coach is unavailable");
+  });
+
+  it("degrades to a run without Tavily when its setup fails", async () => {
+    const outage = new Error("tavily unreachable");
+    tavilyMocks.connect.mockRejectedValueOnce(outage);
+    tavilyMocks.close.mockRejectedValueOnce(new Error("never connected"));
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+      tavilyMcpUrl: "https://tavily.example/mcp",
+    });
+
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      outage,
+      expect.objectContaining({
+        tags: { subsystem: "tavily-setup", degrading: "true" },
+      }),
+    );
+    // A failing close in the finally block must not undo the degraded success.
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(persistCall).toBeDefined();
+    expect(String(persistCall?.[1]?.body)).not.toContain(
+      "Coach is unavailable",
+    );
   });
 
   it("bounds a partial cold seed to the compaction token threshold", async () => {

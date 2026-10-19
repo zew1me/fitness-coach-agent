@@ -11,11 +11,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadChatMessages, loadChatThread } from "../../lib/coach-api";
 import {
-  type ChatThreadHook,
   readLocalChatThread,
-  useChatThread,
   writeLocalChatThread,
-} from "../../lib/use-chat-thread";
+} from "../../lib/local-chat-thread";
+import { type ChatThreadHook, useChatThread } from "../../lib/use-chat-thread";
 
 vi.mock("../../lib/coach-api", () => ({
   loadChatMessages: vi.fn(),

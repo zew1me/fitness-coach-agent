@@ -8,6 +8,7 @@ import {
   createCoachTools,
 } from "../../lib/agent/coach-tools";
 import type { SupabaseAgentSession } from "../../lib/agent/supabase-agent-session";
+import { ToolRoundBudget } from "../../lib/agent/tool-round-budget";
 import { coachToolDefinitions } from "../../lib/agent/tools";
 
 const sentryMocks = vi.hoisted(() => ({
@@ -1224,9 +1225,9 @@ describe("coachToolDefinitions upload handling", () => {
       detail: expect.stringContaining("could not be processed"),
       status: "error",
     });
-    // Every coach tool is disabled for the rest of the turn once one has run,
-    // so an affirmative retry instruction is unfollowable and strands the model
-    // on its remaining turns until maxTurns throws (Sentry 7633993901).
+    // A retry re-sends the same failing reference and spends one of the turn's
+    // few tool rounds (see ToolRoundBudget), so the result must not invite one
+    // (Sentry 7633993901).
     const detail = (result as { detail: string }).detail;
     expect(detail).toContain("Do not retry");
     expect(detail).not.toMatch(/retry (with|using)/i);
@@ -1333,6 +1334,7 @@ describe("createAgentCoachTools input validation errors", () => {
       new RunContext<CoachAgentRunContext>({
         hasActivityFileAttachment: false,
         toolCalled: false,
+        toolRounds: new ToolRoundBudget(),
       }),
       rawArgs,
     );

@@ -3,7 +3,7 @@
  *
  * The AI SDK pushes a `step-start` part into the live assistant message on
  * `start-step`, before any text or tool part exists (reasoning parts behave the
- * same way). `uiPartText` in `components/coach-chat.tsx` returns null for both,
+ * same way). `uiPartText` in `components/chat-messages.tsx` returns null for both,
  * so the bubble used to mount visibly empty (timestamp only) until the first
  * text or tool part arrived — which reads to the athlete as a broken app.
  *
