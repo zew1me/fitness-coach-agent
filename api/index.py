@@ -2521,8 +2521,9 @@ class ExplicitPlanWorkoutRequest(BaseModel):
     description: str | None
     phase_name: str | None
     sport: str = Field(min_length=1)
-    target_distance_meters: float | None = Field(gt=0)
-    target_duration_minutes: int | None = Field(gt=0)
+    # Zero is a real prescription (a rest day is 0 minutes), mirroring target_tss.
+    target_distance_meters: float | None = Field(ge=0)
+    target_duration_minutes: int | None = Field(ge=0)
     target_tss: float | None = Field(ge=0)
     title: str = Field(min_length=1)
     workout_date: date

@@ -179,6 +179,36 @@ describe("coachToolDefinitions", () => {
     });
   });
 
+  it("accepts a zero-minute rest day in an exact workout schedule", () => {
+    // Real preview payload that was rejected with the SDK's generic
+    // "Invalid JSON input for tool" because duration had to be positive.
+    const restDay = {
+      sport: "rest",
+      title: "Rest",
+      phase_name: "constrained reset",
+      target_tss: null,
+      description: "Full rest day.",
+      workout_date: "2026-10-22",
+      workout_type: "rest",
+      target_distance_meters: null,
+      target_duration_minutes: 0,
+    };
+    const schema = coachToolDefinitions.generate_training_plan.inputSchema;
+
+    const parsed = schema.safeParse({
+      title: "Constrained reset",
+      goal_id: "335cbb02-356c-4faa-8d8b-a21aa493735a",
+      workouts: [restDay, { ...restDay, target_distance_meters: 0 }],
+      training_model: "performance",
+    });
+    const negative = schema.safeParse({
+      workouts: [{ ...restDay, target_duration_minutes: -1 }],
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(negative.success).toBe(false);
+  });
+
   it("accepts complete and abandon actions without a goal payload", () => {
     for (const action of ["complete", "abandon"] as const) {
       const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({

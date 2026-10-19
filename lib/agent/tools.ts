@@ -214,11 +214,13 @@ const explicitPlanWorkoutSchema = z.object({
   // OpenAI strict tool schemas require every nested object field to be present.
   // Nullable targets let the coach represent a prescribed session without
   // inventing duration, distance, or TSS values the athlete never supplied.
+  // Zero is a legitimate target (the coach prescribes rest days as 0 minutes),
+  // so these are nonnegative like target_tss rather than strictly positive.
   description: z.string().min(1).nullable(),
   phase_name: z.string().min(1).nullable(),
   sport: z.string().min(1),
-  target_distance_meters: z.number().positive().nullable(),
-  target_duration_minutes: z.number().int().positive().nullable(),
+  target_distance_meters: z.number().nonnegative().nullable(),
+  target_duration_minutes: z.number().int().nonnegative().nullable(),
   target_tss: z.number().nonnegative().nullable(),
   title: z.string().min(1),
   workout_date: z.iso.date(),

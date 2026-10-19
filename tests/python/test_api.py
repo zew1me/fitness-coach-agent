@@ -4076,6 +4076,76 @@ async def test_generate_plan_structure_persists_explicit_mixed_sport_schedule(
 
 
 @pytest.mark.asyncio
+async def test_generate_plan_structure_accepts_zero_minute_rest_day(monkeypatch) -> None:
+    # Regression: the coach prescribes rest days as 0 minutes / 0 meters; rejecting
+    # zero made every explicit plan containing a rest day fail to save.
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-rest"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    workouts = [
+        {
+            "description": "Easy spin.",
+            "phase_name": "constrained reset",
+            "sport": "cycling",
+            "target_distance_meters": None,
+            "target_duration_minutes": 60,
+            "target_tss": None,
+            "title": "Easy ride",
+            "workout_date": "2026-10-21",
+            "workout_type": "endurance",
+        },
+        {
+            "description": "Full rest day.",
+            "phase_name": "constrained reset",
+            "sport": "rest",
+            "target_distance_meters": 0,
+            "target_duration_minutes": 0,
+            "target_tss": None,
+            "title": "Rest",
+            "workout_date": "2026-10-22",
+            "workout_type": "rest",
+        },
+    ]
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={"title": "Reset block", "training_model": "performance", "workouts": workouts},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["workouts_created"] == 2
+    rest = recording_repo.created_workouts[1]
+    assert rest.workout_type == "rest"
+    assert rest.target_duration_minutes == 0
+    assert rest.target_distance_meters == 0
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.weekly_hours_target == 1.0
+
+
+@pytest.mark.asyncio
 async def test_generate_plan_structure_rejects_unknown_goal_for_explicit_schedule(
     monkeypatch,
 ) -> None:
