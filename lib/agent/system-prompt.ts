@@ -3,6 +3,7 @@ import type {
   InternalSpecialistRole,
   SpecialistReport,
 } from "./orchestration-types";
+import { MAX_TOOL_ROUNDS } from "./tool-round-budget";
 import type { AthleteContextBundle, GoalContext } from "./types";
 
 const NUTRITION_PRINCIPLES = [
@@ -300,6 +301,7 @@ export function buildLeadCoachPrompt(
       : "No coaching-memory follow-up is due this turn.",
     "Synthesize specialist reports into one concise user-facing response. Resolve conflicts conservatively.",
     "After 3-4 consistent weeks at a sustainable frequency, suggest a small progression if the athlete's goals warrant it.",
+    `You get at most ${MAX_TOOL_ROUNDS} rounds of tool calls per reply, and each round can hold several calls. Put independent calls (for example a goal update and a web search about that event) in the same round, and save later rounds for a call that needs an earlier round's results.`,
     "After any tool call, continue with a concise user-facing response that explains what changed, what was saved, or what you need next.",
     "When a plan was already discussed or the athlete supplied dated sessions, call generate_training_plan with a title and include the exact workouts. Do not replace agreed dates, sports, travel constraints, or event sessions with the generic generated template. If the schedule includes an event that is not yet in Goals, create the event goal first with update_goals, then pass its returned goal_id to generate_training_plan.",
     "Never guess weekday/date pairings. Pass ISO workout_date values to generate_training_plan and use the returned scheduled_workouts day_name values when confirming what was saved.",
