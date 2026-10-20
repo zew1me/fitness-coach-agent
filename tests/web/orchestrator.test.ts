@@ -13,6 +13,10 @@ import {
 } from "../../lib/agent/orchestrator";
 import { runSpecialists } from "../../lib/agent/specialists";
 import { buildLeadCoachPrompt } from "../../lib/agent/system-prompt";
+import {
+  FINAL_RESPONSE_INSTRUCTION,
+  ToolRoundBudget,
+} from "../../lib/agent/tool-round-budget";
 
 import { athleteContextFixture } from "./agent-fixtures";
 
@@ -38,6 +42,12 @@ const sentryMocks = vi.hoisted(() => ({
   startSpan: vi.fn((_options: unknown, callback: () => Promise<unknown>) =>
     callback(),
   ),
+}));
+
+const tavilyMocks = vi.hoisted(() => ({
+  close: vi.fn(() => Promise.resolve()),
+  connect: vi.fn(() => Promise.resolve()),
+  listTools: vi.fn(() => Promise.resolve([])),
 }));
 
 const orchestratorMocks = vi.hoisted(() => {
@@ -114,7 +124,12 @@ vi.mock("@openai/agents", async (importOriginal) => {
     ...actual,
     Agent: orchestratorMocks.Agent,
     MaxTurnsExceededError: orchestratorMocks.MaxTurnsExceededError,
-    MCPServerStreamableHttp: class MCPServerStreamableHttp {},
+    MCPServerStreamableHttp: class MCPServerStreamableHttp {
+      name = "tavily";
+      close = tavilyMocks.close;
+      connect = tavilyMocks.connect;
+      listTools = tavilyMocks.listTools;
+    },
     Runner: orchestratorMocks.Runner,
     tool: vi.fn((definition: Record<string, unknown>) => ({
       ...definition,
@@ -296,7 +311,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-describe("streamCoachTurn", () => {
+describe("streamCoachTurn setup and attachments", () => {
   it("runs the lead coach with string-only trace metadata", async () => {
     const response = await streamCoachTurn({
       accessToken: "token-1",
@@ -310,19 +325,29 @@ describe("streamCoachTurn", () => {
       expect.anything(),
       expect.any(Array),
       expect.objectContaining({
-        maxTurns: 4,
+        maxTurns: 3,
         stream: true,
       }),
     );
-    expect(
-      orchestratorMocks.agentConfigs.find(
-        (config) => config["name"] === "Lead coach",
-      ),
-    ).toMatchObject({
-      instructions: "system prompt",
+    const leadConfig = orchestratorMocks.agentConfigs.find(
+      (config) => config["name"] === "Lead coach",
+    );
+    expect(leadConfig).toMatchObject({
       model: "gpt-5.6-luna",
       name: "Lead coach",
     });
+    // Tavily must never ride in mcpServers: the SDK skips isEnabled for MCP
+    // tools, which is how a turn escaped the tool gate (Sentry 7633993901).
+    expect(leadConfig?.["mcpServers"]).toBeUndefined();
+    const instructions = leadConfig?.["instructions"] as (runContext: {
+      context: { toolRounds: ToolRoundBudget };
+    }) => string;
+    const toolRounds = new ToolRoundBudget(1);
+    expect(instructions({ context: { toolRounds } })).toBe("system prompt");
+    toolRounds.noteToolStart("update_goals");
+    expect(instructions({ context: { toolRounds } })).toBe(
+      `system prompt\n\n${FINAL_RESPONSE_INSTRUCTION}`,
+    );
     expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(
       "fitness-coach-turn",
       expect.any(Function),
@@ -358,7 +383,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: true, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: true,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(false);
@@ -386,7 +415,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: true, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: true,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(false);
@@ -416,7 +449,11 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: false, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: false,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(true);
@@ -446,12 +483,18 @@ describe("streamCoachTurn", () => {
     expect(
       saveActivityFromText?.isEnabled({
         runContext: {
-          context: { hasActivityFileAttachment: false, toolCalled: false },
+          context: {
+            hasActivityFileAttachment: false,
+            toolCalled: false,
+            toolRounds: new ToolRoundBudget(),
+          },
         },
       }),
     ).toBe(true);
   });
+});
 
+describe("streamCoachTurn streaming and persistence", () => {
   it("streams text using the existing UI-message protocol", async () => {
     const response = await streamCoachTurn({
       accessToken: "token-1",
@@ -561,7 +604,9 @@ describe("streamCoachTurn", () => {
       ]),
     );
   });
+});
 
+describe("streamCoachTurn silent-turn fallbacks", () => {
   it("runs a tool-free acknowledgement turn when the lead tool turn streams no text", async () => {
     orchestratorMocks.runEventSequences.push(
       [
@@ -822,7 +867,9 @@ describe("streamCoachTurn", () => {
     expect(sentryMocks.captureMessage).not.toHaveBeenCalled();
     expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
   });
+});
 
+describe("streamCoachTurn model ladder and rate limits", () => {
   it("falls back to tier two when a 429 occurs before streaming", async () => {
     orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError());
 
@@ -1150,7 +1197,9 @@ describe("streamCoachTurn", () => {
     );
     expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(3);
   });
+});
 
+describe("streamCoachTurn durable rollback, max turns and cold seeding", () => {
   it("rolls back a failed durable attempt before persisting the fallback input", async () => {
     let state = {
       thread_id: "thread-1",
@@ -1348,6 +1397,16 @@ describe("streamCoachTurn", () => {
       orchestratorMocks.agentsRun.mock.calls as unknown as unknown[][]
     )[1];
     expect(followupCall?.[1]).toEqual(leadOutput);
+    // The tool-round budget should make this unreachable, so reaching it is an
+    // error — reported under its own fingerprint, apart from pre-budget events.
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      maxTurns,
+      expect.objectContaining({
+        fingerprint: ["coach-max-turns-salvaged"],
+        level: "error",
+        tags: { subsystem: "coach-max-turns" },
+      }),
+    );
   });
 
   it("still propagates non-max-turns errors from the lead run", async () => {
@@ -1391,6 +1450,45 @@ describe("streamCoachTurn", () => {
       >
     ).find(([url]) => String(url).endsWith("/api/chat/messages"));
     expect(String(persistCall?.[1]?.body)).toContain("Coach is unavailable");
+  });
+
+  it("degrades to a run without Tavily when its setup fails", async () => {
+    const outage = new Error("tavily unreachable");
+    tavilyMocks.connect.mockRejectedValueOnce(outage);
+    tavilyMocks.close.mockRejectedValueOnce(new Error("never connected"));
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      messages: messages(),
+      streamErrorMessage: "Coach is unavailable right now. Please try again.",
+      tavilyMcpUrl: "https://tavily.example/mcp",
+    });
+
+    await response.text();
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      outage,
+      expect.objectContaining({
+        tags: { subsystem: "tavily-setup", degrading: "true" },
+      }),
+    );
+    // A failing close in the finally block must not undo the degraded success.
+    const persistCall = (
+      fetchMock.mock.calls as unknown as Array<
+        [RequestInfo | URL, RequestInit?]
+      >
+    ).find(([url]) => String(url).endsWith("/api/chat/messages"));
+    expect(persistCall).toBeDefined();
+    expect(String(persistCall?.[1]?.body)).not.toContain(
+      "Coach is unavailable",
+    );
   });
 
   it("bounds a partial cold seed to the compaction token threshold", async () => {
@@ -1497,7 +1595,9 @@ describe("streamCoachTurn", () => {
       DEFAULT_AUTO_COMPACT_TOKENS - PER_TURN_OVERHEAD_TOKENS,
     );
   });
+});
 
+describe("streamCoachTurn durable-session leases", () => {
   it("releases a durable-session lease when the acquired lease response has malformed JSON", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1563,7 +1663,9 @@ describe("streamCoachTurn", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
   });
+});
 
+describe("streamCoachTurn durable-session setup degradation", () => {
   // Issue #408: durable-session setup is an optimisation. Lease acquisition
   // already degraded to a stateless turn on failure, but every step after it
   // killed the turn, so a transient 5xx reached the athlete as
@@ -1841,7 +1943,9 @@ describe("streamCoachTurn", () => {
     expect(leaseSignal?.aborted).toBe(true);
     expect(historySignal?.aborted).toBe(true);
   });
+});
 
+describe("streamCoachTurn specialist delegation and lease renewal", () => {
   it("degrades to lead-only when runSpecialists rejects", async () => {
     // runSpecialists() itself handles per-specialist failures internally
     // (see lib/agent/specialists.ts) and should never reject in practice,
