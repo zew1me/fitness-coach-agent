@@ -412,9 +412,9 @@ function invalidToolInputIssues(error: unknown): string[] | null {
       return path ? `${path}: ${issue.message}` : issue.message;
     });
   }
-  return [
-    cause instanceof Error ? cause.message : "arguments are not valid JSON",
-  ];
+  // Never echo the parser message: JSON.parse errors can quote the raw input,
+  // which would carry athlete text into Sentry.
+  return ["arguments are not valid JSON"];
 }
 
 // Replaces the SDK default, which answers every schema rejection with a generic

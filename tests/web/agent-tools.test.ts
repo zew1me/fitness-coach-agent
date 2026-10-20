@@ -1413,16 +1413,21 @@ describe("createAgentCoachTools input validation errors", () => {
     const { fetchImpl } = createRecordingFetch({});
     const tool = agentTool("update_coaching_memory", fetchImpl);
 
-    const output = await invoke(tool, "{not json");
+    // V8 quotes a fragment of the input in some JSON.parse messages.
+    const output = await invoke(tool, '{"note": "left knee pain" oops}');
 
     expect(output).toEqual(
-      expect.stringContaining("Invalid input for update_coaching_memory: "),
+      expect.stringContaining(
+        "Invalid input for update_coaching_memory: arguments are not valid JSON",
+      ),
     );
+    expect(String(output)).not.toContain("knee");
     expect(sentryMocks.captureException).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         fingerprint: ["coach-tool-input-invalid", "update_coaching_memory"],
         level: "error",
+        extra: { issues: ["arguments are not valid JSON"] },
       }),
     );
   });
