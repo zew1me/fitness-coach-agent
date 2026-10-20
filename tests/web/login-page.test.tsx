@@ -117,6 +117,26 @@ describe("LoginPage", () => {
     ).toBeTruthy();
   });
 
+  it("shows the fallback message when the error response body is not JSON", async () => {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response("<html>502 Bad Gateway</html>", {
+          status: 502,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    ) as unknown as typeof fetch;
+
+    render(<LoginPage />);
+
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "athlete@example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /send code/i }));
+
+    expect(await screen.findByText("Unable to start login.")).toBeTruthy();
+  });
+
   it("submits the invite code after the new-user gate is shown", async () => {
     const fetchMock = vi
       .fn()

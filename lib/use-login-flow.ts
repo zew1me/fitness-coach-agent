@@ -27,7 +27,11 @@ async function requestOtp(body: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const payload = (await response.json()) as RequestOtpPayload;
+  // Gateways and platform errors answer with HTML or plain text; fall back to an
+  // empty payload so callers show their own message instead of a parser error.
+  const payload = (await response
+    .json()
+    .catch((): RequestOtpPayload => ({}))) as RequestOtpPayload;
   return { ok: response.ok, payload };
 }
 
