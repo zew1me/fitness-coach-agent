@@ -1,8 +1,5 @@
 import {
-  Agent,
-  MaxTurnsExceededError,
   MCPServerStreamableHttp,
-  Runner,
   withTrace,
   type AgentInputItem,
   type MCPServer,
@@ -17,14 +14,13 @@ import {
 } from "ai";
 
 import { toAgentInputItems } from "./agent-input";
-import { finishAgentText, writeAgentStreamEvent } from "./agent-stream";
+import { finishAgentText } from "./agent-stream";
 import {
-  createAgentCoachTools,
   isActivityFile,
   isZipUpload,
   type CoachAgentRunContext,
 } from "./coach-tools";
-import { oldestDueFollowUp } from "./coaching-memory";
+import type { CoachingMemoryRecord } from "./coaching-memory";
 import { buildContextSlices } from "./context-slices";
 import { planSpecialistDelegation } from "./delegation-planner";
 import {
@@ -33,6 +29,15 @@ import {
   estimateStoredContext,
 } from "./durable-compaction-session";
 import { fetchSignalWithTimeout } from "./fetch-signal";
+import {
+  createTurnRateLimitLedger,
+  rateLimitStreamErrorMessage,
+  runLeadModelLadder,
+  tierSpanAttributes,
+  writeDeterministicText,
+  type LeadTurnState,
+  type StreamTextState,
+} from "./lead-model-ladder";
 import {
   CHAT_TURN_LEASE_TTL_SECONDS,
   LeaseAcquisitionError,
@@ -43,11 +48,12 @@ import {
   type ChatTurnLeaseState,
 } from "./lease-client";
 import { nonImageFilePart, selectMessagesForModel } from "./message-context";
-import { modelCircuitBreaker } from "./model-circuit-breaker";
 import {
-  buildModelSettings,
+  modelCircuitBreaker,
+  type ModelAdmission,
+} from "./model-circuit-breaker";
+import {
   captureRateLimit,
-  getRetryAfterMs,
   isRateLimitError,
   MODEL_TIERS,
   resolveSpecialistTier,
@@ -62,16 +68,8 @@ import {
   ModelStateError,
   SupabaseAgentSession,
 } from "./supabase-agent-session";
-import { buildLeadCoachPrompt } from "./system-prompt";
-import {
-  budgetedInstructions,
-  listBudgetedMcpTools,
-  MAX_COACH_TURNS,
-  ToolRoundBudget,
-  trackToolRounds,
-} from "./tool-round-budget";
+import { listBudgetedMcpTools, ToolRoundBudget } from "./tool-round-budget";
 import type { AthleteContextBundle } from "./types";
-import { recordStageUsage } from "./usage-metrics";
 
 type StreamCoachTurnBaseOptions = {
   accessToken: string;
@@ -112,28 +110,6 @@ const COLD_SEED_TOKEN_BUDGET = Math.floor(
 );
 const PRE_RUN_FETCH_TIMEOUT_MS = 10_000;
 export const CHAT_TURN_LEASE_RENEW_INTERVAL_MS = 20_000;
-const ACKNOWLEDGEMENT_PROMPT =
-  "You just completed an action for the athlete. Use the prior tool result in the conversation to write a brief 1-2 sentence acknowledgement of what changed, then end with one short question or prompt to continue. Do not call tools. Be warm and concise.";
-const EMPTY_MODEL_RESPONSE = "Hey, can you remind me of where we are at?";
-
-function rateLimitStreamErrorMessage(
-  error: unknown,
-  fallback: string,
-  priorRetryAfterMs?: number,
-): string {
-  if (!isRateLimitError(error)) return fallback;
-  const errorRetryAfterMs = getRetryAfterMs(error);
-  const retryAfterMs = Math.max(errorRetryAfterMs ?? 0, priorRetryAfterMs ?? 0);
-  if (retryAfterMs <= 0) return fallback;
-
-  const seconds = Math.max(1, Math.ceil(retryAfterMs / 1_000));
-  const minutes = Math.ceil(seconds / 60);
-  const wait =
-    seconds < 60
-      ? `${seconds} second${seconds === 1 ? "" : "s"}`
-      : `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  return `Coach is rate-limited right now. Please try again in about ${wait}.`;
-}
 
 type PrepareDurableSessionOptions = {
   accessToken: string;
@@ -153,58 +129,8 @@ type PreparedDurableSession = {
   underlyingSession: SupabaseAgentSession;
 };
 
-type StreamTextState = {
-  lastToolName?: string;
-  textId: string;
-  textStarted: boolean;
-};
-
 function generateUuid(): string {
   return crypto.randomUUID();
-}
-
-function buildToolAcknowledgement(toolName: string | undefined): string {
-  const acknowledgements: Record<string, string> = {
-    adjust_plan:
-      "I've adjusted your plan. Want to review the changes or tune anything else?",
-    calculate_zones: "Ok I've made some tweaks to your targets.",
-    estimate_thresholds:
-      "Thanks, I've factored the data you've shared into my notes.",
-    generate_training_plan: "I've got a fresh training for you.",
-    process_uploaded_file: "I've processed that file.",
-    recalibrate_thresholds:
-      "I checked your thresholds against recent efforts and noted the result.",
-    save_activity_from_text: "I took note of that activity.",
-    update_athlete_profile:
-      "Thanks, I'll keep track of that information. Anything else you'd like to share with me at this time?",
-    update_goals: "Ok, I'm tracking that as a goal of yours.",
-    update_schedule:
-      "Ok, made some notes based on your availability. We can use this to adjust your upcoming workouts.",
-  };
-  return (
-    acknowledgements[toolName ?? ""] ?? "Done. What would you like to do next?"
-  );
-}
-
-function buildRateLimitedToolAcknowledgement(
-  toolName: string | undefined,
-  error: unknown,
-): string {
-  const acknowledgement = buildToolAcknowledgement(toolName);
-  const waitMessage = rateLimitStreamErrorMessage(error, "");
-  return waitMessage ? `${acknowledgement} ${waitMessage}` : acknowledgement;
-}
-
-function writeDeterministicText(
-  writer: UIMessageStreamWriter,
-  state: StreamTextState,
-  text: string,
-): void {
-  if (!state.textStarted) {
-    writer.write({ type: "text-start", id: state.textId });
-    state.textStarted = true;
-  }
-  writer.write({ type: "text-delta", id: state.textId, delta: text });
 }
 
 function prepareBootstrapItems(
@@ -607,6 +533,410 @@ function startLeaseRenewal({
   };
 }
 
+// streamCoachTurn's options after defaults and model-message selection, carried
+// through every step of the turn.
+type CoachTurnRequest = {
+  accessToken: string;
+  acquiredLease: ChatTurnLeaseState | undefined;
+  baseUrl: string;
+  context: AthleteContextBundle;
+  extraHeaders: Record<string, string> | undefined;
+  providedLeaseId: string | undefined;
+  runContext: CoachAgentRunContext;
+  selectedMessages: UIMessage[];
+  signal: AbortSignal | undefined;
+  streamErrorMessage: string;
+  tavilyMcpUrl: string | undefined;
+  timeZone: string | undefined;
+  useDurableSession: boolean;
+};
+
+// Mutable per-turn state, shared by reference between the turn steps and the
+// stream's error and cleanup paths. `stopLeaseRenewal` is assigned late by
+// `markLeaseAcquired`, so cleanup must read it off this object, not a copy.
+type TurnLifecycle = LeadTurnState & {
+  leaseId: string;
+  leaseStatus: { acquired: boolean; lost: boolean };
+  onLeaseLost: (error: unknown) => void;
+  stopLeaseRenewal: (() => Promise<void>) | undefined;
+};
+
+type TurnSession = {
+  durableSession: DurableCompactionSession | undefined;
+  traceGroupId: string;
+  underlyingSession: SupabaseAgentSession | undefined;
+};
+
+type CoachTurn = {
+  lifecycle: TurnLifecycle;
+  request: CoachTurnRequest;
+  session: TurnSession;
+  writer: UIMessageStreamWriter;
+};
+
+function leaseRequest(
+  request: CoachTurnRequest,
+  leaseId: string,
+): Pick<
+  PrepareDurableSessionOptions,
+  "accessToken" | "baseUrl" | "extraHeaders" | "leaseId"
+> {
+  return {
+    accessToken: request.accessToken,
+    baseUrl: request.baseUrl,
+    ...(request.extraHeaders ? { extraHeaders: request.extraHeaders } : {}),
+    leaseId,
+  };
+}
+
+function startTurnLeaseRenewal(
+  request: CoachTurnRequest,
+  lifecycle: TurnLifecycle,
+): () => Promise<void> {
+  return startLeaseRenewal({
+    ...leaseRequest(request, lifecycle.leaseId),
+    onLeaseLost: lifecycle.onLeaseLost,
+  });
+}
+
+function createTurnLifecycle(request: CoachTurnRequest): TurnLifecycle {
+  const leaseId = request.providedLeaseId ?? crypto.randomUUID();
+  // Lease renewal runs concurrently with the turn; if the lease is lost
+  // (another request took it over), abort this turn via the same signal
+  // already threaded through runner.run() rather than letting it keep
+  // writing to a durable session it no longer owns.
+  const leaseAbortController = new AbortController();
+  const effectiveSignal = request.signal
+    ? AbortSignal.any([request.signal, leaseAbortController.signal])
+    : leaseAbortController.signal;
+  const lifecycle: TurnLifecycle = {
+    admittedProbes: new Set<ModelAdmission>(),
+    effectiveSignal,
+    // Indirection through a function, rather than reading
+    // effectiveSignal.aborted directly at each call site, keeps
+    // typescript-eslint from narrowing it to a stale literal across
+    // `await`s — the signal can flip to aborted at any time.
+    isTurnAborted: () => effectiveSignal.aborted,
+    leaseId,
+    leaseStatus: { acquired: request.acquiredLease !== undefined, lost: false },
+    onLeaseLost: (error) => {
+      lifecycle.leaseStatus.lost = true;
+      leaseAbortController.abort(
+        error instanceof Error ? error : new Error("chat turn lease lost"),
+      );
+    },
+    rateLimits: createTurnRateLimitLedger(),
+    stopLeaseRenewal: undefined,
+    textState: { textId: "coach-response", textStarted: false },
+  };
+  if (request.acquiredLease !== undefined) {
+    lifecycle.stopLeaseRenewal = startTurnLeaseRenewal(request, lifecycle);
+  }
+  return lifecycle;
+}
+
+function markLeaseAcquired(
+  request: CoachTurnRequest,
+  lifecycle: TurnLifecycle,
+): void {
+  lifecycle.leaseStatus.acquired = true;
+  // Acquisition fires at most once per turn, but guard anyway: a second call
+  // must not overwrite a live renewal's stop closure, which would orphan the
+  // first interval so the turn-end stopLeaseRenewal?.() could never clear it.
+  if (lifecycle.stopLeaseRenewal) return;
+  lifecycle.stopLeaseRenewal = startTurnLeaseRenewal(request, lifecycle);
+}
+
+async function prepareTurnSession(
+  request: CoachTurnRequest,
+  lifecycle: TurnLifecycle,
+): Promise<TurnSession> {
+  const stateless: TurnSession = {
+    durableSession: undefined,
+    traceGroupId: request.context.profile.user_id,
+    underlyingSession: undefined,
+  };
+  if (!request.useDurableSession) return stateless;
+  const prepared = await prepareDurableSession({
+    accessToken: request.accessToken,
+    baseUrl: request.baseUrl,
+    context: request.context,
+    ...(request.extraHeaders ? { extraHeaders: request.extraHeaders } : {}),
+    leaseId: lifecycle.leaseId,
+    ...(request.acquiredLease ? { leaseState: request.acquiredLease } : {}),
+    markLeaseAcquired: () => markLeaseAcquired(request, lifecycle),
+    selectedMessages: request.selectedMessages,
+    signal: lifecycle.effectiveSignal,
+  });
+  return prepared ?? stateless;
+}
+
+function admitStartingTier(lifecycle: TurnLifecycle): ModelAdmission {
+  const admission = modelCircuitBreaker.pickTier(MODEL_TIERS);
+  if (admission.probeGeneration !== undefined) {
+    lifecycle.admittedProbes.add(admission);
+  }
+  return admission;
+}
+
+async function planDelegation(
+  turn: CoachTurn,
+  specialistTier: ModelTier,
+  coachingMemory: CoachingMemoryRecord[],
+): Promise<DelegationPlan> {
+  const { underlyingSession } = turn.session;
+  try {
+    return await planSpecialistDelegation({
+      durableContext: underlyingSession
+        ? await underlyingSession.getItems()
+        : [],
+      latestUserTurn: toAgentInputItems(turn.request.selectedMessages),
+      coachingMemory,
+      athleteContext: turn.request.context,
+      tier: specialistTier,
+    });
+  } catch (error) {
+    if (isRateLimitError(error)) {
+      turn.lifecycle.rateLimits.note(specialistTier, error);
+      captureRateLimit({ tier: specialistTier, outcome: "exhausted", error });
+    } else {
+      Sentry.captureException(error, {
+        tags: { subsystem: "delegation-planner" },
+      });
+    }
+    Sentry.logger.warn("coach: delegation failed; continuing lead-only");
+    return { delegations: [] };
+  }
+}
+
+async function consultSpecialists(
+  turn: CoachTurn,
+  specialistTier: ModelTier,
+  coachingMemory: CoachingMemoryRecord[],
+  delegationPlan: DelegationPlan,
+): Promise<SpecialistReport[]> {
+  // runSpecialists() handles per-specialist failures (bad report, bad
+  // proposedUpdate, execution error) internally so one malformed specialist
+  // doesn't discard the others and always returns already-valid reports; this
+  // catch is a last-resort net for anything unexpected outside that.
+  try {
+    return await runSpecialists({
+      messages: turn.request.selectedMessages,
+      messagesAreModelSelected: true,
+      tier: specialistTier,
+      roles: delegationPlan.delegations.map((item) => item.role),
+      delegations: delegationPlan.delegations,
+      coachingMemory,
+      onRateLimit: turn.lifecycle.rateLimits.note,
+      slices: buildContextSlices(turn.request.context),
+      timeZone: turn.request.timeZone,
+    });
+  } catch (error) {
+    Sentry.captureException(error, {
+      tags: { subsystem: "specialists" },
+    });
+    Sentry.logger.warn("coach: specialist run failed; continuing lead-only");
+    return [];
+  }
+}
+
+/**
+ * The `fitness-coach-turn` trace body: delegation planning, specialists, then
+ * the lead coach down the model ladder. Turn-wide rate limits are flushed to
+ * the circuit breaker and the Tavily MCP server closed however the ladder ends.
+ */
+async function runCoachTurn(
+  turn: CoachTurn,
+  startingAdmission: ModelAdmission,
+): Promise<void> {
+  const { lifecycle, request, session } = turn;
+  const { underlyingSession } = session;
+  const specialistTier = resolveSpecialistTier(startingAdmission.tier);
+  const coachingMemory = underlyingSession
+    ? await underlyingSession.getCoachingMemory()
+    : [];
+  const delegationPlan = await planDelegation(
+    turn,
+    specialistTier,
+    coachingMemory,
+  );
+  const reports = await consultSpecialists(
+    turn,
+    specialistTier,
+    coachingMemory,
+    delegationPlan,
+  );
+  const durableFallbackBaseline = underlyingSession
+    ? await underlyingSession.getItems()
+    : undefined;
+  const tavilyServer = createTavilyServer(request.tavilyMcpUrl);
+
+  try {
+    const tavilyTools =
+      tavilyServer === null
+        ? []
+        : await connectTavilyTools(tavilyServer, lifecycle.effectiveSignal);
+    await runLeadModelLadder(
+      {
+        accessToken: request.accessToken,
+        baseUrl: request.baseUrl,
+        coachingMemory,
+        context: request.context,
+        durableFallbackBaseline,
+        durableSession: session.durableSession,
+        extraHeaders: request.extraHeaders,
+        lifecycle,
+        reports,
+        runContext: request.runContext,
+        selectedMessages: request.selectedMessages,
+        tavilyTools,
+        timeZone: request.timeZone,
+        traceGroupId: session.traceGroupId,
+        underlyingSession,
+        writer: turn.writer,
+      },
+      startingAdmission,
+    );
+  } finally {
+    lifecycle.rateLimits.flushToBreaker(startingAdmission);
+    if (tavilyServer !== null) await closeTavilyServer(tavilyServer);
+  }
+}
+
+async function traceCoachTurn(
+  turn: CoachTurn,
+  startingAdmission: ModelAdmission,
+): Promise<void> {
+  const startingTier = startingAdmission.tier;
+  const traceMetadata = {
+    fallbackModels: MODEL_TIERS.map((tier) => tier.model).join(","),
+    startingModel: startingTier.model,
+  } satisfies Record<string, string>;
+  await Sentry.startSpan(
+    {
+      name: "fitness-coach-turn",
+      // OpenTelemetry GenAI semantic conventions so Sentry/OTel backends
+      // recognise this as an agent-invocation span.
+      op: "gen_ai.invoke_agent",
+      attributes: {
+        "gen_ai.system": "openai",
+        ...tierSpanAttributes(startingTier),
+        "user.id": turn.request.context.profile.user_id,
+      },
+    },
+    () =>
+      withTrace(
+        "fitness-coach-turn",
+        () => runCoachTurn(turn, startingAdmission),
+        {
+          groupId: turn.session.traceGroupId,
+          metadata: traceMetadata,
+        },
+      ),
+  );
+}
+
+function finishTurnStream(
+  writer: UIMessageStreamWriter,
+  textState: StreamTextState,
+  userId: string,
+): void {
+  finishAgentText(writer, textState);
+  Sentry.logger.info("coach turn complete", {
+    textStarted: textState.textStarted,
+    user_id: userId,
+  });
+  writer.write({ type: "finish-step" });
+  writer.write({ type: "finish", finishReason: "stop" });
+}
+
+function failTurnStream(
+  request: CoachTurnRequest,
+  writer: UIMessageStreamWriter,
+  lifecycle: TurnLifecycle,
+  error: unknown,
+): void {
+  if (request.signal?.aborted) {
+    writer.write({ type: "abort", reason: "request aborted" });
+    return;
+  }
+  const { textState } = lifecycle;
+  const userErrorMessage = rateLimitStreamErrorMessage(
+    error,
+    request.streamErrorMessage,
+    lifecycle.rateLimits.longestLeadRetryAfterMs(),
+  );
+  if (!textState.textStarted) {
+    writeDeterministicText(writer, textState, userErrorMessage);
+  }
+  finishAgentText(writer, textState);
+  writer.write({ type: "error", errorText: userErrorMessage });
+  writer.write({ type: "finish-step" });
+  writer.write({ type: "finish", finishReason: "error" });
+  // The lease-lost case already reported to Sentry from onLeaseLost;
+  // this `error` here is just the resulting abort, not new information.
+  if (!lifecycle.leaseStatus.lost) {
+    Sentry.captureException(error, {
+      tags: { subsystem: "coach-stream" },
+      extra: { textStarted: textState.textStarted },
+    });
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(
+    "[chat] stream error:",
+    message.replace(/key=[^&\s]+/g, "key=***"),
+  );
+}
+
+async function cleanUpTurn(
+  request: CoachTurnRequest,
+  lifecycle: TurnLifecycle,
+): Promise<void> {
+  for (const admission of lifecycle.admittedProbes) {
+    modelCircuitBreaker.releaseProbe(admission);
+  }
+  await lifecycle.stopLeaseRenewal?.();
+  // If we lost the lease, we no longer own it — attempting to release
+  // it would just fail with another 409 that only adds Sentry noise.
+  if (!lifecycle.leaseStatus.acquired || lifecycle.leaseStatus.lost) return;
+  try {
+    await releaseChatTurnLease(leaseRequest(request, lifecycle.leaseId));
+  } catch (error) {
+    Sentry.captureException(error, {
+      tags: { subsystem: "lease-release" },
+      extra: { leaseId: lifecycle.leaseId },
+    });
+  }
+}
+
+// Lease, compaction, delegation, streaming, and cleanup form one turn
+// transaction; each step below owns one phase of it.
+async function executeCoachTurn(
+  request: CoachTurnRequest,
+  writer: UIMessageStreamWriter,
+): Promise<void> {
+  writer.write({ type: "start" });
+  writer.write({ type: "start-step" });
+  const lifecycle = createTurnLifecycle(request);
+  try {
+    const session = await prepareTurnSession(request, lifecycle);
+    const startingAdmission = admitStartingTier(lifecycle);
+    await traceCoachTurn(
+      { lifecycle, request, session, writer },
+      startingAdmission,
+    );
+    finishTurnStream(
+      writer,
+      lifecycle.textState,
+      request.context.profile.user_id,
+    );
+  } catch (error) {
+    failTurnStream(request, writer, lifecycle, error);
+  } finally {
+    await cleanUpTurn(request, lifecycle);
+  }
+}
+
 export function streamCoachTurn({
   accessToken,
   acquiredLease,
@@ -626,10 +956,24 @@ export function streamCoachTurn({
     ? messages
     : selectMessagesForModel(messages);
   const latestUserTurn = latestUserTurnMessages(selectedMessages);
-  const runContext: CoachAgentRunContext = {
-    hasActivityFileAttachment: hasActivityFileAttachment(latestUserTurn),
-    toolCalled: false,
-    toolRounds: new ToolRoundBudget(),
+  const request: CoachTurnRequest = {
+    accessToken,
+    acquiredLease,
+    baseUrl,
+    context,
+    extraHeaders,
+    providedLeaseId,
+    runContext: {
+      hasActivityFileAttachment: hasActivityFileAttachment(latestUserTurn),
+      toolCalled: false,
+      toolRounds: new ToolRoundBudget(),
+    },
+    selectedMessages,
+    signal,
+    streamErrorMessage,
+    tavilyMcpUrl,
+    timeZone,
+    useDurableSession,
   };
 
   const stream = createUIMessageStream<UIMessage>({
@@ -648,619 +992,7 @@ export function streamCoachTurn({
         finishReason,
       );
     },
-    // Lease, compaction, delegation, streaming, and cleanup form one turn transaction.
-    // eslint-disable-next-line complexity
-    execute: async ({ writer }) => {
-      writer.write({ type: "start" });
-      writer.write({ type: "start-step" });
-      const textState: StreamTextState = {
-        textId: "coach-response",
-        textStarted: false,
-      };
-
-      const leaseId = providedLeaseId ?? crypto.randomUUID();
-      const leaseStatus = {
-        acquired: acquiredLease !== undefined,
-        lost: false,
-      };
-      // Lease renewal runs concurrently with the turn; if the lease is lost
-      // (another request took it over), abort this turn via the same signal
-      // already threaded through runner.run() rather than letting it keep
-      // writing to a durable session it no longer owns.
-      const leaseAbortController = new AbortController();
-      const effectiveSignal = signal
-        ? AbortSignal.any([signal, leaseAbortController.signal])
-        : leaseAbortController.signal;
-      // Indirection through a function, rather than reading
-      // effectiveSignal.aborted directly at each call site, keeps
-      // typescript-eslint from narrowing it to a stale literal across the
-      // `await`s below — the signal can flip to aborted at any time.
-      const isTurnAborted = (): boolean => effectiveSignal.aborted;
-      const onLeaseLost = (error: unknown): void => {
-        leaseStatus.lost = true;
-        leaseAbortController.abort(
-          error instanceof Error ? error : new Error("chat turn lease lost"),
-        );
-      };
-      const admittedProbes = new Set<
-        ReturnType<typeof modelCircuitBreaker.pickTier>
-      >();
-      let maxLeadRetryAfterMs: number | undefined;
-      let stopLeaseRenewal: (() => Promise<void>) | undefined =
-        acquiredLease === undefined
-          ? undefined
-          : startLeaseRenewal({
-              accessToken,
-              baseUrl,
-              ...(extraHeaders ? { extraHeaders } : {}),
-              leaseId,
-              onLeaseLost,
-            });
-      try {
-        let durableSession: DurableCompactionSession | undefined;
-        let underlyingSession: SupabaseAgentSession | undefined;
-        let traceGroupId = context.profile.user_id;
-        if (useDurableSession) {
-          const prepared = await prepareDurableSession({
-            accessToken,
-            baseUrl,
-            context,
-            ...(extraHeaders ? { extraHeaders } : {}),
-            leaseId,
-            ...(acquiredLease ? { leaseState: acquiredLease } : {}),
-            markLeaseAcquired: () => {
-              leaseStatus.acquired = true;
-              // Acquisition fires at most once per turn, but guard anyway: a
-              // second call must not overwrite a live renewal's stop closure,
-              // which would orphan the first interval so the turn-end
-              // stopLeaseRenewal?.() could never clear it.
-              if (stopLeaseRenewal) return;
-              stopLeaseRenewal = startLeaseRenewal({
-                accessToken,
-                baseUrl,
-                ...(extraHeaders ? { extraHeaders } : {}),
-                leaseId,
-                onLeaseLost,
-              });
-            },
-            selectedMessages,
-            signal: effectiveSignal,
-          });
-          if (prepared !== null) {
-            durableSession = prepared.durableSession;
-            underlyingSession = prepared.underlyingSession;
-            traceGroupId = prepared.traceGroupId;
-          }
-        }
-        const startingAdmission = modelCircuitBreaker.pickTier(MODEL_TIERS);
-        const startingTier = startingAdmission.tier;
-        const startingTierIndex = MODEL_TIERS.indexOf(startingTier);
-        if (startingAdmission.probeGeneration !== undefined) {
-          admittedProbes.add(startingAdmission);
-        }
-        const traceMetadata = {
-          fallbackModels: MODEL_TIERS.map((tier) => tier.model).join(","),
-          startingModel: startingTier.model,
-        } satisfies Record<string, string>;
-        await Sentry.startSpan(
-          {
-            name: "fitness-coach-turn",
-            // OpenTelemetry GenAI semantic conventions so Sentry/OTel backends
-            // recognise this as an agent-invocation span.
-            op: "gen_ai.invoke_agent",
-            attributes: {
-              "gen_ai.system": "openai",
-              "gen_ai.request.model": startingTier.model,
-              "gen_ai.request.reasoning_effort": String(startingTier.effort),
-              "coach.model_tier": startingTierIndex + 1,
-              "coach.breaker_state": modelCircuitBreaker.snapshot(
-                startingTier.model,
-              ).state,
-              "user.id": context.profile.user_id,
-            },
-          },
-          () =>
-            withTrace(
-              "fitness-coach-turn",
-              // The trace callback owns the complete model orchestration lifecycle.
-              // eslint-disable-next-line complexity
-              async () => {
-                let delegationPlan: DelegationPlan = { delegations: [] };
-                const turnRateLimits = new Map<
-                  string,
-                  { error: unknown; retryAfterMs?: number; tier: ModelTier }
-                >();
-                const breakerRecordedModels = new Set<string>();
-                const noteTurnRateLimit = (
-                  tier: ModelTier,
-                  error: unknown,
-                ): void => {
-                  const retryAfterMs = getRetryAfterMs(error);
-                  const existing = turnRateLimits.get(tier.model);
-                  if (
-                    existing &&
-                    (existing.retryAfterMs ?? 0) >= (retryAfterMs ?? 0)
-                  ) {
-                    return;
-                  }
-                  turnRateLimits.set(tier.model, {
-                    tier,
-                    error,
-                    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-                  });
-                };
-                const specialistTier = resolveSpecialistTier(startingTier);
-                const coachingMemory = underlyingSession
-                  ? await underlyingSession.getCoachingMemory()
-                  : [];
-                try {
-                  delegationPlan = await planSpecialistDelegation({
-                    durableContext: underlyingSession
-                      ? await underlyingSession.getItems()
-                      : [],
-                    latestUserTurn: toAgentInputItems(selectedMessages),
-                    coachingMemory,
-                    athleteContext: context,
-                    tier: specialistTier,
-                  });
-                } catch (error) {
-                  if (isRateLimitError(error)) {
-                    noteTurnRateLimit(specialistTier, error);
-                    captureRateLimit({
-                      tier: specialistTier,
-                      outcome: "exhausted",
-                      error,
-                    });
-                  } else {
-                    Sentry.captureException(error, {
-                      tags: { subsystem: "delegation-planner" },
-                    });
-                  }
-                  Sentry.logger.warn(
-                    "coach: delegation failed; continuing lead-only",
-                  );
-                }
-                // runSpecialists() handles per-specialist failures (bad
-                // report, bad proposedUpdate, execution error) internally so
-                // one malformed specialist doesn't discard the others and
-                // always returns already-valid reports; this catch is a
-                // last-resort net for anything unexpected outside that.
-                let reports: SpecialistReport[] = [];
-                try {
-                  reports = await runSpecialists({
-                    messages: selectedMessages,
-                    messagesAreModelSelected: true,
-                    tier: specialistTier,
-                    roles: delegationPlan.delegations.map((item) => item.role),
-                    delegations: delegationPlan.delegations,
-                    coachingMemory,
-                    onRateLimit: noteTurnRateLimit,
-                    slices: buildContextSlices(context),
-                    timeZone,
-                  });
-                } catch (error) {
-                  Sentry.captureException(error, {
-                    tags: { subsystem: "specialists" },
-                  });
-                  Sentry.logger.warn(
-                    "coach: specialist run failed; continuing lead-only",
-                  );
-                }
-                const durableFallbackBaseline = underlyingSession
-                  ? await underlyingSession.getItems()
-                  : undefined;
-                const tavilyServer = createTavilyServer(tavilyMcpUrl);
-
-                try {
-                  const tavilyTools =
-                    tavilyServer === null
-                      ? []
-                      : await connectTavilyTools(tavilyServer, effectiveSignal);
-                  const leadInstructions = buildLeadCoachPrompt(
-                    context,
-                    reports,
-                    oldestDueFollowUp(coachingMemory)?.statement,
-                    timeZone,
-                  );
-                  let admission = startingAdmission;
-                  let tier: ModelTier = startingTier;
-                  let tierIndex = startingTierIndex;
-                  for (;;) {
-                    const attemptProgress = { eventStarted: false };
-                    try {
-                      await withTrace(
-                        "fitness-coach-tier-attempt",
-                        // A tier attempt deliberately keeps streaming, tool acknowledgement,
-                        // telemetry, and deterministic degradation in one trace boundary.
-                        // eslint-disable-next-line complexity
-                        async () => {
-                          const lead = new Agent<CoachAgentRunContext>({
-                            name: "Lead coach",
-                            // Resolved once per model call, which makes it the
-                            // turn boundary for the tool-round budget.
-                            instructions:
-                              budgetedInstructions<CoachAgentRunContext>(
-                                leadInstructions,
-                              ),
-                            model: tier.model,
-                            modelSettings: buildModelSettings(tier),
-                            // Tavily rides in `tools`, never `mcpServers`: the SDK
-                            // ignores isEnabled for MCP tools, so they would escape
-                            // the round budget (see listBudgetedMcpTools).
-                            tools: [
-                              ...createAgentCoachTools({
-                                accessToken,
-                                baseUrl,
-                                ...(extraHeaders ? { extraHeaders } : {}),
-                                ...(underlyingSession
-                                  ? { modelSession: underlyingSession }
-                                  : {}),
-                              }),
-                              ...tavilyTools,
-                            ],
-                          });
-                          trackToolRounds(lead);
-                          lead.on("agent_tool_start", (activeContext) => {
-                            activeContext.context.toolCalled = true;
-                          });
-
-                          const runner = new Runner({
-                            traceIncludeSensitiveData: true,
-                            tracingDisabled: false,
-                            workflowName: "fitness-coach-turn",
-                          });
-                          const result = await runner.run(
-                            lead,
-                            toAgentInputItems(selectedMessages),
-                            {
-                              context: runContext,
-                              maxTurns: MAX_COACH_TURNS,
-                              signal: effectiveSignal,
-                              ...(durableSession
-                                ? { session: durableSession }
-                                : {}),
-                              stream: true,
-                            },
-                          );
-
-                          // The tool-round budget makes MaxTurnsExceededError
-                          // unreachable in normal operation; this is the backstop
-                          // if that invariant ever breaks. The runner throws only
-                          // after the turn's tool calls have completed, so fall
-                          // through to the acknowledgement/deterministic response
-                          // below to preserve that work.
-                          try {
-                            for await (const event of result) {
-                              attemptProgress.eventStarted = true;
-                              writeAgentStreamEvent(event, writer, textState);
-                            }
-                            await result.completed;
-                          } catch (error) {
-                            if (!(error instanceof MaxTurnsExceededError)) {
-                              throw error;
-                            }
-                            if (!isTurnAborted()) {
-                              const { toolRounds } = runContext;
-                              const extra = {
-                                max_turns: MAX_COACH_TURNS,
-                                tool_names: toolRounds.toolNames.join(","),
-                                tool_rounds_used: toolRounds.roundsUsed,
-                              };
-                              // Error, not warning: the tool-round budget makes
-                              // this unreachable, so reaching it means that
-                              // invariant broke — even though the athlete still
-                              // gets a reply from the salvage path below. Its own
-                              // fingerprint keeps it apart from the pre-budget
-                              // spin events.
-                              Sentry.captureException(error, {
-                                extra,
-                                fingerprint: ["coach-max-turns-salvaged"],
-                                level: "error",
-                                tags: { subsystem: "coach-max-turns" },
-                              });
-                              Sentry.logger.warn(
-                                "coach: max turns exceeded; salvaging completed tool work",
-                                extra,
-                              );
-                            }
-                          }
-                          recordStageUsage("lead", result.state.usage);
-
-                          const ranTool =
-                            runContext.toolCalled ||
-                            textState.lastToolName !== undefined;
-                          let acknowledgementError: unknown;
-                          if (
-                            ranTool &&
-                            !textState.textStarted &&
-                            !isTurnAborted()
-                          ) {
-                            try {
-                              const acknowledgement =
-                                new Agent<CoachAgentRunContext>({
-                                  name: "Coach acknowledgement",
-                                  instructions: ACKNOWLEDGEMENT_PROMPT,
-                                  model: tier.model,
-                                  modelSettings: buildModelSettings(tier),
-                                  mcpServers: [],
-                                  tools: [],
-                                });
-                              const followup = await runner.run(
-                                acknowledgement,
-                                result.output,
-                                {
-                                  context: runContext,
-                                  maxTurns: 2,
-                                  signal: effectiveSignal,
-                                  stream: true,
-                                },
-                              );
-                              for await (const event of followup) {
-                                writeAgentStreamEvent(event, writer, textState);
-                              }
-                              await followup.completed;
-                              recordStageUsage(
-                                "lead-followup",
-                                followup.state.usage,
-                              );
-                            } catch (error) {
-                              acknowledgementError = error;
-                              if (!isTurnAborted()) {
-                                if (isRateLimitError(error)) {
-                                  noteTurnRateLimit(tier, error);
-                                  if (!breakerRecordedModels.has(tier.model)) {
-                                    modelCircuitBreaker.recordFailure(
-                                      admission,
-                                      getRetryAfterMs(error),
-                                    );
-                                    breakerRecordedModels.add(tier.model);
-                                  }
-                                  captureRateLimit({
-                                    tier,
-                                    outcome: "exhausted",
-                                    error,
-                                    textStarted: textState.textStarted,
-                                  });
-                                } else {
-                                  Sentry.captureException(error, {
-                                    tags: { subsystem: "coach-followup" },
-                                  });
-                                }
-                                Sentry.logger.warn(
-                                  "coach: acknowledgement follow-up failed; using deterministic fallback",
-                                );
-                              }
-                            }
-                          }
-
-                          if (!textState.textStarted && !isTurnAborted()) {
-                            writeDeterministicText(
-                              writer,
-                              textState,
-                              ranTool
-                                ? buildRateLimitedToolAcknowledgement(
-                                    textState.lastToolName,
-                                    acknowledgementError,
-                                  )
-                                : EMPTY_MODEL_RESPONSE,
-                            );
-                          }
-                        },
-                        {
-                          groupId: traceGroupId,
-                          metadata: { model: tier.model },
-                        },
-                      );
-                      if (isTurnAborted()) {
-                        modelCircuitBreaker.releaseProbe(admission);
-                        throw effectiveSignal.reason instanceof Error
-                          ? effectiveSignal.reason
-                          : new Error("chat turn aborted");
-                      }
-                      const auxiliaryRateLimit = turnRateLimits.get(tier.model);
-                      if (
-                        auxiliaryRateLimit &&
-                        !breakerRecordedModels.has(tier.model)
-                      ) {
-                        modelCircuitBreaker.recordFailure(
-                          admission,
-                          auxiliaryRateLimit.retryAfterMs,
-                        );
-                        breakerRecordedModels.add(tier.model);
-                      } else if (!auxiliaryRateLimit) {
-                        modelCircuitBreaker.recordSuccess(admission);
-                      }
-                      break;
-                    } catch (error) {
-                      if (!isRateLimitError(error)) {
-                        modelCircuitBreaker.releaseProbe(admission);
-                        throw error;
-                      }
-
-                      const retryAfterMs = getRetryAfterMs(error);
-                      if (
-                        retryAfterMs !== undefined &&
-                        (maxLeadRetryAfterMs === undefined ||
-                          retryAfterMs > maxLeadRetryAfterMs)
-                      ) {
-                        maxLeadRetryAfterMs = retryAfterMs;
-                      }
-                      noteTurnRateLimit(tier, error);
-                      if (!breakerRecordedModels.has(tier.model)) {
-                        modelCircuitBreaker.recordFailure(
-                          admission,
-                          retryAfterMs,
-                        );
-                        breakerRecordedModels.add(tier.model);
-                      }
-                      if (
-                        !textState.textStarted &&
-                        (runContext.toolCalled ||
-                          textState.lastToolName !== undefined) &&
-                        !isTurnAborted()
-                      ) {
-                        captureRateLimit({
-                          tier,
-                          outcome: "exhausted",
-                          error,
-                          textStarted: false,
-                        });
-                        writeDeterministicText(
-                          writer,
-                          textState,
-                          buildRateLimitedToolAcknowledgement(
-                            textState.lastToolName,
-                            error,
-                          ),
-                        );
-                        break;
-                      }
-                      const canFallback =
-                        !attemptProgress.eventStarted &&
-                        !textState.textStarted &&
-                        !runContext.toolCalled &&
-                        textState.lastToolName === undefined &&
-                        !isTurnAborted() &&
-                        tierIndex + 1 < MODEL_TIERS.length;
-                      if (!canFallback) {
-                        captureRateLimit({
-                          tier,
-                          outcome: "exhausted",
-                          error,
-                          textStarted: textState.textStarted,
-                        });
-                        throw error;
-                      }
-
-                      if (durableFallbackBaseline && underlyingSession) {
-                        await underlyingSession.replaceAll(
-                          durableFallbackBaseline,
-                          { trigger: "model-tier-fallback-rollback" },
-                        );
-                      }
-                      const failedTierIndex = tierIndex;
-                      const nextAdmission = modelCircuitBreaker.pickTier(
-                        MODEL_TIERS.slice(tierIndex + 1),
-                      );
-                      const nextTier = nextAdmission.tier;
-                      captureRateLimit({
-                        tier,
-                        outcome: "falling_back",
-                        error,
-                        fallbackModel: nextTier.model,
-                        textStarted: textState.textStarted,
-                      });
-                      admission = nextAdmission;
-                      tier = nextTier;
-                      tierIndex = MODEL_TIERS.indexOf(nextTier);
-                      if (admission.probeGeneration !== undefined) {
-                        admittedProbes.add(admission);
-                      }
-                      Sentry.getActiveSpan()?.setAttribute(
-                        "gen_ai.request.model",
-                        tier.model,
-                      );
-                      Sentry.getActiveSpan()?.setAttribute(
-                        "gen_ai.request.reasoning_effort",
-                        String(tier.effort),
-                      );
-                      Sentry.getActiveSpan()?.setAttribute(
-                        "coach.model_tier",
-                        tierIndex + 1,
-                      );
-                      Sentry.getActiveSpan()?.setAttribute(
-                        "coach.breaker_state",
-                        modelCircuitBreaker.snapshot(tier.model).state,
-                      );
-                      Sentry.logger.warn(
-                        `coach: tier ${failedTierIndex + 1} rate-limited; falling back to ${tier.model}`,
-                      );
-                    }
-                  }
-                } finally {
-                  for (const rateLimit of turnRateLimits.values()) {
-                    if (breakerRecordedModels.has(rateLimit.tier.model)) {
-                      continue;
-                    }
-                    modelCircuitBreaker.recordFailure(
-                      rateLimit.tier.model === startingTier.model
-                        ? startingAdmission
-                        : { tier: rateLimit.tier },
-                      rateLimit.retryAfterMs,
-                    );
-                    breakerRecordedModels.add(rateLimit.tier.model);
-                  }
-                  if (tavilyServer !== null)
-                    await closeTavilyServer(tavilyServer);
-                }
-              },
-              {
-                groupId: traceGroupId,
-                metadata: traceMetadata,
-              },
-            ),
-        );
-        finishAgentText(writer, textState);
-        Sentry.logger.info("coach turn complete", {
-          textStarted: textState.textStarted,
-          user_id: context.profile.user_id,
-        });
-        writer.write({ type: "finish-step" });
-        writer.write({ type: "finish", finishReason: "stop" });
-      } catch (error) {
-        if (signal?.aborted) {
-          writer.write({ type: "abort", reason: "request aborted" });
-          return;
-        }
-        const userErrorMessage = rateLimitStreamErrorMessage(
-          error,
-          streamErrorMessage,
-          maxLeadRetryAfterMs,
-        );
-        if (!textState.textStarted) {
-          writeDeterministicText(writer, textState, userErrorMessage);
-        }
-        finishAgentText(writer, textState);
-        writer.write({ type: "error", errorText: userErrorMessage });
-        writer.write({ type: "finish-step" });
-        writer.write({ type: "finish", finishReason: "error" });
-        // The lease-lost case already reported to Sentry from onLeaseLost;
-        // this `error` here is just the resulting abort, not new information.
-        if (!leaseStatus.lost) {
-          Sentry.captureException(error, {
-            tags: { subsystem: "coach-stream" },
-            extra: { textStarted: textState.textStarted },
-          });
-        }
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(
-          "[chat] stream error:",
-          message.replace(/key=[^&\s]+/g, "key=***"),
-        );
-      } finally {
-        for (const admission of admittedProbes) {
-          modelCircuitBreaker.releaseProbe(admission);
-        }
-        await stopLeaseRenewal?.();
-        // If we lost the lease, we no longer own it — attempting to release
-        // it would just fail with another 409 that only adds Sentry noise.
-        if (leaseStatus.acquired && !leaseStatus.lost) {
-          try {
-            await releaseChatTurnLease({
-              accessToken,
-              baseUrl,
-              ...(extraHeaders ? { extraHeaders } : {}),
-              leaseId,
-            });
-          } catch (error) {
-            Sentry.captureException(error, {
-              tags: { subsystem: "lease-release" },
-              extra: { leaseId },
-            });
-          }
-        }
-      }
-    },
+    execute: ({ writer }) => executeCoachTurn(request, writer),
   });
 
   return createUIMessageStreamResponse({ stream });

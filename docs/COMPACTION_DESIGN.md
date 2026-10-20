@@ -212,7 +212,9 @@ a per-environment data migration.
          except a 409 conflict or aborted signal still ends the turn
 5. Agent runs     →  SDK appends items via addItems() during the turn
       └─ lead model honors provider retry delays up to 8 seconds, then falls back
-         only if no stream event, response text, or tool call has started
+         only if no stream event, response text, or tool call has started; a
+         fallback first rolls durable state back to its pre-lead baseline with
+         replaceAll (runLeadModelLadder in lib/agent/lead-model-ladder.ts)
       └─ longer provider delays skip the in-request retry; if every tier is exhausted,
          the athlete-visible error reports the longest provider wait seen across the ladder
 6. After a successful turn, auto-compaction runs if the same thresholds are hit
