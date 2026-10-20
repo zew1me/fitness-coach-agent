@@ -311,7 +311,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-describe("streamCoachTurn", () => {
+describe("streamCoachTurn setup and attachments", () => {
   it("runs the lead coach with string-only trace metadata", async () => {
     const response = await streamCoachTurn({
       accessToken: "token-1",
@@ -492,7 +492,9 @@ describe("streamCoachTurn", () => {
       }),
     ).toBe(true);
   });
+});
 
+describe("streamCoachTurn streaming and persistence", () => {
   it("streams text using the existing UI-message protocol", async () => {
     const response = await streamCoachTurn({
       accessToken: "token-1",
@@ -602,7 +604,9 @@ describe("streamCoachTurn", () => {
       ]),
     );
   });
+});
 
+describe("streamCoachTurn silent-turn fallbacks", () => {
   it("runs a tool-free acknowledgement turn when the lead tool turn streams no text", async () => {
     orchestratorMocks.runEventSequences.push(
       [
@@ -863,7 +867,9 @@ describe("streamCoachTurn", () => {
     expect(sentryMocks.captureMessage).not.toHaveBeenCalled();
     expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
   });
+});
 
+describe("streamCoachTurn model ladder and rate limits", () => {
   it("falls back to tier two when a 429 occurs before streaming", async () => {
     orchestratorMocks.agentsRun.mockRejectedValueOnce(rateLimitError());
 
@@ -1191,7 +1197,9 @@ describe("streamCoachTurn", () => {
     );
     expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(3);
   });
+});
 
+describe("streamCoachTurn durable rollback, max turns and cold seeding", () => {
   it("rolls back a failed durable attempt before persisting the fallback input", async () => {
     let state = {
       thread_id: "thread-1",
@@ -1587,7 +1595,9 @@ describe("streamCoachTurn", () => {
       DEFAULT_AUTO_COMPACT_TOKENS - PER_TURN_OVERHEAD_TOKENS,
     );
   });
+});
 
+describe("streamCoachTurn durable-session leases", () => {
   it("releases a durable-session lease when the acquired lease response has malformed JSON", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1653,7 +1663,9 @@ describe("streamCoachTurn", () => {
       expect.objectContaining({ method: "DELETE" }),
     );
   });
+});
 
+describe("streamCoachTurn durable-session setup degradation", () => {
   // Issue #408: durable-session setup is an optimisation. Lease acquisition
   // already degraded to a stateless turn on failure, but every step after it
   // killed the turn, so a transient 5xx reached the athlete as
@@ -1931,7 +1943,9 @@ describe("streamCoachTurn", () => {
     expect(leaseSignal?.aborted).toBe(true);
     expect(historySignal?.aborted).toBe(true);
   });
+});
 
+describe("streamCoachTurn specialist delegation and lease renewal", () => {
   it("degrades to lead-only when runSpecialists rejects", async () => {
     // runSpecialists() itself handles per-specialist failures internally
     // (see lib/agent/specialists.ts) and should never reject in practice,
