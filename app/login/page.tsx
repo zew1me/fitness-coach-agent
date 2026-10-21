@@ -1,13 +1,13 @@
 "use client";
 
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 import { Suspense } from "react";
 
 import { BrandMark } from "../../components/brand-mark";
 import { siteConfig } from "../../lib/site";
 import { type LoginFlow, useLoginFlow } from "../../lib/use-login-flow";
 
-function SendLinkForm({ flow }: { flow: LoginFlow }): JSX.Element {
+function SendLinkForm({ flow }: { flow: LoginFlow }): ReactNode {
   return (
     <form
       onSubmit={(event) => {
@@ -46,7 +46,7 @@ function SendLinkForm({ flow }: { flow: LoginFlow }): JSX.Element {
   );
 }
 
-function VerifyOtpForm({ flow }: { flow: LoginFlow }): JSX.Element {
+function VerifyOtpForm({ flow }: { flow: LoginFlow }): ReactNode {
   return (
     <form
       onSubmit={(event) => {
@@ -81,7 +81,7 @@ function VerifyOtpForm({ flow }: { flow: LoginFlow }): JSX.Element {
   );
 }
 
-function LoginPageContent(): JSX.Element {
+function LoginPageContent(): ReactNode {
   const flow = useLoginFlow();
 
   return (
@@ -107,7 +107,7 @@ function LoginPageContent(): JSX.Element {
   );
 }
 
-export default function LoginPage(): JSX.Element {
+export default function LoginPage(): ReactNode {
   return (
     <Suspense
       fallback={

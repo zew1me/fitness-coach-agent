@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type { JSX, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import type { AthleteProfile } from "../lib/types";
 
@@ -25,7 +25,7 @@ function AccountMenu({
   onOpenProfile: () => void;
   extraItems: ReactNode | undefined;
   onMenuItemClick: () => void;
-}>): JSX.Element {
+}>): ReactNode {
   return (
     <div
       aria-label="Account"
@@ -84,7 +84,7 @@ export function AccountMenuButton({
   profile: AthleteProfile | null;
   onOpenProfile: () => void;
   extraItems?: ReactNode;
-}>): JSX.Element {
+}>): ReactNode {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 

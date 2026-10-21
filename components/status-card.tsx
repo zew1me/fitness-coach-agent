@@ -1,4 +1,4 @@
-import type { JSX, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import styles from "./status-card.module.css";
 
@@ -16,7 +16,7 @@ export function StatusCard({
   headingLevel = "h2",
   role,
   title,
-}: StatusCardProps): JSX.Element {
+}: StatusCardProps): ReactNode {
   const Heading = headingLevel;
 
   return (
