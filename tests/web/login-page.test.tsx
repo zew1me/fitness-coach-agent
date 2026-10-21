@@ -137,6 +137,27 @@ describe("LoginPage", () => {
     expect(await screen.findByText("Unable to start login.")).toBeTruthy();
   });
 
+  it("does not report a sent code when a successful response body is not JSON", async () => {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response("<html>ok</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    ) as unknown as typeof fetch;
+
+    render(<LoginPage />);
+
+    fireEvent.change(screen.getByLabelText("Email"), {
+      target: { value: "athlete@example.com" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /send code/i }));
+
+    expect(await screen.findByText("Unable to start login.")).toBeTruthy();
+    expect(screen.queryByText(/check your email/i)).toBeNull();
+  });
+
   it("submits the invite code after the new-user gate is shown", async () => {
     const fetchMock = vi
       .fn()

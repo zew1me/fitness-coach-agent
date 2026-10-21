@@ -27,11 +27,18 @@ async function requestOtp(body: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  // Gateways and platform errors answer with HTML or plain text; fall back to an
-  // empty payload so callers show their own message instead of a parser error.
-  const payload = (await response
-    .json()
-    .catch((): RequestOtpPayload => ({}))) as RequestOtpPayload;
+  let payload: RequestOtpPayload;
+  try {
+    payload = (await response.json()) as RequestOtpPayload;
+  } catch {
+    // Gateways and platform errors answer with HTML or plain text; fall back to
+    // an empty payload so callers show their own message instead of a parser
+    // error. A 2xx we cannot parse is not a confirmed send, so it must fail.
+    if (response.ok) {
+      throw new Error("Unable to start login.");
+    }
+    payload = {};
+  }
   return { ok: response.ok, payload };
 }
 
