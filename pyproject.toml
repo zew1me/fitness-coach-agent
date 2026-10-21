@@ -113,6 +113,9 @@ asyncio_mode = "auto"
 # Workspace tools intentionally reuse tests/test_cli.py; importlib mode avoids module-name clashes.
 # Live OpenAI and DB integration tests are opt-in, excluded from the default run.
 addopts = "--import-mode=importlib -m 'not db and not oai'"
+# A short HMAC key in tests means a test is signing JWTs with a placeholder secret
+# (issue #261); fail loudly instead of printing a warning nobody reads.
+filterwarnings = ["error::jwt.warnings.InsecureKeyLengthWarning"]
 markers = [
   "db: integration tests that require a live Supabase connection (run with: uv run pytest -m db)",
   "oai: live OpenAI API calls; excluded by default, run with `uv run pytest -m oai`",
