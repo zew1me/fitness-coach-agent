@@ -10,8 +10,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # The Settings default ("replace-me") is a 10-byte placeholder, so every JWT the suite
 # signed or verified tripped PyJWT's InsecureKeyLengthWarning (issue #261). Pin a
-# 32-byte test-only secret before any test module imports backend.config. This also
-# keeps a developer's real APP_JWT_SECRET (exported, or from .env) out of the suite.
+# 33-byte test-only secret (HS256 needs >= 32) before any test module imports
+# backend.config. This also keeps a developer's real APP_JWT_SECRET (exported, or from
+# .env) out of the suite.
 os.environ["APP_JWT_SECRET"] = "test-only-jwt-secret-0123456789ab"
 
 
