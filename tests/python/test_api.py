@@ -34,6 +34,16 @@ from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfig
 from backend.services.auth import AuthService
 
 
+def browser_session_cookie_header(cookie_value: str) -> dict[str, str]:
+    """Send the browser-session cookie on one request only.
+
+    httpx deprecates per-request ``cookies=`` (issue #260). An explicit ``Cookie`` header keeps
+    the same one-request scope without touching the client's cookie jar, which the stdlib jar
+    leaves alone whenever a request already carries its own ``Cookie`` header.
+    """
+    return {"Cookie": f"coach_browser_session={cookie_value}"}
+
+
 class GrantRecord(TypedDict):
     id: str
     user_id: str
@@ -1304,7 +1314,7 @@ async def test_chat_attachments_upload_validates_object_key_scope(
         # Then get a valid token
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1351,7 +1361,7 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
 
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1462,7 +1472,7 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
 
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1532,7 +1542,7 @@ async def test_process_uploaded_file_recovers_key_from_public_url(
         cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1590,7 +1600,7 @@ async def test_process_uploaded_file_persists_activity(auth_service_fixture, mon
         cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1662,7 +1672,7 @@ async def test_process_uploaded_file_parses_tcx_with_hrv_metadata(
         cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1741,7 +1751,7 @@ async def test_oauth_authorize_redirects_to_consent_when_grant_missing(
                 "code_challenge": "challenge-1",
                 "code_challenge_method": "S256",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -1807,7 +1817,7 @@ async def test_oauth_authorize_invalid_browser_cookie_redirects_to_login(
                 "code_challenge": "challenge-1",
                 "code_challenge_method": "S256",
             },
-            cookies={"coach_browser_session": "not-a-jwt"},
+            headers=browser_session_cookie_header("not-a-jwt"),
             follow_redirects=False,
         )
 
@@ -1841,7 +1851,7 @@ async def test_oauth_authorize_prompt_consent_forces_consent(
                 "code_challenge": "challenge-1",
                 "code_challenge_method": "S256",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -1869,7 +1879,7 @@ async def test_oauth_authorize_decision_denial_redirects_back_with_error(
                 "code_challenge_method": "S256",
                 "decision": "deny",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -1905,7 +1915,7 @@ async def test_oauth_authorize_decision_exchanges_code_refresh_and_revokes(
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -2011,7 +2021,7 @@ async def test_oauth_browser_token_issues_same_origin_bearer(auth_service_fixtur
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
         )
 
     assert response.status_code == 200
@@ -2053,7 +2063,7 @@ async def test_oauth_token_rejects_bad_code_verifier(auth_service_fixture) -> No
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
         code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
@@ -2100,7 +2110,7 @@ async def test_oauth_token_rejects_client_mismatch_without_consuming_code(
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
         code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
@@ -2145,7 +2155,7 @@ async def test_oauth_token_rejects_reused_authorization_code(auth_service_fixtur
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
         code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
@@ -4788,7 +4798,7 @@ async def test_process_uploaded_file_returns_404_on_no_such_key(
         token_body = (
             await client.post(
                 "/api/oauth/browser-token",
-                cookies={"coach_browser_session": cookie_value},
+                headers=browser_session_cookie_header(cookie_value),
             )
         ).json()
 
@@ -4830,7 +4840,7 @@ async def test_process_uploaded_zip_returns_404_on_no_such_key(
         token_body = (
             await client.post(
                 "/api/oauth/browser-token",
-                cookies={"coach_browser_session": cookie_value},
+                headers=browser_session_cookie_header(cookie_value),
             )
         ).json()
 
