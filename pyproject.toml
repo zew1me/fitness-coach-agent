@@ -113,6 +113,9 @@ asyncio_mode = "auto"
 # Workspace tools intentionally reuse tests/test_cli.py; importlib mode avoids module-name clashes.
 # Live OpenAI and DB integration tests are opt-in, excluded from the default run.
 addopts = "--import-mode=importlib -m 'not db and not oai'"
+# httpx deprecates per-request cookies=; tests send an explicit Cookie header instead (issue
+# #260). Escalating just this warning keeps the deprecated form from creeping back.
+filterwarnings = ["error:Setting per-request cookies:DeprecationWarning"]
 markers = [
   "db: integration tests that require a live Supabase connection (run with: uv run pytest -m db)",
   "oai: live OpenAI API calls; excluded by default, run with `uv run pytest -m oai`",
