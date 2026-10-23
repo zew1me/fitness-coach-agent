@@ -474,7 +474,7 @@ async def test_call_vision_records_stage_and_separate_reasoning_usage(
         ),
         usage=ResponseUsage(
             input_tokens=900,
-            input_tokens_details=InputTokensDetails(cached_tokens=100),
+            input_tokens_details=InputTokensDetails(cached_tokens=100, cache_write_tokens=0),
             output_tokens=420,
             output_tokens_details=OutputTokensDetails(reasoning_tokens=300),
             total_tokens=1320,
@@ -825,7 +825,7 @@ async def test_call_vision_reports_duration_and_tokens_as_metrics(
         output_parsed=screenshot_analyzer.ActivityExtraction(sport="running"),
         usage=ResponseUsage(
             input_tokens=1200,
-            input_tokens_details=InputTokensDetails(cached_tokens=64),
+            input_tokens_details=InputTokensDetails(cached_tokens=64, cache_write_tokens=0),
             output_tokens=340,
             output_tokens_details=OutputTokensDetails(reasoning_tokens=256),
             total_tokens=1540,
