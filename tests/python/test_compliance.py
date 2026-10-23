@@ -152,6 +152,13 @@ class TestMatching:
         activity = _activity(activity_date=date(2026, 7, 1), duration_seconds=None)
         assert len(match_activities_to_workouts([workout], [activity], today=TODAY)) == 1
 
+    def test_zero_minute_workout_target_is_treated_as_no_duration_target(self) -> None:
+        workout = _workout(
+            workout_date=date(2026, 7, 1), workout_type="mobility", target_duration_minutes=0
+        )
+        activity = _activity(activity_date=date(2026, 7, 1), duration_seconds=20 * 60)
+        assert len(match_activities_to_workouts([workout], [activity], today=TODAY)) == 1
+
     def test_already_linked_activity_is_skipped(self) -> None:
         workout = _workout(workout_date=date(2026, 7, 1))
         activity = _activity(activity_date=date(2026, 7, 1), planned_workout_id="w-other")
