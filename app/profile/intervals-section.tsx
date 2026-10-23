@@ -1,4 +1,4 @@
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import type { IntervalsConnectionStatus } from "../../lib/types";
 
@@ -23,7 +23,7 @@ export function IntervalsSection({
   onDisconnect,
   onSync,
   status,
-}: IntervalsSectionProps): JSX.Element {
+}: IntervalsSectionProps): ReactNode {
   return (
     <section className={styles.section}>
       <h2 className={styles.sectionTitle}>Intervals.icu</h2>
@@ -44,7 +44,7 @@ export function IntervalsSection({
 function IntervalsMessages({
   error,
   notice,
-}: Pick<IntervalsSectionProps, "error" | "notice">): JSX.Element {
+}: Pick<IntervalsSectionProps, "error" | "notice">): ReactNode {
   return (
     <>
       {notice !== null && <p className={styles.notice}>{notice}</p>}
@@ -64,7 +64,7 @@ function IntervalsStatusView({
   onDisconnect,
   onSync,
   status,
-}: IntervalsStatusViewProps): JSX.Element {
+}: IntervalsStatusViewProps): ReactNode {
   if (status === null) {
     return (
       <p className={styles.connectionText}>Loading connection status...</p>
@@ -90,7 +90,7 @@ function ConnectedIntervalsStatus({
   status,
 }: Pick<IntervalsSectionProps, "action" | "onDisconnect" | "onSync"> & {
   status: IntervalsConnectionStatus;
-}): JSX.Element {
+}): ReactNode {
   const athleteLabel =
     status.intervals_athlete_name ??
     status.intervals_athlete_id ??
@@ -131,7 +131,7 @@ function ConnectedIntervalsStatus({
 function DisconnectedIntervalsStatus({
   action,
   onConnect,
-}: Pick<IntervalsSectionProps, "action" | "onConnect">): JSX.Element {
+}: Pick<IntervalsSectionProps, "action" | "onConnect">): ReactNode {
   return (
     <>
       <p className={styles.connectionText}>Not connected</p>

@@ -1,4 +1,4 @@
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import { WORKOUT_FAMILY_LEGEND } from "../lib/calendar-workout-visuals";
 
@@ -13,7 +13,7 @@ const ENTRY_MARKERS = [
   { label: "Recorded activity", marker: "●", status: "recorded" },
 ] as const;
 
-export function CalendarLegend(): JSX.Element {
+export function CalendarLegend(): ReactNode {
   return (
     <div className={styles.legends}>
       <div
