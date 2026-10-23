@@ -1,5 +1,7 @@
-import { tool, type Tool } from "@openai/agents";
+import { ModelBehaviorError, tool, type Tool } from "@openai/agents";
+import * as Sentry from "@sentry/nextjs";
 import { type ToolSet } from "ai";
+import { z } from "zod";
 
 import { coachingMemoryToolSchema } from "./coaching-memory";
 import type { SupabaseAgentSession } from "./supabase-agent-session";
@@ -385,6 +387,64 @@ export type CoachAgentRunContext = ToolRoundBudgetContext & {
   hasActivityFileAttachment: boolean;
 };
 
+function formatIssuePath(path: ReadonlyArray<PropertyKey>): string {
+  return path.reduce<string>((formatted, segment) => {
+    if (typeof segment === "number") {
+      return `${formatted}[${segment}]`;
+    }
+    const key = String(segment);
+    return formatted ? `${formatted}.${key}` : key;
+  }, "");
+}
+
+// The SDK wraps an argument-parsing failure in InvalidToolInputError (not
+// exported, so matched via its exported ModelBehaviorError base and its
+// toolInvocation field) whose originalError is the ZodError from the tool's
+// schema, or a SyntaxError for malformed JSON.
+function invalidToolInputIssues(error: unknown): string[] | null {
+  if (!(error instanceof ModelBehaviorError) || !("toolInvocation" in error)) {
+    return null;
+  }
+  const cause = (error as { originalError?: unknown }).originalError;
+  if (cause instanceof z.ZodError) {
+    return cause.issues.map((issue) => {
+      const path = formatIssuePath(issue.path);
+      return path ? `${path}: ${issue.message}` : issue.message;
+    });
+  }
+  // Never echo the parser message: JSON.parse errors can quote the raw input,
+  // which would carry athlete text into Sentry.
+  return ["arguments are not valid JSON"];
+}
+
+// Replaces the SDK default, which answers every schema rejection with a generic
+// "Invalid JSON input for tool": the model could not tell which field failed
+// (it retried with smaller payloads, blaming size) and nothing reached Sentry.
+function coachToolErrorFunction(name: string) {
+  return (_runContext: unknown, error: unknown): string => {
+    const issues = invalidToolInputIssues(error);
+    if (issues === null) {
+      const details = error instanceof Error ? error.toString() : String(error);
+      return `An error occurred while running the tool. Please try again. Error: ${details}`;
+    }
+    // Issue paths and messages only: the raw arguments can be large and carry
+    // athlete data.
+    Sentry.captureException(error, {
+      level: "error",
+      fingerprint: ["coach-tool-input-invalid", name],
+      tags: { subsystem: "coach-tools", tool: name },
+      extra: { issues },
+    });
+    // No retry promise: a corrected call needs a tool round left this turn
+    // (ToolRoundBudget), which the model cannot see from here.
+    return (
+      `Invalid input for ${name}: ${issues.join("; ")}. Nothing was saved. ` +
+      `Fix those fields before calling ${name} again; if you cannot call it ` +
+      "again this turn, tell the athlete this save did not go through."
+    );
+  };
+}
+
 // Activity writes have no dedup yet (docs/ACTIVITY_MATERIALIZATION_DESIGN.md), so
 // re-running one of these in a later tool round would store the same workout
 // twice and inflate training load for weeks. One round of them per reply is all a
@@ -420,6 +480,7 @@ export function createAgentCoachTools(
       isEnabled: ({ runContext }) =>
         isCoachToolEnabled(name, runContext.context),
       execute: (input: unknown) => executeCoachTool(name, input, context),
+      errorFunction: coachToolErrorFunction(name),
     }),
   );
   if (context.modelSession) {
@@ -431,6 +492,7 @@ export function createAgentCoachTools(
         parameters: coachingMemoryToolSchema,
         isEnabled: ({ runContext }) =>
           runContext.context.toolRounds.hasRoundsLeft(),
+        errorFunction: coachToolErrorFunction("update_coaching_memory"),
         execute: async (input) => {
           await context.modelSession?.updateCoachingMemory(input.operation);
           return { status: "updated" };

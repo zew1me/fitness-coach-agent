@@ -59,7 +59,9 @@ def _pair_score(workout: PlanWorkout, activity: Activity) -> float | None:
 
     score = 1.0 - 0.25 * day_offset
 
-    if workout.target_duration_minutes is not None and activity.duration_seconds is not None:
+    # A 0-minute target carries no duration to compare against; treating it as one
+    # would make every activity a 0% duration match and disqualify the pair.
+    if workout.target_duration_minutes and activity.duration_seconds is not None:
         duration_ratio = _ratio(
             float(workout.target_duration_minutes * 60), float(activity.duration_seconds)
         )
