@@ -2,7 +2,6 @@
 
 import {
   createContext,
-  type JSX,
   type ReactNode,
   useCallback,
   useContext,
@@ -37,7 +36,7 @@ const ChatTurnLeaseContext = createContext<ChatTurnLeaseContextValue | null>(
 
 export function ChatTurnLeaseProvider({
   children,
-}: ChatTurnLeaseProviderProps): JSX.Element {
+}: ChatTurnLeaseProviderProps): ReactNode {
   const [pendingUserIds, setPendingUserIds] = useState<ReadonlySet<string>>(
     new Set(),
   );

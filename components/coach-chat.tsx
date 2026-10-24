@@ -3,7 +3,7 @@
 import * as Sentry from "@sentry/nextjs";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import { onlyWelcomeMessage } from "../lib/chat-ui-messages";
 import { siteConfig } from "../lib/site";
@@ -77,7 +77,7 @@ function LoggedOutLanding({
 }: Readonly<{
   authenticationRequired: boolean;
   error: string | null;
-}>): JSX.Element {
+}>): ReactNode {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.landingCard}>
@@ -112,7 +112,7 @@ function LoggedOutLanding({
   );
 }
 
-function OutRunningIllustration(): JSX.Element {
+function OutRunningIllustration(): ReactNode {
   return (
     <div aria-hidden="true" className={styles.errorIllustration}>
       <svg className={styles.errorArt} viewBox="0 0 240 180">
@@ -171,7 +171,7 @@ function OutRunningIllustration(): JSX.Element {
 
 function ChatErrorState({
   error,
-}: Readonly<{ error: string | null }>): JSX.Element {
+}: Readonly<{ error: string | null }>): ReactNode {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.errorCard}>
@@ -208,7 +208,7 @@ function ChatErrorState({
  *
  * @returns A JSX element containing the complete coach chat interface.
  */
-function ChatLoadingShell(): JSX.Element {
+function ChatLoadingShell(): ReactNode {
   return (
     <main className={styles.page}>
       <div className={styles.shell}>
@@ -235,7 +235,7 @@ function ChatTopbar({
   coachingStatus: string;
   onOpenDrawer: () => void;
   onExport: () => void;
-}>): JSX.Element {
+}>): ReactNode {
   return (
     <header className={styles.topbar}>
       <div className={styles.brandBlock}>
@@ -296,7 +296,7 @@ function ChatTopbar({
   );
 }
 
-export function CoachChat(): JSX.Element {
+export function CoachChat(): ReactNode {
   const session = useBrowserSession();
   if (session.loading) {
     return <SessionLoading />;
@@ -320,7 +320,7 @@ function SignedInChat({
 }: Readonly<{
   token: BrowserTokenResponse;
   refreshSession: () => Promise<void>;
-}>): JSX.Element {
+}>): ReactNode {
   const thread = useChatThread(token);
   const athleteProfile = useAthleteProfile(token);
   if (thread.loading) {
@@ -353,7 +353,7 @@ function CoachChatBody({
   threadData: ChatThreadResponse;
   refreshSession: () => Promise<void>;
   athleteProfile: AthleteProfileHook;
-}>): JSX.Element {
+}>): ReactNode {
   const {
     error: threadError,
     fetchOlderMessages,
