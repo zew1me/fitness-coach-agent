@@ -370,9 +370,8 @@ function CoachChatBody({
     threadId,
     token.user_id,
   );
-  const { releaseVersion, startTurn, turnInFlight } = useChatTurnLease(
-    token.user_id,
-  );
+  const { cancelTurn, releaseVersion, startTurn, turnInFlight } =
+    useChatTurnLease(token.user_id);
   const [sending, setSending] = useState(false);
   const [syncingThread, setSyncingThread] = useState(false);
   const olderRequestVersionRef = useRef(0);
@@ -415,6 +414,7 @@ function CoachChatBody({
   }, [refetchThread, releaseVersion, setThreadError]);
 
   const handleSend = useChatSend({
+    cancelTurn,
     composerBusy,
     draft,
     olderRequestVersionRef,

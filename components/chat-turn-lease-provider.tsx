@@ -25,6 +25,7 @@ type ChatTurnLeaseProviderProps = Readonly<{
 }>;
 
 type ChatTurnLease = {
+  cancelTurn: () => void;
   releaseVersion: number;
   startTurn: () => void;
   turnInFlight: boolean;
@@ -112,6 +113,7 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
 
   if (context === null) {
     return {
+      cancelTurn: (): void => {},
       releaseVersion: 0,
       startTurn: (): void => {},
       turnInFlight: false,
@@ -119,6 +121,14 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
   }
 
   return {
+    // The chat POST was refused before any turn started, so there is no turn
+    // to wait out. Dropping the pending flag skips the post-release thread
+    // refresh, which would otherwise clear the send error it is showing. The
+    // next status poll still blocks the composer if another turn holds the
+    // lease.
+    cancelTurn: (): void => {
+      context.clearPendingTurn(userId);
+    },
     releaseVersion,
     startTurn: (): void => {
       setStatusKnown(false);

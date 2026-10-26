@@ -19,6 +19,7 @@ type ChatSendOptions = {
   sendMessage: UseChatHelpers<UIMessage>["sendMessage"];
   setMessages: UseChatHelpers<UIMessage>["setMessages"];
   startTurn: () => void;
+  cancelTurn: () => void;
   setSending: (_sending: boolean) => void;
   setSyncingThread: (_syncing: boolean) => void;
   setThreadError: (_error: string | null) => void;
@@ -67,6 +68,7 @@ export function useChatSend({
   sendMessage,
   setMessages,
   startTurn,
+  cancelTurn,
   setSending,
   setSyncingThread,
   setThreadError,
@@ -135,6 +137,7 @@ export function useChatSend({
       Sentry.logger.error("message send failed");
       console.error("Sending coach message failed", error);
       setSyncingThread(false);
+      cancelTurn();
       // Drop the optimistic user bubble the SDK added, then restore the draft.
       setMessages((current) =>
         current.filter((message) => message.id !== messageId),
