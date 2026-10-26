@@ -969,6 +969,49 @@ describe("app/api/chat route error handling", () => {
       "Coach is out to lunch. Please try again later.",
     );
   });
+
+  it("answers a held turn lease with a retry-soon 409 instead of the generic 503 (#346)", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      const requestedUrl = String(url);
+      requestedUrls.push(requestedUrl);
+      if (requestedUrl.endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      if (requestedUrl.endsWith("/api/chat/model-state/lease")) {
+        return Promise.resolve(new Response("conflict", { status: 409 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers: { cookie: "coach_browser_session=session-token" },
+        body: JSON.stringify({ messages: [] }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.text()).resolves.toBe(
+      "Coach is still replying to your previous message. Please try again in a minute.",
+    );
+    expect(streamCoachTurn).not.toHaveBeenCalled();
+    expect(requestedUrls).not.toContain(
+      "http://localhost/api/engine/get-athlete-summary",
+    );
+  });
 });
 
 describe("app/api/chat route tool execution", () => {
