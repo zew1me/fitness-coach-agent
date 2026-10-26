@@ -56,3 +56,64 @@ test("shows the error field of a JSON error body, not the raw JSON", async ({
   ).toBeVisible();
   await expect(page.getByText('{"error"')).toHaveCount(0);
 });
+
+// A route failure after the user turn was persisted (e.g. the athlete-context
+// load) restores the draft. Resending it unchanged must reuse the message id so
+// the backend's id-keyed upsert does not store the turn twice; an edited draft
+// is a new message and gets a new id.
+async function sentMessageIds(
+  page: import("@playwright/test").Page,
+): Promise<string[]> {
+  const ids: string[] = [];
+  await page.route("**/api/chat", async (route) => {
+    const body = route.request().postDataJSON() as {
+      message?: { id?: string };
+    };
+    ids.push(body.message?.id ?? "");
+    await route.fulfill({
+      status: 503,
+      contentType: "text/plain",
+      body: "Coach is out to lunch. Please try again later.",
+    });
+  });
+  return ids;
+}
+
+test("resending an unchanged failed draft reuses its message id", async ({
+  page,
+}) => {
+  await mockAuthenticatedSession(page);
+  const ids = await sentMessageIds(page);
+
+  await page.goto("/");
+  await page.locator("textarea").fill("I finished my intervals.");
+  const send = page.getByRole("button", { name: "Send" });
+  await send.click();
+  await expect(
+    page.getByText("Coach is out to lunch. Please try again later."),
+  ).toBeVisible();
+  await send.click();
+  await expect.poll(() => ids.length).toBe(2);
+
+  expect(ids[0]).not.toBe("");
+  expect(ids[1]).toBe(ids[0]);
+});
+
+test("an edited failed draft is sent with a new message id", async ({
+  page,
+}) => {
+  await mockAuthenticatedSession(page);
+  const ids = await sentMessageIds(page);
+
+  await page.goto("/");
+  const composer = page.locator("textarea");
+  await composer.fill("I finished my intervals.");
+  const send = page.getByRole("button", { name: "Send" });
+  await send.click();
+  await expect(composer).toHaveValue("I finished my intervals.");
+  await composer.fill("I finished my intervals, legs felt heavy.");
+  await send.click();
+  await expect.poll(() => ids.length).toBe(2);
+
+  expect(ids[1]).not.toBe(ids[0]);
+});

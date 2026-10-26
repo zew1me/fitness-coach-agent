@@ -46,7 +46,7 @@ function restoreFailedDraft(
   draft: ChatDraft,
   pendingComposer: string,
   pendingAttachments: LocalAttachment[],
-): void {
+): boolean {
   const draftUntouched =
     draft.latestComposerRef.current === "" &&
     draft.latestAttachmentsRef.current.length === 0;
@@ -56,6 +56,32 @@ function restoreFailedDraft(
   } else {
     removePreviewUrls(pendingAttachments);
   }
+  return draftUntouched;
+}
+
+type FailedSend = {
+  attachments: LocalAttachment[];
+  composer: string;
+  messageId: string;
+};
+
+// The route can persist the user turn before failing (e.g. the athlete-context
+// load), and persistence upserts on the message id. Resending the restored
+// draft unchanged therefore reuses the failed send's id so the turn is not
+// stored twice; any edit makes it a new message with a new id.
+function messageIdForSend(
+  failedSend: FailedSend | null,
+  composer: string,
+  attachments: LocalAttachment[],
+): string {
+  if (
+    failedSend !== null &&
+    failedSend.composer === composer &&
+    failedSend.attachments === attachments
+  ) {
+    return failedSend.messageId;
+  }
+  return crypto.randomUUID();
 }
 
 /**
@@ -80,6 +106,7 @@ export function useChatSend({
   // Synchronous guard against double-click: state reads aren't atomic across
   // rapid events, so this ref is the authoritative in-flight check.
   const sendInFlightRef = useRef(false);
+  const failedSendRef = useRef<FailedSend | null>(null);
   const { composer, attachments } = draft;
 
   async function handleSend(): Promise<void> {
@@ -93,7 +120,12 @@ export function useChatSend({
     // Snapshot the draft before we clear it so the catch block can restore it.
     const pendingComposer = composer;
     const pendingAttachments = attachments;
-    const messageId = crypto.randomUUID();
+    const messageId = messageIdForSend(
+      failedSendRef.current,
+      pendingComposer,
+      pendingAttachments,
+    );
+    failedSendRef.current = null;
     try {
       Sentry.logger.info("user turn submitted", {
         has_text: pendingComposer.trim().length > 0,
@@ -142,7 +174,13 @@ export function useChatSend({
       setMessages((current) =>
         current.filter((message) => message.id !== messageId),
       );
-      restoreFailedDraft(draft, pendingComposer, pendingAttachments);
+      if (restoreFailedDraft(draft, pendingComposer, pendingAttachments)) {
+        failedSendRef.current = {
+          attachments: pendingAttachments,
+          composer: pendingComposer,
+          messageId,
+        };
+      }
       setThreadError(errorMessage(error, "Unable to send your message."));
       // A chat turn uses the cookie-backed Next.js route directly rather than
       // authorizedFetch. Revalidate here so an expired cookie replaces the
