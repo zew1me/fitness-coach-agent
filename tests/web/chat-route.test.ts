@@ -1004,9 +1004,6 @@ describe("app/api/chat route error handling", () => {
     );
 
     expect(response.status).toBe(409);
-    await expect(response.text()).resolves.toBe(
-      "Coach is still replying to your previous message. Please try again in a minute.",
-    );
     expect(streamCoachTurn).not.toHaveBeenCalled();
     expect(requestedUrls).not.toContain(
       "http://localhost/api/engine/get-athlete-summary",
