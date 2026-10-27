@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-import { resolveDevServerPort } from "./tests/ui/helpers/dev-server-port";
+import { resolveDevServer } from "./tests/ui/helpers/dev-server-port";
 
 /**
  * UI tests — run explicitly with `bun run test:ui`.
@@ -13,15 +13,16 @@ import { resolveDevServerPort } from "./tests/ui/helpers/dev-server-port";
  *
  * The local dev server listens on 3000 in the primary checkout and on a stable
  * per-worktree port in a linked git worktree, so concurrent runs in different
- * worktrees never reuse each other's server (issue #202). Set PLAYWRIGHT_PORT
- * to pick the port explicitly.
+ * worktrees never reuse each other's server (issue #202); a worktree never
+ * reuses an already-running server, so a port collision fails loudly. Set
+ * PLAYWRIGHT_PORT to pick the port explicitly.
  */
 
-const devServerPort = resolveDevServerPort({
+const devServer = resolveDevServer({
   override: process.env["PLAYWRIGHT_PORT"],
   rootDir: __dirname,
 });
-const devServerUrl = `http://localhost:${devServerPort}`;
+const devServerUrl = `http://localhost:${devServer.port}`;
 const baseURL = process.env["BASE_URL"] ?? devServerUrl;
 
 export default defineConfig({
@@ -58,9 +59,9 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: `bun dev --port ${devServerPort}`,
+          command: `bun dev --port ${devServer.port}`,
           url: devServerUrl,
-          reuseExistingServer: true,
+          reuseExistingServer: devServer.reuseExistingServer,
           timeout: 60_000,
           stdout: "pipe",
           stderr: "pipe",

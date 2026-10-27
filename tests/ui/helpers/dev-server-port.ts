@@ -13,7 +13,7 @@ export const DEFAULT_DEV_SERVER_PORT = 3000;
 const WORKTREE_PORT_BASE = 3100;
 const WORKTREE_PORT_SPAN = 900;
 
-interface ResolveDevServerPortOptions {
+interface ResolveDevServerOptions {
   /** Explicit override, normally `process.env["PLAYWRIGHT_PORT"]`. */
   override?: string | undefined;
   /** Repository root the Playwright config lives in. */
@@ -39,24 +39,38 @@ function worktreePort(rootDir: string): number {
   return WORKTREE_PORT_BASE + (digest.readUInt32BE(0) % WORKTREE_PORT_SPAN);
 }
 
+interface DevServerTarget {
+  port: number;
+  /**
+   * Whether Playwright may reuse a server already listening on `port`. False
+   * for hash-derived worktree ports: two worktrees can hash to the same port,
+   * and reusing would silently test the other worktree's branch, so a
+   * collision must fail loudly ("port already used") instead.
+   */
+  reuseExistingServer: boolean;
+}
+
 /**
- * Pick the port Playwright's dev server listens on.
+ * Pick the port Playwright's dev server listens on, and whether an existing
+ * server on that port may be reused.
  *
  * Every checkout used to share port 3000, and `reuseExistingServer` meant a
  * Playwright run in one worktree silently tested another worktree's dev server
  * (issue #202). Resolution order:
  *
- * 1. `PLAYWRIGHT_PORT`, when set, always wins.
+ * 1. `PLAYWRIGHT_PORT`, when set, always wins; reuse stays on because the
+ *    caller chose the port deliberately.
  * 2. A linked worktree gets a stable port derived from its absolute path, so
- *    concurrent runs in different worktrees use different servers.
- * 3. The primary checkout keeps 3000, so CI and an already-running `bun dev`
- *    behave exactly as before.
+ *    concurrent runs in different worktrees use different servers. Reuse is
+ *    off so a rare hash collision fails instead of crossing worktrees.
+ * 3. The primary checkout keeps 3000 with reuse, so CI and an already-running
+ *    `bun dev` behave exactly as before.
  */
-export function resolveDevServerPort({
+export function resolveDevServer({
   override,
   rootDir,
   isLinkedWorktree = defaultIsLinkedWorktree,
-}: ResolveDevServerPortOptions): number {
+}: ResolveDevServerOptions): DevServerTarget {
   const trimmed = override?.trim();
   if (trimmed) {
     const port = Number(trimmed);
@@ -65,9 +79,9 @@ export function resolveDevServerPort({
         `PLAYWRIGHT_PORT must be an integer between 1 and 65535, got "${override}"`,
       );
     }
-    return port;
+    return { port, reuseExistingServer: true };
   }
   return isLinkedWorktree(rootDir)
-    ? worktreePort(rootDir)
-    : DEFAULT_DEV_SERVER_PORT;
+    ? { port: worktreePort(rootDir), reuseExistingServer: false }
+    : { port: DEFAULT_DEV_SERVER_PORT, reuseExistingServer: true };
 }

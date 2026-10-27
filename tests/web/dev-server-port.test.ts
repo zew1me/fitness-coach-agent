@@ -6,13 +6,19 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_DEV_SERVER_PORT,
-  resolveDevServerPort,
+  resolveDevServer,
 } from "../ui/helpers/dev-server-port";
 
 const linked = (): boolean => true;
 const primary = (): boolean => false;
 
-describe("resolveDevServerPort", () => {
+function resolveDevServerPort(
+  options: Parameters<typeof resolveDevServer>[0],
+): number {
+  return resolveDevServer(options).port;
+}
+
+describe("resolveDevServer", () => {
   it("keeps 3000 for the primary checkout", () => {
     expect(
       resolveDevServerPort({ rootDir: "/repo", isLinkedWorktree: primary }),
@@ -62,6 +68,31 @@ describe("resolveDevServerPort", () => {
     ).toBe(4321);
   });
 
+  it("never reuses an existing server on a hash-derived worktree port", () => {
+    // Two worktrees can hash to the same port; reusing would silently test the
+    // other worktree's branch, so Playwright must fail on an occupied port.
+    expect(
+      resolveDevServer({
+        rootDir: "/repo/.worktrees/a",
+        isLinkedWorktree: linked,
+      }).reuseExistingServer,
+    ).toBe(false);
+  });
+
+  it("keeps reuse for the primary checkout and an explicit PLAYWRIGHT_PORT", () => {
+    expect(
+      resolveDevServer({ rootDir: "/repo", isLinkedWorktree: primary })
+        .reuseExistingServer,
+    ).toBe(true);
+    expect(
+      resolveDevServer({
+        override: "4321",
+        rootDir: "/repo/.worktrees/a",
+        isLinkedWorktree: linked,
+      }).reuseExistingServer,
+    ).toBe(true);
+  });
+
   it("ignores an empty PLAYWRIGHT_PORT", () => {
     expect(
       resolveDevServerPort({
@@ -82,7 +113,7 @@ describe("resolveDevServerPort", () => {
   );
 });
 
-describe("resolveDevServerPort linked-worktree detection", () => {
+describe("resolveDevServer linked-worktree detection", () => {
   let dir: string | undefined;
 
   afterEach(() => {
