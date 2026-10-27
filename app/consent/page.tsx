@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 import { Suspense } from "react";
 
 function formatScopes(scope: string): string[] {
@@ -19,24 +19,34 @@ function readConsentParams(searchParams: ReturnType<typeof useSearchParams>): {
   return {
     clientId: searchParams.get("client_id") ?? "",
     redirectUri: searchParams.get("redirect_uri") ?? "",
-    scope: searchParams.get("scope") ?? "profile:read plans:write metrics:write",
+    scope:
+      searchParams.get("scope") ?? "profile:read plans:write metrics:write",
     state: searchParams.get("state") ?? "",
     codeChallenge: searchParams.get("code_challenge") ?? "",
-    codeChallengeMethod: searchParams.get("code_challenge_method") ?? "S256"
+    codeChallengeMethod: searchParams.get("code_challenge_method") ?? "S256",
   };
 }
 
-function ConsentPageContent(): JSX.Element {
+function ConsentPageContent(): ReactNode {
   const searchParams = useSearchParams();
-  const { clientId, redirectUri, scope, state, codeChallenge, codeChallengeMethod } =
-    readConsentParams(searchParams);
+  const {
+    clientId,
+    redirectUri,
+    scope,
+    state,
+    codeChallenge,
+    codeChallengeMethod,
+  } = readConsentParams(searchParams);
   const scopes = formatScopes(scope);
 
   return (
     <main className="page">
       <section className="page-card">
         <h1>Connect ChatGPT</h1>
-        <p>Approve ChatGPT to read and update training data for the athlete account in this browser.</p>
+        <p>
+          Approve ChatGPT to read and update training data for the athlete
+          account in this browser.
+        </p>
         <p>Client: {clientId || "Unknown client"}</p>
         <p>Redirect URI: {redirectUri || "Missing redirect URI"}</p>
         <ul className="scope-list">
@@ -50,11 +60,25 @@ function ConsentPageContent(): JSX.Element {
           <input name="scope" type="hidden" value={scope} />
           <input name="state" type="hidden" value={state} />
           <input name="code_challenge" type="hidden" value={codeChallenge} />
-          <input name="code_challenge_method" type="hidden" value={codeChallengeMethod} />
-          <button className="button button-secondary" name="decision" type="submit" value="approve">
+          <input
+            name="code_challenge_method"
+            type="hidden"
+            value={codeChallengeMethod}
+          />
+          <button
+            className="button button-secondary"
+            name="decision"
+            type="submit"
+            value="approve"
+          >
             Approve access
           </button>
-          <button className="button button-ghost" name="decision" type="submit" value="deny">
+          <button
+            className="button button-ghost"
+            name="decision"
+            type="submit"
+            value="deny"
+          >
             Deny
           </button>
         </form>
@@ -63,7 +87,7 @@ function ConsentPageContent(): JSX.Element {
   );
 }
 
-export default function ConsentPage(): JSX.Element {
+export default function ConsentPage(): ReactNode {
   return (
     <Suspense
       fallback={

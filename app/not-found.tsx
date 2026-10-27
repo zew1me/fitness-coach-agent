@@ -1,11 +1,11 @@
 import Link from "next/link";
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import { StatusCard } from "../components/status-card";
 
 import styles from "./not-found.module.css";
 
-export default function NotFound(): JSX.Element {
+export default function NotFound(): ReactNode {
   return (
     <main className={styles.page}>
       <div className={styles.content}>

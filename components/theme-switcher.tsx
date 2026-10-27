@@ -1,13 +1,13 @@
 "use client";
 
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import { useTheme } from "../lib/use-theme";
 import type { ThemeMode } from "../lib/use-theme";
 
 const themeModes: readonly ThemeMode[] = ["light", "dark", "system"];
 
-function ThemeModeIcon({ mode }: Readonly<{ mode: ThemeMode }>): JSX.Element {
+function ThemeModeIcon({ mode }: Readonly<{ mode: ThemeMode }>): ReactNode {
   if (mode === "light") {
     return (
       <svg aria-hidden="true" className="theme-icon" viewBox="0 0 24 24">
@@ -65,7 +65,7 @@ function labelForMode(mode: ThemeMode): string {
   return mode.charAt(0).toUpperCase() + mode.slice(1);
 }
 
-export function ThemeSwitcher(): JSX.Element {
+export function ThemeSwitcher(): ReactNode {
   const { mode, setTheme } = useTheme();
 
   return (

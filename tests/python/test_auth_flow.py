@@ -15,7 +15,11 @@ from httpx import ASGITransport, AsyncClient
 
 import api.index as api_index
 from backend.models.auth import BrowserSessionContext, BrowserTokenResponse
-from tests.python.test_api import FakeAuthService, InMemoryOAuthRepository
+from tests.python.test_api import (
+    FakeAuthService,
+    InMemoryOAuthRepository,
+    browser_session_cookie_header,
+)
 
 
 class AuthFlowFakeService(FakeAuthService):
@@ -105,7 +109,7 @@ async def test_otp_login_round_trip(
 
     token_response = await client.post(
         "/api/oauth/browser-token",
-        cookies={"coach_browser_session": cookie_value},
+        headers=browser_session_cookie_header(cookie_value),
     )
     assert token_response.status_code == 200
     payload = BrowserTokenResponse.model_validate(token_response.json())
@@ -138,7 +142,7 @@ async def test_browser_token_awaits_repository_without_blocking_other_requests(
 
     monkeypatch.setattr(asyncio, "to_thread", forbidden_offload)
     pending = asyncio.create_task(
-        client.post("/api/oauth/browser-token", cookies={"coach_browser_session": cookie})
+        client.post("/api/oauth/browser-token", headers=browser_session_cookie_header(cookie))
     )
     try:
         await asyncio.wait_for(entered.wait(), timeout=1)
@@ -168,7 +172,7 @@ async def test_browser_token_renews_the_browser_session_cookie(
 
     response = await client.post(
         "/api/oauth/browser-token",
-        cookies={"coach_browser_session": cookie},
+        headers=browser_session_cookie_header(cookie),
     )
 
     assert response.status_code == 200
@@ -187,7 +191,7 @@ async def test_browser_token_with_garbage_cookie_returns_401(
     client, _ = auth_client
     response = await client.post(
         "/api/oauth/browser-token",
-        cookies={"coach_browser_session": "not-a-valid-jwt"},
+        headers=browser_session_cookie_header("not-a-valid-jwt"),
     )
     assert response.status_code == 401
     assert "set-cookie" not in response.headers

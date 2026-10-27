@@ -21,10 +21,11 @@ bun run db:reset    # wipe + replay all migrations locally
 bun dev          # Next.js dev server
 bun run build    # Production build
 bun run lint     # ESLint (zero warnings)
+bun run lint:css  # Stylelint on CSS
 bun run lint:actions  # actionlint (pinned zew1me fork) on GitHub workflows
 bun run typecheck  # tsc + Next.js typegen
 bun run test     # Vitest unit tests (tests/web/)
-bun run check    # lint + typecheck + test
+bun run check    # lint + lint:css + lint:actions + typecheck + test + ast-grep:check
 
 # Python backend and uv workspace tools
 uv run pytest                         # all Python and workspace-tool tests
