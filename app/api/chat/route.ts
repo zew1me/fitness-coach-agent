@@ -47,7 +47,7 @@ const COACH_UNAVAILABLE_MESSAGE =
 // turn streams and lapses CHAT_TURN_LEASE_TTL_SECONDS after it stops, so the
 // athlete can retry within about a minute (#346).
 const COACH_BUSY_MESSAGE =
-  "Coach is still replying to your previous message. Please try again in a minute.";
+  "Coach is deep in contemplation. Please try again in a minute.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
