@@ -331,6 +331,7 @@ See `.env.example`. Required:
 - Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
 - Python tests: `tests/python/` plus co-located `tools/*/tests/` workspace-tool tests — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for application fixtures; workspace tools should keep tool-specific fixtures local
+- UI tests: `tests/ui/` — Playwright. The auto-started dev server uses port 3000 in the primary checkout and a stable per-worktree port in a linked git worktree, so concurrent runs in different worktrees never share a server; set `PLAYWRIGHT_PORT` to choose the port, or `BASE_URL` to target a deployed preview
 
 ## Local hooks (lefthook)
 
