@@ -7,6 +7,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -25,6 +26,7 @@ type ChatTurnLeaseProviderProps = Readonly<{
 }>;
 
 type ChatTurnLease = {
+  cancelTurn: () => void;
   releaseVersion: number;
   startTurn: () => void;
   turnInFlight: boolean;
@@ -69,6 +71,11 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
   const [releaseVersion, setReleaseVersion] = useState(0);
   const [statusKnown, setStatusKnown] = useState(context === null);
   const pendingTurn = context?.pendingUserIds.has(userId) ?? false;
+  // Set synchronously by cancelTurn. A status poll can resolve after a refused
+  // send but before React commits the cleared pending flag; its closure still
+  // sees pendingTurn, so without this it would bump releaseVersion and the
+  // release refresh would clear the send error being shown.
+  const turnCancelledRef = useRef(false);
 
   useEffect(() => {
     if (context === null) return;
@@ -80,7 +87,8 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
         const status = await loadChatTurnLeaseStatus(fetch, controller.signal);
         if (cancelled) return;
 
-        const hadTurnInFlight = pendingTurn || leaseActive;
+        const hadTurnInFlight =
+          (pendingTurn && !turnCancelledRef.current) || leaseActive;
         setLeaseActive(status.in_flight);
         setStatusKnown(true);
         if (!status.in_flight) {
@@ -112,6 +120,7 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
 
   if (context === null) {
     return {
+      cancelTurn: (): void => {},
       releaseVersion: 0,
       startTurn: (): void => {},
       turnInFlight: false,
@@ -119,8 +128,18 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
   }
 
   return {
+    // The chat POST was refused before any turn started, so there is no turn
+    // to wait out. Dropping the pending flag skips the post-release thread
+    // refresh, which would otherwise clear the send error it is showing. The
+    // next status poll still blocks the composer if another turn holds the
+    // lease.
+    cancelTurn: (): void => {
+      turnCancelledRef.current = true;
+      context.clearPendingTurn(userId);
+    },
     releaseVersion,
     startTurn: (): void => {
+      turnCancelledRef.current = false;
       setStatusKnown(false);
       context.startPendingTurn(userId);
     },

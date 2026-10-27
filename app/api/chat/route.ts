@@ -5,6 +5,7 @@ import { after } from "next/server";
 import {
   CHAT_TURN_LEASE_TTL_SECONDS,
   acquireChatTurnLease,
+  LeaseAcquisitionError,
   LeaseReleaseError,
   releaseChatTurnLease,
 } from "../../../lib/agent/lease-client";
@@ -42,6 +43,11 @@ const PERSIST_MESSAGE_TIMEOUT_MS = 10_000;
 const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 180_000;
 const COACH_UNAVAILABLE_MESSAGE =
   "Coach is out to lunch. Please try again later.";
+// Another turn on this thread still holds the lease. It is renewed while that
+// turn streams and lapses CHAT_TURN_LEASE_TTL_SECONDS after it stops, so the
+// athlete can retry within about a minute (#346).
+const COACH_BUSY_MESSAGE =
+  "Coach is deep in contemplation. Please try again in a minute.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
@@ -353,6 +359,10 @@ export async function POST(request: Request): Promise<Response> {
   try {
     return await handleChatRequest(request, token);
   } catch (error) {
+    if (error instanceof LeaseAcquisitionError && error.status === 409) {
+      Sentry.logger.info("chat: turn lease already held");
+      return new Response(COACH_BUSY_MESSAGE, { status: 409 });
+    }
     Sentry.logger.error("chat: POST error", { error: safeErrorMessage(error) });
     return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });
   }
