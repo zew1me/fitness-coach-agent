@@ -116,7 +116,7 @@ execution, bounded output, and machine-readable output when supported. Use this 
 Next.js 15 App Router. Key pages:
 
 - `app/login/page.tsx` — magic link OTP via Supabase
-- `app/auth/callback/page.tsx` — Supabase auth callback
+- `app/auth/callback/route.ts` — Supabase auth callback
 - `app/consent/page.tsx` — OAuth consent UI (POSTs to `/api/oauth/authorize/decision`)
 - `app/profile/page.tsx` — athlete profile management
 - `app/calendar/page.tsx` — read-only training calendar (past 42 days + upcoming 8 weeks of planned workouts and recorded activities via `GET /api/calendar`; issue #212 MVP)
@@ -128,9 +128,9 @@ Next.js 15 App Router. Key pages:
 `api/index.py` is the Vercel Functions entrypoint (FastAPI app). Domain logic lives in `backend/`:
 
 - `backend/config.py` — Pydantic Settings (reads env vars)
-- `backend/models/` — Pydantic models: `auth.py` (OAuth + JWT), `planning.py` (plans), `storage.py` (R2)
+- `backend/models/` — Pydantic models: `auth.py` (OAuth + JWT), `training.py` (plans, workouts, goals), `storage.py` (R2)
 - `backend/repos/` — Supabase persistence: `oauth_repo.py` (grants/codes/refresh tokens), `supabase_repo.py` (athlete profiles + check-ins)
-- `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `planner.py` (14-day plan composition), `r2.py` (Cloudflare R2 presigned URLs)
+- `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `plan_composer.py` (daily workout composition from the plan skeleton), `r2.py` (Cloudflare R2 presigned URLs)
 
 `api/index.py` has a centralized `PostgRESTAPIError` exception handler that maps
 Postgres SQLSTATE codes to the shared 409/422/503 response contract. Route handlers
@@ -222,7 +222,7 @@ The legacy columns `chat_messages.content` (denormalized text mirror) and the se
 
 #### Compaction
 
-See [COMPACTION_DESIGN.md](COMPACTION_DESIGN.md).
+See [docs/COMPACTION_DESIGN.md](docs/COMPACTION_DESIGN.md).
 
 ### Storage
 
