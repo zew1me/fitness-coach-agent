@@ -28,11 +28,16 @@ _APPLICATION_ROLES = frozenset({"anon", "authenticated", "service_role"})
 def local_db_url() -> str:
     """The direct-connection URL, validated to be loopback; raises otherwise."""
     url = os.environ.get("LOCAL_SUPABASE_DB_URL", DEFAULT_LOCAL_DB_URL)
-    host = conninfo_to_dict(url).get("host")
-    if host not in _LOOPBACK_HOSTS:
+    params = conninfo_to_dict(url)
+    host = params.get("host")
+    # libpq connects to hostaddr, when set, regardless of host; PGHOSTADDR is its default.
+    hostaddr = params.get("hostaddr") or os.environ.get("PGHOSTADDR")
+    if host not in _LOOPBACK_HOSTS or (hostaddr and hostaddr not in _LOOPBACK_HOSTS):
         # A missing host means a unix socket or a PG* environment default, neither of which
         # can be proven local from the URL, so those are refused as well.
-        raise RuntimeError(f"Refusing direct Postgres access to non-local host {host!r}.")
+        raise RuntimeError(
+            f"Refusing direct Postgres access to non-local host {hostaddr or host!r}."
+        )
     return url
 
 

@@ -7,6 +7,7 @@ def test_local_db_url_defaults_to_the_local_supabase_postgres(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("LOCAL_SUPABASE_DB_URL", raising=False)
+    monkeypatch.delenv("PGHOSTADDR", raising=False)
 
     assert local_db_url() == DEFAULT_LOCAL_DB_URL
 
@@ -18,10 +19,19 @@ def test_local_db_url_defaults_to_the_local_supabase_postgres(
         "postgresql://postgres:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres",
         "postgresql://postgres:secret@10.0.0.5:54322/postgres",
         "postgresql://postgres:secret@/postgres",
+        # libpq connects to hostaddr rather than host when both are set.
+        "postgresql://postgres:secret@localhost/postgres?hostaddr=203.0.113.5",
     ],
 )
 def test_local_db_url_refuses_non_loopback_hosts(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     monkeypatch.setenv("LOCAL_SUPABASE_DB_URL", url)
+
+    with pytest.raises(RuntimeError, match="non-local host"):
+        local_db_url()
+
+
+def test_local_db_url_refuses_a_non_loopback_pghostaddr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PGHOSTADDR", "203.0.113.5")
 
     with pytest.raises(RuntimeError, match="non-local host"):
         local_db_url()
