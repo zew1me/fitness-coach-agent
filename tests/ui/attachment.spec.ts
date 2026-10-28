@@ -6,7 +6,8 @@
  * across browsers (iOS Safari blocks programmatic .click() on hidden inputs).
  *
  * Run with:  bun run test:ui
- * Requires the dev server to be running on http://localhost:3000 (or BASE_URL).
+ * Playwright starts the dev server itself (see playwright.config.ts for the
+ * port), or targets BASE_URL when set.
  */
 import { test, expect } from "@playwright/test";
 import { mockAuthenticatedSession } from "./helpers/session";
