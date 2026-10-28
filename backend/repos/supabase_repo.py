@@ -28,6 +28,7 @@ from backend.models.chat import (
 from backend.models.training import (
     Activity,
     ActivityLoadInput,
+    ActivitySource,
     DailyLoadSnapshot,
     Goal,
     PlanWorkout,
@@ -267,6 +268,21 @@ def build_activity_summary_from_fields(activity: Activity) -> dict[str, Any]:
     return summary
 
 
+# Columns the materialization RPCs own (docs/ACTIVITY_MATERIALIZATION_DESIGN.md, "Changes to
+# `activities`"). They are never written from an `Activity` model, which would let a plain
+# `update_activity` reset a superseded or recomposed row to the model defaults.
+_ACTIVITY_PROJECTION_METADATA = frozenset(
+    {
+        "source_count",
+        "field_provenance",
+        "presentation_state",
+        "superseded_by_activity_id",
+        "materialized_at",
+    }
+)
+_INTERVALS_KEY_PREFIX = "intervals:"
+
+
 def _activity_payload(activity: Activity) -> dict[str, Any]:
     activity_to_persist = activity
     if not activity.activity_summary:
@@ -276,7 +292,22 @@ def _activity_payload(activity: Activity) -> dict[str, Any]:
                 "activity_summary": build_activity_summary_from_fields(activity),
             }
         )
-    return activity_to_persist.model_dump(mode="json", exclude={"created_at", "updated_at"})
+    return activity_to_persist.model_dump(
+        mode="json", exclude={"created_at", "updated_at", *_ACTIVITY_PROJECTION_METADATA}
+    )
+
+
+def _activity_source_payload(activity: Activity) -> dict[str, Any]:
+    """The evidence the writer can see; SQL derives and cross-checks everything else.
+
+    ``source_file_key`` is the object key for every format. For Intervals the key is
+    ``intervals:{id}`` and the provider id inside it is the source's ``external_id``.
+    ``create_activity_with_source`` raises ``22023`` if either disagrees with the activity.
+    """
+    external_id: str | None = None
+    if activity.source == "intervals_sync" and activity.source_file_key is not None:
+        external_id = activity.source_file_key.removeprefix(_INTERVALS_KEY_PREFIX) or None
+    return {"object_key": activity.source_file_key, "external_id": external_id}
 
 
 class SupabaseRepository:
@@ -438,33 +469,57 @@ class SupabaseRepository:
     # ── Activities ────────────────────────────────────────────
 
     async def create_activity(self, activity: Activity) -> Activity:
-        client = self._require_client()
-        payload = _activity_payload(activity)
-        if not payload.get("id"):
-            payload["id"] = str(uuid4())
-        response = client.table("activities").insert(payload).execute()
-        rows = response.data or []
-        if not rows:
+        created = await self._create_activity_with_source(activity)
+        if created is None:
             raise RuntimeError("Supabase did not return the inserted activity row.")
-        return Activity.model_validate(rows[0])
+        return created
 
     async def create_intervals_activity(self, activity: Activity) -> Activity | None:
         """Insert an Intervals activity, returning ``None`` when it was already synced."""
+        return await self._create_activity_with_source(activity)
+
+    async def _create_activity_with_source(self, activity: Activity) -> Activity | None:
+        """Insert an activity and its bootstrap source atomically via the shadow-writer RPC.
+
+        The RPC returns NULL, not an error, when an Intervals activity with the same
+        ``(user_id, intervals_source_file_key)`` already exists.
+        """
         client = self._require_client()
         payload = _activity_payload(activity)
         if not payload.get("id"):
             payload["id"] = str(uuid4())
+        response = client.rpc(
+            "create_activity_with_source",
+            {
+                "p_user_id": activity.user_id,
+                "p_activity": payload,
+                "p_source": _activity_source_payload(activity),
+            },
+        ).execute()
+        row = response.data
+        # A function declared `returns public.activities` that returns SQL NULL reaches us as
+        # an object whose columns are all null (PostgREST does not emit JSON null for it), so
+        # a missing primary key is the "already synced" signal, not just an empty body.
+        if not row or row.get("id") is None:
+            return None
+        return Activity.model_validate(row)
+
+    async def list_live_activity_sources(
+        self, user_id: str, activity_id: str
+    ) -> list[ActivitySource]:
+        """Non-retired sources of one activity, oldest first (ties broken by id)."""
+        client = self._require_client()
         response = (
-            client.table("activities")
-            .upsert(
-                payload,
-                on_conflict="user_id,intervals_source_file_key",
-                ignore_duplicates=True,
-            )
+            client.table("activity_sources")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("activity_id", activity_id)
+            .is_("retired_at", "null")
+            .order("created_at")
+            .order("id")
             .execute()
         )
-        rows = response.data or []
-        return Activity.model_validate(rows[0]) if rows else None
+        return [ActivitySource.model_validate(r) for r in (response.data or [])]
 
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         client = self._require_client()
