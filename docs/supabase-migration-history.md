@@ -27,6 +27,7 @@
 - `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
 - `20260920021259_restore_service_role_table_privileges.sql` — restores PostgREST DML privileges required by server-side repositories after a fresh bootstrap
 - `20261011183239_load_snapshot_null_identity.sql` — deduplicates aggregate load snapshots and makes `(user_id, snapshot_date, sport)` unique with NULLs treated as equal
+- `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -592,3 +593,47 @@ access model explicit and reproducible instead of relying on environment drift.
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). This is privilege metadata only; it does not rewrite application data
 or weaken RLS/browser policies.
+
+## 20261028090000 — one-to-one plan workout/activity link (2026-10-28)
+
+**File:** `supabase/migrations/20261028090000_plan_workout_link_one_to_one.sql`
+
+**Change:** Replaces `match_plan_workout_to_activity` and `resolve_plan_workout`:
+
+- Both refuse with SQLSTATE `22023` to link an activity that a different workout already claims,
+  whether the claim is held by `plan_workouts.actual_activity_id` or by
+  `activities.planned_workout_id`. Nothing is written.
+- The clear-prior branches only null a prior activity's `planned_workout_id` while it still
+  points at this workout, and they now run before the new link is written.
+- `resolve_plan_workout(..., 'skipped', p_activity_id)` no longer writes the activity's reverse
+  link. Before this, a skip that named an activity pointed the activity at a workout whose
+  `actual_activity_id` had just been cleared.
+
+It also adds partial unique indexes `plan_workouts_actual_activity_unique` and
+`activities_planned_workout_unique` (each `where ... is not null`). Grants are restated
+unchanged: `service_role` only.
+
+**Why:** Issue #467. Neither link column had a uniqueness constraint, and the RPCs did not check
+the target activity. `resolve_plan_workout` is model-facing, so linking an already-linked activity
+to a second workout credited two completed workouts for one activity. It also left the first
+workout stuck: `unlink_plan_workout_from_activity` correctly refuses a pair whose reverse link has
+moved on. The only remaining fix, skipping the first workout, then cleared the other workout's
+reverse link. The auto-matcher was never affected because it skips linked rows on both sides.
+
+**Ordering note:** With the unique index on `activities.planned_workout_id`, reassigning a
+workout to a new activity must clear the old activity's link before setting the new one, or the
+statement fails with `23505`. Both RPCs do this.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset` locally). No data
+rewrite. Hosted data was checked on 2026-09-01: neither link was claimed twice in preview or
+production. Before applying, re-run these checks. Both must return no rows:
+
+```sql
+select actual_activity_id from plan_workouts
+where actual_activity_id is not null group by 1 having count(*) > 1;
+select planned_workout_id from activities
+where planned_workout_id is not null group by 1 having count(*) > 1;
+```
+
+If a duplicate exists, index creation fails and the whole migration rolls back. Repair that pair
+by hand first; do not weaken the index.
