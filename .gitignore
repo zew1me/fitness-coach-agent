@@ -77,6 +77,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+# Template for the gitignored agent preview-E2E credentials; holds no values.
+!.env.agent.example
 .envrc
 scripts/bootstrap/.state.*.json
 .fseventsd

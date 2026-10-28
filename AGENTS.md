@@ -46,6 +46,15 @@ one-shot repository glue in `scripts/`; build durable, configurable, dependency-
 user-facing Python CLIs as Typer packages under `tools/` in the uv workspace. Update the shared
 lockfile and root checks whenever a workspace tool is added.
 
+### Agent preview E2E credentials
+
+Agents that test Vercel preview deployments (throwaway inbox, invite code, automation bypass,
+preview Supabase) read a gitignored `.env.agent`. A human creates it once with
+`scripts/setup-agent-e2e.sh`; run `scripts/setup-agent-e2e.sh --check` to see which gates are
+missing. Keys and their sources are documented in `.env.agent.example`. A linked worktree has its
+own `.env.agent`, so copy it in or set `AGENT_ENV_FILE`. Never point it at the production
+Supabase project.
+
 ## ast-grep guardrails
 
 Use the locally pinned `ast-grep` CLI to discover and preserve repository-specific structural
