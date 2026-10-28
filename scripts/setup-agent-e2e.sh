@@ -295,14 +295,14 @@ vercel_project_dir() {
   [[ -f "$root/.vercel/project.json" ]] && printf '%s' "$root"
 }
 
-# latest_preview_url prints https://<host> of the newest READY preview deployment.
+# latest_preview_url prints https://<host> of the newest READY preview deployment (newest first).
 # AGENT_E2E_PREVIEW_URL overrides discovery (useful when `vercel` isn't logged in).
 latest_preview_url() {
   if [[ -n "${AGENT_E2E_PREVIEW_URL:-}" ]]; then printf '%s' "${AGENT_E2E_PREVIEW_URL%/}"; return 0; fi
   command -v vercel >/dev/null 2>&1 || return 1
   local dir json host
   dir=$(vercel_project_dir) || return 1
-  json=$(vercel ls --cwd "$dir" --environment preview --status READY --limit 1 \
+  json=$(vercel ls --cwd "$dir" --environment preview --status READY \
     --format json --non-interactive 2>/dev/null) || return 1
   # The CLI has emitted both a bare array and {"deployments": [...]}; accept either.
   host=$(printf '%s' "$json" | json_field "deployments.0.url")
@@ -370,7 +370,7 @@ verify_h4() {
   with_status=$(printf 'header = "x-vercel-protection-bypass: %s"\n' "$secret" |
     http_status -K - "$url/login")
   bare_status=$(http_status "$url/login")
-  if [[ "$with_status" == "401" || "$with_status" == "403" || "$with_status" == "000" ]]; then
+  if [[ ! "$with_status" =~ ^[23][0-9][0-9]$ ]]; then
     fail "$url/login with bypass header → $with_status (secret $(mask "$secret"))"
     record_gate 3 "bypass header rejected ($with_status) at $url"; return 1
   fi
@@ -484,6 +484,11 @@ esac
 
 TOTAL_STAGES=6
 
+# write_env keeps an existing file's mode, so a copied .env.agent.example could stay world-readable
+# while it receives secrets. Create the file if needed and force owner-only access first.
+[[ -e "$ENV_FILE" ]] || (umask 077 && : > "$ENV_FILE")
+chmod 600 "$ENV_FILE"
+
 banner "Agent preview-E2E setup (.env.agent)"
 
 # ── H1: Resend receiving address ──────────────────────────────────────────
@@ -573,7 +578,15 @@ pause "Press Enter for the final verification"
 # ── Final: full read-only verification ────────────────────────────────────
 stage "Verify everything"
 say "Read-only checks against Resend, the latest preview deployment, and Supabase."
-run_checks || true
+checks_ok=0
+run_checks || checks_ok=1
+
+if (( checks_ok )); then
+  # Don't call finish: it would print "Setup complete" while a gate is still missing.
+  (( ${#WRITTEN_ENV[@]} )) && note "wrote ${#WRITTEN_ENV[@]} value(s) to $ENV_FILE: ${WRITTEN_ENV[*]}"
+  warn "Setup incomplete: fix the failing gates above, then re-run this script (or use --check)."
+  return 1
+fi
 
 finish
 }
