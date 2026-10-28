@@ -207,6 +207,11 @@ async def test_rpc_rejects_disagreeing_unknown_or_foreign_input_atomically(
         {"p_user_id": owner, "p_activity": payload, "p_source": {"object_key": "x"}},
         {"p_user_id": owner, "p_activity": payload, "p_source": {"content_hash": "abc"}},
         {"p_user_id": other, "p_activity": payload, "p_source": {}},
+        {
+            "p_user_id": owner,
+            "p_activity": {k: v for k, v in payload.items() if k != "source"},
+            "p_source": {},
+        },
         # Keys the insert would silently drop are rejected instead.
         {"p_user_id": owner, "p_activity": {**payload, "future_column": 1}, "p_source": {}},
         {"p_user_id": owner, "p_activity": {**payload, "presentation_state": "x"}, "p_source": {}},
@@ -297,6 +302,25 @@ def test_trigger_logs_legacy_inserts_and_the_marker_prevents_double_capture(
             ),
         )
         assert LEGACY_LOG_LINE not in session.notices
+
+        # The duplicate (NULL) path also clears the marker.
+        intervals = (
+            f'{{"user_id": "{owner}", "sport": "running", "activity_date": "2026-07-04",'
+            ' "source": "intervals_sync", "source_file_key": "intervals:dup"}'
+        )
+        for _ in range(2):
+            cursor.execute(
+                "select public.create_activity_with_source(%s, %s::jsonb, '{}'::jsonb)",
+                (owner, intervals),
+            )
+        session.notices.clear()
+        cursor.execute(
+            "insert into public.activities (user_id, sport, activity_date)"
+            " values (%s, 'running', '2026-07-06')",
+            (owner,),
+        )
+        assert session.notices.count(LEGACY_LOG_LINE) == 1
+        session.notices.clear()
 
         # The marker is transaction-local and cleared by the RPC, so a later legacy insert
         # in the same transaction is captured again.

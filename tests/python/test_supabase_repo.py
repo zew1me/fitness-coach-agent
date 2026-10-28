@@ -1,5 +1,6 @@
 import re
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
@@ -2430,3 +2431,70 @@ async def test_upsert_athlete_profile_allows_null_specialization_pct() -> None:
         "not omit it — omission would be semantically ambiguous in a full upsert"
     )
     assert payload["specialization_pct"] is None
+
+
+def test_activity_payload_keys_match_the_rpc_allowlist() -> None:
+    """The RPC raises 22023 on keys outside its allowlist, so drift must fail here."""
+    migration = next(Path("supabase/migrations").glob("*_activity_sources.sql")).read_text()
+    allowlist_block = migration.split("v_key <> all (array[", 1)[1].split("])", 1)[0]
+    allowed = set(re.findall(r"'([a-z_]+)'", allowlist_block))
+
+    payload = supabase_repo._activity_payload(
+        Activity(user_id="athlete-1", sport="running", activity_date=date(2026, 4, 1))
+    )
+
+    assert set(payload) == allowed
+
+
+@pytest.mark.asyncio
+async def test_manual_activity_rpc_payload_is_exact() -> None:
+    client = FakeRpcClient(_rpc_activity_row())
+    repo = SupabaseRepository(client=client)
+
+    await repo.create_activity(
+        Activity(
+            id="00000000-0000-0000-0000-0000000000a1",
+            user_id="athlete-1",
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            duration_seconds=1800,
+            activity_summary={"schema": "activity_summary_v1"},
+        )
+    )
+
+    expected: dict[str, object] = dict.fromkeys(
+        [
+            "started_at",
+            "distance_meters",
+            "elevation_gain_meters",
+            "avg_hr_bpm",
+            "max_hr_bpm",
+            "avg_power_watts",
+            "normalized_power_watts",
+            "avg_pace_sec_per_km",
+            "avg_cadence_rpm",
+            "tss",
+            "intensity_factor",
+            "zone_distribution",
+            "rpe",
+            "athlete_notes",
+            "fatigue_notes",
+            "fueling_notes",
+            "source_file_key",
+            "raw_extraction",
+            "planned_workout_id",
+        ]
+    )
+    expected.update(
+        {
+            "id": "00000000-0000-0000-0000-0000000000a1",
+            "user_id": "athlete-1",
+            "sport": "running",
+            "activity_date": "2026-04-01",
+            "duration_seconds": 1800,
+            "source": "manual",
+            "summary_schema_version": 1,
+            "activity_summary": {"schema": "activity_summary_v1"},
+        }
+    )
+    assert client.calls[0][1]["p_activity"] == expected

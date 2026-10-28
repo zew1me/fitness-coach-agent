@@ -471,7 +471,10 @@ class SupabaseRepository:
     async def create_activity(self, activity: Activity) -> Activity:
         created = await self._create_activity_with_source(activity)
         if created is None:
-            raise RuntimeError("Supabase did not return the inserted activity row.")
+            raise RuntimeError(
+                "Supabase did not return the inserted activity row "
+                "(an Intervals activity with the same source key may already exist)."
+            )
         return created
 
     async def create_intervals_activity(self, activity: Activity) -> Activity | None:

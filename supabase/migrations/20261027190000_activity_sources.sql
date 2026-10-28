@@ -142,6 +142,13 @@ create index activity_sources_fingerprint_idx
 create index activity_sources_activity_idx
   on public.activity_sources (activity_id) where retired_at is null;
 
+-- The composite foreign keys cascade on activity delete, and the referential-integrity
+-- lookup has no retired_at predicate, so the partial index above cannot serve it.
+create index activity_sources_activity_user_idx
+  on public.activity_sources (activity_id, user_id);
+create index activity_sources_origin_activity_user_idx
+  on public.activity_sources (origin_activity_id, user_id);
+
 -- At most one live athlete override per activity, so a writer that forgets to retire the
 -- previous override fails loudly instead of silently resurrecting an older edit.
 create unique index activity_sources_one_live_override_idx
@@ -284,7 +291,7 @@ create or replace function public.activity_payload_fingerprint(
 )
 returns text
 language sql
-immutable
+stable
 set search_path = ''
 as $$
   select case
@@ -310,13 +317,16 @@ $$;
 create or replace function public.activity_projection_fields(p_activity public.activities)
 returns jsonb
 language sql
-immutable
+stable
 set search_path = ''
 as $$
+  -- started_at is rendered in UTC explicitly: a timestamptz would otherwise serialize in
+  -- the session time zone, and PR B compares this output against stored fields.
   select jsonb_build_object(
     'sport', p_activity.sport,
     'activity_date', p_activity.activity_date,
-    'started_at', p_activity.started_at,
+    'started_at', to_char(p_activity.started_at at time zone 'UTC',
+                          'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
     'duration_seconds', p_activity.duration_seconds,
     'distance_meters', p_activity.distance_meters,
     'elevation_gain_meters', p_activity.elevation_gain_meters,
@@ -487,6 +497,11 @@ begin
   end loop;
 
   v_record := jsonb_populate_record(null::public.activities, p_activity);
+  -- No silent default: an activity without a source has no reviewed bootstrap mapping.
+  if v_record.source is null then
+    raise exception 'p_activity.source is required'
+      using errcode = '22023';
+  end if;
 
   -- Tell the temporary legacy trigger that this transaction writes its own source.
   perform set_config('app.activity_source_bootstrap', 'on', true);
@@ -511,7 +526,7 @@ begin
     v_record.avg_pace_sec_per_km, v_record.avg_cadence_rpm,
     v_record.tss, v_record.intensity_factor, v_record.zone_distribution,
     v_record.rpe, v_record.athlete_notes, v_record.fatigue_notes, v_record.fueling_notes,
-    coalesce(v_record.source, 'manual'), v_record.source_file_key, v_record.raw_extraction,
+    v_record.source, v_record.source_file_key, v_record.raw_extraction,
     coalesce(v_record.summary_schema_version, 1),
     coalesce(v_record.activity_summary, '{}'::jsonb), v_record.planned_workout_id
   )
