@@ -469,13 +469,34 @@ class SupabaseRepository:
     # ── Activities ────────────────────────────────────────────
 
     async def create_activity(self, activity: Activity) -> Activity:
+        """Insert an activity; an Intervals activity that is already synced is returned as-is.
+
+        Overlapping syncs, or a re-pull after lost state, legitimately offer the same Intervals
+        activity twice, so that case is idempotent rather than an error.
+        """
         created = await self._create_activity_with_source(activity)
-        if created is None:
-            raise RuntimeError(
-                "Supabase did not return the inserted activity row "
-                "(an Intervals activity with the same source key may already exist)."
-            )
-        return created
+        if created is not None:
+            return created
+        existing = await self._get_synced_intervals_activity(activity)
+        if existing is None:
+            raise RuntimeError("Supabase did not return the inserted activity row.")
+        return existing
+
+    async def _get_synced_intervals_activity(self, activity: Activity) -> Activity | None:
+        if activity.source != "intervals_sync" or not activity.source_file_key:
+            return None
+        client = self._require_client()
+        response = (
+            client.table("activities")
+            .select("*")
+            .eq("user_id", activity.user_id)
+            .eq("source", "intervals_sync")
+            .eq("source_file_key", activity.source_file_key)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        return Activity.model_validate(rows[0]) if rows else None
 
     async def create_intervals_activity(self, activity: Activity) -> Activity | None:
         """Insert an Intervals activity, returning ``None`` when it was already synced."""

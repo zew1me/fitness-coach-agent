@@ -1230,6 +1230,28 @@ async def test_create_activity_generates_an_id_when_missing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_activity_is_idempotent_for_an_already_synced_intervals_activity() -> None:
+    """Overlapping or repeated syncs offer one Intervals activity twice; that is no error."""
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    def intervals_activity(user_id: str) -> Activity:
+        return Activity(
+            user_id=user_id,
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            source="intervals_sync",
+            source_file_key="intervals:i100",
+        )
+
+    first = await repo.create_activity(intervals_activity("athlete-1"))
+    second = await repo.create_activity(intervals_activity("athlete-1"))
+    other_athlete = await repo.create_activity(intervals_activity("athlete-2"))
+
+    assert second.id == first.id
+    assert other_athlete.id != first.id
+
+
+@pytest.mark.asyncio
 async def test_create_activity_raises_when_the_rpc_returns_nothing() -> None:
     repo = SupabaseRepository(client=FakeRpcClient(None))
 
