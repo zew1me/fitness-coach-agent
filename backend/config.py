@@ -119,7 +119,7 @@ class Settings(BaseSettings):
         effort = self.openai_vision_reasoning_effort
         # These GPT-6 models support low and above, but not minimal. Include dated
         # snapshots while retaining existing settings for other model families.
-        gpt6_models = ("gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol")
+        gpt6_models = ("gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6.1-sol")
         if effort == "minimal" and any(
             model == name or model.startswith(name + "-") for name in gpt6_models
         ):

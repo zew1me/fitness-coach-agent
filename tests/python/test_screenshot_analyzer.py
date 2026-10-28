@@ -149,7 +149,17 @@ def test_validate_vision_model_accepts_reasoning_models(model_name: str) -> None
 
 
 @pytest.mark.parametrize(
-    "model_name", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-luna-2026-01-01"]
+    "model_name",
+    [
+        "gpt-6-luna",
+        "gpt-6-sol",
+        "gpt-6-astra",
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+        "gpt-6-luna-2026-01-01",
+        "gpt-6-sol-2026-01-01",
+        "gpt-6-astra-2026-01-01",
+    ],
 )
 def test_vision_rejects_unsupported_gpt6_effort(model_name: str) -> None:
     with pytest.raises(ValidationError, match="not supported"):
@@ -159,7 +169,9 @@ def test_vision_rejects_unsupported_gpt6_effort(model_name: str) -> None:
         )
 
 
-@pytest.mark.parametrize("model_name", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"])
+@pytest.mark.parametrize(
+    "model_name", ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6.1-sol"]
+)
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
 def test_vision_accepts_supported_gpt6_efforts(model_name: str, effort: str) -> None:
     settings = _settings_without_env_file(
