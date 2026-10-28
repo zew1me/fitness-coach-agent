@@ -2,7 +2,7 @@ import math
 import os
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Model families that support OpenAI's `reasoning` parameter on the Responses API.
@@ -18,6 +18,7 @@ _REASONING_CAPABLE_MODEL_PREFIXES: frozenset[str] = frozenset(
         "o3",  # o3, o3-mini — and newer o3 variants
         "o4",  # o4-mini — and newer o4 variants
         "gpt-5",  # gpt-5, gpt-5-mini, gpt-5.6-luna — and newer gpt-5 variants
+        "gpt-6",  # GPT-6 Luna supports reasoning, including low effort.
     }
 )
 
@@ -28,15 +29,15 @@ class Settings(BaseSettings):
     app_jwt_secret: str = "replace-me"
     openai_api_key: str | None = None
     openai_max_retries: int = 4
-    openai_activity_text_model: str = "gpt-5.6-sol"
+    openai_activity_text_model: str = "gpt-6.1-sol"
     openai_activity_text_timeout_seconds: float = 60.0
-    openai_vision_model: str = "gpt-5.6-luna"
+    openai_vision_model: str = "gpt-6-luna"
     openai_vision_timeout_seconds: float = 45.0
     # Ceiling on one _call_vision, retries included. openai_max_retries applies per
     # request, so retries alone could hold a serverless request for minutes; a
     # screenshot is best-effort, so give up and return "no data" instead.
     openai_vision_total_timeout_seconds: float = 90.0
-    # gpt-5.x vision is a reasoning model: reasoning draws down the output budget, so keep
+    # Vision uses a reasoning model: reasoning draws down the output budget, so keep
     # this generous — a truncated response is invalid even under strict structured outputs.
     openai_vision_max_output_tokens: int = 8000
     # Keep reasoning light: screenshot extraction is a perception task, not a reasoning one.
@@ -110,6 +111,19 @@ class Settings(BaseSettings):
         # Normalize so e.g. "Low" / " low " from the environment match the Literal.
         if isinstance(v, str):
             return v.strip().lower()
+        return v
+
+    @field_validator("openai_vision_reasoning_effort")
+    @classmethod
+    def validate_vision_effort_for_model(cls, v: str, info: ValidationInfo) -> str:
+        model = info.data.get("openai_vision_model", "")
+        # These GPT-6 models support low and above, but not minimal. Include dated
+        # snapshots while retaining existing settings for other model families.
+        gpt6_models = ("gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol")
+        if v == "minimal" and any(
+            model == name or model.startswith(name + "-") for name in gpt6_models
+        ):
+            raise ValueError(f"openai_vision_reasoning_effort {v!r} is not supported by {model}")
         return v
 
     r2_account_id: str | None = None
