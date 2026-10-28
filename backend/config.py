@@ -1,8 +1,8 @@
 import math
 import os
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Model families that support OpenAI's `reasoning` parameter on the Responses API.
@@ -113,18 +113,25 @@ class Settings(BaseSettings):
             return v.strip().lower()
         return v
 
-    @field_validator("openai_vision_reasoning_effort")
-    @classmethod
-    def validate_vision_effort_for_model(cls, v: str, info: ValidationInfo) -> str:
-        model = info.data.get("openai_vision_model", "")
+    @model_validator(mode="after")
+    def validate_vision_effort_for_model(self) -> Self:
+        model = self.openai_vision_model
+        effort = self.openai_vision_reasoning_effort
         # These GPT-6 models support low and above, but not minimal. Include dated
         # snapshots while retaining existing settings for other model families.
         gpt6_models = ("gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol")
-        if v == "minimal" and any(
+        if effort == "minimal" and any(
             model == name or model.startswith(name + "-") for name in gpt6_models
         ):
-            raise ValueError(f"openai_vision_reasoning_effort {v!r} is not supported by {model}")
-        return v
+            # Migrate a legacy effort override when the model follows our default.
+            # Explicit model choices from init, env, or .env must remain fail-closed.
+            if "openai_vision_model" not in self.model_fields_set:
+                self.openai_vision_reasoning_effort = "low"
+            else:
+                raise ValueError(
+                    f"openai_vision_reasoning_effort {effort!r} is not supported by {model}"
+                )
+        return self
 
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None
