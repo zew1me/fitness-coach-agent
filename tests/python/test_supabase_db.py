@@ -40,7 +40,7 @@ from backend.models.athlete import (
 )
 from backend.models.auth import UserContext
 from backend.models.intervals import IntervalsConnectionCreate
-from backend.models.training import Goal, TrainingPlan
+from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepository
 from backend.repos.supabase_repo import RecordNotFoundError, SupabaseRepository
 from backend.services.intervals import IntervalsOAuthService, TokenCipher
@@ -848,3 +848,151 @@ async def test_large_history_rebuild_is_idempotent_through_live_database(
         assert current.ctl == second.json()["latest_ctl"] == round(ctl, 1)
     finally:
         client.table("athlete_profiles").delete().eq("user_id", owner).execute()
+
+
+async def _seed_two_workouts_and_activity(
+    repo: SupabaseRepository, user_id: str
+) -> tuple[str, str, str]:
+    """Seed two scheduled workouts and one activity; return (w1_id, w2_id, activity_id)."""
+    await repo.upsert_athlete_profile(
+        AthleteProfile(user_id=user_id, primary_sports=["cycling"], coaching_state="active")
+    )
+    plan = await repo.create_training_plan(
+        TrainingPlan(
+            user_id=user_id,
+            title="Link test",
+            plan_type="weekly",
+            start_date=date(2026, 10, 5),
+            end_date=date(2026, 10, 11),
+        )
+    )
+    w1, w2 = await repo.create_plan_workouts(
+        [
+            PlanWorkout(
+                plan_id=plan.id or "",
+                user_id=user_id,
+                workout_date=date(2026, 10, 10),
+                day_of_week=5,
+                week_number=1,
+                sport="cycling",
+                title="Endurance 1",
+                workout_type="endurance",
+            ),
+            PlanWorkout(
+                plan_id=plan.id or "",
+                user_id=user_id,
+                workout_date=date(2026, 10, 11),
+                day_of_week=6,
+                week_number=1,
+                sport="cycling",
+                title="Endurance 2",
+                workout_type="endurance",
+            ),
+        ]
+    )
+    activity = await repo.create_activity(
+        Activity(user_id=user_id, sport="cycling", activity_date=date(2026, 10, 10))
+    )
+    return w1.id or "", w2.id or "", activity.id or ""
+
+
+@pytest.mark.asyncio
+async def test_resolve_refuses_activity_already_linked_to_another_workout(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Issue #467: a second claim on a linked activity raises 22023 and writes nothing."""
+    w1, w2, activity_id = await _seed_two_workouts_and_activity(repo, unique_user)
+    await repo.match_plan_workout_to_activity(
+        user_id=unique_user,
+        workout_id=w1,
+        activity_id=activity_id,
+        completion_source="auto_matched",
+    )
+
+    with pytest.raises(PostgRESTAPIError) as resolve_exc:
+        await repo.resolve_plan_workout_atomic(
+            user_id=unique_user,
+            workout_id=w2,
+            outcome="completed",
+            activity_id=activity_id,
+            source="coach",
+        )
+    assert resolve_exc.value.code == "22023"
+    with pytest.raises(PostgRESTAPIError) as match_exc:
+        await repo.match_plan_workout_to_activity(
+            user_id=unique_user,
+            workout_id=w2,
+            activity_id=activity_id,
+            completion_source="coach_confirmed",
+        )
+    assert match_exc.value.code == "22023"
+
+    first = await repo.get_plan_workout(unique_user, w1)
+    second = await repo.get_plan_workout(unique_user, w2)
+    activity = await repo.get_activity(unique_user, activity_id)
+    assert (first.status, first.actual_activity_id) == ("completed", activity_id)
+    assert (second.status, second.actual_activity_id) == ("scheduled", None)
+    assert activity.planned_workout_id == w1
+
+    # The original pair is still consistent, so the intended unlink path works.
+    unlinked = await repo.unlink_plan_workout_from_activity(
+        user_id=unique_user, workout_id=w1, activity_id=activity_id
+    )
+    assert unlinked.planned_workout_id is None
+
+
+@pytest.mark.asyncio
+async def test_skip_does_not_clear_a_reverse_link_that_moved_on(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Issue #467: skipping a workout must not clear an activity link it no longer owns."""
+    w1, w2, activity_id = await _seed_two_workouts_and_activity(repo, unique_user)
+    await repo.match_plan_workout_to_activity(
+        user_id=unique_user,
+        workout_id=w2,
+        activity_id=activity_id,
+        completion_source="auto_matched",
+    )
+
+    # Skipping W1 while naming the activity W2 owns must leave W2's link intact.
+    await repo.resolve_plan_workout_atomic(
+        user_id=unique_user,
+        workout_id=w1,
+        outcome="skipped",
+        activity_id=activity_id,
+        source="coach",
+    )
+
+    activity = await repo.get_activity(unique_user, activity_id)
+    second = await repo.get_plan_workout(unique_user, w2)
+    assert activity.planned_workout_id == w2
+    assert second.actual_activity_id == activity_id
+
+
+@pytest.mark.asyncio
+async def test_reassigning_a_workout_moves_the_reverse_link(
+    repo: SupabaseRepository, unique_user: str
+) -> None:
+    """Reassigning a workout to another activity still clears the old reverse link."""
+    w1, _w2, first_activity = await _seed_two_workouts_and_activity(repo, unique_user)
+    other = await repo.create_activity(
+        Activity(user_id=unique_user, sport="cycling", activity_date=date(2026, 10, 10))
+    )
+    await repo.match_plan_workout_to_activity(
+        user_id=unique_user,
+        workout_id=w1,
+        activity_id=first_activity,
+        completion_source="auto_matched",
+    )
+
+    updated = await repo.resolve_plan_workout_atomic(
+        user_id=unique_user,
+        workout_id=w1,
+        outcome="completed",
+        activity_id=other.id,
+        source="athlete",
+    )
+
+    assert updated.actual_activity_id == other.id
+    assert (await repo.get_activity(unique_user, first_activity)).planned_workout_id is None
+    assert (await repo.get_activity(unique_user, other.id or "")).planned_workout_id == w1
