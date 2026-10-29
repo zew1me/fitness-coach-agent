@@ -63,12 +63,9 @@ function AccountMenu({
         className={styles.menuForm}
         method="post"
       >
-        <button
-          className={styles.menuItem}
-          data-menu-item
-          role="menuitem"
-          type="submit"
-        >
+        {/* No data-menu-item: closing the menu on click unmounts this form before the
+            browser runs the submit, so Sign out would do nothing. The POST navigates away. */}
+        <button className={styles.menuItem} role="menuitem" type="submit">
           Sign out
         </button>
       </form>
