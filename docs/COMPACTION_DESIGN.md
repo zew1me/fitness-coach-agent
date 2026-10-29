@@ -242,7 +242,10 @@ A durable session is an optimisation, not a prerequisite for answering the
 athlete, so **every** step of steps 1–4 above shares one failure policy: log,
 tag the Sentry event `degrading: "true"` with the failing `step`
 (`seed` / `project` / `compact`), and run the turn statelessly
-(`prepareDurableSession` in `lib/agent/orchestrator.ts`). Exactly two failures
+(`prepareDurableSession` in `lib/agent/orchestrator.ts`). The warning goes
+through the turn's injected logger (`lib/logger.ts`), which by default writes it
+to both Sentry Logs and the console (Vercel runtime logs), so a degraded turn
+stays visible even when Sentry's transport is the thing failing. Exactly two failures
 still end the turn, because in both cases continuing is unsafe rather than
 merely degraded:
 
