@@ -821,14 +821,14 @@ async def _call_vision(prompt: str, image_url: str, schema: type[ModelT]) -> Mod
                         "operator_hint",
                         f"Model {settings.openai_vision_model!r} rejected the reasoning "
                         f"parameter. Set OPENAI_VISION_MODEL to a reasoning-capable model "
-                        f"(o1*, o3*, o4*, gpt-5*), or add its prefix to "
+                        f"(o1*, o3*, o4*, gpt-5*, gpt-6*), or add its prefix to "
                         f"_REASONING_CAPABLE_MODEL_PREFIXES in backend/config.py.",
                     )
                     sentry_sdk.capture_exception(error)
                 logger.exception(
                     "screenshot vision model config error: %r does not support reasoning — "
                     "set OPENAI_VISION_MODEL to a reasoning-capable model "
-                    "(o1*, o3*, o4*, gpt-5*); type=%s status=%s",
+                    "(o1*, o3*, o4*, gpt-5*, gpt-6*); type=%s status=%s",
                     settings.openai_vision_model,
                     schema.__name__,
                     status_code,
