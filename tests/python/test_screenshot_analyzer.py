@@ -4,6 +4,7 @@ import logging
 import struct
 import typing
 import zlib
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -104,6 +105,22 @@ def make_fake_openai(
     return FakeAsyncOpenAI
 
 
+def _settings_without_env_file(**kwargs: Any) -> Settings:
+    # Pydantic Settings accepts _env_file at runtime, though ty does not expose it.
+    options: dict[str, Any] = {"_env_file": None, **kwargs}
+    return Settings(**options)
+
+
+def test_openai_model_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_ACTIVITY_TEXT_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_VISION_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_VISION_REASONING_EFFORT", raising=False)
+    settings = _settings_without_env_file()
+    assert settings.openai_activity_text_model == "gpt-6.1-sol"
+    assert settings.openai_vision_model == "gpt-6-luna"
+    assert settings.openai_vision_reasoning_effort == "low"
+
+
 @pytest.mark.parametrize("model_name", ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "davinci"])
 def test_validate_vision_model_rejects_non_reasoning_models(model_name: str) -> None:
     with pytest.raises(ValidationError, match="not an approved reasoning-capable model"):
@@ -122,11 +139,96 @@ def test_validate_vision_model_rejects_non_reasoning_models(model_name: str) -> 
         "gpt-5-mini",
         "gpt-5.4-mini",
         "gpt-5.6-luna",
+        "gpt-6-luna",
+        "gpt-6.1-sol",
     ],
 )
 def test_validate_vision_model_accepts_reasoning_models(model_name: str) -> None:
-    s = Settings(openai_vision_model=model_name)
+    s = Settings(openai_vision_model=model_name, openai_vision_reasoning_effort="low")
     assert s.openai_vision_model == model_name
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "gpt-6-luna",
+        "gpt-6-sol",
+        "gpt-6-astra",
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+        "gpt-6-luna-2026-01-01",
+        "gpt-6-sol-2026-01-01",
+        "gpt-6-astra-2026-01-01",
+    ],
+)
+def test_vision_rejects_unsupported_gpt6_effort(model_name: str) -> None:
+    with pytest.raises(ValidationError, match="not supported"):
+        _settings_without_env_file(
+            openai_vision_model=model_name,
+            openai_vision_reasoning_effort=" Minimal ",
+        )
+
+
+@pytest.mark.parametrize(
+    "model_name", ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6.1-sol"]
+)
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_vision_accepts_supported_gpt6_efforts(model_name: str, effort: str) -> None:
+    settings = _settings_without_env_file(
+        openai_vision_model=model_name, openai_vision_reasoning_effort=effort
+    )
+    assert settings.openai_vision_reasoning_effort == effort
+
+
+def test_vision_preserves_legacy_minimal_effort() -> None:
+    settings = _settings_without_env_file(
+        openai_vision_model="gpt-5.4-mini", openai_vision_reasoning_effort="minimal"
+    )
+    assert settings.openai_vision_reasoning_effort == "minimal"
+
+
+@pytest.mark.parametrize("source", ["environment", "dotenv"])
+def test_vision_migrates_minimal_effort_with_default_model(
+    source: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OPENAI_VISION_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_VISION_REASONING_EFFORT", raising=False)
+    if source == "environment":
+        monkeypatch.setenv("OPENAI_VISION_REASONING_EFFORT", " MINIMAL ")
+        settings = _settings_without_env_file()
+    else:
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_VISION_REASONING_EFFORT= MINIMAL \n")
+        settings = _settings_without_env_file(_env_file=env_file)
+    assert settings.openai_vision_model == "gpt-6-luna"
+    assert settings.openai_vision_reasoning_effort == "low"
+
+
+@pytest.mark.parametrize("effort", ["", "none", "invalid"])
+def test_vision_rejects_invalid_effort_with_default_model(
+    effort: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_VISION_MODEL", raising=False)
+    with pytest.raises(ValidationError, match="Input should be"):
+        _settings_without_env_file(openai_vision_reasoning_effort=effort)
+
+
+@pytest.mark.parametrize("source", ["environment", "dotenv"])
+def test_vision_rejects_incompatible_environment_override(
+    source: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OPENAI_VISION_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_VISION_REASONING_EFFORT", raising=False)
+    env_file = tmp_path / ".env"
+    if source == "environment":
+        monkeypatch.setenv("OPENAI_VISION_MODEL", " gpt-6-luna ")
+        monkeypatch.setenv("OPENAI_VISION_REASONING_EFFORT", " MINIMAL ")
+    else:
+        env_file.write_text(
+            "OPENAI_VISION_MODEL= gpt-6-luna \nOPENAI_VISION_REASONING_EFFORT= MINIMAL \n"
+        )
+    with pytest.raises(ValidationError, match="not supported"):
+        _settings_without_env_file(_env_file=env_file)
 
 
 @pytest.mark.parametrize("model_name", ["", "   "])
@@ -151,11 +253,12 @@ def test_validate_activity_text_model_rejects_empty(model_name: str) -> None:
         "gpt-5.4-mini",
         "gpt-5.6-luna",
         "gpt-5.6-sol",
+        "gpt-6.1-sol",
         "o4-mini",
     ],
 )
 def test_validate_activity_text_model_accepts_any_non_empty_model(model_name: str) -> None:
-    s = Settings(openai_activity_text_model=model_name)
+    s = Settings(openai_activity_text_model=model_name, openai_vision_reasoning_effort="low")
     assert s.openai_activity_text_model == model_name
 
 

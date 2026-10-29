@@ -450,7 +450,6 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     const session = new DurableCompactionSession({
       underlyingSession: store,
       client,
-      model: MODEL,
     });
 
     const result = await session.runCompaction({
@@ -505,7 +504,7 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
   }, 60_000);
 
   it("compacts a real reasoning-model run's history, including provider-attached metadata, without a 400", async () => {
-    // gpt-5.6-luna (the production compaction model) is a reasoning model, so
+    // The lead model is a reasoning model, so
     // a real tool-using turn against it produces reasoning items and
     // function_call/function_call_output items that the SDK stamps with its
     // own providerData — this is the actual shape stored in
@@ -545,7 +544,6 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     const session = new DurableCompactionSession({
       underlyingSession: store,
       client: new OpenAI(),
-      model: MODEL,
     });
 
     const compactionResult = await session
@@ -649,7 +647,6 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     const session = new DurableCompactionSession({
       underlyingSession: store,
       client: new OpenAI(),
-      model: MODEL,
     });
 
     const compactionResult = await session

@@ -56,7 +56,7 @@ describe("DurableCompactionSession", () => {
     expect(client.responses.compact).toHaveBeenCalledWith(
       expect.objectContaining({
         input: [userItem("old")],
-        model: "gpt-5.6-luna",
+        model: "gpt-6-luna",
       }),
     );
     expect(underlying.replaceAll).toHaveBeenCalledWith(
@@ -84,6 +84,37 @@ describe("DurableCompactionSession", () => {
         prepared_estimate_error_percent: expect.any(Number),
         prepared_estimated_to_actual_ratio: expect.any(Number),
       }),
+    );
+  });
+
+  it("honors an explicit compaction model override", async () => {
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue([userItem("old")]),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: [userItem("summary")],
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        }),
+      },
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      model: "custom-compaction-model",
+    });
+
+    await session.runCompaction({ force: true });
+
+    expect(client.responses.compact).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "custom-compaction-model" }),
     );
   });
 

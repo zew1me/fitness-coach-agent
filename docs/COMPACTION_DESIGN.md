@@ -169,7 +169,7 @@ Safety guard: if `responses.compact` returns an empty array the method **throws*
 rather than replacing durable context with nothing. This prevents a model error
 or API glitch from silently erasing the conversation.
 
-Compaction defaults to `gpt-5.6-luna`, the cost-sensitive GPT-5.6 tier, unless
+Compaction defaults to `gpt-6-luna` unless
 the session supplies an explicit model override. Its raw OpenAI client allows four
 retries (and honors provider `Retry-After` guidance) so transient rate limits do not
 unnecessarily abort the pre-turn compaction step. Compaction does not use the

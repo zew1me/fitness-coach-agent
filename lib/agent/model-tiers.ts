@@ -28,6 +28,13 @@ type TextVerbosity = "low" | "medium" | "high";
 const STANDARD_REASONING_EFFORTS: ReadonlySet<ModelSettingsReasoningEffort> =
   new Set(["none", "low", "medium", "high", "xhigh"]);
 
+// OpenAI model pages: https://developers.openai.com/api/docs/models/gpt-6-luna,
+// https://developers.openai.com/api/docs/models/gpt-6.1-terra, and
+// https://developers.openai.com/api/docs/models/gpt-6.1-sol. All support max,
+// but the SDK settings type does not, so max is clamped to xhigh. Sol lacks none.
+const SOL_REASONING_EFFORTS: ReadonlySet<ModelSettingsReasoningEffort> =
+  new Set(["low", "medium", "high", "xhigh"]);
+
 export const MODEL_SUPPORTED_EFFORTS: Record<
   string,
   ReadonlySet<ModelSettingsReasoningEffort>
@@ -36,6 +43,9 @@ export const MODEL_SUPPORTED_EFFORTS: Record<
   "gpt-5.6-luna": STANDARD_REASONING_EFFORTS,
   "gpt-5.6-sol": STANDARD_REASONING_EFFORTS,
   "gpt-5.6-terra": STANDARD_REASONING_EFFORTS,
+  "gpt-6-luna": STANDARD_REASONING_EFFORTS,
+  "gpt-6.1-terra": STANDARD_REASONING_EFFORTS,
+  "gpt-6.1-sol": SOL_REASONING_EFFORTS,
 };
 
 export type ModelTier = {
@@ -105,7 +115,11 @@ export function clampEffort(
     if (candidate !== undefined && supported.has(candidate)) return candidate;
     index -= 1;
   }
-  return "none";
+  // If no lower effort is supported, use the lowest supported effort instead.
+  for (const candidate of REASONING_EFFORT_LADDER) {
+    if (supported.has(candidate)) return candidate;
+  }
+  throw new Error(`No supported reasoning effort configured for ${model}`);
 }
 
 export function stepDownEffort(
@@ -144,11 +158,11 @@ export function resolveModelTiers(): readonly ModelTier[] {
     "medium",
   );
   const verbosity = parseVerbosity(process.env["OPENAI_TEXT_VERBOSITY"], "low");
-  const model1 = process.env["OPENAI_LEAD_MODEL"]?.trim() || "gpt-5.6-luna";
+  const model1 = process.env["OPENAI_LEAD_MODEL"]?.trim() || "gpt-6-luna";
   const model2 =
     process.env["OPENAI_FALLBACK_MODEL_2"]?.trim() || "gpt-5.4-mini";
   const model3 =
-    process.env["OPENAI_FALLBACK_MODEL_3"]?.trim() || "gpt-5.6-terra";
+    process.env["OPENAI_FALLBACK_MODEL_3"]?.trim() || "gpt-6.1-terra";
   const effort2 = parseEffort(
     process.env["OPENAI_FALLBACK_REASONING_EFFORT_2"],
     baseline,
@@ -166,8 +180,7 @@ export function resolveModelTiers(): readonly ModelTier[] {
 }
 
 export function resolveSpecialistTier(effectiveTier: ModelTier): ModelTier {
-  const primaryModel =
-    process.env["OPENAI_LEAD_MODEL"]?.trim() || "gpt-5.6-luna";
+  const primaryModel = process.env["OPENAI_LEAD_MODEL"]?.trim() || "gpt-6-luna";
   const model =
     effectiveTier.model === primaryModel
       ? process.env["OPENAI_SPECIALIST_MODEL"]?.trim() || effectiveTier.model
