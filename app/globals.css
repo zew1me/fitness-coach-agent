@@ -83,6 +83,9 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
+
+  /* iOS Safari's 100vh ignores the retractable toolbars; dvh tracks the visible area (#540). */
+  min-height: 100dvh;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
     var(--page-glow), var(--bg);

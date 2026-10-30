@@ -2,19 +2,24 @@
 
 .page {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .shell {
   margin: 0 auto;
   max-width: 1100px;
   min-height: 100vh;
+  min-height: 100dvh;
   padding: 24px 20px 32px;
 }
 
 .frame {
   display: grid;
   grid-template-rows: auto 1fr auto;
-  min-height: calc(100vh - 56px);
+
+  /* Exactly viewport-tall (not min-height) so the message pane scrolls instead of the page. */
+  height: calc(100vh - 56px);
+  height: calc(100dvh - 56px);
   border: 1px solid var(--border);
   border-radius: 28px;
   background: var(--surface-strong);
@@ -778,7 +783,8 @@
   }
 
   .frame {
-    min-height: calc(100vh - 24px);
+    height: calc(100vh - 24px);
+    height: calc(100dvh - 24px);
     border-radius: 24px;
   }
 
