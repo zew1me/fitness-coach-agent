@@ -413,6 +413,10 @@
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+
+  /* Attachments are uncapped; scroll the chips so the composer cannot outgrow the fixed-height frame. */
+  max-height: 7.5rem;
+  overflow-y: auto;
 }
 
 .uploadChip {
