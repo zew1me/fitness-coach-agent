@@ -185,8 +185,8 @@ No new tables were introduced for this lifecycle work (all app-level).
 
 ### OpenAI model resilience
 
-Coach turns use the model ladder defined in `lib/agent/model-tiers.ts`: `gpt-5.6-luna`
-(medium), then `gpt-5.4-mini` (medium), then `gpt-5.6-terra` (low). SDK calls retry
+Coach turns use the model ladder defined in `lib/agent/model-tiers.ts`: `gpt-6-luna`
+(medium), then `gpt-5.4-mini` (medium), then `gpt-6.1-terra` (low). SDK calls retry
 429/503/network failures before the orchestrator falls back to the next model. The
 module-scope circuit breaker opens after three consecutive rate-limited turns,
 allows one lazy half-open probe after its cooldown, and automatically closes on
