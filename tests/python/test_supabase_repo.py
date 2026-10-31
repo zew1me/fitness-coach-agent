@@ -1,5 +1,7 @@
 import re
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -12,7 +14,7 @@ from backend.models.athlete import (
     ThresholdRecalibrationCandidate,
 )
 from backend.models.chat import ChatModelStateReplaceRequest
-from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
+from backend.models.training import Activity, ActivitySource, Goal, PlanWorkout, TrainingPlan
 from backend.repos import supabase_repo
 from backend.repos.supabase_repo import (
     RecordNotFoundError,
@@ -221,6 +223,7 @@ class FakeSupabaseClient:
         athlete_rows: list[dict[str, object]] | None = None,
         threshold_rows: list[dict[str, object]] | None = None,
         activity_rows: list[dict[str, object]] | None = None,
+        activity_source_rows: list[dict[str, object]] | None = None,
         chat_thread_rows: list[dict[str, object]] | None = None,
         chat_message_rows: list[dict[str, object]] | None = None,
         chat_attachment_rows: list[dict[str, object]] | None = None,
@@ -237,6 +240,7 @@ class FakeSupabaseClient:
             "athlete_profiles": FakeTableQuery(athlete_rows or []),
             "sport_thresholds": FakeTableQuery(threshold_rows or []),
             "activities": FakeTableQuery(activity_rows or []),
+            "activity_sources": FakeTableQuery(activity_source_rows or []),
             "daily_load_snapshots": FakeTableQuery(daily_load_snapshot_rows or []),
             "chat_threads": FakeTableQuery(chat_thread_rows or []),
             "chat_messages": FakeTableQuery(chat_message_rows or []),
@@ -269,7 +273,26 @@ class FakeSupabaseClient:
             return FakeRpcQuery(self._create_recalibration_candidate_atomic(params))
         if function_name == "decide_recalibration_candidate_atomic":
             return FakeRpcQuery(self._decide_recalibration_candidate_atomic(params))
+        if function_name == "create_activity_with_source":
+            return FakeRpcQuery(self._create_activity_with_source(params))
         raise AssertionError(f"Unexpected RPC call: {function_name}")
+
+    def _create_activity_with_source(self, params: dict[str, object]) -> dict[str, object] | None:
+        # Mirrors the SQL contract: `returns public.activities` is one composite row, and an
+        # Intervals duplicate on (user_id, intervals_source_file_key) returns NULL.
+        payload = params["p_activity"]
+        assert isinstance(payload, dict)
+        row = dict(payload)
+        rows = self._tables["activities"]._rows
+        if row.get("source") == "intervals_sync" and any(
+            existing.get("user_id") == row["user_id"]
+            and existing.get("source") == "intervals_sync"
+            and existing.get("source_file_key") == row.get("source_file_key")
+            for existing in rows
+        ):
+            return None
+        rows.append(row)
+        return row
 
     def _create_training_plan_atomic(self, params: dict[str, object]) -> dict[str, object]:
         payload = params["p_plan"]
@@ -1089,6 +1112,209 @@ async def test_create_intervals_activity_ignores_a_duplicate_source_key() -> Non
 
     assert created is not None
     assert duplicate is None
+
+
+def _rpc_activity_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "00000000-0000-0000-0000-0000000000a1",
+        "user_id": "athlete-1",
+        "sport": "running",
+        "activity_date": "2026-04-01",
+        "source": "manual",
+        "source_file_key": None,
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("activity", "expected_source"),
+    [
+        pytest.param(
+            Activity(
+                id="00000000-0000-0000-0000-0000000000a1",
+                user_id="athlete-1",
+                sport="running",
+                activity_date=date(2026, 4, 1),
+                source="manual",
+            ),
+            {"object_key": None, "external_id": None},
+            id="manual",
+        ),
+        pytest.param(
+            Activity(
+                id="00000000-0000-0000-0000-0000000000a1",
+                user_id="athlete-1",
+                sport="cycling",
+                activity_date=date(2026, 4, 1),
+                source="fit_upload",
+                source_file_key="uploads/athlete-1/ride.fit",
+            ),
+            {"object_key": "uploads/athlete-1/ride.fit", "external_id": None},
+            id="file",
+        ),
+        pytest.param(
+            Activity(
+                id="00000000-0000-0000-0000-0000000000a1",
+                user_id="athlete-1",
+                sport="cycling",
+                activity_date=date(2026, 4, 1),
+                source="intervals_sync",
+                source_file_key="intervals:i100",
+            ),
+            {"object_key": "intervals:i100", "external_id": "i100"},
+            id="intervals",
+        ),
+    ],
+)
+async def test_create_activity_uses_shadow_writer_rpc(
+    activity: Activity, expected_source: dict[str, object]
+) -> None:
+    client = FakeRpcClient(_rpc_activity_row(source=activity.source))
+    repo = SupabaseRepository(client=client)
+
+    created = await repo.create_activity(activity)
+
+    assert created.id == "00000000-0000-0000-0000-0000000000a1"
+    assert [name for name, _ in client.calls] == ["create_activity_with_source"]
+    params = client.calls[0][1]
+    assert set(params) == {"p_user_id", "p_activity", "p_source"}
+    assert params["p_user_id"] == "athlete-1"
+    assert params["p_source"] == expected_source
+    payload = cast(dict[str, Any], params["p_activity"])
+    assert payload["id"] == "00000000-0000-0000-0000-0000000000a1"
+    assert payload["user_id"] == "athlete-1"
+    assert payload["source"] == activity.source
+    assert payload["source_file_key"] == activity.source_file_key
+    assert payload["summary_schema_version"] == 1
+    assert payload["activity_summary"]["schema"] == "activity_summary_v1"
+
+
+@pytest.mark.asyncio
+async def test_create_intervals_activity_uses_shadow_writer_rpc_and_maps_null_to_none() -> None:
+    activity = Activity(
+        id="00000000-0000-0000-0000-0000000000a1",
+        user_id="athlete-1",
+        sport="running",
+        activity_date=date(2026, 4, 1),
+        source="intervals_sync",
+        source_file_key="intervals:i100",
+    )
+    repo = SupabaseRepository(client=FakeRpcClient(None))
+    assert await repo.create_intervals_activity(activity) is None
+
+    # PostgREST renders a NULL `returns public.activities` as an all-null object.
+    client = FakeRpcClient({"id": None, "user_id": None, "sport": None, "source_count": None})
+    repo = SupabaseRepository(client=client)
+
+    assert await repo.create_intervals_activity(activity) is None
+    assert client.calls[0][0] == "create_activity_with_source"
+    assert client.calls[0][1]["p_source"] == {
+        "object_key": "intervals:i100",
+        "external_id": "i100",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_activity_generates_an_id_when_missing() -> None:
+    client = FakeRpcClient(_rpc_activity_row())
+    repo = SupabaseRepository(client=client)
+
+    await repo.create_activity(
+        Activity(user_id="athlete-1", sport="running", activity_date=date(2026, 4, 1))
+    )
+
+    payload = cast(dict[str, Any], client.calls[0][1]["p_activity"])
+    assert payload["id"]
+
+
+@pytest.mark.asyncio
+async def test_create_activity_is_idempotent_for_an_already_synced_intervals_activity() -> None:
+    """Overlapping or repeated syncs offer one Intervals activity twice; that is no error."""
+    repo = SupabaseRepository(client=FakeSupabaseClient())
+
+    def intervals_activity(user_id: str) -> Activity:
+        return Activity(
+            user_id=user_id,
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            source="intervals_sync",
+            source_file_key="intervals:i100",
+        )
+
+    first = await repo.create_activity(intervals_activity("athlete-1"))
+    second = await repo.create_activity(intervals_activity("athlete-1"))
+    other_athlete = await repo.create_activity(intervals_activity("athlete-2"))
+
+    assert second.id == first.id
+    assert other_athlete.id != first.id
+
+
+@pytest.mark.asyncio
+async def test_create_activity_raises_when_the_rpc_returns_nothing() -> None:
+    repo = SupabaseRepository(client=FakeRpcClient(None))
+
+    with pytest.raises(RuntimeError, match="did not return"):
+        await repo.create_activity(
+            Activity(user_id="athlete-1", sport="running", activity_date=date(2026, 4, 1))
+        )
+
+
+def test_activity_payload_never_writes_projection_metadata() -> None:
+    """A plain update must not reset RPC-owned columns to the model defaults."""
+    payload = supabase_repo._activity_payload(
+        Activity(
+            user_id="athlete-1",
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            presentation_state="superseded",
+            source_count=3,
+        )
+    )
+
+    for column in (
+        "source_count",
+        "field_provenance",
+        "presentation_state",
+        "superseded_by_activity_id",
+        "materialized_at",
+    ):
+        assert column not in payload
+
+
+@pytest.mark.asyncio
+async def test_list_live_activity_sources_returns_only_live_sources_for_the_owner() -> None:
+    def source_row(source_id: str, **overrides: object) -> dict[str, object]:
+        row: dict[str, object] = {
+            "id": source_id,
+            "user_id": "athlete-1",
+            "activity_id": "activity-1",
+            "origin_activity_id": "activity-1",
+            "provider": "unknown",
+            "ingest_format": "fit",
+            "retired_at": None,
+            "created_at": "2026-04-01T00:00:00+00:00",
+        }
+        row.update(overrides)
+        return row
+
+    repo = SupabaseRepository(
+        client=FakeSupabaseClient(
+            activity_source_rows=[
+                source_row("live"),
+                source_row("retired", retired_at="2026-04-02T00:00:00+00:00"),
+                source_row("other-activity", activity_id="activity-2"),
+                source_row("other-user", user_id="athlete-2"),
+            ]
+        )
+    )
+
+    sources = await repo.list_live_activity_sources("athlete-1", "activity-1")
+
+    assert [source.id for source in sources] == ["live"]
+    assert isinstance(sources[0], ActivitySource)
+    assert sources[0].ingest_format == "fit"
 
 
 @pytest.mark.asyncio
@@ -2227,3 +2453,70 @@ async def test_upsert_athlete_profile_allows_null_specialization_pct() -> None:
         "not omit it — omission would be semantically ambiguous in a full upsert"
     )
     assert payload["specialization_pct"] is None
+
+
+def test_activity_payload_keys_match_the_rpc_allowlist() -> None:
+    """The RPC raises 22023 on keys outside its allowlist, so drift must fail here."""
+    migration = next(Path("supabase/migrations").glob("*_activity_sources.sql")).read_text()
+    allowlist_block = migration.split("v_key <> all (array[", 1)[1].split("])", 1)[0]
+    allowed = set(re.findall(r"'([a-z_]+)'", allowlist_block))
+
+    payload = supabase_repo._activity_payload(
+        Activity(user_id="athlete-1", sport="running", activity_date=date(2026, 4, 1))
+    )
+
+    assert set(payload) == allowed
+
+
+@pytest.mark.asyncio
+async def test_manual_activity_rpc_payload_is_exact() -> None:
+    client = FakeRpcClient(_rpc_activity_row())
+    repo = SupabaseRepository(client=client)
+
+    await repo.create_activity(
+        Activity(
+            id="00000000-0000-0000-0000-0000000000a1",
+            user_id="athlete-1",
+            sport="running",
+            activity_date=date(2026, 4, 1),
+            duration_seconds=1800,
+            activity_summary={"schema": "activity_summary_v1"},
+        )
+    )
+
+    expected: dict[str, object] = dict.fromkeys(
+        [
+            "started_at",
+            "distance_meters",
+            "elevation_gain_meters",
+            "avg_hr_bpm",
+            "max_hr_bpm",
+            "avg_power_watts",
+            "normalized_power_watts",
+            "avg_pace_sec_per_km",
+            "avg_cadence_rpm",
+            "tss",
+            "intensity_factor",
+            "zone_distribution",
+            "rpe",
+            "athlete_notes",
+            "fatigue_notes",
+            "fueling_notes",
+            "source_file_key",
+            "raw_extraction",
+            "planned_workout_id",
+        ]
+    )
+    expected.update(
+        {
+            "id": "00000000-0000-0000-0000-0000000000a1",
+            "user_id": "athlete-1",
+            "sport": "running",
+            "activity_date": "2026-04-01",
+            "duration_seconds": 1800,
+            "source": "manual",
+            "summary_schema_version": 1,
+            "activity_summary": {"schema": "activity_summary_v1"},
+        }
+    )
+    assert client.calls[0][1]["p_activity"] == expected

@@ -47,6 +47,47 @@ class Activity(BaseModel):
 
     planned_workout_id: str | None = None
 
+    # Projection metadata owned by the materialization RPCs (see the activity materialization
+    # design doc). Read-only here: `_activity_payload` never writes them, so a plain update
+    # cannot clobber them.
+    source_count: int = 1
+    field_provenance: dict[str, Any] = Field(default_factory=dict)
+    presentation_state: Literal["active", "superseded"] = "active"
+    superseded_by_activity_id: str | None = None
+    materialized_at: datetime | None = None
+
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+ActivitySourceProvider = Literal[
+    "garmin", "intervals", "strava", "wahoo", "coros", "polar", "suunto", "athlete", "unknown"
+]
+ActivityIngestFormat = Literal[
+    "athlete_override", "fit", "tcx", "gpx", "intervals_api", "text", "screenshot", "manual"
+]
+
+
+class ActivitySource(BaseModel):
+    """One ingested input behind an activity (`activity_sources` row).
+
+    Evidence fields are immutable in the database; only `activity_id` and `retired_at` move.
+    """
+
+    id: str
+    user_id: str
+    activity_id: str
+    origin_activity_id: str
+    provider: ActivitySourceProvider
+    ingest_format: ActivityIngestFormat
+    external_id: str | None = None
+    object_key: str | None = None
+    content_hash: str | None = None
+    payload_fingerprint: str | None = None
+    fields: dict[str, Any] = Field(default_factory=dict)
+    raw_extraction: dict[str, Any] | None = None
+    recorded_at: datetime | None = None
+    retired_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
