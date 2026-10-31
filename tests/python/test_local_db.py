@@ -8,6 +8,7 @@ def test_local_db_url_defaults_to_the_local_supabase_postgres(
 ) -> None:
     monkeypatch.delenv("LOCAL_SUPABASE_DB_URL", raising=False)
     monkeypatch.delenv("PGHOSTADDR", raising=False)
+    monkeypatch.delenv("PGSERVICE", raising=False)
 
     assert local_db_url() == DEFAULT_LOCAL_DB_URL
 
@@ -31,9 +32,31 @@ def test_local_db_url_refuses_non_loopback_hosts(monkeypatch: pytest.MonkeyPatch
 
 
 def test_local_db_url_refuses_a_non_loopback_pghostaddr(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pin the URL: a hostaddr inside an ambient LOCAL_SUPABASE_DB_URL would override PGHOSTADDR.
+    monkeypatch.setenv("LOCAL_SUPABASE_DB_URL", DEFAULT_LOCAL_DB_URL)
     monkeypatch.setenv("PGHOSTADDR", "203.0.113.5")
 
     with pytest.raises(RuntimeError, match="non-local host"):
+        local_db_url()
+
+
+@pytest.mark.parametrize(
+    ("url", "pgservice"),
+    [
+        ("postgresql://postgres:secret@127.0.0.1:54322/postgres?service=remote", None),
+        (DEFAULT_LOCAL_DB_URL, "remote"),
+    ],
+)
+def test_local_db_url_refuses_a_service_file_configuration(
+    monkeypatch: pytest.MonkeyPatch, url: str, pgservice: str | None
+) -> None:
+    monkeypatch.setenv("LOCAL_SUPABASE_DB_URL", url)
+    if pgservice is None:
+        monkeypatch.delenv("PGSERVICE", raising=False)
+    else:
+        monkeypatch.setenv("PGSERVICE", pgservice)
+
+    with pytest.raises(RuntimeError, match="pg_service.conf"):
         local_db_url()
 
 

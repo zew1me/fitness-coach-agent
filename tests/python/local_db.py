@@ -29,6 +29,10 @@ def local_db_url() -> str:
     """The direct-connection URL, validated to be loopback; raises otherwise."""
     url = os.environ.get("LOCAL_SUPABASE_DB_URL", DEFAULT_LOCAL_DB_URL)
     params = conninfo_to_dict(url)
+    # A service file's settings outrank PG* environment defaults, so a selected service could
+    # supply a remote hostaddr that the checks below never see.
+    if params.get("service") or os.environ.get("PGSERVICE"):
+        raise RuntimeError("Refusing direct Postgres access through a pg_service.conf service.")
     host = params.get("host")
     # libpq connects to hostaddr, when set, regardless of host; PGHOSTADDR is its default.
     hostaddr = params.get("hostaddr") or os.environ.get("PGHOSTADDR")
