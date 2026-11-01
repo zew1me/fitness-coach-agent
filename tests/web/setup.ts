@@ -2,7 +2,26 @@ import { createWriteStream, type WriteStream } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { afterAll, beforeAll } from "vitest";
+import { afterAll, beforeAll, beforeEach, vi } from "vitest";
+
+import { MODEL_CONFIG_ENV_VARS } from "./model-config-env";
+
+// Model, effort, verbosity and retry settings (`lib/agent/model-tiers.ts`) are
+// read from `OPENAI_*` env vars, so a shell or sandbox that exports them would
+// change the ladder the suite asserts against. Unset just those (SDK connection
+// settings such as the key and base URL stay, for the opt-in live test) so
+// tests see the shipped defaults; a test that needs a value stubs it itself.
+// This runs at module scope because `MODEL_TIERS` is resolved at import time,
+// and again before each test because a test file's `vi.unstubAllEnvs()`
+// restores the ambient values.
+function unsetAmbientOpenAIConfig(): void {
+  for (const name of MODEL_CONFIG_ENV_VARS) {
+    vi.stubEnv(name, undefined);
+  }
+}
+
+unsetAmbientOpenAIConfig();
+beforeEach(unsetAmbientOpenAIConfig);
 
 const logPath = join(tmpdir(), `vitest-console-${process.pid}.log`);
 let logStream: WriteStream;
