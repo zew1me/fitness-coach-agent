@@ -1491,6 +1491,46 @@ describe("streamCoachTurn durable rollback, max turns and cold seeding", () => {
     );
   });
 
+  it("routes turn logs through an injected logger instead of Sentry", async () => {
+    tavilyMocks.connect.mockRejectedValueOnce(new Error("tavily unreachable"));
+    tavilyMocks.close.mockRejectedValueOnce(new Error("never connected"));
+    const logger = {
+      debug: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+    };
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      logger,
+      messages: messages(),
+      tavilyMcpUrl: "https://tavily.example/mcp",
+    });
+    await response.text();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "coach: Tavily setup failed; continuing without it",
+      { error: "tavily unreachable" },
+    );
+    expect(logger.warn).toHaveBeenCalledWith("coach: Tavily close failed", {
+      error: "never connected",
+    });
+    expect(logger.info).toHaveBeenCalledWith("coach turn complete", {
+      textStarted: true,
+      user_id: "athlete-1",
+    });
+    // Modules outside #267's scope (e.g. agent-stream) still log to Sentry
+    // directly, so only the orchestrator's own lines are asserted absent.
+    expect(sentryMocks.logger.warn).not.toHaveBeenCalled();
+    expect(sentryMocks.logger.info).not.toHaveBeenCalledWith(
+      "coach turn complete",
+      expect.anything(),
+    );
+  });
+
   it("bounds a partial cold seed to the compaction token threshold", async () => {
     const historyMessages = Array.from({ length: 60 }, (_, index) => ({
       id: `history-${index}`,
