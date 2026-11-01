@@ -338,7 +338,7 @@ export const coachToolDefinitions = {
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(
-    "Persist recovery and wellness observations. Set each entry's source to where the numbers came from, not who typed them, as a short snake_case name: e.g. manual (or null) for the athlete's own subjective report, screenshot_extract for a wellness screenshot, or the device/app for exports and syncs (garmin_api, garmin_sidecar, intervals_sync, apple_health, whoop, oura, polar, fitbit, suunto, withings, eight_sleep, elite_hrv, ...). Any identifiable source is accepted; a pasted device export is never manual.",
+    "Persist recovery and wellness observations. Set each entry's source to where the numbers came from, not who typed them, as a short snake_case name: e.g. screenshot_extract for a wellness screenshot, or the device/app for exports and syncs (garmin_api, garmin_sidecar, intervals_sync, apple_health, whoop, oura, polar, fitbit, suunto, withings, eight_sleep, elite_hrv, ...). Any identifiable source is accepted; a pasted device export is never manual. For entries that carry only the athlete's own subjective report (energy, notes), pass null: a new day's row then defaults to manual, and a day that already holds device numbers keeps its source instead of being relabelled manual.",
     recoveryInputSchema,
   ),
   update_schedule: defineTool(
