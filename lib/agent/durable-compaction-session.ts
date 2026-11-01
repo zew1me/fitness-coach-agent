@@ -340,7 +340,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     const preparedInputTokens = estimateSerializedTokens(compactionInput);
     const compacted = await this.getClient().responses.compact({
       ...toOpenAICompactOptions(args),
-      model: this.options.model ?? "gpt-5.6-luna",
+      model: this.options.model ?? "gpt-6-luna",
       input: compactionInput,
     });
     // OpenAI defines compacted.output as the canonical replacement window.

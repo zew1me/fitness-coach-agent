@@ -337,6 +337,24 @@ test("opens the account menu and profile drawer from the calendar", async ({
   ).toBeFocused();
 });
 
+test("submits the logout form when Sign out is clicked (issue #525)", async ({
+  page,
+}) => {
+  await mockCalendarView(page);
+  await page.goto("/calendar");
+
+  // The click handler that closes the menu must not unmount the form before the
+  // browser submits it, or Sign out silently does nothing.
+  const logout = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      request.url().endsWith("/api/oauth/browser-session/logout"),
+  );
+  await page.getByRole("button", { name: /Account menu/i }).click();
+  await page.getByRole("menuitem", { name: /Sign out/i }).click();
+  await logout;
+});
+
 test("navigates chat → calendar → chat via the topbar toggles", async ({
   page,
 }) => {

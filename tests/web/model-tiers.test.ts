@@ -40,9 +40,9 @@ describe("model tier compatibility", () => {
     const tiers = resolveModelTiers();
 
     expect(tiers.map((tier) => tier.model)).toEqual([
-      "gpt-5.6-luna",
+      "gpt-6-luna",
       "gpt-5.4-mini",
-      "gpt-5.6-terra",
+      "gpt-6.1-terra",
     ]);
     for (const tier of tiers) {
       expect(MODEL_SUPPORTED_EFFORTS[tier.model]?.has(tier.effort)).toBe(true);
@@ -59,7 +59,18 @@ describe("model tier compatibility", () => {
 
   it("steps down across documented unsupported values", () => {
     expect(clampEffort("gpt-5.4-mini", "max")).toBe("xhigh");
-    expect(clampEffort("gpt-5.6-luna", "minimal")).toBe("none");
+    expect(clampEffort("gpt-6-luna", "minimal")).toBe("none");
+    expect(clampEffort("gpt-6.1-terra", "max")).toBe("xhigh");
+    expect(clampEffort("gpt-6.1-sol", "none")).toBe("low");
+    expect(clampEffort("gpt-6.1-sol", "minimal")).toBe("low");
+    expect(clampEffort("gpt-6.1-sol", "max")).toBe("xhigh");
+    expect(
+      buildModelSettings({
+        model: "gpt-6.1-sol",
+        effort: "none",
+        verbosity: "low",
+      }).reasoning?.effort,
+    ).toBe("low");
     expect(stepDownEffort("medium", 1)).toBe("low");
     expect(stepDownEffort("none", 20)).toBe("none");
   });
