@@ -128,6 +128,17 @@ const uploadedFileInputSchema = z.object({
   public_url: z.string().nullable(),
 });
 
+// Where the numbers came from, not who typed them. Must match
+// recovery_logs_source_check and RecoverySource in backend/models/athlete.py.
+const recoverySourceSchema = z.enum([
+  "manual",
+  "garmin_api",
+  "garmin_sidecar",
+  "apple_health",
+  "intervals_sync",
+  "screenshot_extract",
+]);
+
 const recoveryEntrySchema = z.object({
   body_battery: z.number().int().min(0).max(100).nullable(),
   hrv_ms: z.number().positive().nullable(),
@@ -137,6 +148,7 @@ const recoveryEntrySchema = z.object({
   sleep_consistency_pct: z.number().min(0).max(100).nullable(),
   sleep_duration_hours: z.number().nonnegative().nullable(),
   sleep_score: z.number().nonnegative().nullable(),
+  source: recoverySourceSchema.nullable(),
   stress_score: z.number().nonnegative().nullable(),
   subjective_energy: z.number().int().min(1).max(5).nullable(),
 });
@@ -332,7 +344,7 @@ export const coachToolDefinitions = {
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(
-    "Persist recovery and wellness observations.",
+    "Persist recovery and wellness observations. Set each entry's source to where the numbers came from, not who typed them: screenshot_extract for a wellness screenshot, garmin_api/garmin_sidecar/apple_health/intervals_sync for device or sync exports (including pasted exports), and manual (or null) only for the athlete's own subjective report.",
     recoveryInputSchema,
   ),
   update_schedule: defineTool(

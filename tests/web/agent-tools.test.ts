@@ -342,6 +342,7 @@ describe("coachToolDefinitions", () => {
             sleep_consistency_pct: null,
             sleep_duration_hours: 7.5,
             sleep_score: null,
+            source: null,
             stress_score: 22,
             subjective_energy: 4,
           },
@@ -1452,5 +1453,46 @@ describe("createAgentCoachTools input validation errors", () => {
       ),
     );
     expect(sentryMocks.captureException).not.toHaveBeenCalled();
+  });
+
+  describe("save_recovery_data source provenance", () => {
+    const baseEntry = {
+      body_battery: null,
+      hrv_ms: 48,
+      log_date: "2026-05-30",
+      notes: null,
+      resting_hr_bpm: null,
+      sleep_consistency_pct: null,
+      sleep_duration_hours: 7.5,
+      sleep_score: null,
+      stress_score: null,
+      subjective_energy: null,
+    };
+    const schema = coachToolDefinitions.save_recovery_data.inputSchema;
+
+    it.each([
+      "manual",
+      "garmin_api",
+      "garmin_sidecar",
+      "apple_health",
+      "intervals_sync",
+      "screenshot_extract",
+    ])("accepts source %s", (source) => {
+      expect(
+        schema.parse({ entries: [{ ...baseEntry, source }] }),
+      ).toMatchObject({ entries: [{ source }] });
+    });
+
+    it("accepts a null source", () => {
+      expect(
+        schema.parse({ entries: [{ ...baseEntry, source: null }] }),
+      ).toMatchObject({ entries: [{ source: null }] });
+    });
+
+    it("rejects an unknown source at the Zod boundary", () => {
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source: "whoop" }] }),
+      ).toThrow();
+    });
   });
 });

@@ -7,6 +7,16 @@ from pydantic import BaseModel, Field, field_validator
 # "user" = athlete typed it; "file" = extracted from GPX/FIT/screenshot;
 # "estimated" = derived by the system from workout patterns.
 ThresholdSource = Literal["user", "file", "estimated"]
+# Where a recovery_logs row's numbers came from (not who typed them). Must match
+# recovery_logs_source_check and recoverySourceSchema in lib/agent/tools.ts.
+RecoverySource = Literal[
+    "manual",
+    "garmin_api",
+    "garmin_sidecar",
+    "apple_health",
+    "intervals_sync",
+    "screenshot_extract",
+]
 RecalibrationCandidateStatus = Literal[
     "pending", "accepted", "kept_current", "manual_entered", "superseded"
 ]
@@ -205,7 +215,7 @@ class RecoveryLog(BaseModel):
     subjective_energy: int | None = None
     notes: str | None = None
 
-    source: str = "manual"
+    source: RecoverySource = "manual"
 
 
 _MAX_HOURS_PER_DAY = 24.0

@@ -35,6 +35,7 @@ from backend.engine.training_load import compute_next_load
 from backend.models.athlete import (
     AthleteProfile,
     RecoveryLog,
+    RecoverySource,
     SportThreshold,
     ThresholdRecalibrationCandidate,
 )
@@ -210,6 +211,22 @@ async def test_upsert_recovery_log_preserves_metric_and_source_on_partial_second
     assert refetched.hrv_ms == 48.0
     assert refetched.source == "garmin_api"
     assert refetched.notes == "slept badly"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["garmin_sidecar", "intervals_sync"])
+async def test_upsert_recovery_log_accepts_new_provenance_sources(
+    repo: SupabaseRepository, unique_user: str, source: RecoverySource
+) -> None:
+    """recovery_logs_source_check admits the sidecar and intervals sources (#428)."""
+    await repo.upsert_athlete_profile(AthleteProfile(user_id=unique_user, coaching_state="active"))
+    log_date = date(2026, 7, 4)
+
+    saved = await repo.upsert_recovery_log(
+        RecoveryLog(user_id=unique_user, log_date=log_date, hrv_ms=50.0, source=source)
+    )
+
+    assert saved.source == source
 
 
 @pytest.mark.asyncio

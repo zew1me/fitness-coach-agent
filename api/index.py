@@ -2221,6 +2221,11 @@ class SaveRecoveryDataRequest(BaseModel):
 def _recovery_log_from_entry(entry: Mapping[str, object], user_id: str) -> RecoveryLog:
     # user_id is always derived from the bearer token; never trust the client payload.
     fields = {key: value for key, value in entry.items() if key != "user_id"}
+    # The coach tool sends source=null when it has no provenance to report. Drop it so it
+    # stays out of model_fields_set: a new row then takes the column default ('manual') and
+    # a partial update never overwrites the provenance already stored on that day's row.
+    if fields.get("source") is None:
+        fields.pop("source", None)
     if fields.get("log_date") is None:
         fields["log_date"] = datetime.now(UTC).date().isoformat()
     fields["user_id"] = user_id

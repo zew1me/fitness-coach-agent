@@ -27,6 +27,7 @@
 - `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
 - `20260920021259_restore_service_role_table_privileges.sql` — restores PostgREST DML privileges required by server-side repositories after a fresh bootstrap
 - `20261011183239_load_snapshot_null_identity.sql` — deduplicates aggregate load snapshots and makes `(user_id, snapshot_date, sport)` unique with NULLs treated as equal
+- `20261101120000_recovery_logs_source_values.sql` — adds `'garmin_sidecar'` and `'intervals_sync'` to `recovery_logs_source_check` for wellness provenance (#428)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -592,3 +593,30 @@ access model explicit and reproducible instead of relying on environment drift.
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). This is privilege metadata only; it does not rewrite application data
 or weaken RLS/browser policies.
+
+## 20261101120000 — recovery log source values (2026-11-01)
+
+**File:** `supabase/migrations/20261101120000_recovery_logs_source_values.sql`
+
+**Change:** Recreates `recovery_logs_source_check` with the existing allowed
+values (`manual`, `garmin_api`, `apple_health`, `screenshot_extract`) plus
+`garmin_sidecar` and `intervals_sync`, adding it as `NOT VALID` before
+separately validating it, mirroring `20260714130000`.
+
+**Why:** Daily wellness data arrives from the athlete's own words, wellness
+screenshots, the Garmin sidecar CLI, and intervals.icu. The coach's
+`save_recovery_data` tool now accepts a per-entry `source` so each row records
+where its numbers came from; the constraint must admit those values (#428).
+
+**Preview before applying:**
+
+```sql
+select distinct source
+from public.recovery_logs
+order by source;
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Preview and production are separate Supabase projects and must each be
+linked and applied independently. The migration only widens the allowed source
+values and requires no backfill or maintenance window.
