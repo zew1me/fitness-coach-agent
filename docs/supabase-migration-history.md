@@ -600,8 +600,9 @@ or weaken RLS/browser policies.
 
 **Change:** Replaces `recovery_logs_source_check`, which enumerated `manual`,
 `garmin_api`, `apple_health` and `screenshot_extract`, with a format check: a
-lowercase snake*case slug (`^[a-z0-9]+(*[a-z0-9]+)\*$`) of at most 64 characters.
-The constraint is added `NOT VALID`and then validated separately, mirroring`20260714130000`. Every previously allowed value already matches the new shape.
+lowercase `snake_case` slug (`^[a-z0-9]+(_[a-z0-9]+)*$`) of at most 64 characters.
+The constraint is added `NOT VALID` and then validated separately, mirroring
+`20260714130000`. Every previously allowed value already matches the new shape.
 
 **Why:** Daily wellness data arrives from an open-ended set of sources: the
 athlete's own words, screenshots, the Garmin sidecar CLI, intervals.icu, and any
