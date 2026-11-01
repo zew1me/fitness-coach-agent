@@ -3134,7 +3134,19 @@ async def test_save_recovery_data_omitted_or_null_source_defaults_to_manual_with
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("recovery_user_context")
-async def test_save_recovery_data_rejects_unknown_source(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("raw_source", "stored"),
+    [
+        ("whoop", "whoop"),
+        ("Oura Ring", "oura_ring"),
+        ("  Eight Sleep ", "eight_sleep"),
+        ("Elite-HRV", "elite_hrv"),
+        ("Polar Flow (export)", "polar_flow_export"),
+    ],
+)
+async def test_save_recovery_data_accepts_any_source_as_normalized_slug(
+    monkeypatch, raw_source: str, stored: str
+) -> None:
     repository = RecoveryRepository()
     monkeypatch.setattr(api_index, "repo", repository)
 
@@ -3142,7 +3154,25 @@ async def test_save_recovery_data_rejects_unknown_source(monkeypatch) -> None:
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/engine/save-recovery-data",
-            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, "source": "whoop"}]},
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, "source": raw_source}]},
+        )
+
+    assert response.status_code == 200
+    assert repository.saved[0].source == stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+@pytest.mark.parametrize("raw_source", ["--", "   ", "x" * 65])
+async def test_save_recovery_data_rejects_unusable_source(monkeypatch, raw_source: str) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, "source": raw_source}]},
         )
 
     assert response.status_code == 422

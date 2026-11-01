@@ -2243,7 +2243,11 @@ async def save_recovery_data_endpoint(
     try:
         logs = [_recovery_log_from_entry(entry, user_id) for entry in payload.entries]
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        # Validator ValueErrors land in ctx as exception objects, which FastAPI cannot
+        # JSON-encode; without include_context=False a bad source would surface as a 500.
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_context=False, include_url=False)
+        ) from exc
 
     saved: list[Mapping[str, object]] = []
     try:

@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, date, datetime
 from typing import Literal
 
@@ -7,16 +8,22 @@ from pydantic import BaseModel, Field, field_validator
 # "user" = athlete typed it; "file" = extracted from GPX/FIT/screenshot;
 # "estimated" = derived by the system from workout patterns.
 ThresholdSource = Literal["user", "file", "estimated"]
-# Where a recovery_logs row's numbers came from (not who typed them). Must match
-# recovery_logs_source_check and recoverySourceSchema in lib/agent/tools.ts.
-RecoverySource = Literal[
-    "manual",
-    "garmin_api",
-    "garmin_sidecar",
-    "apple_health",
-    "intervals_sync",
-    "screenshot_extract",
-]
+# Recovery-log provenance is open-ended (any device or app the coach can identify), so it is
+# normalized to a lowercase snake_case slug rather than checked against a vendor list. The
+# shape matches recovery_logs_source_check: "Eight Sleep" -> "eight_sleep".
+RECOVERY_SOURCE_MAX_LENGTH = 64
+_NON_SLUG_CHARS = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_recovery_source(value: str) -> str:
+    slug = _NON_SLUG_CHARS.sub("_", value.strip().lower()).strip("_")
+    if not slug:
+        raise ValueError("source must contain at least one letter or digit")
+    if len(slug) > RECOVERY_SOURCE_MAX_LENGTH:
+        raise ValueError(f"source must be at most {RECOVERY_SOURCE_MAX_LENGTH} characters")
+    return slug
+
+
 RecalibrationCandidateStatus = Literal[
     "pending", "accepted", "kept_current", "manual_entered", "superseded"
 ]
@@ -215,7 +222,12 @@ class RecoveryLog(BaseModel):
     subjective_energy: int | None = None
     notes: str | None = None
 
-    source: RecoverySource = "manual"
+    source: str = "manual"
+
+    @field_validator("source")
+    @classmethod
+    def _normalize_source(cls, value: str) -> str:
+        return normalize_recovery_source(value)
 
 
 _MAX_HOURS_PER_DAY = 24.0

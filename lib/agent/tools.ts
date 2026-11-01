@@ -128,16 +128,10 @@ const uploadedFileInputSchema = z.object({
   public_url: z.string().nullable(),
 });
 
-// Where the numbers came from, not who typed them. Must match
-// recovery_logs_source_check and RecoverySource in backend/models/athlete.py.
-const recoverySourceSchema = z.enum([
-  "manual",
-  "garmin_api",
-  "garmin_sidecar",
-  "apple_health",
-  "intervals_sync",
-  "screenshot_extract",
-]);
+// Where the numbers came from, not who typed them. Deliberately open-ended: any device or
+// app the coach can identify is a valid source. The backend normalizes it to the snake_case
+// slug recovery_logs_source_check expects ("Eight Sleep" -> "eight_sleep").
+const recoverySourceSchema = z.string().trim().min(1).max(64);
 
 const recoveryEntrySchema = z.object({
   body_battery: z.number().int().min(0).max(100).nullable(),
@@ -344,7 +338,7 @@ export const coachToolDefinitions = {
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(
-    "Persist recovery and wellness observations. Set each entry's source to where the numbers came from, not who typed them: screenshot_extract for a wellness screenshot, garmin_api/garmin_sidecar/apple_health/intervals_sync for device or sync exports (including pasted exports), and manual (or null) only for the athlete's own subjective report.",
+    "Persist recovery and wellness observations. Set each entry's source to where the numbers came from, not who typed them, as a short snake_case name: e.g. manual (or null) for the athlete's own subjective report, screenshot_extract for a wellness screenshot, or the device/app for exports and syncs (garmin_api, garmin_sidecar, intervals_sync, apple_health, whoop, oura, polar, fitbit, suunto, withings, eight_sleep, elite_hrv, ...). Any identifiable source is accepted; a pasted device export is never manual.",
     recoveryInputSchema,
   ),
   update_schedule: defineTool(

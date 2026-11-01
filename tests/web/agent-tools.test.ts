@@ -1472,12 +1472,12 @@ describe("createAgentCoachTools input validation errors", () => {
 
     it.each([
       "manual",
-      "garmin_api",
       "garmin_sidecar",
-      "apple_health",
       "intervals_sync",
-      "screenshot_extract",
-    ])("accepts source %s", (source) => {
+      "whoop",
+      "Oura Ring",
+      "eight_sleep",
+    ])("accepts open-ended source %s", (source) => {
       expect(
         schema.parse({ entries: [{ ...baseEntry, source }] }),
       ).toMatchObject({ entries: [{ source }] });
@@ -1489,10 +1489,13 @@ describe("createAgentCoachTools input validation errors", () => {
       ).toMatchObject({ entries: [{ source: null }] });
     });
 
-    it("rejects an unknown source at the Zod boundary", () => {
-      expect(() =>
-        schema.parse({ entries: [{ ...baseEntry, source: "whoop" }] }),
-      ).toThrow();
-    });
+    it.each(["", "   ", "x".repeat(65)])(
+      "rejects an empty or oversized source %j at the Zod boundary",
+      (source) => {
+        expect(() =>
+          schema.parse({ entries: [{ ...baseEntry, source }] }),
+        ).toThrow();
+      },
+    );
   });
 });

@@ -27,7 +27,7 @@
 - `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
 - `20260920021259_restore_service_role_table_privileges.sql` — restores PostgREST DML privileges required by server-side repositories after a fresh bootstrap
 - `20261011183239_load_snapshot_null_identity.sql` — deduplicates aggregate load snapshots and makes `(user_id, snapshot_date, sport)` unique with NULLs treated as equal
-- `20261101120000_recovery_logs_source_values.sql` — adds `'garmin_sidecar'` and `'intervals_sync'` to `recovery_logs_source_check` for wellness provenance (#428)
+- `20261101120000_recovery_logs_source_free_form.sql` — replaces the vendor list in `recovery_logs_source_check` with a snake_case slug format check so wellness provenance is open-ended (#428)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -594,19 +594,22 @@ access model explicit and reproducible instead of relying on environment drift.
 locally). This is privilege metadata only; it does not rewrite application data
 or weaken RLS/browser policies.
 
-## 20261101120000 — recovery log source values (2026-11-01)
+## 20261101120000 — free-form recovery log source (2026-11-01)
 
-**File:** `supabase/migrations/20261101120000_recovery_logs_source_values.sql`
+**File:** `supabase/migrations/20261101120000_recovery_logs_source_free_form.sql`
 
-**Change:** Recreates `recovery_logs_source_check` with the existing allowed
-values (`manual`, `garmin_api`, `apple_health`, `screenshot_extract`) plus
-`garmin_sidecar` and `intervals_sync`, adding it as `NOT VALID` before
-separately validating it, mirroring `20260714130000`.
+**Change:** Replaces `recovery_logs_source_check`, which enumerated `manual`,
+`garmin_api`, `apple_health` and `screenshot_extract`, with a format check: a
+lowercase snake*case slug (`^[a-z0-9]+(*[a-z0-9]+)\*$`) of at most 64 characters.
+The constraint is added `NOT VALID`and then validated separately, mirroring`20260714130000`. Every previously allowed value already matches the new shape.
 
-**Why:** Daily wellness data arrives from the athlete's own words, wellness
-screenshots, the Garmin sidecar CLI, and intervals.icu. The coach's
-`save_recovery_data` tool now accepts a per-entry `source` so each row records
-where its numbers came from; the constraint must admit those values (#428).
+**Why:** Daily wellness data arrives from an open-ended set of sources: the
+athlete's own words, screenshots, the Garmin sidecar CLI, intervals.icu, and any
+device or app an athlete exports from (Whoop, Oura, Polar, Fitbit, Withings,
+Eight Sleep, ...). The coach's `save_recovery_data` tool now passes a free-form
+per-entry `source`. The API normalizes it to a slug (`"Eight Sleep"` →
+`eight_sleep`), so the database only guards the shape and needs no new migration
+for each new vendor (#428).
 
 **Preview before applying:**
 
@@ -618,5 +621,5 @@ order by source;
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). Preview and production are separate Supabase projects and must each be
-linked and applied independently. The migration only widens the allowed source
-values and requires no backfill or maintenance window.
+linked and applied independently. Existing values all satisfy the new check, so
+no backfill or maintenance window is needed.
