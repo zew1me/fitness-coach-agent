@@ -363,13 +363,14 @@ actionlint needs no manual install: `scripts/actionlint.sh` downloads the pinned
 
 ### Pre-push (full CI gate)
 
-Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus three additional static checks:
+Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus two additional static checks (`cpd`, `knip`):
 
 | Step                | Command                                                                       |
 | ------------------- | ----------------------------------------------------------------------------- |
 | `lint`              | `bun run lint`                                                                |
 | `stylelint`         | `bun run lint:css`                                                            |
 | `actionlint`        | `bun run lint:actions`                                                        |
+| `ast-grep`          | `bun run ast-grep:check`                                                      |
 | `ruff-check`        | `uv run ruff check .`                                                         |
 | `ruff-format-check` | `uv run ruff format --check .`                                                |
 | `typecheck`         | `bun run typecheck`                                                           |
