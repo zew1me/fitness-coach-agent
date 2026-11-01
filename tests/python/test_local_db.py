@@ -3,12 +3,18 @@ import pytest
 from tests.python.local_db import DEFAULT_LOCAL_DB_URL, direct_session, local_db_url
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_pgservice(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An inherited PGSERVICE makes local_db_url() fail on the service check before it reaches
+    # the host checks these tests assert on.
+    monkeypatch.delenv("PGSERVICE", raising=False)
+
+
 def test_local_db_url_defaults_to_the_local_supabase_postgres(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("LOCAL_SUPABASE_DB_URL", raising=False)
     monkeypatch.delenv("PGHOSTADDR", raising=False)
-    monkeypatch.delenv("PGSERVICE", raising=False)
 
     assert local_db_url() == DEFAULT_LOCAL_DB_URL
 

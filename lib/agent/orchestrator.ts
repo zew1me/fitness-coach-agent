@@ -13,6 +13,8 @@ import {
   type UIMessage,
 } from "ai";
 
+import { createLogger, type Logger } from "../logger";
+
 import { toAgentInputItems } from "./agent-input";
 import { finishAgentText } from "./agent-stream";
 import {
@@ -76,6 +78,8 @@ type StreamCoachTurnBaseOptions = {
   baseUrl: string;
   context: AthleteContextBundle;
   extraHeaders?: Record<string, string>;
+  // Defaults to the Sentry + console fan-out; tests inject a spy or no-op.
+  logger?: Logger;
   messages: UIMessage[];
   messagesAreModelSelected?: boolean;
   signal?: AbortSignal;
@@ -118,6 +122,7 @@ type PrepareDurableSessionOptions = {
   extraHeaders?: Record<string, string>;
   leaseId: string;
   leaseState?: ChatTurnLeaseState;
+  logger: Logger;
   markLeaseAcquired: () => void;
   selectedMessages: UIMessage[];
   signal?: AbortSignal;
@@ -145,6 +150,7 @@ function prepareBootstrapItems(
 function trimBootstrapToBudget(
   session: SupabaseAgentSession,
   messages: UIMessage[],
+  logger: Logger,
 ): UIMessage[] {
   for (let start = 0; start < messages.length; start += 1) {
     const candidate = messages.slice(start);
@@ -157,7 +163,7 @@ function trimBootstrapToBudget(
   }
   // Every suffix exceeds the budget — seed the session cold rather than
   // exceeding the token limit.  Log so this case is visible in production.
-  Sentry.logger.warn(
+  logger.warn(
     "coach: trimBootstrapToBudget: all messages exceed budget; session seeded cold",
     { messageCount: messages.length },
   );
@@ -170,6 +176,7 @@ async function initializeSessionFromTranscript(options: {
   baseUrl: string;
   extraHeaders?: Record<string, string>;
   currentMessageIds: Set<string>;
+  logger: Logger;
   signal?: AbortSignal;
 }): Promise<void> {
   if ((await options.session.getItems()).length > 0) return;
@@ -201,7 +208,11 @@ async function initializeSessionFromTranscript(options: {
       estimateStoredContext(candidateItems).estimatedTokens >
       COLD_SEED_TOKEN_BUDGET
     ) {
-      selected = trimBootstrapToBudget(options.session, candidate);
+      selected = trimBootstrapToBudget(
+        options.session,
+        candidate,
+        options.logger,
+      );
       break;
     }
     selected = candidate;
@@ -233,7 +244,7 @@ async function persistAssistantMessage(
   options: Pick<
     StreamCoachTurnOptions,
     "accessToken" | "baseUrl" | "extraHeaders"
-  >,
+  > & { logger: Logger },
   responseMessage: UIMessage,
   finishReason: string | undefined,
 ): Promise<void> {
@@ -258,17 +269,17 @@ async function persistAssistantMessage(
       }),
     });
     if (!response.ok) {
-      Sentry.logger.error("coach: persist assistant reply failed", {
+      options.logger.error("coach: persist assistant reply failed", {
         status: response.status,
       });
-      console.error("[chat] persist assistant reply failed:", response.status);
     }
   } catch (error) {
     Sentry.captureException(error, {
       tags: { subsystem: "persist-assistant" },
     });
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("[chat] persist assistant reply error:", message);
+    options.logger.error("coach: persist assistant reply error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -295,7 +306,7 @@ async function acquireDurableLeaseState(
     Sentry.captureException(leaseError, {
       tags: { subsystem: "lease-acquire", degrading: "true" },
     });
-    Sentry.logger.warn(
+    options.logger.warn(
       "coach: lease fetch failed; degrading to stateless mode",
       {
         error:
@@ -354,6 +365,7 @@ async function buildDurableSession(
     currentMessageIds: new Set(
       options.selectedMessages.map((message) => message.id),
     ),
+    logger: options.logger,
     ...(options.signal ? { signal: options.signal } : {}),
   });
   progress.step = "project";
@@ -410,7 +422,7 @@ async function prepareDurableSession(
         step: progress.step,
       },
     });
-    Sentry.logger.warn(
+    options.logger.warn(
       "coach: durable session setup failed; degrading to stateless mode",
       {
         error: error instanceof Error ? error.message : String(error),
@@ -457,6 +469,7 @@ function createTavilyServer(url: string | undefined): MCPServer | null {
 async function connectTavilyTools(
   server: MCPServer,
   signal: AbortSignal,
+  logger: Logger,
 ): Promise<Tool<CoachAgentRunContext>[]> {
   try {
     await server.connect();
@@ -466,7 +479,7 @@ async function connectTavilyTools(
     Sentry.captureException(error, {
       tags: { subsystem: "tavily-setup", degrading: "true" },
     });
-    Sentry.logger.warn("coach: Tavily setup failed; continuing without it", {
+    logger.warn("coach: Tavily setup failed; continuing without it", {
       error: error instanceof Error ? error.message : String(error),
     });
     return [];
@@ -475,11 +488,14 @@ async function connectTavilyTools(
 
 // Runs in the turn's finally block, where a throw would replace the turn's own
 // outcome — including after a degraded setup that never connected.
-async function closeTavilyServer(server: MCPServer): Promise<void> {
+async function closeTavilyServer(
+  server: MCPServer,
+  logger: Logger,
+): Promise<void> {
   try {
     await server.close();
   } catch (error) {
-    Sentry.logger.warn("coach: Tavily close failed", {
+    logger.warn("coach: Tavily close failed", {
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -541,6 +557,7 @@ type CoachTurnRequest = {
   baseUrl: string;
   context: AthleteContextBundle;
   extraHeaders: Record<string, string> | undefined;
+  logger: Logger;
   providedLeaseId: string | undefined;
   runContext: CoachAgentRunContext;
   selectedMessages: UIMessage[];
@@ -664,6 +681,7 @@ async function prepareTurnSession(
     ...(request.extraHeaders ? { extraHeaders: request.extraHeaders } : {}),
     leaseId: lifecycle.leaseId,
     ...(request.acquiredLease ? { leaseState: request.acquiredLease } : {}),
+    logger: request.logger,
     markLeaseAcquired: () => markLeaseAcquired(request, lifecycle),
     selectedMessages: request.selectedMessages,
     signal: lifecycle.effectiveSignal,
@@ -704,7 +722,7 @@ async function planDelegation(
         tags: { subsystem: "delegation-planner" },
       });
     }
-    Sentry.logger.warn("coach: delegation failed; continuing lead-only");
+    turn.request.logger.warn("coach: delegation failed; continuing lead-only");
     return { delegations: [] };
   }
 }
@@ -735,7 +753,9 @@ async function consultSpecialists(
     Sentry.captureException(error, {
       tags: { subsystem: "specialists" },
     });
-    Sentry.logger.warn("coach: specialist run failed; continuing lead-only");
+    turn.request.logger.warn(
+      "coach: specialist run failed; continuing lead-only",
+    );
     return [];
   }
 }
@@ -775,7 +795,11 @@ async function runCoachTurn(
     const tavilyTools =
       tavilyServer === null
         ? []
-        : await connectTavilyTools(tavilyServer, lifecycle.effectiveSignal);
+        : await connectTavilyTools(
+            tavilyServer,
+            lifecycle.effectiveSignal,
+            request.logger,
+          );
     await runLeadModelLadder(
       {
         accessToken: request.accessToken,
@@ -799,7 +823,9 @@ async function runCoachTurn(
     );
   } finally {
     lifecycle.rateLimits.flushToBreaker(startingAdmission);
-    if (tavilyServer !== null) await closeTavilyServer(tavilyServer);
+    if (tavilyServer !== null) {
+      await closeTavilyServer(tavilyServer, request.logger);
+    }
   }
 }
 
@@ -837,14 +863,14 @@ async function traceCoachTurn(
 }
 
 function finishTurnStream(
+  request: CoachTurnRequest,
   writer: UIMessageStreamWriter,
   textState: StreamTextState,
-  userId: string,
 ): void {
   finishAgentText(writer, textState);
-  Sentry.logger.info("coach turn complete", {
+  request.logger.info("coach turn complete", {
     textStarted: textState.textStarted,
-    user_id: userId,
+    user_id: request.context.profile.user_id,
   });
   writer.write({ type: "finish-step" });
   writer.write({ type: "finish", finishReason: "stop" });
@@ -882,10 +908,9 @@ function failTurnStream(
     });
   }
   const message = error instanceof Error ? error.message : String(error);
-  console.error(
-    "[chat] stream error:",
-    message.replace(/key=[^&\s]+/g, "key=***"),
-  );
+  request.logger.error("coach: stream error", {
+    error: message.replace(/key=[^&\s]+/g, "key=***"),
+  });
 }
 
 async function cleanUpTurn(
@@ -925,11 +950,7 @@ async function executeCoachTurn(
       { lifecycle, request, session, writer },
       startingAdmission,
     );
-    finishTurnStream(
-      writer,
-      lifecycle.textState,
-      request.context.profile.user_id,
-    );
+    finishTurnStream(request, writer, lifecycle.textState);
   } catch (error) {
     failTurnStream(request, writer, lifecycle, error);
   } finally {
@@ -944,6 +965,7 @@ export function streamCoachTurn({
   context,
   extraHeaders,
   leaseId: providedLeaseId,
+  logger = createLogger(),
   messages,
   messagesAreModelSelected = false,
   signal,
@@ -962,6 +984,7 @@ export function streamCoachTurn({
     baseUrl,
     context,
     extraHeaders,
+    logger,
     providedLeaseId,
     runContext: {
       hasActivityFileAttachment: hasActivityFileAttachment(latestUserTurn),
@@ -987,6 +1010,7 @@ export function streamCoachTurn({
           accessToken,
           baseUrl,
           ...(extraHeaders ? { extraHeaders } : {}),
+          logger,
         },
         responseMessage,
         finishReason,

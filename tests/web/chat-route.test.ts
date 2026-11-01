@@ -1620,8 +1620,9 @@ describe("app/api/chat route deferred cleanup", () => {
     expect(Sentry.logger.warn).toHaveBeenCalledWith(
       "chat: Sentry.flush timed out; some spans may be lost",
     );
+    // The facade sends the same line to both channels (issue #267).
     expect(consoleSpy).toHaveBeenCalledWith(
-      "[chat] Sentry.flush timed out; some spans may be lost",
+      "chat: Sentry.flush timed out; some spans may be lost",
     );
     consoleSpy.mockRestore();
   });
