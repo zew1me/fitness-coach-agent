@@ -642,3 +642,24 @@ rows: until PR B runs, historical activities have no source. Do not deploy
 application code that calls `create_activity_with_source` before this migration
 is applied. Per-environment backfill and contract status will be recorded here by
 PR B and PR C.
+
+**Preview deployment repair (2026-11-01, PR #534):** Sentry issue `7822499376`
+reported `PGRST202` from `/api/engine/process-uploaded-file` on the PR preview.
+The preview project `psbteexygkspyotkyflc` (`fitness-coach-agent-preview`) was
+missing this migration; the CLI migration list and push dry run confirmed it was
+the only pending migration. Applied it with `supabase db push --linked
+--skip-vault` after verifying the linked project and obtaining approval. The
+remote migration list now includes `20261027190000`, and a subsequent dry run
+reports no pending migrations. Catalog checks confirmed the RPC's named arguments
+and service-role-only execution grants; the live PostgREST OpenAPI schema also
+exposes the RPC and `activity_sources`. No activity was inserted for verification.
+Production was not inspected or changed; this is not a production-apply record.
+Historical-source backfill and the contract step remain pending.
+
+For a recurrence, first verify the failing deployment's Supabase target, then
+check that environment's migration list and the catalog signature
+`public.create_activity_with_source(text,jsonb,jsonb)`. Apply a missing migration
+only after reviewing the dry run and approving the target. If the function exists
+but PostgREST still cannot find it, investigate its grants and schema cache rather
+than replaying the migration. Do not fall back to an untracked direct activity
+insert: that would discard source capture on an unmigrated database.
