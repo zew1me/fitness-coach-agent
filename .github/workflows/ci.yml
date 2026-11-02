@@ -26,6 +26,8 @@ jobs:
       - run: bun run ast-grep:check
       - run: bun run typecheck
       - run: bun run test
+      - run: bun run cpd
+      - run: bun run knip
 
   ui:
     runs-on: ubuntu-latest
