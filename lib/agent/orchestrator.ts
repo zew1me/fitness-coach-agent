@@ -375,7 +375,10 @@ async function buildDurableSession(
   ];
   const estimate = estimateStoredContext(projected);
   progress.step = "compact";
-  const durableSession = new DurableCompactionSession({ underlyingSession });
+  const durableSession = new DurableCompactionSession({
+    underlyingSession,
+    logger: options.logger,
+  });
   await compactIfNeeded(durableSession, estimate);
   return { durableSession, traceGroupId, underlyingSession };
 }
@@ -712,6 +715,7 @@ async function planDelegation(
       coachingMemory,
       athleteContext: turn.request.context,
       tier: specialistTier,
+      logger: turn.request.logger,
     });
   } catch (error) {
     if (isRateLimitError(error)) {
@@ -748,6 +752,7 @@ async function consultSpecialists(
       onRateLimit: turn.lifecycle.rateLimits.note,
       slices: buildContextSlices(turn.request.context),
       timeZone: turn.request.timeZone,
+      logger: turn.request.logger,
     });
   } catch (error) {
     Sentry.captureException(error, {
@@ -810,6 +815,7 @@ async function runCoachTurn(
         durableSession: session.durableSession,
         extraHeaders: request.extraHeaders,
         lifecycle,
+        logger: request.logger,
         reports,
         runContext: request.runContext,
         selectedMessages: request.selectedMessages,

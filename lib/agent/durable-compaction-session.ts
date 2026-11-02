@@ -9,8 +9,9 @@ import {
   type OpenAIResponsesCompactionResult,
   type SessionHistoryRewriteAwareSession,
 } from "@openai/agents";
-import * as Sentry from "@sentry/nextjs";
 import OpenAI from "openai";
+
+import { defaultLogger, type Logger } from "../logger";
 
 import {
   sanitizeResponsesCompactInputItem,
@@ -202,6 +203,7 @@ function buildCompactionMetadata(
 type CompactResponse = Awaited<ReturnType<OpenAI["responses"]["compact"]>>;
 
 function logCompactionTelemetry(params: {
+  logger: Logger;
   trigger: CompactionTrigger;
   before: StoredContextEstimate;
   preparedInputTokens: number;
@@ -211,6 +213,7 @@ function logCompactionTelemetry(params: {
   compacted: CompactResponse;
 }): void {
   const {
+    logger,
     trigger,
     before,
     preparedInputTokens,
@@ -227,7 +230,7 @@ function logCompactionTelemetry(params: {
     preparedInputTokens,
     compacted.usage.input_tokens,
   );
-  Sentry.logger.info("coach compaction complete", {
+  logger.info("coach compaction complete", {
     trigger,
     before_bytes: before.bytes,
     before_tokens: before.estimatedTokens,
@@ -285,6 +288,7 @@ type CompactionSessionOptions = {
   model?: string;
   autoCompactTokens?: number;
   autoCompactNonUserItems?: number;
+  logger?: Logger;
 };
 
 export class DurableCompactionSession implements OpenAIResponsesCompactionAwareSession {
@@ -356,6 +360,7 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     );
 
     logCompactionTelemetry({
+      logger: this.options.logger ?? defaultLogger,
       trigger,
       before,
       preparedInputTokens,

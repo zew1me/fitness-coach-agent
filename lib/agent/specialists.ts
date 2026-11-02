@@ -2,6 +2,8 @@ import { Agent, run } from "@openai/agents";
 import * as Sentry from "@sentry/nextjs";
 import type { UIMessage } from "ai";
 
+import { defaultLogger, type Logger } from "../logger";
+
 import { toAgentInputItems } from "./agent-input";
 import { selectMessagesForModel } from "./message-context";
 import {
@@ -39,6 +41,7 @@ type RunSpecialistsOptions = {
   coachingMemory?: Array<Record<string, unknown>>;
   onRateLimit?: (tier: ModelTier, error: unknown) => void;
   timeZone?: string | undefined;
+  logger?: Logger;
 };
 
 function orderRoles(roles: InternalSpecialistRole[]): InternalSpecialistRole[] {
@@ -55,6 +58,7 @@ type RunSingleSpecialistOptions = {
   selectedMessages: UIMessage[];
   slices: ContextSlices;
   timeZone: string | undefined;
+  logger: Logger;
 };
 
 // One specialist's execution failure (timeout, no output, malformed report)
@@ -76,6 +80,7 @@ async function runSingleSpecialist({
   selectedMessages,
   slices,
   timeZone,
+  logger,
 }: RunSingleSpecialistOptions): Promise<SpecialistReport | null> {
   const agent = new Agent({
     name: `${role[0]?.toUpperCase()}${role.slice(1)} specialist`,
@@ -99,7 +104,7 @@ async function runSingleSpecialist({
     const result = await run(agent, toAgentInputItems(selectedMessages), {
       maxTurns: 1,
     });
-    recordStageUsage("specialist", result.state.usage);
+    recordStageUsage("specialist", result.state.usage, logger);
 
     const finalOutput = result.finalOutput;
     if (!finalOutput) {
@@ -109,7 +114,7 @@ async function runSingleSpecialist({
     const { droppedProposedUpdateCount, report } =
       repairSpecialistReport(finalOutput);
     if (droppedProposedUpdateCount > 0) {
-      Sentry.logger.warn(
+      logger.warn(
         `coach: dropped ${droppedProposedUpdateCount} invalid proposedUpdate(s) from ${role} specialist report`,
       );
     }
@@ -142,7 +147,7 @@ async function runSingleSpecialist({
         tags: { role, subsystem: "specialists" },
       });
     }
-    Sentry.logger.warn(`coach: ${role} specialist failed; skipping`);
+    logger.warn(`coach: ${role} specialist failed; skipping`);
     return null;
   }
 }
@@ -157,6 +162,7 @@ export async function runSpecialists({
   coachingMemory = [],
   onRateLimit,
   timeZone,
+  logger = defaultLogger,
 }: RunSpecialistsOptions): Promise<SpecialistReport[]> {
   const selectedMessages = messagesAreModelSelected
     ? messages
@@ -187,6 +193,7 @@ export async function runSpecialists({
         selectedMessages,
         slices,
         timeZone,
+        logger,
       });
     }),
   );
