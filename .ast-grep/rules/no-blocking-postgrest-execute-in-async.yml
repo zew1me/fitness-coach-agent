@@ -1,0 +1,31 @@
+id: no-blocking-postgrest-execute-in-async
+language: Python
+severity: error
+message: Do not call a synchronous `.execute()` inline inside an `async def`.
+note: |
+  The synchronous Supabase client's `execute()` does blocking HTTP I/O and stalls every other
+  request on the event loop (#283). In SupabaseRepository use `await _execute(query)`, which runs
+  it in a worker thread; with an async client, `await` the call. Handlers should go through a
+  repository method rather than issuing PostgREST queries themselves.
+files:
+  - api/**/*.py
+  - backend/**/*.py
+rule:
+  pattern: $QUERY.execute()
+  inside:
+    kind: function_definition
+    regex: ^async\s
+    stopBy:
+      kind: function_definition
+  not:
+    any:
+      # An awaited execute() belongs to an async client, which does not block.
+      - inside:
+          kind: await
+          stopBy:
+            kind: function_definition
+      # A lambda body runs wherever it is called (e.g. handed to a worker thread).
+      - inside:
+          kind: lambda
+          stopBy:
+            kind: function_definition

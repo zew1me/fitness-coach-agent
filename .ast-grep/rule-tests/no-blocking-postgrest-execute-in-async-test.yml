@@ -1,0 +1,40 @@
+id: no-blocking-postgrest-execute-in-async
+valid:
+  - |
+    async def read(client):
+        return await client.table("goals").select("*").execute()
+  - |
+    async def read(client):
+        return await (client.table("goals").select("*").eq("id", 1).execute())
+  - |
+    async def read(query):
+        return await asyncio.to_thread(query.execute)
+  - |
+    async def read(query):
+        return await _execute(query)
+  - |
+    async def read(query):
+        return await asyncio.to_thread(lambda: query.execute())
+  - |
+    def read(client):
+        return client.table("goals").select("*").execute()
+  - |
+    async def outer(client):
+        def inner():
+            return client.table("goals").select("*").execute()
+        return await asyncio.to_thread(inner)
+invalid:
+  - |
+    async def read(client):
+        return client.table("goals").select("*").execute()
+  - |
+    async def write(client, payload):
+        response = client.table("goals").insert(payload).execute()
+        return response.data
+  - |
+    class Repo:
+        async def update(self, client):
+            client.table("goals").update({"a": 1}).eq("id", 1).execute()
+  - |
+    async def read(query, flag):
+        return query.upsert(1).execute() if flag else await _execute(query)
