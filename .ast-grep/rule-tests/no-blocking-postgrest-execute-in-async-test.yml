@@ -38,3 +38,9 @@ invalid:
   - |
     async def read(query, flag):
         return query.upsert(1).execute() if flag else await _execute(query)
+  - |
+    async def read(query):
+        return await asyncio.to_thread(query.execute())
+  - |
+    async def read(query):
+        return (lambda: query.execute())()
