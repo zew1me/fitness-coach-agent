@@ -12,6 +12,12 @@ import { mockAuthenticatedSession, TEST_USER_ID } from "./helpers/session";
 
 const MESSAGE_COUNT = 40;
 
+// Portrait phone, plus a short landscape phone where the chip cap must shrink.
+const CHIP_VIEWPORTS = [
+  { width: 390, height: 844 },
+  { width: 568, height: 320 },
+];
+
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
   "base64",
@@ -72,39 +78,46 @@ test.describe("mobile chat viewport fit (#540)", () => {
       scrollHeight: el.scrollHeight,
     }));
     expect(overflow.scrollHeight).toBeGreaterThan(overflow.clientHeight);
+    // scrollTo works even under overflow:hidden, so also require user-scrollable overflow.
+    expect(["auto", "scroll"]).toContain(
+      await pane.evaluate((el) => getComputedStyle(el).overflowY),
+    );
     await pane.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
     await expect(
       page.getByText(`Message ${MESSAGE_COUNT - 1}: keep it steady.`),
     ).toBeInViewport();
   });
 
-  test("many attachment chips scroll inside the composer, keeping Send on screen", async ({
-    page,
-  }) => {
-    await mockLongThread(page);
-    await page.goto("/");
-    const label = page.getByLabel("Add photo or activity file");
-    const [fileChooser] = await Promise.all([
-      page.waitForEvent("filechooser"),
-      label.click(),
-    ]);
-    await fileChooser.setFiles(
-      Array.from({ length: 30 }, (_, i) => ({
-        name: `workout-${i}.png`,
-        mimeType: "image/png",
-        buffer: PNG_1X1,
-      })),
-    );
-    await expect(page.getByText("workout-29.png")).toBeAttached();
+  for (const viewport of CHIP_VIEWPORTS) {
+    test(`many attachment chips scroll inside the composer, keeping Send on screen (${viewport.width}x${viewport.height})`, async ({
+      page,
+    }) => {
+      await mockLongThread(page);
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      const label = page.getByLabel("Add photo or activity file");
+      const [fileChooser] = await Promise.all([
+        page.waitForEvent("filechooser"),
+        label.click(),
+      ]);
+      await fileChooser.setFiles(
+        Array.from({ length: 30 }, (_, i) => ({
+          name: `workout-${i}.png`,
+          mimeType: "image/png",
+          buffer: PNG_1X1,
+        })),
+      );
+      await expect(page.getByText("workout-29.png")).toBeAttached();
 
-    const send = page.getByRole("button", { name: /^Send$/i });
-    const box = await send.boundingBox();
-    expect(box).not.toBeNull();
-    expect(box!.y + box!.height).toBeLessThanOrEqual(844);
-    const { scrollHeight, innerHeight } = await page.evaluate(() => ({
-      scrollHeight: document.documentElement.scrollHeight,
-      innerHeight: window.innerHeight,
-    }));
-    expect(scrollHeight).toBeLessThanOrEqual(innerHeight);
-  });
+      const send = page.getByRole("button", { name: /^Send$/i });
+      const box = await send.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
+      const { scrollHeight, innerHeight } = await page.evaluate(() => ({
+        scrollHeight: document.documentElement.scrollHeight,
+        innerHeight: window.innerHeight,
+      }));
+      expect(scrollHeight).toBeLessThanOrEqual(innerHeight);
+    });
+  }
 });
