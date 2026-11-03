@@ -2593,3 +2593,29 @@ async def test_repository_writes_do_not_block_the_event_loop() -> None:
 
     assert client.loop_was_free == [True]
     assert inner._tables["athlete_profiles"]._rows[0]["user_id"] == "athlete-1"
+
+
+@pytest.mark.asyncio
+async def test_confirm_active_threshold_marks_only_the_active_row_user_confirmed() -> None:
+    inner = FakeSupabaseClient(
+        threshold_rows=[
+            {"user_id": "athlete-1", "sport": "cycling", "superseded_at": None, "source": "auto"},
+            {
+                "user_id": "athlete-1",
+                "sport": "cycling",
+                "superseded_at": "2026-01-01T00:00:00+00:00",
+                "source": "auto",
+            },
+            {"user_id": "athlete-1", "sport": "running", "superseded_at": None, "source": "auto"},
+        ]
+    )
+    client = _EventLoopProbeClient(inner)
+    repo = SupabaseRepository(client=client)
+
+    await _run_while_probing_loop(client, repo.confirm_active_threshold("athlete-1", "cycling"))
+
+    assert client.loop_was_free == [True]
+    rows = inner._tables["sport_thresholds"]._rows
+    assert [row["source"] for row in rows] == ["user", "auto", "auto"]
+    assert rows[0]["estimation_method"] == "manual"
+    assert rows[0]["confidence"] == "high"

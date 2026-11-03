@@ -378,6 +378,17 @@ class SupabaseRepository:
         )
         return [SportThreshold.model_validate(r) for r in (response.data or [])]
 
+    async def confirm_active_threshold(self, user_id: str, sport: str) -> None:
+        """Mark the athlete's active threshold for ``sport`` as user-confirmed."""
+        client = self._require_client()
+        await _execute(
+            client.table("sport_thresholds")
+            .update({"estimation_method": "manual", "confidence": "high", "source": "user"})
+            .eq("user_id", user_id)
+            .eq("sport", sport)
+            .is_("superseded_at", "null")
+        )
+
     async def upsert_sport_threshold(self, threshold: SportThreshold) -> SportThreshold:
         client = self._require_client()
         # Supersede existing active threshold for this sport
