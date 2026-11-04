@@ -66,6 +66,34 @@ def test_efforts_without_a_long_anchor_are_medium_confidence() -> None:
     assert fit.confidence == "medium"
 
 
+def test_repeated_durations_count_as_one_effort() -> None:
+    fit = fit_critical_power([_effort(180), _effort(1200), _effort(1200)])
+
+    assert fit.cp_standard_error_watts is None
+    assert fit.confidence == "low"
+
+
+def test_only_the_best_effort_at_a_duration_is_fit() -> None:
+    efforts = [_effort(180), _effort(1200)]
+
+    assert fit_critical_power([*efforts, MaxEffort(1200, 250)]) == fit_critical_power(efforts)
+
+
+@pytest.mark.parametrize(
+    "durations",
+    [
+        (180, 1195, 1200),
+        (300, 305, 1200),
+    ],
+)
+def test_near_identical_durations_do_not_cross_check_each_other(
+    durations: tuple[int, int, int],
+) -> None:
+    fit = fit_critical_power([_effort(duration) for duration in durations])
+
+    assert fit.confidence == "low"
+
+
 def test_efforts_that_disagree_with_the_model_are_low_confidence() -> None:
     fit = fit_critical_power(
         [

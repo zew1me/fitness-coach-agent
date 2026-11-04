@@ -71,8 +71,14 @@ def fit_critical_power(efforts: list[MaxEffort]) -> CriticalPowerFit:
     """
     _validate_efforts(efforts)
 
-    durations = [float(effort.duration_seconds) for effort in efforts]
-    work = [effort.power_watts * effort.duration_seconds for effort in efforts]
+    # The curve is best power per duration, so a lesser repeat is not a maximal effort.
+    best_power: dict[int, float] = {}
+    for effort in efforts:
+        best_power[effort.duration_seconds] = max(
+            best_power.get(effort.duration_seconds, 0.0), effort.power_watts
+        )
+    durations = [float(duration) for duration in best_power]
+    work = [power * duration for duration, power in best_power.items()]
     cp, w_prime = linear_regression(durations, work)
 
     if (
@@ -134,14 +140,26 @@ def _standard_errors(
     )
 
 
+def _separated_duration_count(durations: list[float]) -> int:
+    """Count durations at least the minimum spread apart, ignoring near-identical ones."""
+    count = 0
+    previous = -math.inf
+    for duration in sorted(durations):
+        if duration - previous >= MIN_DURATION_SPREAD_SECONDS:
+            count += 1
+            previous = duration
+    return count
+
+
 def _confidence(
     durations: list[float],
     cp: float,
     w_prime: float,
     standard_errors: tuple[float, float] | None,
 ) -> Literal["low", "medium", "high"]:
-    # Two efforts always fit perfectly, so nothing cross-checks a non-maximal one.
-    if standard_errors is None:
+    # Two efforts always fit perfectly, so nothing cross-checks a non-maximal one. Efforts
+    # seconds apart are effectively one point, so they don't provide that cross-check either.
+    if standard_errors is None or _separated_duration_count(durations) <= MIN_EFFORTS:
         return "low"
     cp_error, w_prime_error = standard_errors
     if (
