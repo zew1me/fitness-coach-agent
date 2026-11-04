@@ -77,4 +77,27 @@ describe("recordStageUsage", () => {
 
     expect(sentryMocks.logger.info).not.toHaveBeenCalled();
   });
+
+  it("writes to an injected logger instead of Sentry", () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const usage = new Usage({
+      requests: 1,
+      inputTokens: 10,
+      outputTokens: 2,
+      totalTokens: 12,
+    });
+
+    recordStageUsage("lead", usage, logger);
+
+    expect(logger.info).toHaveBeenCalledWith(
+      "coach model stage usage",
+      expect.objectContaining({ stage: "lead", input_tokens: 10 }),
+    );
+    expect(sentryMocks.logger.info).not.toHaveBeenCalled();
+  });
 });

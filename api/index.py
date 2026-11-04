@@ -3315,10 +3315,7 @@ async def confirm_threshold(
     Sets estimation_method=manual, confidence=high, source=user.
     """
     user_id = user_context.user_id
-    client = repo._require_client()
-    client.table("sport_thresholds").update(
-        {"estimation_method": "manual", "confidence": "high", "source": "user"}
-    ).eq("user_id", user_id).eq("sport", payload.sport).is_("superseded_at", "null").execute()
+    await repo.confirm_active_threshold(user_id, payload.sport)
     logger.info("threshold confirmed user_id=%s sport=%s", user_id, payload.sport)
 
     thresholds = await repo.get_active_thresholds(user_id)

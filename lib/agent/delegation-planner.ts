@@ -1,5 +1,7 @@
 import { Agent, run, type AgentInputItem } from "@openai/agents";
 
+import type { Logger } from "../logger";
+
 import { buildModelSettings, type ModelTier } from "./model-tiers";
 import {
   delegationPlanSchema,
@@ -23,6 +25,7 @@ export async function planSpecialistDelegation(options: {
   coachingMemory: Array<Record<string, unknown>>;
   athleteContext: AthleteContextBundle;
   tier: ModelTier;
+  logger?: Logger;
 }): Promise<DelegationPlan> {
   const planner = new Agent({
     name: "Lead coach delegation planner",
@@ -42,7 +45,7 @@ export async function planSpecialistDelegation(options: {
     ].join("\n"),
   });
   const result = await run(planner, options.latestUserTurn, { maxTurns: 1 });
-  recordStageUsage("delegation", result.state.usage);
+  recordStageUsage("delegation", result.state.usage, options.logger);
   if (!result.finalOutput)
     throw new Error("Delegation planner produced no output");
   return delegationPlanSchema.parse(result.finalOutput);

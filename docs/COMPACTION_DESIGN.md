@@ -157,6 +157,11 @@ production samples before applying a correction factor or replacing the
 estimator, then re-derive both the compaction and cold-seed budgets from the
 calibrated token count rather than guessing from JSON shape.
 
+This telemetry (`coach compaction complete`) is written through the turn's
+injected logger (`DurableCompactionSession`'s `logger` option, set by the
+orchestrator), falling back to `defaultLogger` from `lib/logger.ts` when none is
+supplied, so it reaches both Sentry Logs and the console.
+
 `responses.compact` output is the **canonical replacement window**. OpenAI may
 retain prior messages or tool-call pairs alongside its opaque compaction item,
 but does not guarantee that any particular input item survives. The app stores
