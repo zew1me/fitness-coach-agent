@@ -154,10 +154,10 @@ async function uploadOneAttachment(
       status: "uploaded",
     });
   } catch (error) {
-    Sentry.logger.error(
-      "chat attachment upload failed",
-      attachmentLogContext(file, contentType),
-    );
+    Sentry.logger.error("chat attachment upload failed", {
+      ...attachmentLogContext(file, contentType),
+      original_size: originalSize,
+    });
     updateAttachment(attachmentId, { status: "error", progress: null });
     const timedOut =
       error instanceof DOMException && error.name === "TimeoutError";

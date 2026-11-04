@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   loaded: vi.fn(),
   presign: vi.fn(),
   upload: vi.fn(),
+  logError: vi.fn(),
 }));
 vi.mock("browser-image-compression", () => {
   mocks.loaded();
@@ -20,11 +21,12 @@ vi.mock("../../lib/coach-api", () => ({
   uploadFile: mocks.upload,
 }));
 vi.mock("@sentry/nextjs", () => ({
-  logger: { info: vi.fn(), error: vi.fn() },
+  logger: { info: vi.fn(), error: mocks.logError },
 }));
 
 beforeEach(() => {
   mocks.compress.mockReset();
+  mocks.logError.mockReset();
   mocks.presign.mockReset().mockResolvedValue({ object_key: "key" });
   mocks.upload.mockReset().mockResolvedValue({
     object_key: "key",
@@ -140,6 +142,21 @@ it.each(["too-large", "throw", "still-large"])(
     );
   },
 );
+
+it("logs the original byte size when compression fails before the prepared event", async () => {
+  mocks.compress.mockRejectedValue(new Error("decoder failed"));
+  const { result } = renderHook(() => useChatDraft(vi.fn()));
+  const file = new File([new Uint8Array(4_000_000)], "photo.png", {
+    type: "image/png",
+  });
+  await act(() => result.current.handleFilesAdded([file]));
+  expect(mocks.logError).toHaveBeenCalledWith("chat attachment upload failed", {
+    filename_suffix: ".png",
+    content_type: "image/png",
+    original_size: file.size,
+  });
+  expect(mocks.presign).not.toHaveBeenCalled();
+});
 
 it("rejects an oversized ZIP immediately while an earlier image is still compressing", async () => {
   let finish!: (_file: Blob) => void;
