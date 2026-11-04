@@ -23,6 +23,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("upload planning", () => {
@@ -111,7 +112,7 @@ describe("compression", () => {
     expect(fetchMock).toHaveBeenCalledWith(IMAGE_COMPRESSION_WORKER_URL, {
       integrity: IMAGE_COMPRESSION_WORKER_INTEGRITY,
       credentials: "omit",
-      signal,
+      signal: expect.any(AbortSignal),
     });
     expect(compress).toHaveBeenCalledWith(
       expect.any(File),
@@ -121,6 +122,57 @@ describe("compression", () => {
       }),
     );
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:verified-worker");
+  });
+
+  it("falls back promptly when the CDN stalls, without aborting compression", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_url, { signal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    compress.mockResolvedValue(new Blob(["jpeg"], { type: "image/jpeg" }));
+    const signal = new AbortController().signal;
+    const pending = compressImage(file(4_000_000), {
+      onProgress: vi.fn(),
+      signal,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(pending).resolves.toHaveProperty("type", "image/jpeg");
+    expect(signal.aborted).toBe(false);
+    expect(compress).toHaveBeenCalledWith(
+      expect.any(File),
+      expect.objectContaining({ useWebWorker: false, signal }),
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("forwards caller aborts during the CDN fetch and clears its fallback timer", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_url, { signal }: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const pending = compressImage(file(4_000_000), {
+      onProgress: vi.fn(),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    controller.abort();
+    await expect(pending).rejects.toThrow("cannot reduce below 4.5 MB");
+    expect(compress).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("accepts the hard-limit boundary", async () => {
