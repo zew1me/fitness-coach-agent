@@ -27,6 +27,7 @@
 - `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
 - `20260920021259_restore_service_role_table_privileges.sql` — restores PostgREST DML privileges required by server-side repositories after a fresh bootstrap
 - `20261011183239_load_snapshot_null_identity.sql` — deduplicates aggregate load snapshots and makes `(user_id, snapshot_date, sport)` unique with NULLs treated as equal
+- `20261027190000_activity_sources.sql` — expand step for per-input activity evidence: `activity_ingest_formats`, `activity_sources`, `load_rebuild_pending`, new `activities` projection columns, a temporary legacy-insert trigger, and the `create_activity_with_source` shadow-writer RPC (#533 PR A)
 - `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
@@ -593,6 +594,76 @@ access model explicit and reproducible instead of relying on environment drift.
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). This is privilege metadata only; it does not rewrite application data
 or weaken RLS/browser policies.
+
+## 20261027190000 — activity sources: expand migration and shadow writer (2026-10-27)
+
+**File:** `supabase/migrations/20261027190000_activity_sources.sql`
+
+**Change:** Creates `activity_ingest_formats` (eight seeded fidelity ranks),
+`activity_sources` (one row per ingested input, evidence columns immutable by
+trigger, composite `(activity_id, user_id)` foreign keys, content-hash and
+known-provider external-id partial unique indexes, a non-unique fingerprint
+index, and a one-live-override index) and `load_rebuild_pending` (unused until a
+later phase). Adds `activities.unique (id, user_id)` plus the defaulted
+projection columns `source_count`, `field_provenance`, `presentation_state`,
+`superseded_by_activity_id` and `materialized_at`. Adds shared SQL helpers (a
+total legacy-source mapper that raises on any unmapped value, an Intervals
+external-id parser, the payload fingerprint, the projection-fields extractor and
+the bootstrap-source builder), a temporary `AFTER INSERT` trigger on `activities`
+that captures a bootstrap source for any legacy direct insert (logging a fixed
+`RAISE LOG` line), and the `create_activity_with_source(p_user_id, p_activity,
+p_source)` service-role RPC that inserts an activity and its bootstrap source
+atomically (returning NULL for an Intervals duplicate).
+
+**Why (issue #533, design #397/#445):** Activities are stored exactly as
+ingested, so one workout arriving twice is two rows. Phase 1 of
+`docs/ACTIVITY_MATERIALIZATION_DESIGN.md` makes every activity carry exactly one
+live source before any reader depends on it. This is PR A of three: the
+resumable backfill (PR B) and the contract step (PR C) are separate and ordered.
+Presentation behaviour is unchanged and shadow sources have a NULL
+`content_hash`, so nothing introduced here can reject an upload.
+
+**Security note:** `activity_sources` and `load_rebuild_pending` have owner-read
+RLS and `SELECT` for `authenticated`; all writes are `service_role` only.
+`activity_ingest_formats` is readable by `authenticated` and `service_role` and
+has `INSERT`/`UPDATE`/`DELETE` revoked from every application role, so the
+mapping changes only by migration. The helper functions and
+`create_activity_with_source` are revoked from `public`, `anon` and
+`authenticated` and granted to `service_role`. The legacy trigger function is
+`security definer` because browser roles can still insert into `activities`
+through RLS but cannot write `activity_sources`. The transaction-local marker the
+RPC sets is cutover coordination, not an authorization boundary.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally), preview then production; requires PostgreSQL 15+ (column-list
+`ON DELETE SET NULL`, `NULLS NOT DISTINCT`). Adding `unique (id, user_id)` builds
+an index on `activities` and briefly blocks writes; the new columns have constant
+defaults and do not rewrite the table. The migration does not backfill existing
+rows: until PR B runs, historical activities have no source. Do not deploy
+application code that calls `create_activity_with_source` before this migration
+is applied. Per-environment backfill and contract status will be recorded here by
+PR B and PR C.
+
+**Preview deployment repair (2026-11-01, PR #534):** Sentry issue `7822499376`
+reported `PGRST202` from `/api/engine/process-uploaded-file` on the PR preview.
+The preview project `psbteexygkspyotkyflc` (`fitness-coach-agent-preview`) was
+missing this migration; the CLI migration list and push dry run confirmed it was
+the only pending migration. Applied it with `supabase db push --linked
+--skip-vault` after verifying the linked project and obtaining approval. The
+remote migration list now includes `20261027190000`, and a subsequent dry run
+reports no pending migrations. Catalog checks confirmed the RPC's named arguments
+and service-role-only execution grants; the live PostgREST OpenAPI schema also
+exposes the RPC and `activity_sources`. No activity was inserted for verification.
+Production was not inspected or changed; this is not a production-apply record.
+Historical-source backfill and the contract step remain pending.
+
+For a recurrence, first verify the failing deployment's Supabase target, then
+check that environment's migration list and the catalog signature
+`public.create_activity_with_source(text,jsonb,jsonb)`. Apply a missing migration
+only after reviewing the dry run and approving the target. If the function exists
+but PostgREST still cannot find it, investigate its grants and schema cache rather
+than replaying the migration. Do not fall back to an untracked direct activity
+insert: that would discard source capture on an unmigrated database.
 
 ## 20261028090000 — one-to-one plan workout/activity link (2026-10-28)
 

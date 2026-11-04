@@ -25,6 +25,7 @@ dependencies = [
 dev = [
   "fitness-coach-garmin-sidecar",
   "fitness-coach-self-data-backup",
+  "psycopg[binary]>=3.2,<4.0",
   "pytest>=8.3.5,<9.0.0",
   "pytest-asyncio>=0.25.3,<0.26.0",
   "ruff>=0.11.0,<0.12.0",
