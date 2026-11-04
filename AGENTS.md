@@ -26,6 +26,8 @@ bun run lint:actions  # actionlint (pinned zew1me fork) on GitHub workflows
 bun run typecheck  # tsc + Next.js typegen
 bun run test     # Vitest unit tests (tests/web/)
 bun run check    # lint + lint:css + lint:actions + typecheck + test + ast-grep:check
+bun run cpd      # jscpd copy-paste detection over app/ components/ lib/ api/ backend/
+bun run knip     # unused files, exports and dependencies
 
 # Python backend and uv workspace tools
 uv run pytest                         # all Python and workspace-tool tests
@@ -363,23 +365,24 @@ actionlint needs no manual install: `scripts/actionlint.sh` downloads the pinned
 
 ### Pre-push (full CI gate)
 
-Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus three additional static checks:
+Runs sequentially and mirrors every check in `.github/workflows/ci.yml` (CI runs `cpd` and `knip` in the `web` job):
 
-| Step                | Command                                                                       |
-| ------------------- | ----------------------------------------------------------------------------- |
-| `lint`              | `bun run lint`                                                                |
-| `stylelint`         | `bun run lint:css`                                                            |
-| `actionlint`        | `bun run lint:actions`                                                        |
-| `ruff-check`        | `uv run ruff check .`                                                         |
-| `ruff-format-check` | `uv run ruff format --check .`                                                |
-| `typecheck`         | `bun run typecheck`                                                           |
-| `ty`                | `uv run ty check`                                                             |
-| `vulture`           | `uv run vulture`                                                              |
-| `vitest`            | `bun run test`                                                                |
-| `pytest`            | `uv run pytest`                                                               |
-| `cpd`               | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
-| `knip`              | Dead-code / unused-export detection (production code only)                    |
-| `playwright`        | Full Playwright UI suite                                                      |
+| Step                | Command                                               |
+| ------------------- | ----------------------------------------------------- |
+| `lint`              | `bun run lint`                                        |
+| `stylelint`         | `bun run lint:css`                                    |
+| `actionlint`        | `bun run lint:actions`                                |
+| `ast-grep`          | `bun run ast-grep:check`                              |
+| `ruff-check`        | `uv run ruff check .`                                 |
+| `ruff-format-check` | `uv run ruff format --check .`                        |
+| `typecheck`         | `bun run typecheck`                                   |
+| `ty`                | `uv run ty check`                                     |
+| `vulture`           | `uv run vulture`                                      |
+| `vitest`            | `bun run test`                                        |
+| `pytest`            | `uv run pytest`                                       |
+| `cpd`               | `bun run cpd` (copy-paste detection, ≤1% duplication) |
+| `knip`              | `bun run knip` (dead-code / unused-export detection)  |
+| `playwright`        | Full Playwright UI suite                              |
 
 ### Changes that don't impact the UI layer
 

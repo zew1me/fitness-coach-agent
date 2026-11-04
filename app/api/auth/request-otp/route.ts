@@ -1,9 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
-import * as Sentry from "@sentry/nextjs";
 import { NextResponse } from "next/server";
 
 import { normalizeReturnTo } from "../../../../lib/auth";
+import { defaultLogger } from "../../../../lib/logger";
 import { getSupabaseAdminClient } from "../../../../lib/supabase-admin";
 
 type RequestOtpBody = {
@@ -177,25 +177,25 @@ async function handleNewUser(
 ): Promise<NextResponse> {
   const inviteCode = normalizeInviteCode(body.inviteCode);
   if (inviteCode === null) {
-    Sentry.logger.info("otp: invite code required for new user");
+    defaultLogger.info("otp: invite code required for new user");
     return inviteRequiredResponse();
   }
 
   if (!isInviteCodeValid(inviteCode)) {
-    Sentry.logger.warn("otp: invalid invite code submitted");
+    defaultLogger.warn("otp: invalid invite code submitted");
     return invalidInviteResponse();
   }
 
   const createErrorResponse = await createInvitedUser(email);
   if (createErrorResponse !== null) {
-    Sentry.logger.error("otp: invited user creation failed");
+    defaultLogger.error("otp: invited user creation failed");
     return createErrorResponse;
   }
 
-  Sentry.logger.info("otp: new user created via invite");
+  defaultLogger.info("otp: new user created via invite");
   const invitedOtpResult = await sendOtp(email, emailRedirectTo);
   if (invitedOtpResult.error !== null) {
-    Sentry.logger.error("otp: send failed for new invited user");
+    defaultLogger.error("otp: send failed for new invited user");
     return otpFailureResponse(invitedOtpResult.error);
   }
   return otpSentResponse();
@@ -210,12 +210,12 @@ export async function POST(request: Request): Promise<NextResponse> {
   const { body, email, emailRedirectTo } = parsedRequest;
   const initialOtpResult = await sendOtp(email, emailRedirectTo);
   if (initialOtpResult.error === null) {
-    Sentry.logger.info("otp: sent to existing user");
+    defaultLogger.info("otp: sent to existing user");
     return otpSentResponse();
   }
 
   if (!looksLikeNewUserError(initialOtpResult.error)) {
-    Sentry.logger.error("otp: send failed", {
+    defaultLogger.error("otp: send failed", {
       error_message: initialOtpResult.error.message ?? "unknown",
     });
     return otpFailureResponse(initialOtpResult.error);

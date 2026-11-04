@@ -1,9 +1,11 @@
 import type { Usage } from "@openai/agents";
-import * as Sentry from "@sentry/nextjs";
+
+import { defaultLogger, type Logger } from "../logger";
 
 export function recordStageUsage(
   stage: "compaction" | "delegation" | "lead" | "lead-followup" | "specialist",
   usage?: Usage,
+  logger: Logger = defaultLogger,
 ): void {
   if (!usage) return;
   const entries = usage.requestUsageEntries ?? [];
@@ -13,7 +15,7 @@ export function recordStageUsage(
   );
   const requestSizeTokens =
     entries.length > 0 ? maxRequestInput : usage.inputTokens;
-  Sentry.logger.info("coach model stage usage", {
+  logger.info("coach model stage usage", {
     stage,
     request_count: usage.requests,
     input_tokens: usage.inputTokens,
