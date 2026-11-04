@@ -416,6 +416,7 @@
 
   /* Attachments are uncapped; scroll the chips so the composer cannot outgrow the fixed-height frame,
      including short landscape viewports where 7.5rem alone is too tall. */
+  max-height: 7.5rem;
   max-height: min(7.5rem, 22dvh);
   overflow-y: auto;
 }
