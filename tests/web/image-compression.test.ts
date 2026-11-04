@@ -218,6 +218,21 @@ describe("compression", () => {
     await expect(result).rejects.toThrow("cannot reduce below 4.5 MB");
   });
 
+  it("keeps compression timeouts on the size-error contract, not the network-upload timeout", async () => {
+    compress.mockImplementation(() => new Promise(() => {}));
+    const controller = new AbortController();
+    const pending = compressImage(file(4_000_000), {
+      onProgress: vi.fn(),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(compress).toHaveBeenCalled());
+    controller.abort(new DOMException("Compression timed out", "TimeoutError"));
+    await expect(pending).rejects.toMatchObject({
+      name: "Error",
+      message: expect.stringContaining("cannot reduce below 4.5 MB"),
+    });
+  });
+
   it("does not load compression for an already aborted request", async () => {
     const controller = new AbortController();
     controller.abort();
