@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from datetime import UTC, date, datetime
 from typing import Literal
 
@@ -16,9 +17,13 @@ _NON_SLUG_CHARS = re.compile(r"[^a-z0-9]+")
 
 
 def normalize_recovery_source(value: str) -> str:
-    slug = _NON_SLUG_CHARS.sub("_", value.strip().lower()).strip("_")
+    # Fold accents to ASCII first ("Ōura" -> "oura") so the slug keeps the letter instead of
+    # dropping it; scripts with no ASCII form fold to nothing and are rejected below.
+    # Mirrored by recoverySourceSlug in lib/agent/tools.ts so the tool boundary agrees.
+    folded = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    slug = _NON_SLUG_CHARS.sub("_", folded.strip().lower()).strip("_")
     if not slug:
-        raise ValueError("source must contain at least one letter or digit")
+        raise ValueError("source must contain at least one Latin letter or digit")
     if len(slug) > RECOVERY_SOURCE_MAX_LENGTH:
         raise ValueError(f"source must be at most {RECOVERY_SOURCE_MAX_LENGTH} characters")
     return slug

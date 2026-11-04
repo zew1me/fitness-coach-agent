@@ -3142,6 +3142,9 @@ async def test_save_recovery_data_omitted_or_null_source_defaults_to_manual_with
         ("  Eight Sleep ", "eight_sleep"),
         ("Elite-HRV", "elite_hrv"),
         ("Polar Flow (export)", "polar_flow_export"),
+        ("Ōura", "oura"),
+        ("Suunto Café", "suunto_cafe"),
+        ("İ" * 64, "i" * 64),
     ],
 )
 async def test_save_recovery_data_accepts_any_source_as_normalized_slug(
@@ -3163,7 +3166,7 @@ async def test_save_recovery_data_accepts_any_source_as_normalized_slug(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("recovery_user_context")
-@pytest.mark.parametrize("raw_source", ["--", "   ", "x" * 65])
+@pytest.mark.parametrize("raw_source", ["--", "   ", "!!!", "心拍", "ﬃ" * 22, "x" * 65])
 async def test_save_recovery_data_rejects_unusable_source(monkeypatch, raw_source: str) -> None:
     repository = RecoveryRepository()
     monkeypatch.setattr(api_index, "repo", repository)

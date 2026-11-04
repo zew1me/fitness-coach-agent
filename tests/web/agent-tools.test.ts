@@ -1508,18 +1508,24 @@ describe("createAgentCoachTools input validation errors", () => {
     ])("rejects a source that normalizes to nothing: %s", (_label, source) => {
       expect(() =>
         schema.parse({ entries: [{ ...baseEntry, source }] }),
-      ).toThrow("source must contain at least one ASCII letter or digit");
+      ).toThrow("source must contain at least one Latin letter or digit");
     });
 
-    it("rejects a source whose slug outgrows the limit when lowercased", () => {
-      const source = "İ".repeat(64);
-      expect(source).toHaveLength(64);
+    it("rejects a source whose slug outgrows the limit once folded", () => {
+      // Each "ﬃ" ligature folds to "ffi", so 22 raw characters become a 66-character slug.
+      const source = "ﬃ".repeat(22);
       expect(() =>
         schema.parse({ entries: [{ ...baseEntry, source }] }),
       ).toThrow("source must normalize to at most 64 characters");
     });
 
-    it.each(["Eight Sleep", "K-1", "Ōura", "  whoop  "])(
+    it("accepts a dotted capital I, which folds to a plain ASCII letter", () => {
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source: "İ".repeat(64) }] }),
+      ).not.toThrow();
+    });
+
+    it.each(["Eight Sleep", "K-1", "Ōura", "Suunto Café", "  whoop  "])(
       "still accepts %j, which the backend can normalize",
       (source) => {
         expect(() =>

@@ -135,10 +135,14 @@ const RECOVERY_SOURCE_MAX_LENGTH = 64;
 
 // Mirrors normalize_recovery_source in backend/models/athlete.py so a value the backend would
 // reject fails here, where the coach can correct it, instead of as a 422 after tool execution.
-// The slug is checked rather than the raw text because the two can disagree: "心拍" has letters
-// but no ASCII ones, and lowercasing can lengthen text past the limit ("İ" becomes two chars).
+// Accents fold to ASCII first (NFKD, then drop what is left outside ASCII), so "Ōura" keeps
+// its letter as "oura". The slug is checked rather than the raw text because the two can
+// disagree: "心拍" has letters but no ASCII form, and folding can lengthen text past the
+// limit ("ﬃ" becomes "ffi").
 function recoverySourceSlug(value: string): string {
   return value
+    .normalize("NFKD")
+    .replace(/[\u0080-\uffff]/g, "")
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
@@ -151,7 +155,7 @@ const recoverySourceSchema = z
   .min(1)
   .max(RECOVERY_SOURCE_MAX_LENGTH)
   .refine((value) => recoverySourceSlug(value).length > 0, {
-    message: "source must contain at least one ASCII letter or digit",
+    message: "source must contain at least one Latin letter or digit",
   })
   .refine(
     (value) => recoverySourceSlug(value).length <= RECOVERY_SOURCE_MAX_LENGTH,
