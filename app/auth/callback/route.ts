@@ -1,7 +1,7 @@
-import * as Sentry from "@sentry/nextjs";
 import { NextRequest, NextResponse } from "next/server";
 
 import { buildLoginRedirectPath, normalizeReturnTo } from "../../../lib/auth";
+import { defaultLogger } from "../../../lib/logger";
 import { createServerSupabaseClient } from "../../../lib/supabase-server";
 
 function buildLoginRedirectResponse(
@@ -64,7 +64,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const returnTo = normalizeReturnTo(requestUrl.searchParams.get("return_to"));
 
   if (code === null) {
-    Sentry.logger.warn("auth callback: missing code param");
+    defaultLogger.warn("auth callback: missing code param");
     return buildLoginRedirectResponse(
       request,
       returnTo,
@@ -80,7 +80,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const { data, error } = await supabase.auth.exchangeCodeForSession(code);
 
     if (error !== null) {
-      Sentry.logger.error("auth callback: code exchange failed", {
+      defaultLogger.error("auth callback: code exchange failed", {
         error_code: error.code ?? "unknown",
         error_name: error.name,
       });
@@ -92,7 +92,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       redirectResponse,
       data.session.access_token,
     );
-    Sentry.logger.info("auth callback: login complete", {
+    defaultLogger.info("auth callback: login complete", {
       user_id: data.session.user.id,
       return_to: new URL(returnTo, request.url).pathname,
     });

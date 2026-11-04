@@ -10,6 +10,8 @@ import {
 import * as Sentry from "@sentry/nextjs";
 import type { UIMessage, UIMessageStreamWriter } from "ai";
 
+import type { Logger } from "../logger";
+
 import { toAgentInputItems } from "./agent-input";
 import { writeAgentStreamEvent } from "./agent-stream";
 import {
@@ -91,6 +93,7 @@ type LeadTurn = {
   durableSession: DurableCompactionSession | undefined;
   extraHeaders: Record<string, string> | undefined;
   lifecycle: LeadTurnState;
+  logger: Logger;
   reports: SpecialistReport[];
   runContext: CoachAgentRunContext;
   selectedMessages: UIMessage[];
@@ -296,7 +299,12 @@ async function drainLeadStream(
   try {
     for await (const event of result) {
       progress.eventStarted = true;
-      writeAgentStreamEvent(event, turn.writer, turn.lifecycle.textState);
+      writeAgentStreamEvent(
+        event,
+        turn.writer,
+        turn.lifecycle.textState,
+        turn.logger,
+      );
     }
     await result.completed;
   } catch (error) {
@@ -320,7 +328,7 @@ async function drainLeadStream(
         level: "error",
         tags: { subsystem: "coach-max-turns" },
       });
-      Sentry.logger.warn(
+      turn.logger.warn(
         "coach: max turns exceeded; salvaging completed tool work",
         extra,
       );
@@ -351,7 +359,7 @@ function reportAcknowledgementFailure(
       tags: { subsystem: "coach-followup" },
     });
   }
-  Sentry.logger.warn(
+  turn.logger.warn(
     "coach: acknowledgement follow-up failed; using deterministic fallback",
   );
 }
@@ -384,10 +392,15 @@ async function runAcknowledgementFollowup(
       stream: true,
     });
     for await (const event of followup) {
-      writeAgentStreamEvent(event, turn.writer, turn.lifecycle.textState);
+      writeAgentStreamEvent(
+        event,
+        turn.writer,
+        turn.lifecycle.textState,
+        turn.logger,
+      );
     }
     await followup.completed;
-    recordStageUsage("lead-followup", followup.state.usage);
+    recordStageUsage("lead-followup", followup.state.usage, turn.logger);
     return undefined;
   } catch (error) {
     if (!turn.lifecycle.isTurnAborted()) {
@@ -441,7 +454,7 @@ async function attemptLeadTier(
     },
   );
   await drainLeadStream(turn, result, progress);
-  recordStageUsage("lead", result.state.usage);
+  recordStageUsage("lead", result.state.usage, turn.logger);
 
   const leadRanTool = ranTool(turn);
   const acknowledgementError =
@@ -539,7 +552,7 @@ async function fallBackToNextTier(
     turn.lifecycle.admittedProbes.add(nextAdmission);
   }
   annotateActiveSpanWithTier(nextTier);
-  Sentry.logger.warn(
+  turn.logger.warn(
     `coach: tier ${failedTierIndex + 1} rate-limited; falling back to ${nextTier.model}`,
   );
   return nextAdmission;

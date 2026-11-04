@@ -88,3 +88,10 @@ export function createLogger(
 }
 
 export const noopLogger: Logger = createLogger([]);
+
+/**
+ * Shared Sentry + console logger for entry points and for modules whose
+ * callers do not inject one. Prefer accepting a {@link Logger} parameter and
+ * defaulting it to this, so tests can still pass a spy.
+ */
+export const defaultLogger: Logger = createLogger();
