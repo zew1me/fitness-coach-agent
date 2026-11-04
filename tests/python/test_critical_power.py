@@ -151,3 +151,21 @@ def test_rejects_efforts_that_cannot_support_a_fit(efforts: list[MaxEffort], mes
 def test_rejects_physiologically_impossible_fits(efforts: list[MaxEffort]) -> None:
     with pytest.raises(ValueError, match="maximal"):
         fit_critical_power(efforts)
+
+
+@pytest.mark.parametrize(
+    "efforts",
+    [
+        # Each effort is under the 3000 W input cap, but no one sustains this.
+        [MaxEffort(180, 3000), MaxEffort(1200, 2900)],
+        # Just over the ceiling: CP = 701 W.
+        [MaxEffort(200, 706), MaxEffort(1000, 702)],
+    ],
+)
+def test_rejects_cp_above_the_plausibility_ceiling(efforts: list[MaxEffort]) -> None:
+    with pytest.raises(ValueError, match="check the durations and power"):
+        fit_critical_power(efforts)
+
+
+def test_fits_exactly_at_the_cp_ceiling() -> None:
+    assert fit_critical_power([MaxEffort(200, 705), MaxEffort(1000, 701)]).cp_watts == 700

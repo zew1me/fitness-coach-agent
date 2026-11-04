@@ -31,6 +31,10 @@ MAX_PLAUSIBLE_W_PRIME_JOULES = 60_000
 # people returning from injury, so they only catch fits that are not measurements.
 MIN_PLAUSIBLE_W_PRIME_JOULES = 1_000
 MIN_PLAUSIBLE_CP_WATTS = 30
+# Professional cyclists' 90th-percentile 20-minute power is about 450 W, so this sits far
+# above any real athlete. Beyond it the input is bad data, such as wrong units or a
+# mislabeled sprint, rather than a measurement.
+MAX_PLAUSIBLE_CP_WATTS = 700
 
 # FTP is CP * 0.95-1.05 depending on athlete type (issue #250). Nothing here identifies
 # the athlete type, so use the midpoint rather than bias every athlete in one direction.
@@ -81,6 +85,11 @@ def fit_critical_power(efforts: list[MaxEffort]) -> CriticalPowerFit:
     work = [power * duration for duration, power in best_power.items()]
     cp, w_prime = linear_regression(durations, work)
 
+    if cp > MAX_PLAUSIBLE_CP_WATTS:
+        raise ValueError(
+            "These efforts imply more power than anyone can sustain, so please check the "
+            "durations and power values."
+        )
     if (
         cp < MIN_PLAUSIBLE_CP_WATTS
         or not MIN_PLAUSIBLE_W_PRIME_JOULES <= w_prime <= MAX_PLAUSIBLE_W_PRIME_JOULES
