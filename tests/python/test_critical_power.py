@@ -79,6 +79,12 @@ def test_only_the_best_effort_at_a_duration_is_fit() -> None:
     assert fit_critical_power([*efforts, MaxEffort(1200, 250)]) == fit_critical_power(efforts)
 
 
+def test_a_better_repeat_replaces_an_earlier_worse_one() -> None:
+    efforts = [_effort(180), _effort(1200)]
+
+    assert fit_critical_power([MaxEffort(1200, 250), *efforts]) == fit_critical_power(efforts)
+
+
 @pytest.mark.parametrize(
     "durations",
     [
