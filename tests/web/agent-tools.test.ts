@@ -96,6 +96,38 @@ describe("coachToolDefinitions", () => {
     ]);
   });
 
+  it("accepts maximal efforts for estimate_thresholds", () => {
+    const schema = coachToolDefinitions.estimate_thresholds.inputSchema;
+    const singleTest = {
+      race_distance_meters: null,
+      race_time_seconds: null,
+      sport: "cycling",
+      test_duration_minutes: 20,
+      test_power_watts: 300,
+    };
+    const efforts = [
+      { duration_seconds: 300, power_watts: 345.5 },
+      { duration_seconds: 1200, power_watts: 297 },
+    ];
+
+    expect(schema.parse({ ...singleTest, efforts }).efforts).toEqual(efforts);
+    expect(schema.parse({ ...singleTest, efforts: null }).efforts).toBeNull();
+    // Nullable, not optional: OpenAI rejects tool schemas with incomplete `required`.
+    expect(schema.safeParse(singleTest).success).toBe(false);
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300.5, power_watts: 345 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300, power_watts: 0 }],
+      }).success,
+    ).toBe(false);
+  });
+
   it("validates a goal update payload with course details", () => {
     const parsed = coachToolDefinitions.update_goals.inputSchema.parse({
       action: "create",
