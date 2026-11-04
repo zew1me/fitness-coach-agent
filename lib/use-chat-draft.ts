@@ -10,11 +10,25 @@ import {
 } from "./chat-attachments";
 import { createChatUploadIntent, uploadFile } from "./coach-api";
 import { errorMessage } from "./errors";
+import {
+  attachmentSizeError,
+  compressImage,
+  planAttachmentUpload,
+} from "./image-compression";
 
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20_000;
+const ATTACHMENT_COMPRESSION_TIMEOUT_MS = 60_000;
 
 type AttachmentPatch = Partial<
-  Pick<LocalAttachment, "object_key" | "public_url" | "status">
+  Pick<
+    LocalAttachment,
+    | "object_key"
+    | "public_url"
+    | "status"
+    | "content_type"
+    | "filename"
+    | "progress"
+  >
 >;
 
 type AttachmentUploadCallbacks = {
@@ -55,8 +69,26 @@ function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
       ? URL.createObjectURL(file)
       : null,
     public_url: null,
-    status: "uploading",
+    status:
+      planAttachmentUpload(file) === "compress" ? "compressing" : "uploading",
+    progress: null,
   };
+}
+
+async function prepareAttachment(
+  attachmentId: string,
+  file: File,
+  updateAttachment: AttachmentUploadCallbacks["updateAttachment"],
+): Promise<File> {
+  const plan = planAttachmentUpload(file);
+  if (plan === "too-large") throw attachmentSizeError();
+  if (plan === "as-is") return file;
+  return compressImage(file, {
+    signal: AbortSignal.timeout(ATTACHMENT_COMPRESSION_TIMEOUT_MS),
+    onProgress: (progress) => {
+      updateAttachment(attachmentId, { progress: Math.round(progress) });
+    },
+  });
 }
 
 async function uploadOneAttachment(
@@ -64,8 +96,22 @@ async function uploadOneAttachment(
   file: File,
   { updateAttachment, setThreadError }: AttachmentUploadCallbacks,
 ): Promise<void> {
-  const contentType = activityContentType(file);
+  const originalSize = file.size;
+  let contentType = activityContentType(file);
   try {
+    file = await prepareAttachment(attachmentId, file, updateAttachment);
+    contentType = activityContentType(file);
+    updateAttachment(attachmentId, {
+      content_type: contentType,
+      filename: file.name,
+      status: "uploading",
+      progress: null,
+    });
+    Sentry.logger.info("chat attachment prepared", {
+      ...attachmentLogContext(file, contentType),
+      original_size: originalSize,
+      prepared_size: file.size,
+    });
     const intent = await createChatUploadIntent({
       content_length: file.size,
       content_type: contentType,
@@ -107,7 +153,7 @@ async function uploadOneAttachment(
       "chat attachment upload failed",
       attachmentLogContext(file, contentType),
     );
-    updateAttachment(attachmentId, { status: "error" });
+    updateAttachment(attachmentId, { status: "error", progress: null });
     const timedOut =
       error instanceof DOMException && error.name === "TimeoutError";
     console.error("Chat attachment upload failed", error);
