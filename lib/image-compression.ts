@@ -28,7 +28,8 @@ async function verifiedWorkerURL(
   signal: AbortSignal,
 ): Promise<string | undefined> {
   try {
-    // Avoid shipping a second ~860 KB copy within Vercel deployment size budgets.
+    // Avoid shipping a second worker copy within Vercel deployment size budgets
+    // (2.0.2's script is 57,069 bytes; ~860 KB is the whole installed package).
     // Pin both version AND SHA-384: fetch verifies integrity before any code runs.
     // importScripts has no SRI option, so the worker gets only this verified blob.
     const response = await fetch(IMAGE_COMPRESSION_WORKER_URL, {
