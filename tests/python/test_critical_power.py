@@ -169,3 +169,10 @@ def test_rejects_cp_above_the_plausibility_ceiling(efforts: list[MaxEffort]) -> 
 
 def test_fits_exactly_at_the_cp_ceiling() -> None:
     assert fit_critical_power([MaxEffort(200, 705), MaxEffort(1000, 701)]).cp_watts == 700
+
+
+def test_fits_exactly_at_the_plausibility_floors() -> None:
+    fit = fit_critical_power([MaxEffort(200, 35), MaxEffort(1000, 31)])
+
+    assert fit.cp_watts == 30
+    assert fit.w_prime_joules == 1000
