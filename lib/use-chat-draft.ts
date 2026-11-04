@@ -60,6 +60,7 @@ function attachmentLogContext(
 }
 
 function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
+  const plan = planAttachmentUpload(file);
   return {
     id: attachmentId,
     content_type: activityContentType(file),
@@ -70,7 +71,11 @@ function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
       : null,
     public_url: null,
     status:
-      planAttachmentUpload(file) === "compress" ? "compressing" : "uploading",
+      plan === "too-large"
+        ? "error"
+        : plan === "compress"
+          ? "compressing"
+          : "uploading",
     progress: null,
   };
 }
@@ -222,8 +227,14 @@ export function useChatDraft(
         continue;
       }
       const attachmentId = crypto.randomUUID();
+      const attachment = localAttachmentFor(attachmentId, file);
+      nextLocalAttachments.push(attachment);
+      // Reject immediately, even when an earlier file is still being optimized.
+      if (attachment.status === "error") {
+        setThreadError(attachmentSizeError().message);
+        continue;
+      }
       uploadQueue.push({ attachmentId, file });
-      nextLocalAttachments.push(localAttachmentFor(attachmentId, file));
     }
     setAttachments((current) => [...current, ...nextLocalAttachments]);
 

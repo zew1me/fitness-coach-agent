@@ -141,6 +141,42 @@ it.each(["too-large", "throw", "still-large"])(
   },
 );
 
+it("rejects an oversized ZIP immediately while an earlier image is still compressing", async () => {
+  let finish!: (_file: Blob) => void;
+  mocks.compress.mockImplementation(
+    () =>
+      new Promise<Blob>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const error = vi.fn();
+  const { result } = renderHook(() => useChatDraft(error));
+  let pending!: Promise<void>;
+  await act(async () => {
+    pending = result.current.handleFilesAdded([
+      new File([new Uint8Array(4_000_000)], "photo.png", { type: "image/png" }),
+      new File([new Uint8Array(4_400_001)], "ride.zip", {
+        type: "application/zip",
+      }),
+    ]);
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalled());
+  });
+  expect(error).toHaveBeenCalledWith(
+    expect.stringContaining("cannot reduce below 4.5 MB"),
+  );
+  expect(result.current.attachments.map(({ status }) => status)).toEqual([
+    "compressing",
+    "error",
+  ]);
+  expect(mocks.presign).not.toHaveBeenCalled();
+  await act(async () => {
+    finish(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await pending;
+  });
+  expect(mocks.presign).toHaveBeenCalledTimes(1);
+  expect(mocks.upload).toHaveBeenCalledTimes(1);
+});
+
 it("keeps GIFs and activity files that already fit unchanged", async () => {
   const { result } = renderHook(() => useChatDraft(vi.fn()));
   for (const [name, type] of [
