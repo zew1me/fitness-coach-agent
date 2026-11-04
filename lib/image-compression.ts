@@ -27,6 +27,12 @@ export function attachmentSizeError(): Error {
 async function verifiedWorkerURL(
   signal: AbortSignal,
 ): Promise<string | undefined> {
+  const controller = new AbortController();
+  const onAbort = (): void => controller.abort(signal.reason);
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  // Reserve most of the 60 s compression budget for a safe main-thread fallback.
+  const timer = setTimeout(() => controller.abort(), 3_000);
   try {
     // Avoid shipping a second worker copy within Vercel deployment size budgets
     // (2.0.2's script is 57,069 bytes; ~860 KB is the whole installed package).
@@ -35,7 +41,7 @@ async function verifiedWorkerURL(
     const response = await fetch(IMAGE_COMPRESSION_WORKER_URL, {
       integrity: IMAGE_COMPRESSION_WORKER_INTEGRITY,
       credentials: "omit",
-      signal,
+      signal: controller.signal,
     });
     if (!response.ok) return undefined;
     return URL.createObjectURL(
@@ -46,6 +52,9 @@ async function verifiedWorkerURL(
     // Offline/CORS/SRI failures use our bundled dependency on the main thread;
     // never let the library fall back to its default, unverified CDN URL.
     return undefined;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
