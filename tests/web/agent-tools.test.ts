@@ -126,6 +126,19 @@ describe("coachToolDefinitions", () => {
         efforts: [{ duration_seconds: 300, power_watts: 0 }],
       }).success,
     ).toBe(false);
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300, power_watts: 3000 }],
+      }).success,
+    ).toBe(true);
+    // Mirrors the engine's ceiling so a unit error fails at the tool boundary.
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300, power_watts: 3001 }],
+      }).success,
+    ).toBe(false);
   });
 
   it("validates a goal update payload with course details", () => {

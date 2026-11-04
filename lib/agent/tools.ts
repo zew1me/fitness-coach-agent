@@ -99,7 +99,7 @@ const updateGoalsInputSchema = z
 
 const maxEffortSchema = z.object({
   duration_seconds: z.number().int().positive(),
-  power_watts: z.number().positive(),
+  power_watts: z.number().positive().max(3000),
 });
 
 const thresholdInputSchema = z.object({
