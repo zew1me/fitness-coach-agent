@@ -1,4 +1,7 @@
+import asyncio
 import re
+import threading
+from collections.abc import Awaitable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -2520,3 +2523,100 @@ async def test_manual_activity_rpc_payload_is_exact() -> None:
         }
     )
     assert client.calls[0][1]["p_activity"] == expected
+
+
+class _EventLoopProbeClient:
+    """Fake client whose ``execute()`` blocks until the event loop proves it is free.
+
+    Each ``execute()`` waits for a ``threading.Event`` that only a coroutine running on
+    the event loop sets. If the repository calls the synchronous PostgREST ``execute()``
+    directly inside its coroutine, the loop is blocked, the probe coroutine never runs,
+    and the wait times out — so the test fails deterministically rather than on timing.
+    """
+
+    def __init__(self, inner: FakeSupabaseClient) -> None:
+        self._inner = inner
+        self.loop_was_free: list[bool] = []
+        self.loop_ticked = threading.Event()
+
+    def table(self, table_name: str) -> FakeTableQuery:
+        return self._probe(self._inner.table(table_name))
+
+    def _probe(self, query: FakeTableQuery) -> FakeTableQuery:
+        original_execute = query.execute
+        owner = self
+
+        def execute() -> FakeResponse:
+            owner.loop_was_free.append(owner.loop_ticked.wait(timeout=1.0))
+            return original_execute()
+
+        query.execute = execute  # type: ignore[method-assign]
+        return query
+
+
+async def _run_while_probing_loop(client: _EventLoopProbeClient, operation: Awaitable[object]):
+    async def tick() -> None:
+        # Yield once so this only runs if the repository coroutine gave the loop back.
+        await asyncio.sleep(0)
+        client.loop_ticked.set()
+
+    result, _ = await asyncio.gather(operation, tick())
+    return result
+
+
+@pytest.mark.asyncio
+async def test_repository_reads_do_not_block_the_event_loop() -> None:
+    """Regression for #283: sync PostgREST I/O must be offloaded from async methods."""
+    inner = FakeSupabaseClient(
+        athlete_rows=[{"user_id": "athlete-1", "primary_sports": ["cycling"]}],
+    )
+    client = _EventLoopProbeClient(inner)
+    repo = SupabaseRepository(client=client)
+
+    profile = await _run_while_probing_loop(client, repo.get_athlete_profile("athlete-1"))
+
+    assert isinstance(profile, AthleteProfile)
+    assert client.loop_was_free == [True]
+
+
+@pytest.mark.asyncio
+async def test_repository_writes_do_not_block_the_event_loop() -> None:
+    """Regression for #283: writes take the same offloaded path as reads."""
+    inner = FakeSupabaseClient()
+    client = _EventLoopProbeClient(inner)
+    repo = SupabaseRepository(client=client)
+
+    await _run_while_probing_loop(
+        client,
+        repo.upsert_athlete_profile(AthleteProfile(user_id="athlete-1")),
+    )
+
+    assert client.loop_was_free == [True]
+    assert inner._tables["athlete_profiles"]._rows[0]["user_id"] == "athlete-1"
+
+
+@pytest.mark.asyncio
+async def test_confirm_active_threshold_marks_only_the_athletes_active_row_user_confirmed() -> None:
+    inner = FakeSupabaseClient(
+        threshold_rows=[
+            {"user_id": "athlete-1", "sport": "cycling", "superseded_at": None, "source": "auto"},
+            {
+                "user_id": "athlete-1",
+                "sport": "cycling",
+                "superseded_at": "2026-01-01T00:00:00+00:00",
+                "source": "auto",
+            },
+            {"user_id": "athlete-1", "sport": "running", "superseded_at": None, "source": "auto"},
+            {"user_id": "athlete-2", "sport": "cycling", "superseded_at": None, "source": "auto"},
+        ]
+    )
+    client = _EventLoopProbeClient(inner)
+    repo = SupabaseRepository(client=client)
+
+    await _run_while_probing_loop(client, repo.confirm_active_threshold("athlete-1", "cycling"))
+
+    assert client.loop_was_free == [True]
+    rows = inner._tables["sport_thresholds"]._rows
+    assert [row["source"] for row in rows] == ["user", "auto", "auto", "auto"]
+    assert rows[0]["estimation_method"] == "manual"
+    assert rows[0]["confidence"] == "high"
