@@ -116,6 +116,8 @@ export async function compressImage(
     // Also bound import/decoder stalls; the library's signal cancels its worker.
     return await Promise.race([compress(file, onProgress, signal), aborted]);
   } catch {
+    // Compression failures (including its 60 s timeout) share the size-error UX.
+    // Only the separate network upload timeout should suggest checking a connection.
     throw attachmentSizeError();
   } finally {
     signal.removeEventListener("abort", onAbort);
