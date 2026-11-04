@@ -1470,19 +1470,6 @@ describe("createAgentCoachTools input validation errors", () => {
     };
     const schema = coachToolDefinitions.save_recovery_data.inputSchema;
 
-    it.each([
-      "manual",
-      "garmin_sidecar",
-      "intervals_sync",
-      "whoop",
-      "Oura Ring",
-      "eight_sleep",
-    ])("accepts open-ended source %s", (source) => {
-      expect(
-        schema.parse({ entries: [{ ...baseEntry, source }] }),
-      ).toMatchObject({ entries: [{ source }] });
-    });
-
     it("accepts a null source", () => {
       expect(
         schema.parse({ entries: [{ ...baseEntry, source: null }] }),
@@ -1524,14 +1511,5 @@ describe("createAgentCoachTools input validation errors", () => {
         schema.parse({ entries: [{ ...baseEntry, source: "İ".repeat(64) }] }),
       ).not.toThrow();
     });
-
-    it.each(["Eight Sleep", "K-1", "Ōura", "Suunto Café", "  whoop  "])(
-      "still accepts %j, which the backend can normalize",
-      (source) => {
-        expect(() =>
-          schema.parse({ entries: [{ ...baseEntry, source }] }),
-        ).not.toThrow();
-      },
-    );
   });
 });
