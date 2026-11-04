@@ -106,6 +106,12 @@ def test_rejects_efforts_that_cannot_support_a_fit(efforts: list[MaxEffort], mes
         [MaxEffort(180, 1000), MaxEffort(1200, 50)],
         # Casual "best 20 min" against a real 5 min test: W' far beyond human range.
         [MaxEffort(300, 400), MaxEffort(1200, 150)],
+        # Near-identical power at 5 and 20 min: the short effort was not maximal, W' ~ 0.
+        [MaxEffort(300, 350.001), MaxEffort(1200, 350)],
+        [MaxEffort(300, 352), MaxEffort(1200, 350)],
+        # Passes the W' limits, but no athlete's sustainable power is this low.
+        [MaxEffort(180, 200), MaxEffort(1200, 40)],
+        [MaxEffort(180, 100), MaxEffort(1200, 15.3)],
     ],
 )
 def test_rejects_physiologically_impossible_fits(efforts: list[MaxEffort]) -> None:

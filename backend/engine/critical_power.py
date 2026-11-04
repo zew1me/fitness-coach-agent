@@ -26,6 +26,11 @@ MIN_DURATION_SPREAD_SECONDS = 2 * 60
 # Far above the roughly 5-40 kJ seen in trained cyclists. A larger intercept almost
 # always means the longer effort was not actually maximal, which would deflate CP.
 MAX_PLAUSIBLE_W_PRIME_JOULES = 60_000
+# A smaller intercept means power barely fell between durations, so the shorter effort
+# was not maximal. The floors sit well below any real athlete, including novices and
+# people returning from injury, so they only catch fits that are not measurements.
+MIN_PLAUSIBLE_W_PRIME_JOULES = 1_000
+MIN_PLAUSIBLE_CP_WATTS = 30
 
 # FTP is CP * 0.95-1.05 depending on athlete type (issue #250). Nothing here identifies
 # the athlete type, so use the midpoint rather than bias every athlete in one direction.
@@ -70,7 +75,10 @@ def fit_critical_power(efforts: list[MaxEffort]) -> CriticalPowerFit:
     work = [effort.power_watts * effort.duration_seconds for effort in efforts]
     cp, w_prime = linear_regression(durations, work)
 
-    if cp <= 0 or w_prime <= 0 or w_prime > MAX_PLAUSIBLE_W_PRIME_JOULES:
+    if (
+        cp < MIN_PLAUSIBLE_CP_WATTS
+        or not MIN_PLAUSIBLE_W_PRIME_JOULES <= w_prime <= MAX_PLAUSIBLE_W_PRIME_JOULES
+    ):
         raise ValueError(
             "These efforts do not fit a power-duration curve, so at least one was probably "
             "not maximal. Use each duration's true best effort."
