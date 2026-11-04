@@ -131,7 +131,34 @@ const uploadedFileInputSchema = z.object({
 // Where the numbers came from, not who typed them. Deliberately open-ended: any device or
 // app the coach can identify is a valid source. The backend normalizes it to the snake_case
 // slug recovery_logs_source_check expects ("Eight Sleep" -> "eight_sleep").
-const recoverySourceSchema = z.string().trim().min(1).max(64);
+const RECOVERY_SOURCE_MAX_LENGTH = 64;
+
+// Mirrors normalize_recovery_source in backend/models/athlete.py so a value the backend would
+// reject fails here, where the coach can correct it, instead of as a 422 after tool execution.
+// The slug is checked rather than the raw text because the two can disagree: "心拍" has letters
+// but no ASCII ones, and lowercasing can lengthen text past the limit ("İ" becomes two chars).
+function recoverySourceSlug(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const recoverySourceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(RECOVERY_SOURCE_MAX_LENGTH)
+  .refine((value) => recoverySourceSlug(value).length > 0, {
+    message: "source must contain at least one ASCII letter or digit",
+  })
+  .refine(
+    (value) => recoverySourceSlug(value).length <= RECOVERY_SOURCE_MAX_LENGTH,
+    {
+      message: `source must normalize to at most ${RECOVERY_SOURCE_MAX_LENGTH} characters`,
+    },
+  );
 
 const recoveryEntrySchema = z.object({
   body_battery: z.number().int().min(0).max(100).nullable(),

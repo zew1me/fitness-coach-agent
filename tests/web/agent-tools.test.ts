@@ -1497,5 +1497,35 @@ describe("createAgentCoachTools input validation errors", () => {
         ).toThrow();
       },
     );
+
+    // Each of these passes trim/min/max but is rejected by normalize_recovery_source in
+    // backend/models/athlete.py, so it has to fail before tool execution.
+    it.each([
+      ["symbols only", "!!!"],
+      ["separators only", "---"],
+      ["underscores only", "___"],
+      ["no ASCII letter or digit", "心拍"],
+    ])("rejects a source that normalizes to nothing: %s", (_label, source) => {
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source }] }),
+      ).toThrow("source must contain at least one ASCII letter or digit");
+    });
+
+    it("rejects a source whose slug outgrows the limit when lowercased", () => {
+      const source = "İ".repeat(64);
+      expect(source).toHaveLength(64);
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source }] }),
+      ).toThrow("source must normalize to at most 64 characters");
+    });
+
+    it.each(["Eight Sleep", "K-1", "Ōura", "  whoop  "])(
+      "still accepts %j, which the backend can normalize",
+      (source) => {
+        expect(() =>
+          schema.parse({ entries: [{ ...baseEntry, source }] }),
+        ).not.toThrow();
+      },
+    );
   });
 });
