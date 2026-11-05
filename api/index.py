@@ -1147,6 +1147,7 @@ async def estimate_thresholds_endpoint(
     payload: EstimateThresholdsRequest,
     _: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    """Estimate thresholds from a critical power fit, a race result or a single cycling test."""
     from backend.engine.critical_power import MaxEffort, fit_critical_power
     from backend.engine.thresholds import estimate_cycling_thresholds, estimate_running_thresholds
 

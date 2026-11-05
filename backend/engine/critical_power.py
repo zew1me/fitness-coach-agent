@@ -113,6 +113,7 @@ def fit_critical_power(efforts: list[MaxEffort]) -> CriticalPowerFit:
 
 
 def _validate_efforts(efforts: list[MaxEffort]) -> None:
+    """Raise ValueError with a reason when the efforts cannot support a fit at all."""
     if len(efforts) < MIN_EFFORTS:
         raise ValueError(f"A critical power fit needs at least {MIN_EFFORTS} maximal efforts.")
     for effort in efforts:
@@ -166,6 +167,7 @@ def _confidence(
     w_prime: float,
     standard_errors: tuple[float, float] | None,
 ) -> Literal["low", "medium", "high"]:
+    """Grade the fit: low if unchecked or imprecise, medium if short or narrow, otherwise high."""
     # Two efforts always fit perfectly, so nothing cross-checks a non-maximal one. Efforts
     # seconds apart are effectively one point, so they don't provide that cross-check either.
     if standard_errors is None or _separated_duration_count(durations) <= MIN_EFFORTS:
