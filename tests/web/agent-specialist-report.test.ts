@@ -393,7 +393,7 @@ describe("proposedUpdateToolShapeHints", () => {
     // nested fields are all optional per relaxForProposedUpdate.
     expect(proposedUpdateToolShapeHints).toBe(
       "save_activity_from_text {activity_id?, text}; " +
-        "save_recovery_data {entries: [{body_battery?, hrv_ms?, log_date?, notes?, resting_hr_bpm?, sleep_consistency_pct?, sleep_duration_hours?, sleep_score?, stress_score?, subjective_energy?}]}; " +
+        "save_recovery_data {entries: [{body_battery?, hrv_ms?, log_date?, notes?, resting_hr_bpm?, sleep_consistency_pct?, sleep_duration_hours?, sleep_score?, source?, stress_score?, subjective_energy?}]}; " +
         "update_schedule {overrides?: [{available?, max_hours?, override_date?, reason?}], weekly_pattern?: {<key>: {available?, max_hours?, notes?}}}; " +
         "update_goals {action, goal?: {course_distance_meters?, course_elevation_gain_meters?, course_profile_notes?, goal_type?, improvement_baseline_value?, improvement_metric?, improvement_target_value?, sport?, target_date?, title?}, goal_id?}; " +
         "update_athlete_profile {fields: {biological_sex?, birth_date?, coaching_state?, constraints?: [...], dietary_restrictions?: [...], display_name?, height_cm?, hormone_status?, injuries_rehab?: [...], max_hr_bpm?, notes?, nutrition_notes?, onboarding_collected?: {nutrition?}, primary_sports?: [...], resting_hr_bpm?, specialization_pct?, weekly_available_hours?, weight_kg?}}; " +
