@@ -38,17 +38,26 @@ function UploadChip({
   attachment,
 }: Readonly<{ attachment: LocalAttachment }>): ReactNode {
   const badge = fileTypeBadge(attachment);
+  const pending =
+    attachment.status === "compressing" || attachment.status === "uploading";
   const statusLabel =
-    attachment.status === "uploading"
-      ? "Uploading"
-      : attachment.status === "uploaded"
-        ? "Ready"
-        : "Upload failed";
+    attachment.status === "compressing"
+      ? `Optimizing${attachment.progress === null ? "" : ` ${attachment.progress}%`}`
+      : attachment.status === "uploading"
+        ? "Uploading"
+        : attachment.status === "uploaded"
+          ? "Ready"
+          : "Upload failed";
   return (
     <div className={styles.uploadChip}>
       {badge ? <span className={styles.uploadBadge}>{badge}</span> : null}
       <span>{attachment.filename}</span>
-      <span className={styles.uploadStatus}>{statusLabel}</span>
+      <span className={styles.uploadStatus}>
+        {pending ? (
+          <span aria-hidden="true" className={styles.uploadSpinner} />
+        ) : null}
+        {statusLabel}
+      </span>
     </div>
   );
 }

@@ -7,7 +7,8 @@ export type LocalAttachment = {
   object_key: string;
   preview_url: string | null;
   public_url: string | null;
-  status: "error" | "uploaded" | "uploading";
+  status: "compressing" | "error" | "uploaded" | "uploading";
+  progress: number | null;
 };
 
 export function removePreviewUrls(attachments: LocalAttachment[]): void {
@@ -42,12 +43,15 @@ export function hasSendableContent(
 ): boolean {
   const hasText = composer.trim().length > 0;
   const hasPendingAttachment = attachments.some(
-    (attachment) => attachment.status === "uploading",
+    (attachment) =>
+      attachment.status === "uploading" || attachment.status === "compressing",
   );
 
-  return hasText
-    ? !hasPendingAttachment
-    : attachments.some((attachment) => attachment.status === "uploaded");
+  return (
+    !hasPendingAttachment &&
+    (hasText ||
+      attachments.some((attachment) => attachment.status === "uploaded"))
+  );
 }
 
 export function activityContentType(file: File): string {
