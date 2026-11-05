@@ -213,6 +213,22 @@ async def test_upsert_recovery_log_preserves_metric_and_source_on_partial_second
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["garmin_sidecar", "intervals_sync", "whoop", "eight_sleep"])
+async def test_upsert_recovery_log_accepts_new_provenance_sources(
+    repo: SupabaseRepository, unique_user: str, source: str
+) -> None:
+    """recovery_logs_source_check admits any snake_case provenance slug (#428)."""
+    await repo.upsert_athlete_profile(AthleteProfile(user_id=unique_user, coaching_state="active"))
+    log_date = date(2026, 7, 4)
+
+    saved = await repo.upsert_recovery_log(
+        RecoveryLog(user_id=unique_user, log_date=log_date, hrv_ms=50.0, source=source)
+    )
+
+    assert saved.source == source
+
+
+@pytest.mark.asyncio
 async def test_get_load_snapshot_on_or_before_uses_live_postgrest_filters(
     repo: SupabaseRepository, unique_user: str
 ) -> None:

@@ -342,6 +342,7 @@ describe("coachToolDefinitions", () => {
             sleep_consistency_pct: null,
             sleep_duration_hours: 7.5,
             sleep_score: null,
+            source: null,
             stress_score: 22,
             subjective_energy: 4,
           },
@@ -1452,5 +1453,63 @@ describe("createAgentCoachTools input validation errors", () => {
       ),
     );
     expect(sentryMocks.captureException).not.toHaveBeenCalled();
+  });
+
+  describe("save_recovery_data source provenance", () => {
+    const baseEntry = {
+      body_battery: null,
+      hrv_ms: 48,
+      log_date: "2026-05-30",
+      notes: null,
+      resting_hr_bpm: null,
+      sleep_consistency_pct: null,
+      sleep_duration_hours: 7.5,
+      sleep_score: null,
+      stress_score: null,
+      subjective_energy: null,
+    };
+    const schema = coachToolDefinitions.save_recovery_data.inputSchema;
+
+    it("accepts a null source", () => {
+      expect(
+        schema.parse({ entries: [{ ...baseEntry, source: null }] }),
+      ).toMatchObject({ entries: [{ source: null }] });
+    });
+
+    it.each(["", "   ", "x".repeat(65)])(
+      "rejects an empty or oversized source %j at the Zod boundary",
+      (source) => {
+        expect(() =>
+          schema.parse({ entries: [{ ...baseEntry, source }] }),
+        ).toThrow();
+      },
+    );
+
+    // Each of these passes trim/min/max but is rejected by normalize_recovery_source in
+    // backend/models/athlete.py, so it has to fail before tool execution.
+    it.each([
+      ["symbols only", "!!!"],
+      ["separators only", "---"],
+      ["underscores only", "___"],
+      ["no ASCII letter or digit", "心拍"],
+    ])("rejects a source that normalizes to nothing: %s", (_label, source) => {
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source }] }),
+      ).toThrow("source must contain at least one Latin letter or digit");
+    });
+
+    it("rejects a source whose slug outgrows the limit once folded", () => {
+      // Each "ﬃ" ligature folds to "ffi", so 22 raw characters become a 66-character slug.
+      const source = "ﬃ".repeat(22);
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source }] }),
+      ).toThrow("source must normalize to at most 64 characters");
+    });
+
+    it("accepts a dotted capital I, which folds to a plain ASCII letter", () => {
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source: "İ".repeat(64) }] }),
+      ).not.toThrow();
+    });
   });
 });
