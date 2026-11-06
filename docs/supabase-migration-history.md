@@ -740,3 +740,39 @@ order by source;
 locally). Preview and production are separate Supabase projects and must each be
 linked and applied independently. Existing values all satisfy the new check, so
 no backfill or maintenance window is needed.
+
+## 20261106120000 — drop legacy chat `content` column and `chat_attachments` (2026-11-06)
+
+**File:** `supabase/migrations/20261106120000_drop_legacy_chat_content_and_attachments.sql`
+
+**Change:** Drops `chat_messages.content` and the `chat_attachments` table (with its
+RLS policy and index, via `cascade`). Both were kept by `0004_chat_messages_parts.sql`
+for one release window after messages moved to the `parts` / `attachments` JSON
+columns. Before dropping anything, a guard block aborts the migration if any message
+still has text in `content` but empty `parts`, or if any `chat_attachments` row belongs
+to a message whose `attachments` JSON is empty (#303).
+
+**Why:** Nothing reads either structure. The backend stopped writing `content` in the
+same change, and nothing has written `chat_attachments` since `0004`.
+
+**Deploy order (important):** Deploy the application change first, then apply this
+migration. Earlier application code still sends `content` on every chat-message insert,
+and PostgREST rejects that once the column is gone. The new code works against both the
+old and the new schema.
+
+**Preview before applying:**
+
+```sql
+-- Both must return 0, or the migration aborts.
+select count(*) from public.chat_messages
+where coalesce(content, '') <> '' and parts = '[]'::jsonb;
+
+select count(*) from public.chat_attachments a
+join public.chat_messages m on m.id = a.message_id
+where m.attachments = '[]'::jsonb;
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset` locally) after
+the application deploy. Preview and production are separate Supabase projects and must
+each be linked and applied independently. The drop is irreversible; take a backup first
+if you want the legacy rows retained.
