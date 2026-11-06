@@ -8,7 +8,7 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 
-import { mockAuthenticatedSession, TEST_USER_ID } from "./helpers/session";
+import { mockAuthenticatedSession, mockLongThread } from "./helpers/session";
 
 const MESSAGE_COUNT = 40;
 
@@ -23,44 +23,17 @@ const PNG_1X1 = Buffer.from(
   "base64",
 );
 
-async function mockLongThread(page: Page): Promise<void> {
+async function mockPhoneLongThread(page: Page): Promise<void> {
   await page.setViewportSize({ width: 390, height: 844 });
   await mockAuthenticatedSession(page);
-  await page.route("**/api/chat/thread", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        attachments_enabled: true,
-        next_cursor: null,
-        profile_complete: true,
-        thread: {
-          id: "thread-test-1",
-          user_id: TEST_USER_ID,
-          state: {},
-          created_at: "2026-01-01T00:00:00Z",
-          updated_at: "2026-01-01T00:00:00Z",
-          messages: Array.from({ length: MESSAGE_COUNT }, (_, i) => ({
-            id: `msg-${i}`,
-            role: i % 2 === 0 ? "user" : "assistant",
-            thread_id: "thread-test-1",
-            user_id: TEST_USER_ID,
-            created_at: "2026-01-01T00:00:00Z",
-            metadata: {},
-            attachments: [],
-            parts: [{ type: "text", text: `Message ${i}: keep it steady.` }],
-          })),
-        },
-      }),
-    }),
-  );
+  await mockLongThread(page, MESSAGE_COUNT);
 }
 
 test.describe("mobile chat viewport fit (#540)", () => {
   test("a long thread scrolls inside the message pane, not the page", async ({
     page,
   }) => {
-    await mockLongThread(page);
+    await mockPhoneLongThread(page);
 
     await page.goto("/");
     await expect(page.getByText("Message 0: keep it steady.")).toBeAttached();
@@ -92,7 +65,7 @@ test.describe("mobile chat viewport fit (#540)", () => {
     test(`many attachment chips scroll inside the composer, keeping Send on screen (${viewport.width}x${viewport.height})`, async ({
       page,
     }) => {
-      await mockLongThread(page);
+      await mockPhoneLongThread(page);
       await page.setViewportSize(viewport);
       await page.goto("/");
       const label = page.getByLabel("Add photo or activity file");
