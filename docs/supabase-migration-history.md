@@ -748,9 +748,10 @@ no backfill or maintenance window is needed.
 **Change:** Drops `chat_messages.content` and the `chat_attachments` table (with its
 RLS policy and index, via `cascade`). Both were kept by `0004_chat_messages_parts.sql`
 for one release window after messages moved to the `parts` / `attachments` JSON
-columns. Before dropping anything, a guard block aborts the migration if any message
-still has text in `content` but empty `parts`, or if any `chat_attachments` row belongs
-to a message whose `attachments` JSON is empty (#303).
+columns. Before dropping anything, a guard block aborts the migration if any message's
+non-empty `content` differs from the in-order concatenation of its text parts, or if any
+`chat_attachments` row's `object_key` is missing from its message's `attachments` JSON
+(#303).
 
 **Why:** Nothing reads either structure. The backend stopped writing `content` in the
 same change, and nothing has written `chat_attachments` since `0004`.
@@ -764,12 +765,20 @@ old and the new schema.
 
 ```sql
 -- Both must return 0, or the migration aborts.
-select count(*) from public.chat_messages
-where coalesce(content, '') <> '' and parts = '[]'::jsonb;
+select count(*) from public.chat_messages m
+where coalesce(m.content, '') <> ''
+  and m.content is distinct from (
+    select coalesce(string_agg(coalesce(p.part ->> 'text', ''), '' order by p.ord), '')
+    from jsonb_array_elements(m.parts) with ordinality as p(part, ord)
+    where p.part ->> 'type' = 'text'
+  );
 
 select count(*) from public.chat_attachments a
 join public.chat_messages m on m.id = a.message_id
-where m.attachments = '[]'::jsonb;
+where not exists (
+  select 1 from jsonb_array_elements(m.attachments) as e(entry)
+  where coalesce(e.entry ->> 'objectKey', e.entry ->> 'object_key') = a.object_key
+);
 ```
 
 **All environments:** Apply via `supabase db push` (or `bun run db:reset` locally) after

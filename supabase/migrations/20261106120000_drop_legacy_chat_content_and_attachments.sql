@@ -28,31 +28,45 @@ begin
       and table_name = 'chat_messages'
       and column_name = 'content'
   ) then
+    -- `content` was always written as the in-order concatenation of the text
+    -- parts (0004 backfilled one text part from it; the backend derived it from
+    -- `parts` since), so any non-empty value that differs from that
+    -- concatenation is text `parts` does not carry.
     execute $q$
       select count(*)
-      from public.chat_messages
-      where coalesce(content, '') <> ''
-        and parts = '[]'::jsonb
+      from public.chat_messages m
+      where coalesce(m.content, '') <> ''
+        and m.content is distinct from (
+          select coalesce(string_agg(coalesce(p.part ->> 'text', ''), '' order by p.ord), '')
+          from jsonb_array_elements(m.parts) with ordinality as p(part, ord)
+          where p.part ->> 'type' = 'text'
+        )
     $q$ into unmigrated_text;
 
     if unmigrated_text > 0 then
       raise exception
-        'refusing to drop chat_messages.content: % row(s) have text in content but no parts',
+        'refusing to drop chat_messages.content: % row(s) have content that their text parts do not reproduce',
         unmigrated_text;
     end if;
   end if;
 
   if to_regclass('public.chat_attachments') is not null then
+    -- Every legacy row must appear, by object key, in its message's
+    -- `attachments` JSON (0004 backfilled it as `objectKey`).
     execute $q$
       select count(*)
       from public.chat_attachments a
       join public.chat_messages m on m.id = a.message_id
-      where m.attachments = '[]'::jsonb
+      where not exists (
+        select 1
+        from jsonb_array_elements(m.attachments) as e(entry)
+        where coalesce(e.entry ->> 'objectKey', e.entry ->> 'object_key') = a.object_key
+      )
     $q$ into unmigrated_attachments;
 
     if unmigrated_attachments > 0 then
       raise exception
-        'refusing to drop chat_attachments: % row(s) belong to messages with no attachments JSON',
+        'refusing to drop chat_attachments: % row(s) are missing from their message''s attachments JSON',
         unmigrated_attachments;
     end if;
   end if;
