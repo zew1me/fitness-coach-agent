@@ -61,10 +61,8 @@ class OnboardingRepo:
                 "message_id": message_id,
             }
         )
-        content = "".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
         message = ChatMessage(
             attachments=list(attachments or []),
-            content=content,
             created_at=datetime(2026, 4, 19, tzinfo=UTC),
             id=f"message-{len(self.thread.messages) + 1}",
             metadata=metadata or {},
@@ -198,7 +196,6 @@ async def test_persist_message_defaults_metadata_to_empty_dict() -> None:
 def test_message_cursor_round_trips_message_ids_with_delimiters() -> None:
     created_at = datetime(2026, 4, 19, 12, 30, tzinfo=UTC)
     message = ChatMessage(
-        content="Older message",
         created_at=created_at,
         id="message|with|pipes",
         metadata={},
