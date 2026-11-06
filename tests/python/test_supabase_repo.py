@@ -1777,6 +1777,39 @@ async def test_create_chat_message_does_not_write_legacy_content_column() -> Non
 
 
 @pytest.mark.asyncio
+async def test_chat_messages_ignore_legacy_content_in_old_schema_rows() -> None:
+    # Between the app deploy and the drop migration the database still returns
+    # `content`; the API must not echo it back from either read path (#303).
+    message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
+    legacy_row: dict[str, object] = {
+        "id": message_id,
+        "thread_id": "thread-1",
+        "user_id": "athlete-1",
+        "role": "user",
+        "content": "Legacy mirror",
+        "parts": [{"type": "text", "text": "Legacy mirror"}],
+        "attachments": [],
+        "metadata": {},
+        "created_at": "2026-06-20T12:00:00+00:00",
+    }
+    repo = SupabaseRepository(client=FakeSupabaseClient(chat_message_rows=[legacy_row]))
+
+    created = await repo.create_chat_message(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        role="user",
+        parts=[{"type": "text", "text": "Retry"}],
+        message_id=message_id,
+    )
+    listed = await repo.list_chat_messages("thread-1")
+
+    assert [message.id for message in listed] == [message_id]
+    for message in (created, *listed):
+        assert "content" not in message.model_dump()
+        assert message.parts == [{"type": "text", "text": "Legacy mirror"}]
+
+
+@pytest.mark.asyncio
 async def test_chat_message_pagination_is_stable_for_equal_timestamps() -> None:
     created_at = "2026-06-20T12:00:00+00:00"
     message_ids = (
