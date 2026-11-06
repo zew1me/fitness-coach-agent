@@ -2299,6 +2299,116 @@ async def test_estimate_thresholds_returns_running_paces() -> None:
     assert body["lt1_pace_sec_km"] > body["lt2_pace_sec_km"]
 
 
+async def _post_estimate_thresholds(payload: dict[str, object]) -> httpx.Response:
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/estimate-thresholds", json=payload)
+    api_index.app.dependency_overrides.clear()
+    return response
+
+
+# Maximal efforts for an athlete with CP 280 W and W' 20 kJ: P(t) = CP + W'/t.
+_CP_EFFORTS = [
+    {"duration_seconds": 180, "power_watts": 280 + 20_000 / 180},
+    {"duration_seconds": 480, "power_watts": 280 + 20_000 / 480},
+    {"duration_seconds": 1200, "power_watts": 280 + 20_000 / 1200},
+]
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_fits_critical_power_from_efforts() -> None:
+    response = await _post_estimate_thresholds({"sport": "cycling", "efforts": _CP_EFFORTS})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sport": "cycling",
+        "cp_watts": 280,
+        "w_prime_joules": 20_000,
+        "cp_standard_error_watts": 0,
+        "w_prime_standard_error_joules": 0,
+        "confidence": "high",
+        "ftp_watts": 280,
+        "lt1_watts": 210,
+    }
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_prefers_efforts_over_a_single_test() -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": _CP_EFFORTS,
+            "test_power_watts": 400,
+            "test_duration_minutes": 20,
+        }
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ftp_watts"] == 280
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("efforts", [None, []])
+async def test_estimate_thresholds_without_efforts_keeps_the_single_test_path(
+    efforts: list[object] | None,
+) -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": efforts,
+            "test_power_watts": 300,
+            "test_duration_minutes": 20,
+        }
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"sport": "cycling", "ftp_watts": 285, "lt1_watts": 214}
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_explains_efforts_that_cannot_be_fit() -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": [{"duration_seconds": 300, "power_watts": 350}],
+            "test_power_watts": 300,
+            "test_duration_minutes": 20,
+        }
+    )
+
+    assert response.status_code == 422
+    assert "at least 2" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("power_watts", [0, -300, 3001, 1e308])
+async def test_estimate_thresholds_rejects_out_of_range_effort_power(power_watts: float) -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": [
+                {"duration_seconds": 300, "power_watts": power_watts},
+                {"duration_seconds": 1200, "power_watts": 300},
+            ],
+        }
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_does_not_fit_power_efforts_for_other_sports() -> None:
+    response = await _post_estimate_thresholds({"sport": "running", "efforts": _CP_EFFORTS})
+
+    assert response.status_code == 400
+
+
 @pytest.mark.asyncio
 async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
     api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(

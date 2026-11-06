@@ -122,9 +122,11 @@ def estimate_cycling_thresholds(
     else:
         factor = 0.85
 
-    ftp = round(test_power_watts * factor)
-    lt1 = round(ftp * 0.75)
-    return CyclingThresholds(ftp_watts=ftp, lt1_watts=lt1)
+    return cycling_thresholds_from_ftp(round(test_power_watts * factor))
+
+
+def cycling_thresholds_from_ftp(ftp_watts: int) -> CyclingThresholds:
+    return CyclingThresholds(ftp_watts=ftp_watts, lt1_watts=round(ftp_watts * 0.75))
 
 
 @dataclass(frozen=True)
