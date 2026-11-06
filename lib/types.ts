@@ -88,8 +88,8 @@ export type MessageAttachment = Record<string, unknown>;
 
 export type ChatMessage = {
   attachments: MessageAttachment[];
-  // `content` is a denormalized text mirror kept during the parts-JSON
-  // migration window; renderers should drive off `parts` instead.
+  // Legacy plain-text body. The API no longer returns it (#303), so it is only
+  // ever the schema default; renderers drive off `parts`.
   content?: string;
   created_at: string;
   id: string;

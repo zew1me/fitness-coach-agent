@@ -1220,16 +1220,11 @@ class SupabaseRepository:
         client = self._require_client()
         caller_supplied_id = message_id is not None
         message_id = message_id or str(uuid4())
-        # `content` is denormalized plain text kept for one release window so
-        # existing readers (exports, search) keep working until the follow-up
-        # drop migration. Derive it from any text parts.
-        content = "".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
         payload = {
             "id": message_id,
             "thread_id": thread_id,
             "user_id": user_id,
             "role": role,
-            "content": content,
             "parts": parts,
             "attachments": attachments or [],
             "metadata": metadata or {},
