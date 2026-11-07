@@ -29,6 +29,7 @@
 - `20261011183239_load_snapshot_null_identity.sql` — deduplicates aggregate load snapshots and makes `(user_id, snapshot_date, sport)` unique with NULLs treated as equal
 - `20261027190000_activity_sources.sql` — expand step for per-input activity evidence: `activity_ingest_formats`, `activity_sources`, `load_rebuild_pending`, new `activities` projection columns, a temporary legacy-insert trigger, and the `create_activity_with_source` shadow-writer RPC (#533 PR A)
 - `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
+- `20261101120000_recovery_logs_source_free_form.sql` — replaces the vendor list in `recovery_logs_source_check` with a snake_case slug format check so wellness provenance is open-ended (#428)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -708,3 +709,34 @@ where planned_workout_id is not null group by 1 having count(*) > 1;
 
 If a duplicate exists, index creation fails and the whole migration rolls back. Repair that pair
 by hand first; do not weaken the index.
+
+## 20261101120000 — free-form recovery log source (2026-11-01)
+
+**File:** `supabase/migrations/20261101120000_recovery_logs_source_free_form.sql`
+
+**Change:** Replaces `recovery_logs_source_check`, which enumerated `manual`,
+`garmin_api`, `apple_health` and `screenshot_extract`, with a format check: a
+lowercase `snake_case` slug (`^[a-z0-9]+(_[a-z0-9]+)*$`) of at most 64 characters.
+The constraint is added `NOT VALID` and then validated separately, mirroring
+`20260714130000`. Every previously allowed value already matches the new shape.
+
+**Why:** Daily wellness data arrives from an open-ended set of sources: the
+athlete's own words, screenshots, the Garmin sidecar CLI, intervals.icu, and any
+device or app an athlete exports from (Whoop, Oura, Polar, Fitbit, Withings,
+Eight Sleep, ...). The coach's `save_recovery_data` tool now passes a free-form
+per-entry `source`. The API normalizes it to a slug (`"Eight Sleep"` →
+`eight_sleep`), so the database only guards the shape and needs no new migration
+for each new vendor (#428).
+
+**Preview before applying:**
+
+```sql
+select distinct source
+from public.recovery_logs
+order by source;
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Preview and production are separate Supabase projects and must each be
+linked and applied independently. Existing values all satisfy the new check, so
+no backfill or maintenance window is needed.

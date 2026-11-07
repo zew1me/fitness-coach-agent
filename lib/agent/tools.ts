@@ -134,6 +134,42 @@ const uploadedFileInputSchema = z.object({
   public_url: z.string().nullable(),
 });
 
+// Where the numbers came from, not who typed them. Deliberately open-ended: any device or
+// app the coach can identify is a valid source. The backend normalizes it to the snake_case
+// slug recovery_logs_source_check expects ("Eight Sleep" -> "eight_sleep").
+const RECOVERY_SOURCE_MAX_LENGTH = 64;
+
+// Mirrors normalize_recovery_source in backend/models/athlete.py so a value the backend would
+// reject fails here, where the coach can correct it, instead of as a 422 after tool execution.
+// Accents fold to ASCII first (NFKD, then drop what is left outside ASCII), so "Ōura" keeps
+// its letter as "oura". The slug is checked rather than the raw text because the two can
+// disagree: "心拍" has letters but no ASCII form, and folding can lengthen text past the
+// limit ("ﬃ" becomes "ffi").
+function recoverySourceSlug(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0080-\uffff]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const recoverySourceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(RECOVERY_SOURCE_MAX_LENGTH)
+  .refine((value) => recoverySourceSlug(value).length > 0, {
+    message: "source must contain at least one Latin letter or digit",
+  })
+  .refine(
+    (value) => recoverySourceSlug(value).length <= RECOVERY_SOURCE_MAX_LENGTH,
+    {
+      message: `source must normalize to at most ${RECOVERY_SOURCE_MAX_LENGTH} characters`,
+    },
+  );
+
 const recoveryEntrySchema = z.object({
   body_battery: z.number().int().min(0).max(100).nullable(),
   hrv_ms: z.number().positive().nullable(),
@@ -143,6 +179,7 @@ const recoveryEntrySchema = z.object({
   sleep_consistency_pct: z.number().min(0).max(100).nullable(),
   sleep_duration_hours: z.number().nonnegative().nullable(),
   sleep_score: z.number().nonnegative().nullable(),
+  source: recoverySourceSchema.nullable(),
   stress_score: z.number().nonnegative().nullable(),
   subjective_energy: z.number().int().min(1).max(5).nullable(),
 });
@@ -338,7 +375,7 @@ export const coachToolDefinitions = {
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(
-    "Persist recovery and wellness observations.",
+    "Persist recovery and wellness observations. Set each entry's source to where the numbers came from, not who typed them, as a short snake_case name: e.g. screenshot_extract for a wellness screenshot, or the device/app for exports and syncs (garmin_api, garmin_sidecar, intervals_sync, apple_health, whoop, oura, polar, fitbit, suunto, withings, eight_sleep, elite_hrv, ...). Any identifiable source is accepted; a pasted device export is never manual. For entries that carry only the athlete's own subjective report (energy, notes), pass null: a new day's row then defaults to manual, and a day that already holds device numbers keeps its source instead of being relabelled manual.",
     recoveryInputSchema,
   ),
   update_schedule: defineTool(
