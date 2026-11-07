@@ -1,3 +1,5 @@
+import re
+import unicodedata
 from datetime import UTC, date, datetime
 from typing import Literal
 
@@ -7,6 +9,26 @@ from pydantic import BaseModel, Field, field_validator
 # "user" = athlete typed it; "file" = extracted from GPX/FIT/screenshot;
 # "estimated" = derived by the system from workout patterns.
 ThresholdSource = Literal["user", "file", "estimated"]
+# Recovery-log provenance is open-ended (any device or app the coach can identify), so it is
+# normalized to a lowercase snake_case slug rather than checked against a vendor list. The
+# shape matches recovery_logs_source_check: "Eight Sleep" -> "eight_sleep".
+RECOVERY_SOURCE_MAX_LENGTH = 64
+_NON_SLUG_CHARS = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_recovery_source(value: str) -> str:
+    # Fold accents to ASCII first ("Ōura" -> "oura") so the slug keeps the letter instead of
+    # dropping it; scripts with no ASCII form fold to nothing and are rejected below.
+    # Mirrored by recoverySourceSlug in lib/agent/tools.ts so the tool boundary agrees.
+    folded = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    slug = _NON_SLUG_CHARS.sub("_", folded.strip().lower()).strip("_")
+    if not slug:
+        raise ValueError("source must contain at least one Latin letter or digit")
+    if len(slug) > RECOVERY_SOURCE_MAX_LENGTH:
+        raise ValueError(f"source must be at most {RECOVERY_SOURCE_MAX_LENGTH} characters")
+    return slug
+
+
 RecalibrationCandidateStatus = Literal[
     "pending", "accepted", "kept_current", "manual_entered", "superseded"
 ]
@@ -206,6 +228,11 @@ class RecoveryLog(BaseModel):
     notes: str | None = None
 
     source: str = "manual"
+
+    @field_validator("source")
+    @classmethod
+    def _normalize_source(cls, value: str) -> str:
+        return normalize_recovery_source(value)
 
 
 _MAX_HOURS_PER_DAY = 24.0

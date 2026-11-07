@@ -3088,6 +3088,102 @@ async def test_save_recovery_data_defaults_missing_log_date_to_today(monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_persists_explicit_source(monkeypatch) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={
+                "entries": [
+                    {"log_date": "2026-05-30", "hrv_ms": 48, "source": "garmin_sidecar"},
+                    {"log_date": "2026-05-31", "hrv_ms": 50, "source": "intervals_sync"},
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert [log.source for log in repository.saved] == ["garmin_sidecar", "intervals_sync"]
+    assert all("source" in log.model_fields_set for log in repository.saved)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+@pytest.mark.parametrize("entry_extra", [{}, {"source": None}])
+async def test_save_recovery_data_omitted_or_null_source_defaults_to_manual_without_overwrite(
+    monkeypatch, entry_extra
+) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, **entry_extra}]},
+        )
+
+    assert response.status_code == 200
+    saved = repository.saved[0]
+    assert saved.source == "manual"
+    # Unset source must stay out of fields_set so the repo never overwrites stored provenance.
+    assert "source" not in saved.model_fields_set
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+@pytest.mark.parametrize(
+    ("raw_source", "stored"),
+    [
+        ("whoop", "whoop"),
+        ("Oura Ring", "oura_ring"),
+        ("  Eight Sleep ", "eight_sleep"),
+        ("Elite-HRV", "elite_hrv"),
+        ("Polar Flow (export)", "polar_flow_export"),
+        ("Ōura", "oura"),
+        ("Suunto Café", "suunto_cafe"),
+        ("İ" * 64, "i" * 64),
+    ],
+)
+async def test_save_recovery_data_accepts_any_source_as_normalized_slug(
+    monkeypatch, raw_source: str, stored: str
+) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, "source": raw_source}]},
+        )
+
+    assert response.status_code == 200
+    assert repository.saved[0].source == stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+@pytest.mark.parametrize("raw_source", ["--", "   ", "!!!", "心拍", "ﬃ" * 22, "x" * 65])
+async def test_save_recovery_data_rejects_unusable_source(monkeypatch, raw_source: str) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, "source": raw_source}]},
+        )
+
+    assert response.status_code == 422
+    assert repository.saved == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
 async def test_save_recovery_data_repo_not_configured_returns_503(monkeypatch) -> None:
     class UnconfiguredRepository(EngineRepository):
         async def upsert_recovery_log(self, log: RecoveryLog) -> RecoveryLog:
