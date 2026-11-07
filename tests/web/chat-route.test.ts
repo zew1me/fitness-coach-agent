@@ -1212,6 +1212,32 @@ describe("app/api/chat route engine tool execution", () => {
     );
   });
 
+  it("forwards maximal efforts from estimate_thresholds to the engine", async () => {
+    const fit = { cp_watts: 280, ftp_watts: 280, sport: "cycling" };
+    const fetchMock = vi.fn(() => Promise.resolve(Response.json(fit)));
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    const estimateThresholds = tools["estimate_thresholds"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+    const input = {
+      efforts: [
+        { duration_seconds: 300, power_watts: 345 },
+        { duration_seconds: 1200, power_watts: 297 },
+      ],
+      sport: "cycling",
+    };
+
+    await expect(estimateThresholds.execute(input)).resolves.toEqual(fit);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/estimate-thresholds",
+      expect.objectContaining({ body: JSON.stringify(input), method: "POST" }),
+    );
+  });
+
   it("executes generate_training_plan by calling the engine plan structure endpoint", async () => {
     const fetchMock = vi.fn(() =>
       Promise.resolve(
