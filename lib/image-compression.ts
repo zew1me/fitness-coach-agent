@@ -20,8 +20,15 @@ export function planAttachmentUpload(file: File): UploadPlan {
   return file.size > ATTACHMENT_HARD_LIMIT ? "too-large" : "as-is";
 }
 
+export class AttachmentSizeError extends Error {
+  constructor() {
+    super(CANNOT_REDUCE_MESSAGE);
+    this.name = "AttachmentSizeError";
+  }
+}
+
 export function attachmentSizeError(): Error {
-  return new Error(CANNOT_REDUCE_MESSAGE);
+  return new AttachmentSizeError();
 }
 
 async function verifiedWorkerURL(
@@ -109,16 +116,13 @@ export async function compressImage(
 ): Promise<File> {
   let onAbort = (): void => {};
   const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = (): void => reject(attachmentSizeError());
+    onAbort = (): void => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
   });
   try {
     // Also bound import/decoder stalls; the library's signal cancels its worker.
     return await Promise.race([compress(file, onProgress, signal), aborted]);
-  } catch {
-    // Compression failures (including its 60 s timeout) share the size-error UX.
-    // Only the separate network upload timeout should suggest checking a connection.
-    throw attachmentSizeError();
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
