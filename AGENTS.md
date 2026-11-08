@@ -229,7 +229,7 @@ Use separate Supabase projects per environment (development (local) / preview / 
 
 `chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table.
 
-The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
+The legacy `chat_messages.content` text mirror and the separate `chat_attachments` table were dropped by `20261106120000_drop_legacy_chat_content_and_attachments.sql` (#303); `parts` and `attachments` are the only message payload columns.
 
 #### Compaction
 
