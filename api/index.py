@@ -7,7 +7,7 @@ import os
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
@@ -1125,6 +1125,12 @@ async def compute_tss_endpoint(
     return {"tss": round(tss, 1)}
 
 
+class MaxEffortInput(BaseModel):
+    duration_seconds: int
+    # The ceiling also keeps non-finite and overflowing values out of the fit arithmetic.
+    power_watts: float = Field(gt=0, le=3000)
+
+
 class EstimateThresholdsRequest(BaseModel):
     sport: str
     # Running
@@ -1133,6 +1139,7 @@ class EstimateThresholdsRequest(BaseModel):
     # Cycling
     test_power_watts: int | None = None
     test_duration_minutes: int | None = None
+    efforts: list[MaxEffortInput] | None = None
 
 
 @app.post("/api/engine/estimate-thresholds")
@@ -1140,9 +1147,25 @@ async def estimate_thresholds_endpoint(
     payload: EstimateThresholdsRequest,
     _: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    """Estimate thresholds from a critical power fit, a race result or a single cycling test."""
+    from backend.engine.critical_power import MaxEffort, fit_critical_power
     from backend.engine.thresholds import estimate_cycling_thresholds, estimate_running_thresholds
 
     logger.info("estimate thresholds sport=%s", payload.sport)
+    # Several efforts beat a single test. A failed fit is reported, not replaced by the
+    # single-test path, so the coach can tell the athlete why those efforts did not work.
+    if payload.sport == "cycling" and payload.efforts:
+        try:
+            fit = fit_critical_power(
+                [
+                    MaxEffort(effort.duration_seconds, effort.power_watts)
+                    for effort in payload.efforts
+                ]
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"sport": "cycling", **asdict(fit)}
+
     if payload.sport == "running" and payload.race_time_seconds:
         result = estimate_running_thresholds(
             payload.race_time_seconds,
