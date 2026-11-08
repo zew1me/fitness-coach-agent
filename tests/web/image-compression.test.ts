@@ -170,7 +170,7 @@ describe("compression", () => {
     });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
     controller.abort();
-    await expect(pending).rejects.toThrow("cannot reduce below 4.5 MB");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(compress).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -202,7 +202,9 @@ describe("compression", () => {
           onProgress: vi.fn(),
           signal: new AbortController().signal,
         }),
-      ).rejects.toThrow("cannot reduce below 4.5 MB");
+      ).rejects.toThrow(
+        failure === "throw" ? "decoder failed" : "cannot reduce below 4.5 MB",
+      );
     },
   );
 
@@ -215,10 +217,10 @@ describe("compression", () => {
     });
     await vi.waitFor(() => expect(compress).toHaveBeenCalled());
     controller.abort();
-    await expect(result).rejects.toThrow("cannot reduce below 4.5 MB");
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  it("keeps compression timeouts on the size-error contract, not the network-upload timeout", async () => {
+  it("preserves compression timeouts rather than reporting oversized results", async () => {
     compress.mockImplementation(() => new Promise(() => {}));
     const controller = new AbortController();
     const pending = compressImage(file(4_000_000), {
@@ -228,8 +230,8 @@ describe("compression", () => {
     await vi.waitFor(() => expect(compress).toHaveBeenCalled());
     controller.abort(new DOMException("Compression timed out", "TimeoutError"));
     await expect(pending).rejects.toMatchObject({
-      name: "Error",
-      message: expect.stringContaining("cannot reduce below 4.5 MB"),
+      name: "TimeoutError",
+      message: "Compression timed out",
     });
   });
 
@@ -241,7 +243,7 @@ describe("compression", () => {
         onProgress: vi.fn(),
         signal: controller.signal,
       }),
-    ).rejects.toThrow("cannot reduce below 4.5 MB");
+    ).rejects.toMatchObject({ name: "AbortError" });
     expect(compress).not.toHaveBeenCalled();
   });
 });

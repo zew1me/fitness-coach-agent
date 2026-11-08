@@ -138,7 +138,11 @@ it.each(["too-large", "throw", "still-large"])(
       progress: null,
     });
     expect(error).toHaveBeenCalledWith(
-      expect.stringContaining("cannot reduce below 4.5 MB"),
+      expect.stringContaining(
+        failure === "throw"
+          ? "couldn't decode or optimize"
+          : "cannot reduce below 4.5 MB",
+      ),
     );
   },
 );
@@ -154,9 +158,59 @@ it("logs the original byte size when compression fails before the prepared event
     filename_suffix: ".png",
     content_type: "image/png",
     original_size: file.size,
+    failure_stage: "preparation",
+    failure_reason: "decoder failed",
   });
   expect(mocks.presign).not.toHaveBeenCalled();
 });
+
+it.each(["compression", "upload"])(
+  "reports a %s timeout with the correct stage and recovery advice",
+  async (stage) => {
+    const controller = new AbortController();
+    const reason = new DOMException("Operation timed out", "TimeoutError");
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    if (stage === "compression") {
+      mocks.compress.mockImplementation(() => new Promise(() => {}));
+    } else {
+      mocks.upload.mockRejectedValue(reason);
+    }
+    const error = vi.fn();
+    const { result } = renderHook(() => useChatDraft(error));
+    const file = new File(
+      [new Uint8Array(stage === "compression" ? 4_000_000 : 4)],
+      "photo.png",
+      { type: "image/png" },
+    );
+    await act(async () => {
+      const pending = result.current.handleFilesAdded([file]);
+      if (stage === "compression") {
+        await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalled());
+        controller.abort(reason);
+      }
+      await pending;
+    });
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining(
+        stage === "compression"
+          ? "Optimizing that image took too long"
+          : "Check your connection",
+      ),
+    );
+    expect(mocks.logError).toHaveBeenCalledWith(
+      "chat attachment upload failed",
+      expect.objectContaining({
+        failure_stage: stage === "compression" ? "preparation" : "upload",
+        failure_reason: reason.message,
+      }),
+    );
+    expect(result.current.attachments[0]).toMatchObject({
+      status: "error",
+      progress: null,
+    });
+    if (stage === "compression") expect(mocks.presign).not.toHaveBeenCalled();
+  },
+);
 
 it("rejects an oversized ZIP immediately while an earlier image is still compressing", async () => {
   let finish!: (_file: Blob) => void;

@@ -12,6 +12,7 @@ import { createChatUploadIntent, uploadFile } from "./coach-api";
 import { errorMessage } from "./errors";
 import {
   attachmentSizeError,
+  AttachmentSizeError,
   compressImage,
   planAttachmentUpload,
 } from "./image-compression";
@@ -107,6 +108,7 @@ async function uploadOneAttachment(
 ): Promise<void> {
   const originalSize = file.size;
   let contentType = activityContentType(file);
+  let stage: "preparation" | "presign" | "upload" = "preparation";
   try {
     file = await prepareAttachment(attachmentId, file, updateAttachment);
     contentType = activityContentType(file);
@@ -121,12 +123,14 @@ async function uploadOneAttachment(
       original_size: originalSize,
       prepared_size: file.size,
     });
+    stage = "presign";
     const intent = await createChatUploadIntent({
       content_length: file.size,
       content_type: contentType,
       filename: file.name,
       purpose: "chat-attachment",
     });
+    stage = "upload";
     const uploaded = await uploadFile(
       intent.object_key,
       file,
@@ -161,15 +165,26 @@ async function uploadOneAttachment(
     Sentry.logger.error("chat attachment upload failed", {
       ...attachmentLogContext(file, contentType),
       original_size: originalSize,
+      failure_stage: stage,
+      failure_reason:
+        error instanceof DOMException
+          ? error.message
+          : errorMessage(error, "Unknown attachment failure"),
     });
     updateAttachment(attachmentId, { status: "error", progress: null });
     const timedOut =
       error instanceof DOMException && error.name === "TimeoutError";
     console.error("Chat attachment upload failed", error);
     setThreadError(
-      timedOut
-        ? "That upload took too long and was cancelled. Check your connection and try again."
-        : errorMessage(error, "Unable to upload that attachment."),
+      error instanceof AttachmentSizeError
+        ? error.message
+        : stage === "preparation"
+          ? timedOut
+            ? "Optimizing that image took too long and was cancelled. Try again or choose a smaller image."
+            : "We couldn't decode or optimize that image. Try another image or export it again."
+          : timedOut
+            ? "That upload took too long and was cancelled. Check your connection and try again."
+            : errorMessage(error, "Unable to upload that attachment."),
     );
   }
 }
