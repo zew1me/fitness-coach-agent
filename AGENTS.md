@@ -246,7 +246,9 @@ are capped at 4.4 MB to leave framing room under Vercel's 4.5 MB request limit. 
 has a separate 60 s timeout and a progress chip. Compression is limited to one in-flight
 library call per tab, including after timeout until the decoder settles, because main-thread
 decoding cannot be cancelled. Separate image picks, drops and pastes queue in FIFO order;
-the 60 s preparation budget includes queue waiting, and cancelled queued work never decodes. To avoid an extra worker copy in Vercel
+the 60 s preparation budget includes queue waiting, and cancelled queued work never decodes.
+Discarding the draft (for example, navigating to the calendar) cancels preparation/uploads
+and prevents stale progress or a completed presign from starting an abandoned upload. To avoid an extra worker copy in Vercel
 deployment artifacts (57,069 bytes in 2.0.2; the whole package is ~860 KB), the worker
 script is fetched from an exact-version CDN URL with
 SHA-384 integrity verification, then executed via a verified blob URL. Fetch/integrity
