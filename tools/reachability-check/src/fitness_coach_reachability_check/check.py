@@ -70,11 +70,38 @@ def _parse_allow(entry: Any) -> Allow:  # raw TOML value, validated below
     return Allow(kind, target, reason.strip())
 
 
-def load_config(pyproject: Path) -> Config:
-    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    table = data.get("tool", {}).get(_TABLE)
+def _read_table(pyproject: Path) -> dict[str, Any]:
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ConfigError(f"cannot read {pyproject}: {error}") from error
+    tool = data.get("tool")
+    table = tool.get(_TABLE) if isinstance(tool, dict) else None
     if not isinstance(table, dict):
         raise ConfigError(f"{pyproject} has no [tool.{_TABLE}] table")
+    return table
+
+
+def _check_layout(root: Path, config: Config) -> None:
+    """Reject paths that would make a check silently scan nothing and pass vacuously."""
+    dirs = [*config.python_packages, *config.module_scopes, *config.client_roots]
+    for rel in [*dirs, config.next_app_dir]:
+        if not (root / rel).is_dir():
+            raise ConfigError(f"[tool.{_TABLE}] directory {rel!r} does not exist under {root}")
+    for rel in config.entrypoints:
+        if not (root / rel).is_file():
+            raise ConfigError(f"[tool.{_TABLE}] entrypoint {rel!r} does not exist under {root}")
+    packages = [Path(p) for p in config.python_packages]
+    for scope in config.module_scopes:
+        if not any(Path(scope).is_relative_to(p) for p in packages):
+            raise ConfigError(f"module scope {scope!r} is outside every python_packages entry")
+
+
+def load_config(pyproject: Path) -> Config:
+    table = _read_table(pyproject)
+    allow = table.get("allow", [])
+    if not isinstance(allow, list):
+        raise ConfigError(f"[tool.{_TABLE}].allow must be an array of tables")
     app_dir = table.get("next_app_dir")
     if not isinstance(app_dir, str) or not app_dir:
         raise ConfigError(f"[tool.{_TABLE}].next_app_dir must be a non-empty string")
@@ -84,7 +111,7 @@ def load_config(pyproject: Path) -> Config:
         module_scopes=_str_list(table, "module_scopes"),
         client_roots=_str_list(table, "client_roots"),
         next_app_dir=app_dir,
-        allow=[_parse_allow(e) for e in table.get("allow", [])],
+        allow=[_parse_allow(e) for e in allow],
     )
 
 
@@ -132,6 +159,7 @@ def _apply_allowlist(findings: list[Finding], allow: list[Allow]) -> list[Findin
 
 def run_check(root: Path, config: Config) -> list[Finding]:
     """Return every unallowlisted finding for the repository at ``root``."""
+    _check_layout(root, config)
     api_routes = fastapi_routes(root, config.entrypoints)
     all_routes = api_routes + next_routes(root, config.next_app_dir)
     refs = client_paths(root, config.client_roots)

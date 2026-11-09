@@ -196,6 +196,22 @@ def test_type_checking_import_does_not_make_a_module_reachable(repo: Path) -> No
     assert _findings(repo) == {("module", "backend/engine/hints.py")}
 
 
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (_CONFIG.replace('"app", "lib"', '"app", "missing"'), "does not exist"),
+        (_CONFIG.replace('"backend/services"]', '"backend/services", "tools"]'), "outside"),
+    ],
+)
+def test_layout_errors_fail_instead_of_scanning_nothing(
+    repo: Path, config: str, message: str
+) -> None:
+    _write(repo, "tools/x.py", "")
+    _write(repo, "pyproject.toml", config)
+    with pytest.raises(ConfigError, match=message):
+        run_check(repo, load_config(repo / "pyproject.toml"))
+
+
 def test_cli_exit_codes(repo: Path) -> None:
     runner = CliRunner()
     ok = runner.invoke(app, ["check", "--root", str(repo)])
@@ -206,5 +222,6 @@ def test_cli_exit_codes(repo: Path) -> None:
     assert failed.exit_code == 1
     assert "backend/services/orphan.py" in strip_ansi(failed.output)
 
-    (repo / "pyproject.toml").write_text("[tool.other]\n", encoding="utf-8")
-    assert runner.invoke(app, ["check", "--root", str(repo)]).exit_code == 2
+    for broken in ("[tool.other]\n", "[tool\n", "tool = 1\n"):
+        (repo / "pyproject.toml").write_text(broken, encoding="utf-8")
+        assert runner.invoke(app, ["check", "--root", str(repo)]).exit_code == 2, broken

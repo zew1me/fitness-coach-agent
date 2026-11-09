@@ -29,11 +29,10 @@ def check(
 ) -> None:
     """Run every reachability check and exit non-zero on any unallowlisted finding."""
     try:
-        config = load_config(root / "pyproject.toml")
+        findings = run_check(root, load_config(root / "pyproject.toml"))
     except ConfigError as error:
         typer.echo(f"reachability-check: {error}", err=True)
         raise typer.Exit(2) from error
-    findings = run_check(root, config)
     for finding in findings:
         typer.echo(f"{finding.kind}: {finding.target} — {finding.detail}", err=True)
     if findings:
