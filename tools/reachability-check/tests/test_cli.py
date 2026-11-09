@@ -201,6 +201,9 @@ def test_type_checking_import_does_not_make_a_module_reachable(repo: Path) -> No
     [
         (_CONFIG.replace('"app", "lib"', '"app", "missing"'), "does not exist"),
         (_CONFIG.replace('"backend/services"]', '"backend/services", "tools"]'), "outside"),
+        (_CONFIG.replace('"app", "lib"', '"app", ""'), "non-blank"),
+        (_CONFIG.replace('"backend/services"]', '"backend/services", " "]'), "non-blank"),
+        (_CONFIG.replace('next_app_dir = "app"', 'next_app_dir = " "'), "next_app_dir"),
     ],
 )
 def test_layout_errors_fail_instead_of_scanning_nothing(

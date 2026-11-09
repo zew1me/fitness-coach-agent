@@ -51,8 +51,11 @@ class Finding:
 
 def _str_list(table: dict[str, Any], key: str) -> list[str]:
     value = table.get(key)
-    if not (isinstance(value, list) and value and all(isinstance(v, str) for v in value)):
-        raise ConfigError(f"[tool.{_TABLE}].{key} must be a non-empty list of strings")
+    # A blank entry resolves to the repository root, which is never what a scan entry means.
+    if not (
+        isinstance(value, list) and value and all(isinstance(v, str) and v.strip() for v in value)
+    ):
+        raise ConfigError(f"[tool.{_TABLE}].{key} must be a non-empty list of non-blank strings")
     return value
 
 
@@ -103,7 +106,7 @@ def load_config(pyproject: Path) -> Config:
     if not isinstance(allow, list):
         raise ConfigError(f"[tool.{_TABLE}].allow must be an array of tables")
     app_dir = table.get("next_app_dir")
-    if not isinstance(app_dir, str) or not app_dir:
+    if not isinstance(app_dir, str) or not app_dir.strip():
         raise ConfigError(f"[tool.{_TABLE}].next_app_dir must be a non-empty string")
     return Config(
         entrypoints=_str_list(table, "entrypoints"),
