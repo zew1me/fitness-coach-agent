@@ -34,6 +34,7 @@ type AttachmentPatch = Partial<
 >;
 
 type AttachmentUploadCallbacks = {
+  signal: AbortSignal;
   updateAttachment: (_attachmentId: string, _patch: AttachmentPatch) => void;
   setThreadError: (_error: string | null) => void;
 };
@@ -86,20 +87,51 @@ function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
   };
 }
 
+async function withAttachmentTimeout<T>(
+  draftSignal: AbortSignal,
+  timeoutMs: number,
+  operation: (_signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  // Forward both sources without requiring AbortSignal.any on older Safari.
+  // Aborting the derived signal also removes both forwarding listeners.
+  for (const source of [draftSignal, AbortSignal.timeout(timeoutMs)]) {
+    if (source.aborted) controller.abort(source.reason);
+    else
+      source.addEventListener("abort", () => controller.abort(source.reason), {
+        once: true,
+        signal: controller.signal,
+      });
+  }
+  try {
+    controller.signal.throwIfAborted();
+    return await operation(controller.signal);
+  } finally {
+    controller.abort();
+  }
+}
+
 async function prepareAttachment(
   attachmentId: string,
   file: File,
   updateAttachment: AttachmentUploadCallbacks["updateAttachment"],
+  draftSignal: AbortSignal,
 ): Promise<File> {
   const plan = planAttachmentUpload(file);
   if (plan === "too-large") throw attachmentSizeError();
   if (plan === "as-is") return file;
-  return compressImage(file, {
-    signal: AbortSignal.timeout(ATTACHMENT_COMPRESSION_TIMEOUT_MS),
-    onProgress: (progress) => {
-      updateAttachment(attachmentId, { progress: Math.round(progress) });
-    },
-  });
+  return withAttachmentTimeout(
+    draftSignal,
+    ATTACHMENT_COMPRESSION_TIMEOUT_MS,
+    (signal) =>
+      compressImage(file, {
+        signal,
+        onProgress: (progress) => {
+          if (!signal.aborted)
+            updateAttachment(attachmentId, { progress: Math.round(progress) });
+        },
+      }),
+  );
 }
 
 type AttachmentUploadStage = "preparation" | "presign" | "upload";
@@ -129,13 +161,20 @@ function attachmentFailureMessage(
 async function uploadOneAttachment(
   attachmentId: string,
   file: File,
-  { updateAttachment, setThreadError }: AttachmentUploadCallbacks,
+  { updateAttachment, setThreadError, signal }: AttachmentUploadCallbacks,
 ): Promise<void> {
   const originalSize = file.size;
   let contentType = activityContentType(file);
   let stage: AttachmentUploadStage = "preparation";
   try {
-    file = await prepareAttachment(attachmentId, file, updateAttachment);
+    signal.throwIfAborted();
+    file = await prepareAttachment(
+      attachmentId,
+      file,
+      updateAttachment,
+      signal,
+    );
+    signal.throwIfAborted();
     contentType = activityContentType(file);
     updateAttachment(attachmentId, {
       content_type: contentType,
@@ -155,13 +194,15 @@ async function uploadOneAttachment(
       filename: file.name,
       purpose: "chat-attachment",
     });
+    signal.throwIfAborted();
     stage = "upload";
-    const uploaded = await uploadFile(
-      intent.object_key,
-      file,
-      undefined,
-      AbortSignal.timeout(ATTACHMENT_UPLOAD_TIMEOUT_MS),
+    const uploaded = await withAttachmentTimeout(
+      signal,
+      ATTACHMENT_UPLOAD_TIMEOUT_MS,
+      (uploadSignal) =>
+        uploadFile(intent.object_key, file, undefined, uploadSignal),
     );
+    signal.throwIfAborted();
     if (uploaded.public_url === null) {
       updateAttachment(attachmentId, {
         object_key: uploaded.object_key,
@@ -187,6 +228,8 @@ async function uploadOneAttachment(
       status: "uploaded",
     });
   } catch (error) {
+    // Navigating away discards the draft, not a failed upload to report in a new one.
+    if (signal.aborted) return;
     Sentry.logger.error("chat attachment upload failed", {
       ...attachmentLogContext(file, contentType),
       original_size: originalSize,
@@ -228,6 +271,13 @@ export function useChatDraft(
     latestComposerRef.current = composer;
     latestAttachmentsRef.current = attachments;
   }, [composer, attachments]);
+  const draftControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    draftControllerRef.current = controller;
+    return (): void => controller.abort();
+  }, []);
 
   useEffect((): (() => void) => {
     return (): void => {
@@ -254,6 +304,8 @@ export function useChatDraft(
 
   async function handleFilesAdded(files: File[]): Promise<void> {
     if (files.length === 0) return;
+    const signal = draftControllerRef.current?.signal;
+    if (!signal || signal.aborted) return;
 
     const uploadQueue: Array<{ attachmentId: string; file: File }> = [];
     const nextLocalAttachments: LocalAttachment[] = [];
@@ -279,6 +331,7 @@ export function useChatDraft(
 
     for (const { attachmentId, file } of uploadQueue) {
       await uploadOneAttachment(attachmentId, file, {
+        signal,
         setThreadError,
         updateAttachment,
       });

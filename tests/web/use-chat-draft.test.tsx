@@ -343,6 +343,122 @@ it("rejects an oversized ZIP immediately while an earlier image is still compres
   expect(mocks.upload).toHaveBeenCalledTimes(1);
 });
 
+it("cancels active preparation on unmount and never uploads the discarded image", async () => {
+  let finish!: (_blob: Blob) => void;
+  let preparationSignal!: AbortSignal;
+  let progress!: (_progress: number) => void;
+  mocks.compress.mockImplementation((_file, options) => {
+    preparationSignal = options.signal;
+    progress = options.onProgress;
+    return new Promise<Blob>((resolve) => {
+      finish = resolve;
+    });
+  });
+  const error = vi.fn();
+  const { result, unmount } = renderHook(() => useChatDraft(error));
+  let pending!: Promise<void>;
+  await act(async () => {
+    pending = result.current.handleFilesAdded([
+      new File([new Uint8Array(4_000_000)], "discard.png", {
+        type: "image/png",
+      }),
+    ]);
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalledTimes(1));
+  });
+  unmount();
+  await pending;
+  expect(preparationSignal.aborted).toBe(true);
+  progress(80);
+  finish(new Blob(["jpeg"], { type: "image/jpeg" }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(mocks.presign).not.toHaveBeenCalled();
+  expect(mocks.upload).not.toHaveBeenCalled();
+  expect(error).not.toHaveBeenCalled();
+  expect(mocks.logError).not.toHaveBeenCalled();
+});
+
+it("removes a discarded queued draft without decoding it or blocking a new draft", async () => {
+  let finish!: (_blob: Blob) => void;
+  mocks.compress.mockImplementationOnce(
+    () =>
+      new Promise<Blob>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  mocks.compress.mockResolvedValue(new Blob(["jpeg"], { type: "image/jpeg" }));
+  const active = renderHook(() => useChatDraft(vi.fn()));
+  const discarded = renderHook(() => useChatDraft(vi.fn()));
+  const photo = (name: string): File =>
+    new File([new Uint8Array(4_000_000)], name, { type: "image/png" });
+  let first!: Promise<void>;
+  let queued!: Promise<void>;
+  await act(async () => {
+    first = active.result.current.handleFilesAdded([photo("first.png")]);
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalledTimes(1));
+    queued = discarded.result.current.handleFilesAdded([photo("discard.png")]);
+  });
+  discarded.unmount();
+  await queued;
+  await act(async () => {
+    finish(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await first;
+    await active.result.current.handleFilesAdded([photo("next.png")]);
+  });
+  expect(mocks.compress.mock.calls.map(([input]) => input.name)).toEqual([
+    "first.png",
+    "next.png",
+  ]);
+  expect(mocks.presign.mock.calls.map(([payload]) => payload.filename)).toEqual(
+    ["first.jpg", "next.jpg"],
+  );
+});
+
+it.each(["presign", "upload"])(
+  "stops discarded work during %s without reporting an error",
+  async (stage) => {
+    let finish!: () => void;
+    let uploadSignal: AbortSignal | undefined;
+    const response = {
+      object_key: "key",
+      public_url: "https://example.com/photo.png",
+    };
+    if (stage === "presign")
+      mocks.presign.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = (): void => resolve(response);
+          }),
+      );
+    else
+      mocks.upload.mockImplementation((_key, _file, _fetch, signal) => {
+        uploadSignal = signal;
+        return new Promise((resolve) => {
+          finish = (): void => resolve(response);
+        });
+      });
+    const error = vi.fn();
+    const { result, unmount } = renderHook(() => useChatDraft(error));
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handleFilesAdded([
+        new File(["png"], "photo.png", { type: "image/png" }),
+      ]);
+      await vi.waitFor(() =>
+        expect(
+          stage === "presign" ? mocks.presign : mocks.upload,
+        ).toHaveBeenCalledTimes(1),
+      );
+    });
+    unmount();
+    if (stage === "upload") expect(uploadSignal?.aborted).toBe(true);
+    finish();
+    await pending;
+    if (stage === "presign") expect(mocks.upload).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(mocks.logError).not.toHaveBeenCalled();
+  },
+);
+
 it("keeps GIFs and activity files that already fit unchanged", async () => {
   const { result } = renderHook(() => useChatDraft(vi.fn()));
   for (const [name, type] of [
