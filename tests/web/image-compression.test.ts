@@ -208,32 +208,47 @@ describe("compression", () => {
     },
   );
 
-  it("bounds a stalled decoder with the signal", async () => {
-    compress.mockImplementation(() => new Promise(() => {}));
-    const controller = new AbortController();
-    const result = compressImage(file(4_000_000), {
-      onProgress: vi.fn(),
-      signal: controller.signal,
-    });
-    await vi.waitFor(() => expect(compress).toHaveBeenCalled());
-    controller.abort();
-    await expect(result).rejects.toMatchObject({ name: "AbortError" });
-  });
-
-  it("preserves compression timeouts rather than reporting oversized results", async () => {
-    compress.mockImplementation(() => new Promise(() => {}));
-    const controller = new AbortController();
-    const pending = compressImage(file(4_000_000), {
-      onProgress: vi.fn(),
-      signal: controller.signal,
-    });
-    await vi.waitFor(() => expect(compress).toHaveBeenCalled());
-    controller.abort(new DOMException("Compression timed out", "TimeoutError"));
-    await expect(pending).rejects.toMatchObject({
-      name: "TimeoutError",
-      message: "Compression timed out",
-    });
-  });
+  it.each(["AbortError", "TimeoutError"])(
+    "preserves %s and blocks retries until the underlying decoder settles",
+    async (name) => {
+      let finish!: (_blob: Blob) => void;
+      compress.mockImplementationOnce(
+        () =>
+          new Promise<Blob>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const controller = new AbortController();
+      const pending = compressImage(file(4_000_000), {
+        onProgress: vi.fn(),
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(compress).toHaveBeenCalledTimes(1));
+      const reason = new DOMException("Compression cancelled", name);
+      controller.abort(reason);
+      await expect(pending).rejects.toBe(reason);
+      for (let retry = 0; retry < 3; retry++) {
+        await expect(
+          compressImage(file(4_000_000), {
+            onProgress: vi.fn(),
+            signal: new AbortController().signal,
+          }),
+        ).rejects.toMatchObject({ name: "ImageCompressionBusyError" });
+      }
+      expect(compress).toHaveBeenCalledTimes(1);
+      finish(new Blob(["jpeg"], { type: "image/jpeg" }));
+      // Let the real compression promise (not the timeout race) release its slot.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      compress.mockResolvedValue(new Blob(["jpeg"], { type: "image/jpeg" }));
+      await expect(
+        compressImage(file(4_000_000), {
+          onProgress: vi.fn(),
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toHaveProperty("type", "image/jpeg");
+      expect(compress).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("does not load compression for an already aborted request", async () => {
     const controller = new AbortController();

@@ -65,6 +65,20 @@ async function verifiedWorkerURL(
   }
 }
 
+export class ImageCompressionBusyError extends Error {
+  constructor() {
+    super(
+      "Another image is still being optimized. Wait for it to finish, or reload before trying again.",
+    );
+    this.name = "ImageCompressionBusyError";
+  }
+}
+
+// The library may fall back to an uncancellable main-thread decoder, even after
+// trying a worker. Keep this slot until the actual work settles, not just until
+// the caller's timeout fires, so retries cannot accumulate decodes in this tab.
+let compressionInFlight = false;
+
 async function compress(
   file: File,
   onProgress: (_progress: number) => void,
@@ -77,7 +91,12 @@ async function compress(
   signal.throwIfAborted();
   const workerURL = await verifiedWorkerURL(signal);
   let result: Blob;
+  let ownsSlot = false;
   try {
+    signal.throwIfAborted();
+    if (compressionInFlight) throw new ImageCompressionBusyError();
+    compressionInFlight = true;
+    ownsSlot = true;
     result = await imageCompression(file, {
       fileType: "image/jpeg",
       initialQuality: 0.8,
@@ -91,6 +110,7 @@ async function compress(
       ...(workerURL === undefined ? {} : { libURL: workerURL }),
     });
   } finally {
+    if (ownsSlot) compressionInFlight = false;
     if (workerURL !== undefined) URL.revokeObjectURL(workerURL);
   }
   signal.throwIfAborted();
