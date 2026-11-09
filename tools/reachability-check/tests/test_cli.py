@@ -185,6 +185,17 @@ def test_keyword_path_decorator_is_a_route(repo: Path) -> None:
     assert _findings(repo) == {("endpoint", "/api/engine/keyword")}
 
 
+def test_type_checking_import_does_not_make_a_module_reachable(repo: Path) -> None:
+    _write(repo, "backend/engine/hints.py", "")
+    guard = (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from backend.engine import hints\n"
+    )
+    _write(repo, "api/index.py", guard + _API)
+    assert _findings(repo) == {("module", "backend/engine/hints.py")}
+
+
 def test_cli_exit_codes(repo: Path) -> None:
     runner = CliRunner()
     ok = runner.invoke(app, ["check", "--root", str(repo)])

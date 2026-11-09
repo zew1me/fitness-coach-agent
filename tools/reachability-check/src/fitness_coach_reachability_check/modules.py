@@ -35,10 +35,30 @@ def _resolve_from(node: ast.ImportFrom, current: str, is_package: bool) -> str:
     return ".".join([*base, node.module] if node.module else base)
 
 
+def _is_type_checking(test: ast.expr) -> bool:
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
+
+
+def _runtime_nodes(tree: ast.Module) -> list[ast.AST]:
+    """All nodes except the bodies of `if TYPE_CHECKING:`, which never execute at runtime."""
+    nodes: list[ast.AST] = []
+    stack: list[ast.AST] = [tree]
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if isinstance(node, ast.If) and _is_type_checking(node.test):
+            stack.extend([node.test, *node.orelse])
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return nodes
+
+
 def _imported_names(tree: ast.Module, current: str, is_package: bool) -> set[str]:
-    """Every module name an import in ``tree`` may load, including function-local imports."""
+    """Every module an import in ``tree`` may load at runtime, including function-local ones."""
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _runtime_nodes(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
