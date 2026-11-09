@@ -106,6 +106,10 @@ are independent. No database migration or new secret is needed.
    separate fresh email still supports six-digit code entry. Also test `/profile` and
    the consent return path. The link and code are alternatives for the same single-use
    credential; after one succeeds, reuse of either must fail. Test an expired link too.
+   If email verification succeeds but app browser-session setup is unavailable, the
+   callback preserves the Supabase session and displays **Retry sign-in**. Retry uses
+   the authenticated cookie session, not the consumed link; an expired session still
+   requires a fresh email.
 5. If this fails, check **Authentication → Logs** in the same Supabase project and the
    app's `auth callback: email verification failed` log. Confirm Vercel's server and
    public Supabase settings refer to that same project. Never share raw links, tokens,

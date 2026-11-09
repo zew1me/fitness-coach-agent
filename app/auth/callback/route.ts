@@ -93,14 +93,71 @@ async function verifySignIn(
   return data.session;
 }
 
+async function restoreSignIn(supabase: SupabaseClient): Promise<Session> {
+  // Authenticate the cookie-backed user before reusing a stored session. The
+  // browser-session endpoint independently validates the access token as well.
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+  if (userError !== null) throw userError;
+  const { data, error } = await supabase.auth.getSession();
+  if (error !== null) throw error;
+  if (data.session === null)
+    throw new Error("Your session expired. Request a new sign-in code.");
+  return { ...data.session, user: userData.user };
+}
+
+function browserSessionRetryResponse(
+  response: NextResponse,
+  returnTo: string,
+): NextResponse {
+  // Preserve the verified Supabase cookies, but never carry the consumed token
+  // or backend error details into the retry URL or page. Require a user click
+  // rather than redirecting to an automatic retry loop during an outage.
+  const query = new URLSearchParams({ retry: "1", return_to: returnTo });
+  const retryPath = `/auth/callback?${query.toString()}`.replaceAll(
+    "&",
+    "&amp;",
+  );
+  const headers = new Headers(response.headers);
+  headers.delete("location");
+  headers.set("Content-Type", "text/html; charset=utf-8");
+  headers.set(
+    "Content-Security-Policy",
+    "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  );
+  return new NextResponse(
+    `<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Finish signing in</title></head><body><main><h1>Finish signing in</h1><p>Your email was verified, but we couldn't finish setting up your browser session. Please try again.</p><a href="${retryPath}">Retry sign-in</a></main></body></html>`,
+    { status: 503, headers },
+  );
+}
+
+async function completeBrowserSession(
+  request: NextRequest,
+  response: NextResponse,
+  session: Session,
+  returnTo: string,
+): Promise<NextResponse> {
+  try {
+    await appendBrowserSessionCookie(request, response, session.access_token);
+  } catch {
+    defaultLogger.error("auth callback: browser session creation failed");
+    return browserSessionRetryResponse(response, returnTo);
+  }
+  defaultLogger.info("auth callback: login complete", {
+    user_id: session.user.id,
+    return_to: new URL(returnTo, request.url).pathname,
+  });
+  return response;
+}
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get("code");
   const tokenHash = requestUrl.searchParams.get("token_hash");
   const type = requestUrl.searchParams.get("type");
+  const retry = requestUrl.searchParams.get("retry") === "1";
   const returnTo = normalizeReturnTo(requestUrl.searchParams.get("return_to"));
 
-  if (!code && !tokenHash) {
+  if (!code && !tokenHash && !retry) {
     defaultLogger.warn("auth callback: missing code param");
     return buildLoginRedirectResponse(
       request,
@@ -122,18 +179,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const redirectResponse = callbackRedirect(new URL(returnTo, request.url));
     const supabase = createServerSupabaseClient(request, redirectResponse);
-    const session = await verifySignIn(supabase, code, tokenHash);
-
-    await appendBrowserSessionCookie(
+    const session = retry
+      ? await restoreSignIn(supabase)
+      : await verifySignIn(supabase, code, tokenHash);
+    return await completeBrowserSession(
       request,
       redirectResponse,
-      session.access_token,
+      session,
+      returnTo,
     );
-    defaultLogger.info("auth callback: login complete", {
-      user_id: session.user.id,
-      return_to: new URL(returnTo, request.url).pathname,
-    });
-    return redirectResponse;
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unable to finish login.";
