@@ -1,6 +1,7 @@
 import * as Sentry from "@sentry/nextjs";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
+import { ZodError } from "zod";
 
 import {
   activityContentType,
@@ -14,6 +15,7 @@ import {
   attachmentSizeError,
   AttachmentSizeError,
   compressImage,
+  ImageCompressionBusyError,
   planAttachmentUpload,
 } from "./image-compression";
 
@@ -97,6 +99,33 @@ async function prepareAttachment(
   });
 }
 
+type AttachmentUploadStage = "preparation" | "presign" | "upload";
+
+function attachmentFailureMessage(
+  error: unknown,
+  stage: AttachmentUploadStage,
+): string {
+  if (
+    error instanceof AttachmentSizeError ||
+    error instanceof ImageCompressionBusyError
+  ) {
+    return error.message;
+  }
+  if (stage === "presign" && error instanceof ZodError) {
+    return "That attachment couldn't be uploaded. Choose a non-empty file with a valid filename and try again.";
+  }
+  const timedOut =
+    error instanceof DOMException && error.name === "TimeoutError";
+  if (stage === "preparation") {
+    return timedOut
+      ? "Optimizing that image took too long and was cancelled. Try again or choose a smaller image."
+      : "We couldn't decode or optimize that image. Try another image or export it again.";
+  }
+  return timedOut
+    ? "That upload took too long and was cancelled. Check your connection and try again."
+    : errorMessage(error, "Unable to upload that attachment.");
+}
+
 async function uploadOneAttachment(
   attachmentId: string,
   file: File,
@@ -104,7 +133,7 @@ async function uploadOneAttachment(
 ): Promise<void> {
   const originalSize = file.size;
   let contentType = activityContentType(file);
-  let stage: "preparation" | "presign" | "upload" = "preparation";
+  let stage: AttachmentUploadStage = "preparation";
   try {
     file = await prepareAttachment(attachmentId, file, updateAttachment);
     contentType = activityContentType(file);
@@ -168,20 +197,8 @@ async function uploadOneAttachment(
           : errorMessage(error, "Unknown attachment failure"),
     });
     updateAttachment(attachmentId, { status: "error", progress: null });
-    const timedOut =
-      error instanceof DOMException && error.name === "TimeoutError";
     console.error("Chat attachment upload failed", error);
-    setThreadError(
-      error instanceof AttachmentSizeError
-        ? error.message
-        : stage === "preparation"
-          ? timedOut
-            ? "Optimizing that image took too long and was cancelled. Try again or choose a smaller image."
-            : "We couldn't decode or optimize that image. Try another image or export it again."
-          : timedOut
-            ? "That upload took too long and was cancelled. Check your connection and try again."
-            : errorMessage(error, "Unable to upload that attachment."),
-    );
+    setThreadError(attachmentFailureMessage(error, stage));
   }
 }
 

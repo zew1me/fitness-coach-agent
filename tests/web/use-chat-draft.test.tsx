@@ -3,6 +3,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { uploadedFileParts } from "../../lib/chat-attachments";
+import { uploadRequestSchema } from "../../lib/schemas";
 import { useChatDraft } from "../../lib/use-chat-draft";
 
 const mocks = vi.hoisted(() => ({
@@ -170,8 +171,14 @@ it.each(["compression", "upload"])(
     const controller = new AbortController();
     const reason = new DOMException("Operation timed out", "TimeoutError");
     vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    let finish!: (_blob: Blob) => void;
     if (stage === "compression") {
-      mocks.compress.mockImplementation(() => new Promise(() => {}));
+      mocks.compress.mockImplementation(
+        () =>
+          new Promise<Blob>((resolve) => {
+            finish = resolve;
+          }),
+      );
     } else {
       mocks.upload.mockRejectedValue(reason);
     }
@@ -189,6 +196,8 @@ it.each(["compression", "upload"])(
         controller.abort(reason);
       }
       await pending;
+      if (stage === "compression")
+        finish(new Blob(["jpeg"], { type: "image/jpeg" }));
     });
     expect(error).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -211,6 +220,33 @@ it.each(["compression", "upload"])(
     if (stage === "compression") expect(mocks.presign).not.toHaveBeenCalled();
   },
 );
+
+it("shows readable presign validation errors but retains server error details", async () => {
+  mocks.presign.mockImplementation((payload) =>
+    uploadRequestSchema.parseAsync(payload),
+  );
+  const error = vi.fn();
+  const { result } = renderHook(() => useChatDraft(error));
+  await act(() =>
+    result.current.handleFilesAdded([
+      new File([], "empty.zip", { type: "application/zip" }),
+    ]),
+  );
+  expect(error).toHaveBeenLastCalledWith(
+    "That attachment couldn't be uploaded. Choose a non-empty file with a valid filename and try again.",
+  );
+  expect(mocks.upload).not.toHaveBeenCalled();
+  expect(result.current.attachments[0]?.status).toBe("error");
+  mocks.presign.mockRejectedValue(
+    new Error("Storage is temporarily unavailable"),
+  );
+  await act(() =>
+    result.current.handleFilesAdded([
+      new File(["zip"], "ride.zip", { type: "application/zip" }),
+    ]),
+  );
+  expect(error).toHaveBeenLastCalledWith("Storage is temporarily unavailable");
+});
 
 it("rejects an oversized ZIP immediately while an earlier image is still compressing", async () => {
   let finish!: (_file: Blob) => void;

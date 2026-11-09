@@ -243,7 +243,9 @@ Chat uploads still use the Vercel multipart proxy (not direct-to-R2). The browse
 compresses JPEG/PNG/WebP files ≥4.0 MB to JPEG (2560 px, quality 0.8, ~3.8 MB target),
 stripping EXIF; GIFs and activity/ZIP files are never compressed. All prepared uploads
 are capped at 4.4 MB to leave framing room under Vercel's 4.5 MB request limit. Compression
-has a separate 60 s timeout and a progress chip. To avoid an extra worker copy in Vercel
+has a separate 60 s timeout and a progress chip. Compression is limited to one in-flight
+library call per tab, including after timeout until the decoder settles, because main-thread
+decoding cannot be cancelled. To avoid an extra worker copy in Vercel
 deployment artifacts (57,069 bytes in 2.0.2; the whole package is ~860 KB), the worker
 script is fetched from an exact-version CDN URL with
 SHA-384 integrity verification, then executed via a verified blob URL. Fetch/integrity
