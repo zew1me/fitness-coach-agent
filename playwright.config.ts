@@ -24,6 +24,7 @@ const devServer = resolveDevServer({
 });
 const devServerUrl = `http://localhost:${devServer.port}`;
 const baseURL = process.env["BASE_URL"] ?? devServerUrl;
+const TOUCH_SPECS = /.*\.touch\.spec\.ts$/;
 
 export default defineConfig({
   testDir: "./tests/ui",
@@ -50,7 +51,17 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      testIgnore: TOUCH_SPECS,
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      // Touch-device specs (issue #553): iPhone-class emulation — mobile
+      // viewport/UA, isMobile (meta viewport honored), hasTouch, 3x DPR — run
+      // on Chromium because CI installs only Chromium. Kept to `*.touch.spec.ts`
+      // so the desktop suite is not run twice.
+      name: "mobile-touch",
+      testMatch: TOUCH_SPECS,
+      use: { ...devices["iPhone 15"], browserName: "chromium" },
     },
   ],
   // Auto-start the dev server when running locally.

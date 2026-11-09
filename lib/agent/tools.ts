@@ -97,7 +97,13 @@ const updateGoalsInputSchema = z
     }
   });
 
+const maxEffortSchema = z.object({
+  duration_seconds: z.number().int().positive(),
+  power_watts: z.number().positive().max(3000),
+});
+
 const thresholdInputSchema = z.object({
+  efforts: z.array(maxEffortSchema).nullable(),
   race_distance_meters: z.number().positive().nullable(),
   race_time_seconds: z.number().int().positive().nullable(),
   sport: z.string().min(1),
@@ -389,7 +395,7 @@ export const coachToolDefinitions = {
     zonesInputSchema,
   ),
   estimate_thresholds: defineTool(
-    "Estimate LT1/LT2 thresholds from tests or races.",
+    "Estimate LT1/LT2 thresholds from tests or races. For cycling, prefer efforts: 2+ true maximal efforts of 3-20 minutes at different durations, ideally including one of 12+ minutes, which fits critical power and W'. A rejected fit says why; relay that rather than estimating by hand.",
     thresholdInputSchema,
   ),
   generate_training_plan: defineTool(

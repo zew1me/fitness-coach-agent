@@ -229,7 +229,7 @@ Use separate Supabase projects per environment (development (local) / preview / 
 
 `chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table.
 
-The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
+The legacy `chat_messages.content` text mirror and the separate `chat_attachments` table were dropped by `20261106120000_drop_legacy_chat_content_and_attachments.sql` (#303); `parts` and `attachments` are the only message payload columns.
 
 #### Compaction
 
@@ -355,6 +355,7 @@ See `.env.example`. Required:
 - Python tests: `tests/python/` plus co-located `tools/*/tests/` workspace-tool tests — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for application fixtures; workspace tools should keep tool-specific fixtures local
 - UI tests: `tests/ui/` — Playwright. The auto-started dev server uses port 3000 in the primary checkout and a stable per-worktree port in a linked git worktree, so concurrent runs in different worktrees never share a server (a worktree never reuses an already-running server, so a rare port collision fails loudly); set `PLAYWRIGHT_PORT` to choose the port, or `BASE_URL` to target a deployed preview
+- Touch-device UI tests: name a spec `*.touch.spec.ts` to run it only in the `mobile-touch` Playwright project (iPhone-class emulation with `isMobile`/`hasTouch` on Chromium) instead of the desktop `chromium` project. Use `locator.tap()` for taps and CDP `Input.dispatchTouchEvent` for swipes; it covers the touch/viewport contract, not WebKit rendering
 
 ## Local hooks (lefthook)
 
