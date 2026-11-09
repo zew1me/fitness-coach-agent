@@ -99,9 +99,9 @@ def _endpoint_findings(routes: list[Route], refs: list[ClientPath]) -> list[Find
 def _client_findings(routes: list[Route], refs: list[ClientPath]) -> list[Finding]:
     findings: dict[str, Finding] = {}
     for ref in refs:
-        if not any(r.matches(ref) for r in routes) and ref.path not in findings:
+        if not any(r.matches(ref) for r in routes) and ref.display not in findings:
             detail = f"referenced at {ref.location} matches no FastAPI or Next.js route"
-            findings[ref.path] = Finding("client-path", ref.path, detail)
+            findings[ref.display] = Finding("client-path", ref.display, detail)
     return list(findings.values())
 
 

@@ -6,7 +6,8 @@ import pytest
 from click.utils import strip_ansi
 from fitness_coach_reachability_check.check import ConfigError, load_config, run_check
 from fitness_coach_reachability_check.cli import app
-from fitness_coach_reachability_check.ts_strings import string_segments
+from fitness_coach_reachability_check.routes import ClientPath, Route
+from fitness_coach_reachability_check.ts_strings import INTERPOLATION, string_segments
 from typer.testing import CliRunner
 
 _CONFIG = """
@@ -129,14 +130,59 @@ def test_allow_entry_requires_a_reason(repo: Path) -> None:
         load_config(repo / "pyproject.toml")
 
 
-def test_string_segments_split_template_interpolations() -> None:
+def test_string_segments_keep_template_text_around_interpolations() -> None:
     segments = string_segments("const a = `x${`/api/${b}`}y`; // '/api/c'\n")
-    assert [(s.text, s.interpolated) for s in segments] == [
-        ("x", True),
-        ("/api/", True),
-        ("", False),
-        ("y", False),
-    ]
+    assert [s.text for s in segments] == [f"/api/{INTERPOLATION}", f"x{INTERPOLATION}y"]
+
+
+def test_string_segments_decode_escapes() -> None:
+    segments = string_segments('fetch("/api/foo\\/items"); fetch(`/api/a\\`b`);')
+    assert [s.text for s in segments] == ["/api/foo/items", "/api/a`b"]
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["const r = ", "const r = /* note */ ", "return "],
+)
+def test_regex_literal_with_quotes_is_not_a_string(prefix: str) -> None:
+    source = prefix + """/["'\\/api\\/regex-only'"]/;\nfetch("/api/real");\n"""
+    assert [s.text for s in string_segments(source)] == ["/api/real"]
+
+
+def _client(path: str) -> ClientPath:
+    return ClientPath(path.replace("${id}", INTERPOLATION), "lib/x.ts:1")
+
+
+@pytest.mark.parametrize(
+    ("route", "client", "expected"),
+    [
+        ("/api/users/{user_id}/events/{event_id}", "/api/users/me/events/${id}", True),
+        ("/api/items/{item_id}/delete", "/api/items/${id}/details", False),
+        ("/api/items/{item_id}/details", "/api/items/${id}/details", True),
+        ("/api/items/report-{year}", "/api/items/report-${id}", True),
+        ("/api/files/{file_path:path}", "/api/files/a/b/c", True),
+        ("/api/a/b/c", "/api/${id}", True),
+        ("/api/a/b/c", "/api/z/${id}", False),
+        ("/api/trailing/", "/api/trailing", True),
+        ("/api/search/{rest...?}", "/api/search", True),
+        ("/api/search/{rest...?}", "/api/search/x/y", True),
+        ("/api/search/{rest...}", "/api/search", False),
+    ],
+)
+def test_route_matching(route: str, client: str, expected: bool) -> None:
+    assert Route(route, ("GET",), "api/index.py:1").matches(_client(client)) is expected
+
+
+def test_next_optional_catch_all_route(repo: Path) -> None:
+    _write(repo, "app/api/search/[[...slug]]/route.ts", "export function GET() {}\n")
+    _write(repo, "lib/search.ts", 'export const s = fetch("/api/search");\n')
+    assert _findings(repo) == set()
+
+
+def test_keyword_path_decorator_is_a_route(repo: Path) -> None:
+    extra = '\n\n@app.get(path="/api/engine/keyword")\nasync def k():\n    pass\n'
+    _write(repo, "api/index.py", _API + extra)
+    assert _findings(repo) == {("endpoint", "/api/engine/keyword")}
 
 
 def test_cli_exit_codes(repo: Path) -> None:

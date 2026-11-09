@@ -7,16 +7,20 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from fitness_coach_reachability_check.ts_strings import string_segments
+from fitness_coach_reachability_check.ts_strings import INTERPOLATION, string_segments
 
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
 _CLIENT_SUFFIXES = (".ts", ".tsx")
 # Client paths are same-origin references; absolute URLs point at third parties, not our server.
 _PATH_PREFIXES = ("/api/", "/.well-known/")
 _PATH_END = re.compile(r"[?#\s]")
-_ROUTE_PARAM = re.compile(r"\{([^}/]+)\}")
-_NEXT_CATCH_ALL = re.compile(r"\[\[?\.\.\.[^\]]+\]\]?")
+_ROUTE_PARAM = re.compile(r"\{[^}/]+\}")
+_NEXT_OPTIONAL_CATCH_ALL = re.compile(r"\[\[\.\.\.[^\]]+\]\]")
+_NEXT_CATCH_ALL = re.compile(r"\[\.\.\.[^\]]+\]")
 _NEXT_PARAM = re.compile(r"\[[^\]/]+\]")
+# Route-path tails that absorb any number of segments: FastAPI `{p:path}`, Next `[...p]`, and the
+# optional Next `[[...p]]`, which also matches zero.
+_MULTI_TAIL = ("{rest...}", "{rest...?}")
 
 
 @dataclass(frozen=True)
@@ -26,30 +30,46 @@ class Route:
     location: str
 
     def matches(self, ref: ClientPath) -> bool:
-        if _route_regex(self.path).fullmatch(ref.path):
-            return True
-        # `/api/x/${id}` is only known to start with `/api/x/`; it reaches any route under it.
-        return ref.interpolated and self.path.startswith(ref.path)
+        """Compare segment by segment; a route parameter or a caller interpolation is dynamic."""
+        route = _segments(self.path)
+        client = _segments(ref.path)
+        tail = route[-1]
+        if tail.endswith(":path}") or tail in _MULTI_TAIL:
+            minimum = len(route) - (1 if tail == "{rest...?}" else 0)
+            return len(client) >= minimum and _all_match(route[:-1], client[: len(route) - 1])
+        if client[-1] == INTERPOLATION and len(route) >= len(client):
+            # `/api/${path}` may expand to several segments at runtime.
+            return _all_match(route[: len(client) - 1], client[:-1])
+        return len(route) == len(client) and _all_match(route, client)
 
 
 @dataclass(frozen=True)
 class ClientPath:
     path: str
-    interpolated: bool
     location: str
 
+    @property
+    def display(self) -> str:
+        return self.path.replace(INTERPOLATION, "${…}")
 
-def _route_regex(path: str) -> re.Pattern[str]:
-    """Compile a route; ``{name}`` matches one segment, ``{name:path}`` or ``{rest...}`` several."""
-    parts: list[str] = []
-    pos = 0
-    for param in _ROUTE_PARAM.finditer(path):
-        parts.append(re.escape(path[pos : param.start()]))
-        name = param.group(1)
-        parts.append(".+" if name.endswith(("...", ":path")) else "[^/]+")
-        pos = param.end()
-    parts.append(re.escape(path[pos:]))
-    return re.compile("".join(parts))
+
+def _segments(path: str) -> list[str]:
+    # Trailing slashes are not significant on either side of the comparison.
+    return (path.rstrip("/") or "/").split("/")
+
+
+def _segment_matches(route_segment: str, client_segment: str) -> bool:
+    if route_segment == client_segment or _ROUTE_PARAM.fullmatch(route_segment):
+        return True
+    if INTERPOLATION not in client_segment:
+        return False
+    # `events-${id}` matches a static route segment that has the same literal parts around it.
+    pattern = ".*".join(re.escape(part) for part in client_segment.split(INTERPOLATION))
+    return re.fullmatch(pattern, route_segment) is not None
+
+
+def _all_match(route: list[str], client: list[str]) -> bool:
+    return len(route) == len(client) and all(map(_segment_matches, route, client))
 
 
 def _decorator_route(decorator: ast.expr) -> tuple[str, str] | None:
@@ -57,9 +77,10 @@ def _decorator_route(decorator: ast.expr) -> tuple[str, str] | None:
     if not (isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute)):
         return None
     method = decorator.func.attr
-    if method not in _HTTP_METHODS or not decorator.args:
+    if method not in _HTTP_METHODS:
         return None
-    first = decorator.args[0]
+    keyword = next((k.value for k in decorator.keywords if k.arg == "path"), None)
+    first = decorator.args[0] if decorator.args else keyword
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         return method.upper(), first.value
     return None
@@ -90,21 +111,20 @@ def next_routes(root: Path, app_dir: str) -> list[Route]:
     for handler in sorted(base.rglob("route.ts")):
         parts = [p for p in handler.parent.relative_to(base).parts if not p.startswith("(")]
         path = "/" + "/".join(parts)
+        path = _NEXT_OPTIONAL_CATCH_ALL.sub("{rest...?}", path)
         path = _NEXT_CATCH_ALL.sub("{rest...}", path)
         path = _NEXT_PARAM.sub("{param}", path)
         routes.append(Route(path, ("NEXT",), handler.relative_to(root).as_posix()))
     return routes
 
 
-def _client_path(text: str, interpolated: bool) -> tuple[str, bool] | None:
+def _client_path(text: str) -> str | None:
+    # A leading interpolation is the base URL, as in `${baseUrl}/api/chat/model-state`.
+    text = text.lstrip(INTERPOLATION)
     if not text.startswith(_PATH_PREFIXES):
         return None
     cut = _PATH_END.search(text)
-    if cut:
-        return text[: cut.start()].rstrip("/") or "/", False
-    if interpolated:
-        return text, True
-    return text.rstrip("/"), False
+    return text[: cut.start()] if cut else text
 
 
 def client_paths(root: Path, client_roots: list[str]) -> list[ClientPath]:
@@ -116,7 +136,7 @@ def client_paths(root: Path, client_roots: list[str]) -> list[ClientPath]:
                 continue
             rel = source.relative_to(root).as_posix()
             for segment in string_segments(source.read_text(encoding="utf-8")):
-                found = _client_path(segment.text, segment.interpolated)
-                if found:
-                    refs.append(ClientPath(found[0], found[1], f"{rel}:{segment.line}"))
+                path = _client_path(segment.text)
+                if path:
+                    refs.append(ClientPath(path, f"{rel}:{segment.line}"))
     return refs
