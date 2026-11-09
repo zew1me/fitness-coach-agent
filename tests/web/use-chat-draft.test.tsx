@@ -116,6 +116,65 @@ it("shows progress, patches metadata, then presigns and uploads the prepared fil
   });
 });
 
+it("queues large images from separate additions instead of failing the second one", async () => {
+  const releases: Array<(_blob: Blob) => void> = [];
+  mocks.compress.mockImplementation((_file, options) => {
+    options.onProgress(42);
+    return new Promise<Blob>((resolve) => {
+      releases.push(resolve);
+    });
+  });
+  const error = vi.fn();
+  const { result } = renderHook(() => useChatDraft(error));
+  let first!: Promise<void>;
+  let second!: Promise<void>;
+  await act(async () => {
+    first = result.current.handleFilesAdded([
+      new File([new Uint8Array(4_000_000)], "first.png", { type: "image/png" }),
+    ]);
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalledTimes(1));
+  });
+  await act(async () => {
+    second = result.current.handleFilesAdded([
+      new File([new Uint8Array(4_000_000)], "second.png", {
+        type: "image/png",
+      }),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(mocks.compress).toHaveBeenCalledTimes(1);
+  expect(
+    result.current.attachments.map(({ status, progress }) => ({
+      status,
+      progress,
+    })),
+  ).toEqual([
+    { status: "compressing", progress: 42 },
+    { status: "compressing", progress: null },
+  ]);
+  expect(error).not.toHaveBeenCalled();
+  await act(async () => {
+    releases[0]!(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await first;
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalledTimes(2));
+    releases[1]!(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await second;
+  });
+  expect(
+    result.current.attachments.map(({ filename, status }) => ({
+      filename,
+      status,
+    })),
+  ).toEqual([
+    { filename: "first.jpg", status: "uploaded" },
+    { filename: "second.jpg", status: "uploaded" },
+  ]);
+  expect(mocks.presign.mock.calls.map(([payload]) => payload.filename)).toEqual(
+    ["first.jpg", "second.jpg"],
+  );
+  expect(error).not.toHaveBeenCalled();
+});
+
 it.each(["too-large", "throw", "still-large"])(
   "never presigns or uploads a %s failure",
   async (failure) => {

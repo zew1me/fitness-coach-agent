@@ -65,19 +65,10 @@ async function verifiedWorkerURL(
   }
 }
 
-export class ImageCompressionBusyError extends Error {
-  constructor() {
-    super(
-      "Another image is still being optimized. Wait for it to finish, or reload before trying again.",
-    );
-    this.name = "ImageCompressionBusyError";
-  }
-}
-
-// The library may fall back to an uncancellable main-thread decoder, even after
-// trying a worker. Keep this slot until the actual work settles, not just until
-// the caller's timeout fires, so retries cannot accumulate decodes in this tab.
-let compressionInFlight = false;
+// Share a FIFO across separate picks, drops, pastes and draft instances. Advance
+// only after actual work settles: the library's main-thread decoder cannot be
+// cancelled, so a caller timing out must not let another decode overlap it.
+let compressionTail: Promise<void> = Promise.resolve();
 
 async function compress(
   file: File,
@@ -91,12 +82,8 @@ async function compress(
   signal.throwIfAborted();
   const workerURL = await verifiedWorkerURL(signal);
   let result: Blob;
-  let ownsSlot = false;
   try {
     signal.throwIfAborted();
-    if (compressionInFlight) throw new ImageCompressionBusyError();
-    compressionInFlight = true;
-    ownsSlot = true;
     result = await imageCompression(file, {
       fileType: "image/jpeg",
       initialQuality: 0.8,
@@ -110,7 +97,6 @@ async function compress(
       ...(workerURL === undefined ? {} : { libURL: workerURL }),
     });
   } finally {
-    if (ownsSlot) compressionInFlight = false;
     if (workerURL !== undefined) URL.revokeObjectURL(workerURL);
   }
   signal.throwIfAborted();
@@ -141,8 +127,16 @@ export async function compressImage(
     if (signal.aborted) onAbort();
   });
   try {
-    // Also bound import/decoder stalls; the library's signal cancels its worker.
-    return await Promise.race([compress(file, onProgress, signal), aborted]);
+    // Enqueue before import/fetch to preserve invocation order. Canceled queued
+    // work fails the first signal check in compress(), before loading or decoding.
+    const work = compressionTail.then(() => compress(file, onProgress, signal));
+    // Recover failures so one bad file cannot poison subsequent preparations.
+    compressionTail = work.then(
+      () => {},
+      () => {},
+    );
+    // The existing timeout includes queue waiting, but never advances the tail.
+    return await Promise.race([work, aborted]);
   } finally {
     signal.removeEventListener("abort", onAbort);
   }

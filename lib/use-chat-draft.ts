@@ -15,7 +15,6 @@ import {
   attachmentSizeError,
   AttachmentSizeError,
   compressImage,
-  ImageCompressionBusyError,
   planAttachmentUpload,
 } from "./image-compression";
 
@@ -105,10 +104,7 @@ function attachmentFailureMessage(
   error: unknown,
   stage: AttachmentUploadStage,
 ): string {
-  if (
-    error instanceof AttachmentSizeError ||
-    error instanceof ImageCompressionBusyError
-  ) {
+  if (error instanceof AttachmentSizeError) {
     return error.message;
   }
   if (stage === "presign" && error instanceof ZodError) {

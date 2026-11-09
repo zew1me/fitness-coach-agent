@@ -209,7 +209,7 @@ describe("compression", () => {
   );
 
   it.each(["AbortError", "TimeoutError"])(
-    "preserves %s and blocks retries until the underlying decoder settles",
+    "preserves %s while retries queue until the underlying decoder settles",
     async (name) => {
       let finish!: (_blob: Blob) => void;
       compress.mockImplementationOnce(
@@ -227,28 +227,96 @@ describe("compression", () => {
       const reason = new DOMException("Compression cancelled", name);
       controller.abort(reason);
       await expect(pending).rejects.toBe(reason);
-      for (let retry = 0; retry < 3; retry++) {
-        await expect(
-          compressImage(file(4_000_000), {
-            onProgress: vi.fn(),
-            signal: new AbortController().signal,
-          }),
-        ).rejects.toMatchObject({ name: "ImageCompressionBusyError" });
-      }
-      expect(compress).toHaveBeenCalledTimes(1);
-      finish(new Blob(["jpeg"], { type: "image/jpeg" }));
-      // Let the real compression promise (not the timeout race) release its slot.
-      await new Promise((resolve) => setTimeout(resolve, 0));
       compress.mockResolvedValue(new Blob(["jpeg"], { type: "image/jpeg" }));
-      await expect(
+      const retries = Array.from({ length: 3 }, () =>
         compressImage(file(4_000_000), {
           onProgress: vi.fn(),
           signal: new AbortController().signal,
         }),
-      ).resolves.toHaveProperty("type", "image/jpeg");
-      expect(compress).toHaveBeenCalledTimes(2);
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(compress).toHaveBeenCalledTimes(1);
+      finish(new Blob(["jpeg"], { type: "image/jpeg" }));
+      await expect(Promise.all(retries)).resolves.toHaveLength(3);
+      expect(compress).toHaveBeenCalledTimes(4);
     },
   );
+
+  it("prepares separate requests in FIFO order, one decoder at a time", async () => {
+    const releases: Array<(_blob: Blob) => void> = [];
+    compress.mockImplementation(
+      () =>
+        new Promise<Blob>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+    const pending = ["first.png", "second.png", "third.png"].map((name) =>
+      compressImage(file(4_000_000, "image/png", name), {
+        onProgress: vi.fn(),
+        signal: new AbortController().signal,
+      }),
+    );
+    for (let index = 0; index < pending.length; index++) {
+      await vi.waitFor(() => expect(compress).toHaveBeenCalledTimes(index + 1));
+      expect(compress.mock.calls[index]?.[0].name).toBe(
+        ["first.png", "second.png", "third.png"][index],
+      );
+      releases[index]!(new Blob(["jpeg"], { type: "image/jpeg" }));
+      await pending[index];
+    }
+    await expect(Promise.all(pending)).resolves.toHaveLength(3);
+  });
+
+  it("cancels a queued image promptly without decoding it or poisoning the queue", async () => {
+    let finish!: (_blob: Blob) => void;
+    compress.mockImplementationOnce(
+      () =>
+        new Promise<Blob>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    compress.mockResolvedValue(new Blob(["jpeg"], { type: "image/jpeg" }));
+    const options = {
+      onProgress: vi.fn(),
+      signal: new AbortController().signal,
+    };
+    const first = compressImage(
+      file(4_000_000, "image/png", "first.png"),
+      options,
+    );
+    await vi.waitFor(() => expect(compress).toHaveBeenCalledTimes(1));
+    const controller = new AbortController();
+    const canceled = compressImage(file(4_000_000, "image/png", "cancel.png"), {
+      ...options,
+      signal: controller.signal,
+    });
+    const third = compressImage(
+      file(4_000_000, "image/png", "third.png"),
+      options,
+    );
+    controller.abort();
+    await expect(canceled).rejects.toMatchObject({ name: "AbortError" });
+    expect(compress).toHaveBeenCalledTimes(1);
+    finish(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await Promise.all([first, third]);
+    expect(compress.mock.calls.map(([input]) => input.name)).toEqual([
+      "first.png",
+      "third.png",
+    ]);
+  });
+
+  it("continues the queue after a decoder failure", async () => {
+    compress.mockRejectedValueOnce(new Error("decode failed"));
+    compress.mockResolvedValue(new Blob(["jpeg"], { type: "image/jpeg" }));
+    const options = {
+      onProgress: vi.fn(),
+      signal: new AbortController().signal,
+    };
+    const first = compressImage(file(4_000_000), options);
+    const second = compressImage(file(4_000_000), options);
+    await expect(first).rejects.toThrow("decode failed");
+    await expect(second).resolves.toHaveProperty("type", "image/jpeg");
+  });
 
   it("does not load compression for an already aborted request", async () => {
     const controller = new AbortController();
