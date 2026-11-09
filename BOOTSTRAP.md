@@ -111,8 +111,10 @@ are independent. No database migration or new secret is needed.
    public Supabase settings refer to that same project. Never share raw links, tokens,
    session cookies, or service-role keys; share only the host/path, query parameter
    names, timestamp, and error code. Email security scanners can consume single-use
-   links; use code entry if that happens (a scanner-safe confirmation interstitial is
-   a separate enhancement).
+   links, invalidating that email's code too. Request a fresh email and enter its code
+   without opening the link. If scanners consume every new email automatically, use
+   the OTP-only template mitigation below; a scanner-safe confirmation interstitial
+   is a separate enhancement.
 
 If an immediate mitigation is needed before deployment, temporarily remove the link from
 both hosted email templates and keep `{{ .Token }}`. Re-enable the new hash link only after
