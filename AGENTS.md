@@ -401,7 +401,9 @@ knip and ruff cannot see across the client/server boundary, and fails on:
   entrypoints reaches (an import from tests alone does not count).
 
 Matching is path-level (HTTP methods are not compared) and reads source statically; paths in
-comments do not count as callers. Configuration and the allowlist live in
+comments do not count as callers. Routes come only from `@app.<method>(...)` decorators in the
+entrypoints: `APIRouter`/`include_router` routes are not followed (none exist today), so add that
+support before introducing a router. Configuration and the allowlist live in
 `[tool.reachability-check]` in `pyproject.toml`. Every allow entry needs a `reason`, and an entry
 that stops matching a finding fails the check as stale, so remove it when the underlying item is
 fixed. Prefer deleting dead code or adding the missing caller over allowlisting.
