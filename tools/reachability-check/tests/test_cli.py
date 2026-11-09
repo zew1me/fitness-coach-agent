@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from click.utils import strip_ansi
+from fitness_coach_reachability_check.check import ConfigError, load_config, run_check
+from fitness_coach_reachability_check.cli import app
+from fitness_coach_reachability_check.ts_strings import string_segments
+from typer.testing import CliRunner
+
+_CONFIG = """
+[tool.reachability-check]
+entrypoints = ["api/index.py"]
+python_packages = ["api", "backend"]
+module_scopes = ["backend/engine", "backend/services"]
+client_roots = ["app", "lib"]
+next_app_dir = "app"
+"""
+
+_API = """
+from fastapi import FastAPI
+
+from backend.services import course
+
+app = FastAPI()
+
+
+@app.post("/api/engine/process-uploaded-file")
+async def process():
+    from backend.engine.tss import compute
+
+    return compute()
+
+
+@app.get("/api/items/{item_id}")
+async def item(item_id: str):
+    return item_id
+"""
+
+_CLIENT = """
+// "/api/engine/process-uploaded-file" in a comment must not count as a caller.
+export const upload = (base: string, id: string) => [
+  fetch(`${base}/api/engine/process-uploaded-file`),
+  fetch(`/api/items/${id}`),
+  fetch("/api/chat"),
+  /\\/api\\/regex-only/.test(base),
+];
+"""
+
+
+def _write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    _write(tmp_path, "pyproject.toml", _CONFIG)
+    _write(tmp_path, "api/__init__.py", "")
+    _write(tmp_path, "api/index.py", _API)
+    _write(tmp_path, "backend/__init__.py", "")
+    _write(tmp_path, "backend/engine/__init__.py", "")
+    _write(tmp_path, "backend/engine/tss.py", "def compute():\n    return 1\n")
+    _write(tmp_path, "backend/services/__init__.py", "")
+    _write(tmp_path, "backend/services/course.py", "from ..engine import course_profile\n")
+    _write(tmp_path, "backend/engine/course_profile.py", "")
+    _write(tmp_path, "app/api/chat/route.ts", "export function POST() {}\n")
+    _write(tmp_path, "lib/client.ts", _CLIENT)
+    return tmp_path
+
+
+def _findings(root: Path) -> set[tuple[str, str]]:
+    findings = run_check(root, load_config(root / "pyproject.toml"))
+    return {(f.kind, f.target) for f in findings}
+
+
+def test_clean_tree_has_no_findings(repo: Path) -> None:
+    # Covers a template literal with a base-URL prefix, a path parameter, a Next.js route, a
+    # function-local import and a relative import, all of which must count as reachable.
+    assert _findings(repo) == set()
+
+
+def test_module_imported_only_by_tests_is_flagged(repo: Path) -> None:
+    # Regression fixture for #417: backend/engine/course_analyzer.py shipped with zero callers
+    # outside its own tests, and no existing check reported it.
+    _write(repo, "backend/engine/course_analyzer.py", "def analyze_cycling_climb():\n    pass\n")
+    _write(repo, "tests/test_course_analyzer.py", "from backend.engine import course_analyzer\n")
+    assert _findings(repo) == {("module", "backend/engine/course_analyzer.py")}
+
+
+def test_endpoint_without_client_caller_is_flagged(repo: Path) -> None:
+    _write(
+        repo,
+        "api/index.py",
+        _API + '\n\n@app.post("/api/engine/orphan")\nasync def o():\n    pass\n',
+    )
+    assert _findings(repo) == {("endpoint", "/api/engine/orphan")}
+
+
+def test_path_mentioned_only_in_comment_or_regex_is_not_a_caller(repo: Path) -> None:
+    _write(
+        repo,
+        "lib/client.ts",
+        _CLIENT.replace("fetch(`${base}/api/engine/process-uploaded-file`),", ""),
+    )
+    assert _findings(repo) == {("endpoint", "/api/engine/process-uploaded-file")}
+
+
+def test_client_path_without_route_is_flagged(repo: Path) -> None:
+    _write(repo, "lib/extra.ts", 'export const missing = fetch("/api/engine/typo?x=1");\n')
+    assert _findings(repo) == {("client-path", "/api/engine/typo")}
+
+
+def test_allow_entry_suppresses_and_goes_stale(repo: Path) -> None:
+    _write(repo, "backend/engine/dead.py", "")
+    allow = '\n[[tool.reachability-check.allow]]\nkind = "module"\ntarget = "{}"\nreason = "why"\n'
+    _write(repo, "pyproject.toml", _CONFIG + allow.format("backend/engine/dead.py"))
+    assert _findings(repo) == set()
+    (repo / "backend/engine/dead.py").unlink()
+    assert _findings(repo) == {("stale-allow", "backend/engine/dead.py")}
+
+
+def test_allow_entry_requires_a_reason(repo: Path) -> None:
+    allow = '\n[[tool.reachability-check.allow]]\nkind = "module"\ntarget = "x.py"\nreason = " "\n'
+    _write(repo, "pyproject.toml", _CONFIG + allow)
+    with pytest.raises(ConfigError, match="reason"):
+        load_config(repo / "pyproject.toml")
+
+
+def test_string_segments_split_template_interpolations() -> None:
+    segments = string_segments("const a = `x${`/api/${b}`}y`; // '/api/c'\n")
+    assert [(s.text, s.interpolated) for s in segments] == [
+        ("x", True),
+        ("/api/", True),
+        ("", False),
+        ("y", False),
+    ]
+
+
+def test_cli_exit_codes(repo: Path) -> None:
+    runner = CliRunner()
+    ok = runner.invoke(app, ["check", "--root", str(repo)])
+    assert ok.exit_code == 0, strip_ansi(ok.output)
+
+    _write(repo, "backend/services/orphan.py", "")
+    failed = runner.invoke(app, ["check", "--root", str(repo)])
+    assert failed.exit_code == 1
+    assert "backend/services/orphan.py" in strip_ansi(failed.output)
+
+    (repo / "pyproject.toml").write_text("[tool.other]\n", encoding="utf-8")
+    assert runner.invoke(app, ["check", "--root", str(repo)]).exit_code == 2
