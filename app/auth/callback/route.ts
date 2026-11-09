@@ -1,15 +1,24 @@
+import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 
 import { buildLoginRedirectPath, normalizeReturnTo } from "../../../lib/auth";
 import { defaultLogger } from "../../../lib/logger";
 import { createServerSupabaseClient } from "../../../lib/supabase-server";
 
+function callbackRedirect(url: URL): NextResponse {
+  const response = NextResponse.redirect(url);
+  // Email hashes are credentials: do not cache them or forward them as referrers.
+  response.headers.set("Cache-Control", "no-store");
+  response.headers.set("Referrer-Policy", "no-referrer");
+  return response;
+}
+
 function buildLoginRedirectResponse(
   request: NextRequest,
   returnTo: string,
   message: string,
 ): NextResponse {
-  return NextResponse.redirect(
+  return callbackRedirect(
     new URL(buildLoginRedirectPath(returnTo, message), request.url),
   );
 }
@@ -58,12 +67,40 @@ async function appendBrowserSessionCookie(
   }
 }
 
+async function verifySignIn(
+  supabase: SupabaseClient,
+  code: string | null,
+  tokenHash: string | null,
+): Promise<Session> {
+  // Email is requested server-side without a browser PKCE verifier. Verify
+  // the token hash directly so the link also works in a different browser.
+  // Keep code exchange for existing PKCE callers.
+  const { data, error } = tokenHash
+    ? await supabase.auth.verifyOtp({ token_hash: tokenHash, type: "email" })
+    : await supabase.auth.exchangeCodeForSession(code ?? "");
+  if (error !== null) {
+    defaultLogger.error(
+      tokenHash
+        ? "auth callback: email verification failed"
+        : "auth callback: code exchange failed",
+      { error_code: error.code ?? "unknown", error_name: error.name },
+    );
+    throw error;
+  }
+  if (data.session === null) {
+    throw new Error("No session returned after email sign-in.");
+  }
+  return data.session;
+}
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get("code");
+  const tokenHash = requestUrl.searchParams.get("token_hash");
+  const type = requestUrl.searchParams.get("type");
   const returnTo = normalizeReturnTo(requestUrl.searchParams.get("return_to"));
 
-  if (code === null) {
+  if (!code && !tokenHash) {
     defaultLogger.warn("auth callback: missing code param");
     return buildLoginRedirectResponse(
       request,
@@ -72,28 +109,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  try {
-    const redirectResponse = NextResponse.redirect(
-      new URL(returnTo, request.url),
+  // Only email sign-in is supported here; never accept recovery/invite types
+  // supplied by a URL or silently fall back to another credential on failure.
+  if (tokenHash && type !== "email") {
+    return buildLoginRedirectResponse(
+      request,
+      returnTo,
+      "Invalid email sign-in link.",
     );
-    const supabase = createServerSupabaseClient(request, redirectResponse);
-    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+  }
 
-    if (error !== null) {
-      defaultLogger.error("auth callback: code exchange failed", {
-        error_code: error.code ?? "unknown",
-        error_name: error.name,
-      });
-      throw error;
-    }
+  try {
+    const redirectResponse = callbackRedirect(new URL(returnTo, request.url));
+    const supabase = createServerSupabaseClient(request, redirectResponse);
+    const session = await verifySignIn(supabase, code, tokenHash);
 
     await appendBrowserSessionCookie(
       request,
       redirectResponse,
-      data.session.access_token,
+      session.access_token,
     );
     defaultLogger.info("auth callback: login complete", {
-      user_id: data.session.user.id,
+      user_id: session.user.id,
       return_to: new URL(returnTo, request.url).pathname,
     });
     return redirectResponse;

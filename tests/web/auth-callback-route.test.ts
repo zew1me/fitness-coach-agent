@@ -6,6 +6,7 @@ const sentryMock = vi.hoisted(() => ({
 }));
 const supabaseMock = vi.hoisted(() => ({
   exchangeCodeForSession: vi.fn(),
+  verifyOtp: vi.fn(),
   createServerSupabaseClient: vi.fn(),
 }));
 
@@ -59,9 +60,13 @@ beforeEach(() => {
   fetchMock.mockReset();
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   supabaseMock.exchangeCodeForSession.mockReset();
+  supabaseMock.verifyOtp.mockReset();
   supabaseMock.createServerSupabaseClient.mockReset();
   supabaseMock.createServerSupabaseClient.mockReturnValue({
-    auth: { exchangeCodeForSession: supabaseMock.exchangeCodeForSession },
+    auth: {
+      exchangeCodeForSession: supabaseMock.exchangeCodeForSession,
+      verifyOtp: supabaseMock.verifyOtp,
+    },
   });
   Object.values(sentryMock.logger).forEach((fn) => fn.mockReset());
 });
@@ -117,6 +122,130 @@ describe("GET /auth/callback", () => {
       { user_id: "user-1", return_to: "/profile" },
     );
   });
+
+  it("verifies an email hash without a PKCE cookie and sets both sessions", async () => {
+    supabaseMock.createServerSupabaseClient.mockImplementation(
+      (_request, response) => ({
+        auth: {
+          verifyOtp: supabaseMock.verifyOtp.mockImplementation(() => {
+            response.cookies.set("sb-session", "supabase-session", {
+              httpOnly: true,
+            });
+            return Promise.resolve({
+              data: {
+                session: {
+                  access_token: "email-access-token",
+                  user: { id: "email-user" },
+                },
+              },
+              error: null,
+            });
+          }),
+        },
+      }),
+    );
+    fetchMock.mockResolvedValue(
+      sessionOk("app-session=browser; Path=/; HttpOnly"),
+    );
+    const response = await GET(
+      buildRequest("?token_hash=email-hash&type=email&return_to=%2Fprofile"),
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(supabaseMock.verifyOtp).toHaveBeenCalledWith({
+      token_hash: "email-hash",
+      type: "email",
+    });
+    expect(supabaseMock.exchangeCodeForSession).not.toHaveBeenCalled();
+    expect(locationOf(response).toString()).toBe(
+      "https://app.example.com/profile",
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "sb-session=supabase-session",
+    );
+    expect(response.headers.get("set-cookie")).toContain("app-session=browser");
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1].body)).toEqual({
+      access_token: "email-access-token",
+    });
+    expect(JSON.stringify(sentryMock.logger.info.mock.calls)).not.toContain(
+      "email-hash",
+    );
+  });
+
+  it.each(["", "recovery", "invite", "signup"])(
+    "rejects an unsupported email link type %s before consuming the token",
+    async (type) => {
+      const response = await GET(
+        buildRequest(`?token_hash=email-hash&type=${type}`),
+      );
+      expect(locationOf(response).pathname).toBe("/login");
+      expect(locationOf(response).searchParams.get("error")).toBe(
+        "Invalid email sign-in link.",
+      );
+      expect(supabaseMock.createServerSupabaseClient).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["expired", "already used"])(
+    "returns to login on an %s email token without establishing a session",
+    async (failure) => {
+      supabaseMock.verifyOtp.mockResolvedValue({
+        data: { session: null },
+        error: Object.assign(new Error(`Token ${failure}`), {
+          code: "otp_expired",
+        }),
+      });
+      const response = await GET(
+        buildRequest("?token_hash=email-hash&type=email&return_to=%2Fprofile"),
+      );
+      expect(locationOf(response).pathname).toBe("/login");
+      expect(locationOf(response).searchParams.get("return_to")).toBe(
+        "/profile",
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(sentryMock.logger.error).toHaveBeenCalledWith(
+        "auth callback: email verification failed",
+        { error_code: "otp_expired", error_name: "Error" },
+      );
+    },
+  );
+
+  it("rejects email verification without a session", async () => {
+    supabaseMock.verifyOtp.mockResolvedValue({
+      data: { session: null },
+      error: null,
+    });
+    const response = await GET(
+      buildRequest("?token_hash=email-hash&type=email"),
+    );
+    expect(locationOf(response).pathname).toBe("/login");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://evil.example",
+    "//evil.example",
+    "/\\evil.example",
+    "/\n/evil.example",
+  ])(
+    "does not redirect email links to an external return_to: %j",
+    async (returnTo) => {
+      supabaseMock.verifyOtp.mockResolvedValue({
+        data: { session: { access_token: "tok", user: { id: "user" } } },
+        error: null,
+      });
+      fetchMock.mockResolvedValue(sessionOk(null));
+      const response = await GET(
+        buildRequest(
+          `?token_hash=email-hash&type=email&return_to=${encodeURIComponent(returnTo)}`,
+        ),
+      );
+      expect(locationOf(response).toString()).toBe(
+        "https://app.example.com/consent",
+      );
+    },
+  );
 
   it("adds no set-cookie header when the session endpoint sets none", async () => {
     mockExchangeSuccess();
