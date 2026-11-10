@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 
 
@@ -35,6 +35,25 @@ def _resolve_from(node: ast.ImportFrom, current: str, is_package: bool) -> str:
     return ".".join([*base, node.module] if node.module else base)
 
 
+def _binding_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+        return node.id
+    if isinstance(node, ast.arg):
+        return node.arg
+    if isinstance(node, ast.alias):
+        return node.asname or node.name.split(".")[0]
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.ExceptHandler):
+        return node.name
+    return None
+
+
+def _rebound_names(tree: ast.Module) -> set[str]:
+    bindings = Counter(filter(None, map(_binding_name, ast.walk(tree))))
+    # Conservatively retain imports if an alias is rebound/shadowed anywhere in this module.
+    # This avoids guessing at runtime guards without implementing Python name resolution.
+    return {name for name, count in bindings.items() if count > 1}
+
+
 def _typing_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
     names: set[str] = set()
     modules: set[str] = set()
@@ -43,7 +62,8 @@ def _typing_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
             modules.update(a.asname or a.name for a in node.names if a.name == "typing")
         elif isinstance(node, ast.ImportFrom) and node.module == "typing" and node.level == 0:
             names.update(a.asname or a.name for a in node.names if a.name == "TYPE_CHECKING")
-    return names, modules
+    rebound = _rebound_names(tree)
+    return names - rebound, modules - rebound
 
 
 def _is_type_checking(test: ast.expr, names: set[str], modules: set[str]) -> bool:

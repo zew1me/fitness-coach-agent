@@ -310,6 +310,13 @@ def test_keyword_path_decorator_is_a_route(repo: Path) -> None:
         ("from typing import TYPE_CHECKING as TC", "TC", {("module", "backend/engine/hints.py")}),
         ("import config", "config.TYPE_CHECKING", set()),
         ("TYPE_CHECKING = True", "TYPE_CHECKING", set()),
+        ("from typing import TYPE_CHECKING\nTYPE_CHECKING = True", "TYPE_CHECKING", set()),
+        ("import typing\ntyping = config", "typing.TYPE_CHECKING", set()),
+        (
+            "from typing import TYPE_CHECKING\nfrom config import TYPE_CHECKING",
+            "TYPE_CHECKING",
+            set(),
+        ),
     ],
 )
 def test_only_typing_guards_exclude_imports(
@@ -319,6 +326,18 @@ def test_only_typing_guards_exclude_imports(
     guard = f"{binding}\nif {condition}:\n    from backend.engine import hints\n"
     _write(repo, "api/index.py", guard + _API)
     assert _findings(repo) == expected
+
+
+def test_function_parameter_shadowing_typing_does_not_hide_runtime_import(repo: Path) -> None:
+    _write(repo, "backend/engine/hints.py", "")
+    guard = (
+        "import typing\n"
+        "def load(typing):\n"
+        "    if typing.TYPE_CHECKING:\n"
+        "        from backend.engine import hints\n"
+    )
+    _write(repo, "api/index.py", guard + _API)
+    assert _findings(repo) == set()
 
 
 def test_type_checking_import_does_not_make_a_module_reachable(repo: Path) -> None:
