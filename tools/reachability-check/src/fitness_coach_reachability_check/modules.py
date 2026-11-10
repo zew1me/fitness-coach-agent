@@ -42,8 +42,18 @@ def _binding_name(node: ast.AST) -> str | None:
         return node.arg
     if isinstance(node, ast.alias):
         return node.asname or node.name.split(".")[0]
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.ExceptHandler):
+    if isinstance(
+        node,
+        ast.FunctionDef
+        | ast.AsyncFunctionDef
+        | ast.ClassDef
+        | ast.ExceptHandler
+        | ast.MatchAs
+        | ast.MatchStar,
+    ):
         return node.name
+    if isinstance(node, ast.MatchMapping):
+        return node.rest
     return None
 
 

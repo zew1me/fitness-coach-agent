@@ -340,6 +340,36 @@ def test_function_parameter_shadowing_typing_does_not_hide_runtime_import(repo: 
     assert _findings(repo) == set()
 
 
+@pytest.mark.parametrize(
+    ("subject", "pattern", "expected"),
+    [
+        ("True", "TYPE_CHECKING", set()),
+        ("True", "True as TYPE_CHECKING", set()),
+        ("[True]", "[*TYPE_CHECKING]", set()),
+        ('{"enabled": True}', "{**TYPE_CHECKING}", set()),
+        ('{"enabled": True}', '{"enabled": TYPE_CHECKING}', set()),
+        ("True", "_", {("module", "backend/engine/hints.py")}),
+        ("[True]", "[*_]", {("module", "backend/engine/hints.py")}),
+        ('{"enabled": True}', '{"enabled": _}', {("module", "backend/engine/hints.py")}),
+    ],
+)
+def test_pattern_capture_rebinding_typing_guard(
+    repo: Path, subject: str, pattern: str, expected: set[tuple[str, str]]
+) -> None:
+    _write(repo, "backend/engine/hints.py", "")
+    guard = (
+        "from typing import TYPE_CHECKING\n"
+        f"match {subject}:\n"
+        f"    case {pattern}:\n"
+        "        pass\n"
+        "if TYPE_CHECKING:\n"
+        "    from backend.engine import hints\n"
+    )
+    compile(guard, "pattern-capture-fixture", "exec")
+    _write(repo, "api/index.py", guard + _API)
+    assert _findings(repo) == expected
+
+
 def test_type_checking_import_does_not_make_a_module_reachable(repo: Path) -> None:
     _write(repo, "backend/engine/hints.py", "")
     _write(repo, "backend/engine/runtime_hints.py", "")
