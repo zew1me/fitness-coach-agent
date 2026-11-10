@@ -30,6 +30,7 @@
 - `20261027190000_activity_sources.sql` — expand step for per-input activity evidence: `activity_ingest_formats`, `activity_sources`, `load_rebuild_pending`, new `activities` projection columns, a temporary legacy-insert trigger, and the `create_activity_with_source` shadow-writer RPC (#533 PR A)
 - `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
 - `20261101120000_recovery_logs_source_free_form.sql` — replaces the vendor list in `recovery_logs_source_check` with a snake_case slug format check so wellness provenance is open-ended (#428)
+- `20261104061335_activity_sources_backfill.sql` — restart-safe historical activity-source capture, with a service-role-only progress record and operator RPCs (#533 PR B)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -740,6 +741,29 @@ order by source;
 locally). Preview and production are separate Supabase projects and must each be
 linked and applied independently. Existing values all satisfy the new check, so
 no backfill or maintenance window is needed.
+
+## 20261104061335 — resumable activity-source backfill (2026-11-04)
+
+**File:** `supabase/migrations/20261104061335_activity_sources_backfill.sql`
+
+**Change:** Adds the service-role-only `activity_sources_backfill_progress` singleton and
+three RPCs: `activity_sources_backfill_preflight()`,
+`activity_sources_backfill_batch(integer)`, and
+`activity_sources_backfill_verify()`. They create a restart-safe historical
+activity-source backfill with preflight validation, a checkpointed batch cursor,
+and two clean verification passes.
+
+**Why:** The migration was applied to preview and production during the
+activity-sources rollout, but its file was accidentally omitted when the
+application changes merged. Production therefore recorded remote version
+`20261104061335` with no matching file in `main`, which blocks the Supabase
+GitHub integration. This restores the exact applied migration; it is not an
+empty placeholder or a new schema change.
+
+**All environments:** The migration must remain in the canonical local history.
+It is already applied to the hosted preview and production databases. A fresh
+local reset applies it after `20261027190000_activity_sources.sql`; it does not
+run a backfill automatically.
 
 ## 20261106120000 — drop legacy chat `content` column and `chat_attachments` (2026-11-06)
 
