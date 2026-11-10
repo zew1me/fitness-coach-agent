@@ -76,11 +76,12 @@ def _all_match(route: list[str], client: list[str]) -> bool:
 
 
 def _decorator_route(decorator: ast.expr) -> tuple[str, str] | None:
-    """Return ``(method, path)`` for an ``@app.<method>("/path")`` decorator."""
+    """Return ``(method, path)`` for HTTP verb and ``api_route`` decorators."""
     if not (isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute)):
         return None
     method = decorator.func.attr
-    if method not in _HTTP_METHODS:
+    # Matching is path-level; API_ROUTE labels decorators with an arbitrary method set.
+    if method not in _HTTP_METHODS and method != "api_route":
         return None
     keyword = next((k.value for k in decorator.keywords if k.arg == "path"), None)
     first = decorator.args[0] if decorator.args else keyword

@@ -210,6 +210,27 @@ def test_next_optional_catch_all_route(repo: Path) -> None:
     assert _findings(repo) == set()
 
 
+@pytest.mark.parametrize(
+    "decorator",
+    [
+        '@app.api_route("/api/multi", methods=["GET", "POST"])',
+        '@app.api_route(path="/api/multi", methods=["GET"])',
+        '@app.api_route("/api/multi")',
+    ],
+)
+def test_api_route_decorator_is_collected(repo: Path, decorator: str) -> None:
+    _write(repo, "api/index.py", _API + f"\n{decorator}\nasync def multi():\n    pass\n")
+    assert _findings(repo) == {("endpoint", "/api/multi")}
+    _write(repo, "lib/multi.ts", 'fetch("/api/multi");')
+    assert _findings(repo) == set()
+
+
+def test_nonliteral_api_route_is_not_collected(repo: Path) -> None:
+    extra = '\n@app.api_route(dynamic_path, methods=["GET"])\nasync def multi():\n    pass\n'
+    _write(repo, "api/index.py", _API + extra)
+    assert _findings(repo) == set()
+
+
 def test_keyword_path_decorator_is_a_route(repo: Path) -> None:
     extra = '\n\n@app.get(path="/api/engine/keyword")\nasync def k():\n    pass\n'
     _write(repo, "api/index.py", _API + extra)
