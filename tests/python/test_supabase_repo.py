@@ -229,7 +229,6 @@ class FakeSupabaseClient:
         activity_source_rows: list[dict[str, object]] | None = None,
         chat_thread_rows: list[dict[str, object]] | None = None,
         chat_message_rows: list[dict[str, object]] | None = None,
-        chat_attachment_rows: list[dict[str, object]] | None = None,
         chat_model_state_rows: list[dict[str, object]] | None = None,
         daily_load_snapshot_rows: list[dict[str, object]] | None = None,
         goal_rows: list[dict[str, object]] | None = None,
@@ -247,7 +246,6 @@ class FakeSupabaseClient:
             "daily_load_snapshots": FakeTableQuery(daily_load_snapshot_rows or []),
             "chat_threads": FakeTableQuery(chat_thread_rows or []),
             "chat_messages": FakeTableQuery(chat_message_rows or []),
-            "chat_attachments": FakeTableQuery(chat_attachment_rows or []),
             "chat_model_states": FakeTableQuery(chat_model_state_rows or []),
             "goals": FakeTableQuery(goal_rows or []),
             "plan_workouts": FakeTableQuery(plan_workout_rows or []),
@@ -1737,7 +1735,6 @@ async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None
         "thread_id": "thread-1",
         "user_id": "athlete-1",
         "role": "user",
-        "content": "Existing",
         "parts": [{"type": "text", "text": "Existing"}],
         "attachments": [],
         "metadata": {},
@@ -1754,8 +1751,62 @@ async def test_create_chat_message_is_idempotent_for_caller_message_id() -> None
         message_id=message_id,
     )
 
-    assert message.content == "Existing"
+    assert message.parts == [{"type": "text", "text": "Existing"}]
     assert len(client._tables["chat_messages"]._rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_chat_message_does_not_write_legacy_content_column() -> None:
+    # #303: `chat_messages.content` was a denormalized text mirror of `parts` and is
+    # dropped by migration 20261106120000. Writing it after that migration makes
+    # PostgREST reject every insert, so the repository must never send it.
+    client = FakeSupabaseClient()
+    repo = SupabaseRepository(client=client)
+
+    message = await repo.create_chat_message(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        role="user",
+        parts=[{"type": "text", "text": "Hello"}],
+    )
+
+    [payload] = client._tables["chat_messages"]._rows
+    assert "content" not in payload
+    assert payload["parts"] == [{"type": "text", "text": "Hello"}]
+    assert "content" not in message.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_chat_messages_ignore_legacy_content_in_old_schema_rows() -> None:
+    # Between the app deploy and the drop migration the database still returns
+    # `content`; the API must not echo it back from either read path (#303).
+    message_id = "63ff9606-9158-43d7-a82b-d31ef9788b7d"
+    legacy_row: dict[str, object] = {
+        "id": message_id,
+        "thread_id": "thread-1",
+        "user_id": "athlete-1",
+        "role": "user",
+        "content": "Legacy mirror",
+        "parts": [{"type": "text", "text": "Legacy mirror"}],
+        "attachments": [],
+        "metadata": {},
+        "created_at": "2026-06-20T12:00:00+00:00",
+    }
+    repo = SupabaseRepository(client=FakeSupabaseClient(chat_message_rows=[legacy_row]))
+
+    created = await repo.create_chat_message(
+        thread_id="thread-1",
+        user_id="athlete-1",
+        role="user",
+        parts=[{"type": "text", "text": "Retry"}],
+        message_id=message_id,
+    )
+    listed = await repo.list_chat_messages("thread-1")
+
+    assert [message.id for message in listed] == [message_id]
+    for message in (created, *listed):
+        assert "content" not in message.model_dump()
+        assert message.parts == [{"type": "text", "text": "Legacy mirror"}]
 
 
 @pytest.mark.asyncio
@@ -1772,7 +1823,6 @@ async def test_chat_message_pagination_is_stable_for_equal_timestamps() -> None:
             "thread_id": "thread-1",
             "user_id": "athlete-1",
             "role": "user",
-            "content": message_id,
             "parts": [{"type": "text", "text": message_id}],
             "attachments": [],
             "metadata": {},

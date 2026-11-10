@@ -11,23 +11,8 @@ MessagePart = dict[str, Any]
 MessageAttachment = dict[str, Any]
 
 
-class ChatAttachmentInput(BaseModel):
-    """Legacy attachment shape used only by the deprecated chat_attachments table.
-
-    New code should put attachments inside `parts` as `{type: "file", ...}` entries
-    or in the message-level `attachments` JSON. Kept for migration-window backfill
-    compatibility only.
-    """
-
-    content_type: str
-    filename: str
-    object_key: str
-    public_url: str | None = None
-
-
 class ChatMessage(BaseModel):
     attachments: list[MessageAttachment] = Field(default_factory=list)
-    content: str = ""
     created_at: datetime
     id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
