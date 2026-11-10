@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field
+from os.path import normpath
 from pathlib import Path
 from typing import Any, Literal
 
@@ -56,7 +57,8 @@ def _str_list(table: dict[str, Any], key: str) -> list[str]:
         isinstance(value, list) and value and all(isinstance(v, str) and v.strip() for v in value)
     ):
         raise ConfigError(f"[tool.{_TABLE}].{key} must be a non-empty list of non-blank strings")
-    return value
+    # Validate and match the same spelling; './' and '..' must not silently empty a scope.
+    return [normpath(v) for v in value]
 
 
 def _parse_allow(entry: Any) -> Allow:  # raw TOML value, validated below

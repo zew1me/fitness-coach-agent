@@ -103,6 +103,13 @@ def test_module_imported_only_by_tests_is_flagged(repo: Path) -> None:
     assert _findings(repo) == {("module", "backend/engine/course_analyzer.py")}
 
 
+@pytest.mark.parametrize("scope", ["backend/./engine", "backend/services/../engine"])
+def test_module_scope_paths_are_normalized(repo: Path, scope: str) -> None:
+    _write(repo, "backend/engine/dead.py", "")
+    _write(repo, "pyproject.toml", _CONFIG.replace("backend/engine", scope))
+    assert _findings(repo) == {("module", "backend/engine/dead.py")}
+
+
 def test_endpoint_without_client_caller_is_flagged(repo: Path) -> None:
     _write(
         repo,
