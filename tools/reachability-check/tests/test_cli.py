@@ -159,6 +159,23 @@ def test_string_segments_decode_escapes() -> None:
     assert [s.text for s in segments] == ["/api/foo/items", "/api/a`b"]
 
 
+@pytest.mark.parametrize("quote", ['"', "`"])
+@pytest.mark.parametrize(
+    ("escaped", "decoded"),
+    [
+        (r"/api/foo\x2fitems", "/api/foo/items"),
+        (r"/api/foo\u002fitems", "/api/foo/items"),
+        (r"/api/foo\u{2f}items", "/api/foo/items"),
+        ("/api/foo\\\n/items", "/api/foo/items"),
+        ("/api/foo\\\r\n/items", "/api/foo/items"),
+        (r"/api/foo\titems", "/api/foo\titems"),
+    ],
+)
+def test_javascript_escapes_are_decoded(quote: str, escaped: str, decoded: str) -> None:
+    source = f"fetch({quote}{escaped}{quote});"
+    assert [s.text for s in string_segments(source)] == [decoded]
+
+
 @pytest.mark.parametrize(
     "prefix",
     [

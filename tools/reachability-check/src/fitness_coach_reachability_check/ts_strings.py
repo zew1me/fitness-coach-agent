@@ -9,6 +9,7 @@ string text from everything else.
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
 
@@ -34,6 +35,28 @@ class StringSegment:
 
     text: str
     line: int
+
+
+_ESCAPE = re.compile(
+    r"\\(?:x(?P<hex>[0-9a-fA-F]{2})|u(?P<unicode>[0-9a-fA-F]{4})"
+    r"|u\{(?P<point>[0-9a-fA-F]{1,6})\}|(?P<newline>\r\n|[\r\n])|(?P<simple>[\s\S]))"
+)
+_SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+_MAX_CODE_POINT = 0x10FFFF
+
+
+def _decode_escape(source: str, i: int) -> tuple[str, int]:
+    match = _ESCAPE.match(source, i)
+    if match is None:
+        return "\\", i + 1
+    digits = match.group("hex") or match.group("unicode") or match.group("point")
+    if digits:
+        point = int(digits, 16)
+        text = chr(point) if point <= _MAX_CODE_POINT else match.group()
+    else:
+        simple = match.group("simple") or ""
+        text = _SIMPLE_ESCAPES.get(simple, simple)
+    return text, match.end()
 
 
 def _is_word_char(ch: str) -> bool:
@@ -125,10 +148,11 @@ class _Scanner:
         chars: list[str] = []
         while j < len(self.src) and self.src[j] not in (quote, "\n"):
             if self.src[j] == "\\":
-                j += 1  # keep the escaped character itself, so "\/" decodes to "/"
-            if j < len(self.src):
+                text, j = _decode_escape(self.src, j)
+                chars.append(text)
+            else:
                 chars.append(self.src[j])
-            j += 1
+                j += 1
         self.segments.append(StringSegment("".join(chars), self.line_of(i)))
         return j + 1
 
@@ -141,10 +165,11 @@ class _Scanner:
                 j = self.scan_code(j + 2, stop_at_brace=True)
                 continue
             if self.src[j] == "\\":
-                j += 1
-            if j < len(self.src):
+                text, j = _decode_escape(self.src, j)
+                chars.append(text)
+            else:
                 chars.append(self.src[j])
-            j += 1
+                j += 1
         self.segments.append(StringSegment("".join(chars), self.line_of(i)))
         return j + 1
 
