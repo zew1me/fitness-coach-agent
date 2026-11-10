@@ -20,7 +20,7 @@ INTERPOLATION = "\x00"
 # literal rather than a division: the usual heuristic for lexing JavaScript without a full parser.
 _REGEX_PRECEDERS = frozenset("(,=:[!&|?{};+-*%<>~^")
 _REGEX_KEYWORDS = frozenset(
-    {"return", "typeof", "case", "do", "else", "in", "of", "void", "yield", "await", "delete"}
+    {"return", "typeof", "case", "do", "else", "in", "void", "yield", "await", "delete"}
 )
 _CONTROL_KEYWORDS = frozenset({"if", "while", "for", "with", "switch", "catch"})
 _OPERAND = "a"  # `prev` marker for "an operand just ended", after which `/` is division
@@ -68,13 +68,13 @@ def _is_word_char(ch: str) -> bool:
 class _CodeContext:
     prev: str = ""
     # A closing control condition starts a statement; a closing call/group ends an operand.
-    parens: list[bool] = field(default_factory=list)
+    parens: list[str] = field(default_factory=list)
 
     def punctuation(self, ch: str) -> None:
         if ch.isspace():
             return
         if ch == "(":
-            self.parens.append(self.prev in _CONTROL_KEYWORDS)
+            self.parens.append(self.prev if self.prev in _CONTROL_KEYWORDS else "")
         if ch == ")" and self.parens and self.parens.pop():
             self.prev = "("
         else:
@@ -110,17 +110,22 @@ class _Scanner:
                     context.prev = _OPERAND
                 i = new_i
             elif _is_word_char(ch):
-                i, context.prev = self.read_word(i)
+                i, context.prev = self.read_word(i, context)
             else:
                 context.punctuation(ch)
                 i += 1
         return i
 
-    def read_word(self, i: int) -> tuple[int, str]:
+    def read_word(self, i: int, context: _CodeContext) -> tuple[int, str]:
         j = i
         while j < len(self.src) and _is_word_char(self.src[j]):
             j += 1
         word = self.src[i:j]
+        # Properties can spell keywords, including after optional chaining and comments.
+        if context.prev == ".":
+            return j, _OPERAND
+        if word == "of" and "for" in context.parens:
+            return j, "("
         if word in _CONTROL_KEYWORDS:
             return j, word
         return j, "(" if word in _REGEX_KEYWORDS else _OPERAND

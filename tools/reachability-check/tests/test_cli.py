@@ -186,6 +186,7 @@ def test_javascript_escapes_are_decoded(quote: str, escaped: str, decoded: str) 
         "if (enabled) /* note */ ",
         "while ((enabled && check(value))) ",
         "for (let i = 0; i < 3; i++) ",
+        "for (const value of ",
     ],
 )
 def test_regex_literal_with_quotes_is_not_a_string(prefix: str) -> None:
@@ -193,7 +194,20 @@ def test_regex_literal_with_quotes_is_not_a_string(prefix: str) -> None:
     assert [s.text for s in string_segments(source)] == ["/api/real"]
 
 
-@pytest.mark.parametrize("operand", ["total", "fn()", "(total + tax)"])
+@pytest.mark.parametrize(
+    "operand",
+    [
+        "total",
+        "fn()",
+        "(total + tax)",
+        "of",
+        "opts.of",
+        "x.in",
+        "opts?.return",
+        "obj.if()",
+        "obj. /* note */ return",
+    ],
+)
 def test_division_does_not_hide_a_real_string(operand: str) -> None:
     source = f'{operand} / count; fetch("/api/real");'
     assert [s.text for s in string_segments(source)] == ["/api/real"]
