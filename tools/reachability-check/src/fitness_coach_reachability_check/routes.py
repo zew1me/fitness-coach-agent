@@ -34,12 +34,12 @@ class Route:
         route = _segments(self.path)
         client = _segments(ref.path)
         tail = route[-1]
-        if tail.endswith(":path}") or tail in _MULTI_TAIL:
-            minimum = len(route) - (1 if tail == "{rest...?}" else 0)
-            return len(client) >= minimum and _all_match(route[:-1], client[: len(route) - 1])
         if client[-1] == INTERPOLATION and len(route) >= len(client):
             # `/api/${path}` may expand to several segments at runtime.
             return _all_match(route[: len(client) - 1], client[:-1])
+        if tail.endswith(":path}") or tail in _MULTI_TAIL:
+            minimum = len(route) - (1 if tail == "{rest...?}" else 0)
+            return len(client) >= minimum and _all_match(route[:-1], client[: len(route) - 1])
         return len(route) == len(client) and _all_match(route, client)
 
 
