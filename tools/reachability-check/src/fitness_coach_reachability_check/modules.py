@@ -35,20 +35,35 @@ def _resolve_from(node: ast.ImportFrom, current: str, is_package: bool) -> str:
     return ".".join([*base, node.module] if node.module else base)
 
 
-def _is_type_checking(test: ast.expr) -> bool:
-    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
-        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+def _typing_bindings(tree: ast.Module) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    modules: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            modules.update(a.asname or a.name for a in node.names if a.name == "typing")
+        elif isinstance(node, ast.ImportFrom) and node.module == "typing" and node.level == 0:
+            names.update(a.asname or a.name for a in node.names if a.name == "TYPE_CHECKING")
+    return names, modules
+
+
+def _is_type_checking(test: ast.expr, names: set[str], modules: set[str]) -> bool:
+    return (isinstance(test, ast.Name) and test.id in names) or (
+        isinstance(test, ast.Attribute)
+        and isinstance(test.value, ast.Name)
+        and test.value.id in modules
+        and test.attr == "TYPE_CHECKING"
     )
 
 
 def _runtime_nodes(tree: ast.Module) -> list[ast.AST]:
     """All nodes except the bodies of `if TYPE_CHECKING:`, which never execute at runtime."""
+    names, modules = _typing_bindings(tree)
     nodes: list[ast.AST] = []
     stack: list[ast.AST] = [tree]
     while stack:
         node = stack.pop()
         nodes.append(node)
-        if isinstance(node, ast.If) and _is_type_checking(node.test):
+        if isinstance(node, ast.If) and _is_type_checking(node.test, names, modules):
             stack.extend([node.test, *node.orelse])
         else:
             stack.extend(ast.iter_child_nodes(node))

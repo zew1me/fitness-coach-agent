@@ -204,6 +204,25 @@ def test_keyword_path_decorator_is_a_route(repo: Path) -> None:
     assert _findings(repo) == {("endpoint", "/api/engine/keyword")}
 
 
+@pytest.mark.parametrize(
+    ("binding", "condition", "expected"),
+    [
+        ("import typing", "typing.TYPE_CHECKING", {("module", "backend/engine/hints.py")}),
+        ("import typing as t", "t.TYPE_CHECKING", {("module", "backend/engine/hints.py")}),
+        ("from typing import TYPE_CHECKING as TC", "TC", {("module", "backend/engine/hints.py")}),
+        ("import config", "config.TYPE_CHECKING", set()),
+        ("TYPE_CHECKING = True", "TYPE_CHECKING", set()),
+    ],
+)
+def test_only_typing_guards_exclude_imports(
+    repo: Path, binding: str, condition: str, expected: set[tuple[str, str]]
+) -> None:
+    _write(repo, "backend/engine/hints.py", "")
+    guard = f"{binding}\nif {condition}:\n    from backend.engine import hints\n"
+    _write(repo, "api/index.py", guard + _API)
+    assert _findings(repo) == expected
+
+
 def test_type_checking_import_does_not_make_a_module_reachable(repo: Path) -> None:
     _write(repo, "backend/engine/hints.py", "")
     guard = (
