@@ -43,6 +43,7 @@ _ESCAPE = re.compile(
 )
 _SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
 _MAX_CODE_POINT = 0x10FFFF
+_JSX_OPEN = re.compile(r"<(?:([A-Za-z_$][\w$.:-]*)(?=[\s/>])|(?=>))")
 
 
 def _decode_escape(source: str, i: int) -> tuple[str, int]:
@@ -134,12 +135,58 @@ class _Scanner:
             end = src.find("*/", i + 2)
             return len(src) if end == -1 else end + 2
         ch = src[i]
-        if ch in "'\"":
-            return self.scan_quoted(i)
-        if ch == "`":
-            return self.scan_template(i)
+        if ch in "'\"`<":
+            return self.scan_literal(i)
         if ch == "/" and (prev == "" or prev in _REGEX_PRECEDERS):
             return self.skip_regex(i)
+        return i
+
+    def scan_literal(self, i: int) -> int:
+        if self.src[i] in "'\"":
+            return self.scan_quoted(i)
+        if self.src[i] == "`":
+            return self.scan_template(i)
+        return self.scan_jsx(i)
+
+    def scan_jsx_tag(self, i: int) -> int:
+        while i < len(self.src):
+            ch = self.src[i]
+            if ch == "{":
+                i = self.scan_code(i + 1, stop_at_brace=True)
+            elif ch in "'\"":
+                i = self.scan_quoted(i)
+            elif ch == ">":
+                return i + 1
+            else:
+                i += 1
+        return i
+
+    def scan_jsx(self, i: int) -> int:
+        opening = _JSX_OPEN.match(self.src, i)
+        if opening is None:
+            return i
+        checkpoint = len(self.segments)
+        end = self.scan_jsx_tag(opening.end())
+        if self.src[end - 2 : end] == "/>":
+            return end
+        # Without a closing tag this may be a TypeScript assertion/generic, not JSX.
+        tag = opening.group(1) or ""
+        if re.search(r"</" + re.escape(tag) + r"\s*>", self.src[end:]) is None:
+            del self.segments[checkpoint:]
+            return i
+        return self.scan_jsx_children(end)
+
+    def scan_jsx_children(self, i: int) -> int:
+        # JSX text is not JavaScript: quotes/apostrophes here do not open string literals.
+        while i < len(self.src):
+            if self.src.startswith("</", i):
+                return self.scan_jsx_tag(i + 2)
+            if self.src[i] == "{":
+                i = self.scan_code(i + 1, stop_at_brace=True)
+            elif self.src[i] == "<":
+                i = max(i + 1, self.scan_jsx(i))
+            else:
+                i += 1
         return i
 
     def scan_quoted(self, i: int) -> int:

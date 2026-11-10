@@ -199,6 +199,26 @@ def test_division_does_not_hide_a_real_string(operand: str) -> None:
     assert [s.text for s in string_segments(source)] == ["/api/real"]
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<div>Don\'t miss this {fetch("/api/real")}</div>',
+        '<>Don\'t miss this {fetch("/api/real")}</>',
+        '<div><span>Don\'t</span>{fetch("/api/real")}</div>',
+        '<div>"/api/not-a-caller" {fetch("/api/real")}</div>',
+        '<div title="hello">Don\'t {fetch("/api/real")}</div>',
+        '<Button onClick={() => fetch("/api/real")}>Don\'t</Button>',
+        '<Button onClick={() => fetch("/api/real")} />',
+        'const x = <T>value; fetch("/api/real");',
+        'const f = <T extends "/api/real">(x: T) => x;',
+        'const x = a < b; fetch("/api/real");',
+    ],
+)
+def test_jsx_text_does_not_swallow_javascript_literals(source: str) -> None:
+    paths = [s.text for s in string_segments(source) if s.text.startswith("/api/")]
+    assert paths == ["/api/real"]
+
+
 def _client(path: str) -> ClientPath:
     return ClientPath(path.replace("${id}", INTERPOLATION), "lib/x.ts:1")
 
