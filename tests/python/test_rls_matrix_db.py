@@ -465,8 +465,15 @@ def test_athlete_can_attach_a_child_to_their_own_parent(matrix: Matrix, table: s
     assert matrix.attempt(statement, params) == 1
 
 
+class CrossAthleteParentAcceptedError(AssertionError):
+    """The known #452 gap: a child row referencing another athlete's parent was inserted."""
+
+
 @pytest.mark.xfail(
     strict=True,
+    # Only the known gap is expected; any other error (a broken seed, a renamed column) must
+    # still fail the run instead of hiding behind the expected failure.
+    raises=CrossAthleteParentAcceptedError,
     reason=(
         "#452: policies check only the child's own user_id, not the referenced parent's owner."
         " Remove this marker when #452 lands."
@@ -480,6 +487,8 @@ def test_athlete_cannot_attach_a_child_to_another_athletes_parent(
     statement, params = _INSERTS[table](matrix.athlete.user_id, matrix.other, 4)
     matrix.become("authenticated", matrix.athlete)
     outcome = matrix.attempt(statement, params)
+    if outcome == 1:
+        raise CrossAthleteParentAcceptedError(table)
     assert _is_rls_denial(outcome), outcome
 
 
