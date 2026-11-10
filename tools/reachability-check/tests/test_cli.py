@@ -83,6 +83,18 @@ def test_clean_tree_has_no_findings(repo: Path) -> None:
     assert _findings(repo) == set()
 
 
+def test_entrypoint_outside_packages_is_traversed(repo: Path) -> None:
+    _write(repo, "server.py", _API)
+    _write(repo, "pyproject.toml", _CONFIG.replace('"api/index.py"', '"server.py"'))
+    assert _findings(repo) == set()
+
+
+def test_missing_entrypoint_is_rejected(repo: Path) -> None:
+    (repo / "api/index.py").unlink()
+    with pytest.raises(ConfigError, match="entrypoint.*does not exist"):
+        _findings(repo)
+
+
 def test_module_imported_only_by_tests_is_flagged(repo: Path) -> None:
     # Regression fixture for #417: backend/engine/course_analyzer.py shipped with zero callers
     # outside its own tests, and no existing check reported it.

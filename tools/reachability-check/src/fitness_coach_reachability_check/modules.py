@@ -77,8 +77,9 @@ def _with_parents(name: str) -> list[str]:
 
 def reachable_modules(root: Path, modules: dict[str, Path], entrypoints: list[str]) -> set[str]:
     """Breadth-first walk of in-repo imports starting from the entrypoint files."""
-    by_path = {path.as_posix(): name for name, path in modules.items()}
-    queue = deque(by_path[e] for e in entrypoints if e in by_path)
+    # Entrypoints can live outside package scan roots, e.g. a repository-level server.py.
+    modules = modules | {_module_name(Path(e)): Path(e) for e in entrypoints}
+    queue = deque(_module_name(Path(e)) for e in entrypoints)
     seen: set[str] = set(queue)
     while queue:
         current = queue.popleft()
