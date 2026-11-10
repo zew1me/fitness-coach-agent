@@ -10,7 +10,7 @@ string text from everything else.
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Stands in for each `${...}` in a template literal's text; it cannot occur in real source text.
 INTERPOLATION = "\x00"
@@ -21,6 +21,7 @@ _REGEX_PRECEDERS = frozenset("(,=:[!&|?{};+-*%<>~^")
 _REGEX_KEYWORDS = frozenset(
     {"return", "typeof", "case", "do", "else", "in", "of", "void", "yield", "await", "delete"}
 )
+_CONTROL_KEYWORDS = frozenset({"if", "while", "for", "with", "switch", "catch"})
 _OPERAND = "a"  # `prev` marker for "an operand just ended", after which `/` is division
 
 
@@ -39,6 +40,23 @@ def _is_word_char(ch: str) -> bool:
     return ch.isalnum() or ch in "_$"
 
 
+@dataclass
+class _CodeContext:
+    prev: str = ""
+    # A closing control condition starts a statement; a closing call/group ends an operand.
+    parens: list[bool] = field(default_factory=list)
+
+    def punctuation(self, ch: str) -> None:
+        if ch.isspace():
+            return
+        if ch == "(":
+            self.parens.append(self.prev in _CONTROL_KEYWORDS)
+        if ch == ")" and self.parens and self.parens.pop():
+            self.prev = "("
+        else:
+            self.prev = ch
+
+
 class _Scanner:
     def __init__(self, source: str) -> None:
         self.src = source
@@ -55,22 +73,22 @@ class _Scanner:
     def scan_code(self, i: int, *, stop_at_brace: bool) -> int:
         """Scan code until EOF or, inside `${...}`, the brace that closes the interpolation."""
         depth = 0
-        prev = ""
+        context = _CodeContext()
         while i < len(self.src):
             ch = self.src[i]
             if stop_at_brace and ch == "}" and depth == 0:
                 return i + 1
             depth += {"{": 1, "}": -1}.get(ch, 0)
-            new_i = self.scan_token(i, prev)
+            new_i = self.scan_token(i, context.prev)
             if new_i != i:
                 # A comment is not an operand, so it leaves the regex/division context unchanged.
                 if not self.src.startswith(("//", "/*"), i):
-                    prev = _OPERAND
+                    context.prev = _OPERAND
                 i = new_i
             elif _is_word_char(ch):
-                i, prev = self.read_word(i)
+                i, context.prev = self.read_word(i)
             else:
-                prev = prev if ch.isspace() else ch
+                context.punctuation(ch)
                 i += 1
         return i
 
@@ -78,7 +96,10 @@ class _Scanner:
         j = i
         while j < len(self.src) and _is_word_char(self.src[j]):
             j += 1
-        return j, "(" if self.src[i:j] in _REGEX_KEYWORDS else _OPERAND
+        word = self.src[i:j]
+        if word in _CONTROL_KEYWORDS:
+            return j, word
+        return j, "(" if word in _REGEX_KEYWORDS else _OPERAND
 
     def scan_token(self, i: int, prev: str) -> int:
         """Consume a comment or literal starting at ``i``; return ``i`` unchanged otherwise."""

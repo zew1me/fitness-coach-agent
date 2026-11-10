@@ -161,10 +161,24 @@ def test_string_segments_decode_escapes() -> None:
 
 @pytest.mark.parametrize(
     "prefix",
-    ["const r = ", "const r = /* note */ ", "return "],
+    [
+        "const r = ",
+        "const r = /* note */ ",
+        "return ",
+        "if (enabled) ",
+        "if (enabled) /* note */ ",
+        "while ((enabled && check(value))) ",
+        "for (let i = 0; i < 3; i++) ",
+    ],
 )
 def test_regex_literal_with_quotes_is_not_a_string(prefix: str) -> None:
     source = prefix + """/["'\\/api\\/regex-only'"]/;\nfetch("/api/real");\n"""
+    assert [s.text for s in string_segments(source)] == ["/api/real"]
+
+
+@pytest.mark.parametrize("operand", ["total", "fn()", "(total + tax)"])
+def test_division_does_not_hide_a_real_string(operand: str) -> None:
+    source = f'{operand} / count; fetch("/api/real");'
     assert [s.text for s in string_segments(source)] == ["/api/real"]
 
 
