@@ -418,7 +418,12 @@ def test_athlete_can_update_and_delete_own_rows_only(matrix: Matrix, table: str)
     assert matrix.attempt(touch, (matrix.other.user_id,)) == 0
     assert matrix.attempt(remove, (matrix.other.user_id,)) == 0
     assert matrix.attempt(touch, (matrix.athlete.user_id,)) == own_rows
+    # Last, because it is destructive. FK cascades may remove the athlete's rows in other
+    # tables, so assert the outcome rather than tying the rowcount to the seed.
+    outcome = matrix.attempt(remove, (matrix.athlete.user_id,))
+    assert not isinstance(outcome, pg_errors.Error), outcome
 
+    assert matrix.rows_for(table, matrix.athlete) == 0
     assert matrix.rows_for(table, matrix.other) == other_rows
 
 
