@@ -6,6 +6,9 @@ const sentryMock = vi.hoisted(() => ({
 }));
 const supabaseMock = vi.hoisted(() => ({
   exchangeCodeForSession: vi.fn(),
+  verifyOtp: vi.fn(),
+  getUser: vi.fn(),
+  getSession: vi.fn(),
   createServerSupabaseClient: vi.fn(),
 }));
 
@@ -59,9 +62,17 @@ beforeEach(() => {
   fetchMock.mockReset();
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   supabaseMock.exchangeCodeForSession.mockReset();
+  supabaseMock.verifyOtp.mockReset();
+  supabaseMock.getUser.mockReset();
+  supabaseMock.getSession.mockReset();
   supabaseMock.createServerSupabaseClient.mockReset();
   supabaseMock.createServerSupabaseClient.mockReturnValue({
-    auth: { exchangeCodeForSession: supabaseMock.exchangeCodeForSession },
+    auth: {
+      exchangeCodeForSession: supabaseMock.exchangeCodeForSession,
+      verifyOtp: supabaseMock.verifyOtp,
+      getUser: supabaseMock.getUser,
+      getSession: supabaseMock.getSession,
+    },
   });
   Object.values(sentryMock.logger).forEach((fn) => fn.mockReset());
 });
@@ -117,6 +128,130 @@ describe("GET /auth/callback", () => {
       { user_id: "user-1", return_to: "/profile" },
     );
   });
+
+  it("verifies an email hash without a PKCE cookie and sets both sessions", async () => {
+    supabaseMock.createServerSupabaseClient.mockImplementation(
+      (_request, response) => ({
+        auth: {
+          verifyOtp: supabaseMock.verifyOtp.mockImplementation(() => {
+            response.cookies.set("sb-session", "supabase-session", {
+              httpOnly: true,
+            });
+            return Promise.resolve({
+              data: {
+                session: {
+                  access_token: "email-access-token",
+                  user: { id: "email-user" },
+                },
+              },
+              error: null,
+            });
+          }),
+        },
+      }),
+    );
+    fetchMock.mockResolvedValue(
+      sessionOk("app-session=browser; Path=/; HttpOnly"),
+    );
+    const response = await GET(
+      buildRequest("?token_hash=email-hash&type=email&return_to=%2Fprofile"),
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(supabaseMock.verifyOtp).toHaveBeenCalledWith({
+      token_hash: "email-hash",
+      type: "email",
+    });
+    expect(supabaseMock.exchangeCodeForSession).not.toHaveBeenCalled();
+    expect(locationOf(response).toString()).toBe(
+      "https://app.example.com/profile",
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "sb-session=supabase-session",
+    );
+    expect(response.headers.get("set-cookie")).toContain("app-session=browser");
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1].body)).toEqual({
+      access_token: "email-access-token",
+    });
+    expect(JSON.stringify(sentryMock.logger.info.mock.calls)).not.toContain(
+      "email-hash",
+    );
+  });
+
+  it.each(["", "recovery", "invite", "signup"])(
+    "rejects an unsupported email link type %s before consuming the token",
+    async (type) => {
+      const response = await GET(
+        buildRequest(`?token_hash=email-hash&type=${type}`),
+      );
+      expect(locationOf(response).pathname).toBe("/login");
+      expect(locationOf(response).searchParams.get("error")).toBe(
+        "Invalid email sign-in link.",
+      );
+      expect(supabaseMock.createServerSupabaseClient).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["expired", "already used"])(
+    "returns to login on an %s email token without establishing a session",
+    async (failure) => {
+      supabaseMock.verifyOtp.mockResolvedValue({
+        data: { session: null },
+        error: Object.assign(new Error(`Token ${failure}`), {
+          code: "otp_expired",
+        }),
+      });
+      const response = await GET(
+        buildRequest("?token_hash=email-hash&type=email&return_to=%2Fprofile"),
+      );
+      expect(locationOf(response).pathname).toBe("/login");
+      expect(locationOf(response).searchParams.get("return_to")).toBe(
+        "/profile",
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(sentryMock.logger.error).toHaveBeenCalledWith(
+        "auth callback: email verification failed",
+        { error_code: "otp_expired", error_name: "Error" },
+      );
+    },
+  );
+
+  it("rejects email verification without a session", async () => {
+    supabaseMock.verifyOtp.mockResolvedValue({
+      data: { session: null },
+      error: null,
+    });
+    const response = await GET(
+      buildRequest("?token_hash=email-hash&type=email"),
+    );
+    expect(locationOf(response).pathname).toBe("/login");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://evil.example",
+    "//evil.example",
+    "/\\evil.example",
+    "/\n/evil.example",
+  ])(
+    "does not redirect email links to an external return_to: %j",
+    async (returnTo) => {
+      supabaseMock.verifyOtp.mockResolvedValue({
+        data: { session: { access_token: "tok", user: { id: "user" } } },
+        error: null,
+      });
+      fetchMock.mockResolvedValue(sessionOk(null));
+      const response = await GET(
+        buildRequest(
+          `?token_hash=email-hash&type=email&return_to=${encodeURIComponent(returnTo)}`,
+        ),
+      );
+      expect(locationOf(response).toString()).toBe(
+        "https://app.example.com/consent",
+      );
+    },
+  );
 
   it("adds no set-cookie header when the session endpoint sets none", async () => {
     mockExchangeSuccess();
@@ -204,42 +339,118 @@ describe("GET /auth/callback", () => {
     );
   });
 
-  it("reports the status and truncated body when the browser-session call fails", async () => {
-    mockExchangeSuccess();
-    fetchMock.mockResolvedValue(new Response("x".repeat(500), { status: 401 }));
+  it.each(["http", "network"])(
+    "preserves a verified session after a %s failure and retries without the consumed link",
+    async (failure) => {
+      const user = { id: "email-user" };
+      const session = { access_token: "verified-access-token", user };
+      supabaseMock.verifyOtp.mockResolvedValue({
+        data: { session },
+        error: null,
+      });
+      supabaseMock.getUser.mockResolvedValue({ data: { user }, error: null });
+      supabaseMock.getSession.mockResolvedValue({
+        data: { session },
+        error: null,
+      });
+      supabaseMock.createServerSupabaseClient.mockImplementation(
+        (_request, response) => {
+          response.cookies.set("sb-session", "verified-session", {
+            httpOnly: true,
+            secure: true,
+          });
+          return {
+            auth: {
+              verifyOtp: supabaseMock.verifyOtp,
+              getUser: supabaseMock.getUser,
+              getSession: supabaseMock.getSession,
+            },
+          };
+        },
+      );
+      if (failure === "http")
+        fetchMock.mockResolvedValueOnce(
+          new Response("private backend details", { status: 503 }),
+        );
+      else
+        fetchMock.mockRejectedValueOnce(new Error("private network details"));
+      const response = await GET(
+        buildRequest(
+          "?token_hash=consumed-token&type=email&return_to=%2Fprofile",
+        ),
+      );
+      expect(response.status).toBe(503);
+      expect(response.headers.get("location")).toBeNull();
+      expect(response.headers.get("set-cookie")).toContain(
+        "sb-session=verified-session",
+      );
+      expect(response.headers.get("set-cookie")).toContain("HttpOnly");
+      expect(response.headers.get("set-cookie")).toContain("Secure");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+      const html = await response.text();
+      expect(html).toContain("Retry sign-in");
+      expect(html).not.toMatch(
+        /consumed-token|verified-access-token|private .* details/,
+      );
+      const retryPath = html
+        .match(/href="([^"]+)"/)?.[1]
+        ?.replaceAll("&amp;", "&");
+      expect(retryPath).toBe("/auth/callback?retry=1&return_to=%2Fprofile");
+      fetchMock.mockResolvedValueOnce(
+        sessionOk("coach_browser_session=browser; Path=/; HttpOnly"),
+      );
+      const retried = await GET(
+        new NextRequest(new URL(retryPath ?? "", "https://app.example.com"), {
+          headers: { cookie: "sb-session=verified-session" },
+        }),
+      );
+      expect(locationOf(retried).pathname).toBe("/profile");
+      expect(retried.headers.get("set-cookie")).toContain(
+        "coach_browser_session=browser",
+      );
+      expect(supabaseMock.verifyOtp).toHaveBeenCalledTimes(1);
+      expect(supabaseMock.exchangeCodeForSession).not.toHaveBeenCalled();
+      expect(supabaseMock.getUser).toHaveBeenCalledOnce();
+      expect(supabaseMock.getSession).toHaveBeenCalledOnce();
+      expect(JSON.parse(fetchMock.mock.calls[1]?.[1].body)).toEqual({
+        access_token: session.access_token,
+      });
+    },
+  );
 
-    const response = await GET(buildRequest("?code=abc"));
-
-    const error = locationOf(response).searchParams.get("error") ?? "";
-    expect(locationOf(response).pathname).toBe("/login");
-    expect(error).toContain(
-      "Unable to establish the OAuth browser session (401: ",
-    );
-    expect(error).toBe(
-      `Unable to establish the OAuth browser session (401: ${"x".repeat(200)})`,
-    );
-    expect(response.headers.get("set-cookie")).toBeNull();
-  });
-
-  it("omits the body suffix when the failed response has an empty body", async () => {
-    mockExchangeSuccess();
-    fetchMock.mockResolvedValue(new Response("", { status: 500 }));
-
-    const response = await GET(buildRequest("?code=abc"));
-
-    expect(locationOf(response).searchParams.get("error")).toBe(
-      "Unable to establish the OAuth browser session (500)",
-    );
-  });
-
-  it("uses a generic message when a non-Error value is thrown", async () => {
+  it("also offers recovery after PKCE exchange when the backend fails", async () => {
     mockExchangeSuccess();
     fetchMock.mockRejectedValue("network down");
+    const response = await GET(buildRequest("?code=consumed-code"));
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain("consumed-code");
+  });
 
-    const response = await GET(buildRequest("?code=abc"));
+  it("rejects a retry without an authenticated Supabase user", async () => {
+    supabaseMock.getUser.mockResolvedValue({
+      data: { user: null },
+      error: new Error("Session expired"),
+    });
+    const response = await GET(buildRequest("?retry=1&return_to=%2Fprofile"));
+    expect(locationOf(response).pathname).toBe("/login");
+    expect(locationOf(response).searchParams.get("return_to")).toBe("/profile");
+    expect(supabaseMock.getSession).not.toHaveBeenCalled();
+    expect(supabaseMock.verifyOtp).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 
-    expect(locationOf(response).searchParams.get("error")).toBe(
-      "Unable to finish login.",
-    );
+  it("returns to login if the retry session has disappeared", async () => {
+    supabaseMock.getUser.mockResolvedValue({
+      data: { user: { id: "user" } },
+      error: null,
+    });
+    supabaseMock.getSession.mockResolvedValue({
+      data: { session: null },
+      error: null,
+    });
+    const response = await GET(buildRequest("?retry=1"));
+    expect(locationOf(response).pathname).toBe("/login");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

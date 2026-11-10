@@ -1,6 +1,8 @@
 import json
+from html import unescape
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -1053,10 +1055,23 @@ def test_configure_auth_settings_patches_management_api(monkeypatch) -> None:
     assert body["mailer_otp_length"] == 6
     assert "https://example.vercel.app" in body["uri_allow_list"]
     assert "https://*.vercel.app/**" in body["uri_allow_list"]
-    assert "{{ .Token }}" in body["mailer_templates_magic_link_content"]
-    assert "{{ .ConfirmationURL }}" in body["mailer_templates_magic_link_content"]
-    assert "{{ .Token }}" in body["mailer_templates_confirmation_content"]
-    assert "{{ .ConfirmationURL }}" in body["mailer_templates_confirmation_content"]
+    for key in ("mailer_templates_magic_link_content", "mailer_templates_confirmation_content"):
+        template = body[key]
+        assert "{{ .Token }}" in template
+        assert "{{ .ConfirmationURL }}" not in template
+        redirect_to = "https://preview.example.com/auth/callback?return_to=%2Fprofile"
+        rendered = template.replace("{{ .RedirectTo }}", redirect_to).replace(
+            "{{ .TokenHash }}", "test-token-hash"
+        )
+        href = unescape(rendered.split('href="', 1)[1].split('"', 1)[0])
+        link = urlsplit(href)
+        assert link.netloc == "preview.example.com"
+        assert link.path == "/auth/callback"
+        assert parse_qs(link.query) == {
+            "return_to": ["/profile"],
+            "token_hash": ["test-token-hash"],
+            "type": ["email"],
+        }
 
 
 def test_configure_auth_settings_prints_instructions_when_no_token(capsys) -> None:
@@ -1441,7 +1456,7 @@ def test_configure_auth_settings_smtp_does_not_clobber_base_auth_fields(monkeypa
     assert body["mailer_autoconfirm"] is True
     assert body["mailer_otp_length"] == 6
     assert "{{ .Token }}" in body["mailer_templates_magic_link_content"]
-    assert "{{ .ConfirmationURL }}" in body["mailer_templates_confirmation_content"]
+    assert "{{ .TokenHash }}" in body["mailer_templates_confirmation_content"]
 
 
 def test_bootstrap_settings_smtp_defaults() -> None:

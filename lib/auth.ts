@@ -5,7 +5,15 @@ export function normalizeReturnTo(value: string | null | undefined): string {
     return defaultReturnTo;
   }
 
-  if (!value.startsWith("/") || value.startsWith("//")) {
+  // URL parsing treats backslashes as slashes and removes control characters;
+  // reject them before checking the local path to prevent disguised redirects.
+  const hasUnsafeCharacters = [...value].some(
+    (character) =>
+      character === "\\" ||
+      character.charCodeAt(0) < 32 ||
+      character.charCodeAt(0) === 127,
+  );
+  if (!value.startsWith("/") || value.startsWith("//") || hasUnsafeCharacters) {
     return defaultReturnTo;
   }
 
@@ -14,10 +22,10 @@ export function normalizeReturnTo(value: string | null | undefined): string {
 
 export function buildLoginRedirectPath(
   returnTo: string | null | undefined,
-  error: string | null | undefined = null
+  error: string | null | undefined = null,
 ): string {
   const params = new URLSearchParams({
-    return_to: normalizeReturnTo(returnTo)
+    return_to: normalizeReturnTo(returnTo),
   });
 
   if (error) {

@@ -72,15 +72,57 @@ Bootstrap automatically configures the Supabase project's auth settings via the 
 - **Site URL** — set to your production domain or the Vercel project's stable alias.
 - **Redirect URLs** — `https://*.vercel.app/**` is added for preview environments; `http://localhost:3000/**` and `http://localhost:3001/**` are included for local development.
 - **Email confirmation** — disabled (`MAILER_AUTOCONFIRM=true`) so first-time signups receive the passwordless login email instead of the default signup confirmation.
-- **Email templates** — Magic Link and Confirm Signup templates include both `{{ .Token }}` for the 6-digit code and `{{ .ConfirmationURL }}` as a fallback link.
+- **Email templates** — Magic Link and Confirm Signup use `supabase/templates/email-otp.html`: `{{ .Token }}` for the 6-digit code and a direct app callback containing `{{ .TokenHash }}` for the sign-in link (issue #524). The callback verifies the hash server-side; it does not require a PKCE cookie from the requesting browser.
 - **Preview base URL** — `APP_BASE_URL` is removed from the Vercel Preview environment so preview deployments fall back to Vercel's per-deployment `VERCEL_URL`.
 
 If `SUPABASE_ACCESS_TOKEN` is not set (e.g. existing projects using CLI login), bootstrap prints the values to configure manually in the Supabase dashboard:
 
 - **Authentication → URL Configuration**: set Site URL and add redirect URL patterns
 - **Authentication → Providers → Email**: disable _Confirm email_ so OTP codes are sent directly
-- **Authentication → Email Templates**: update Magic Link and Confirm Signup so the email body includes `{{ .Token }}` and `{{ .ConfirmationURL }}`
+- **Authentication → Email Templates**: copy `supabase/templates/email-otp.html` into both Magic Link and Confirm Signup (deploy the updated callback first)
 - **Vercel → Project Settings → Environment Variables**: remove `APP_BASE_URL` from Preview; keep it only for Production
+
+### Roll out the email-link fix (#524)
+
+Apply this separately to preview and production; their Supabase projects and Vercel settings
+are independent. No database migration or new secret is needed.
+
+1. Deploy the app with the updated `/auth/callback` before changing email templates. Until
+   then, use the six-digit code; old `ConfirmationURL` links still use the incompatible
+   implicit flow and are not repaired by deploying the new callback.
+2. In each project's **Authentication → Email Templates**, replace the bodies of **Magic
+   Link** and **Confirm Signup** with `supabase/templates/email-otp.html`. Bootstrap uses
+   this same file for future runs, and local Supabase uses it via `supabase/config.toml`.
+   Do not run the full infrastructure bootstrap merely to update two templates.
+3. In **Authentication → URL Configuration**, verify the Site URL and allowed redirect
+   URLs for that environment. The app sends `emailRedirectTo` as
+   `https://<request-origin>/auth/callback?return_to=<encoded-local-path>`. The template
+   uses `RedirectTo`, not `SiteURL`, to stay on the deployment that requested the email.
+   Its `&amp;token_hash=...` suffix depends on the existing `?return_to=` query: other
+   OTP senders must follow that contract. Keep production redirect allowlists restricted
+   to trusted hosts; avoid project-wide preview wildcards on production.
+4. Request a **fresh** email. Verify its link lands on the requesting deployment and
+   signs in without an originating browser session (test another browser), and that a
+   separate fresh email still supports six-digit code entry. Also test `/profile` and
+   the consent return path. The link and code are alternatives for the same single-use
+   credential; after one succeeds, reuse of either must fail. Test an expired link too.
+   If email verification succeeds but app browser-session setup is unavailable, the
+   callback preserves the Supabase session and displays **Retry sign-in**. Retry uses
+   the authenticated cookie session, not the consumed link; an expired session still
+   requires a fresh email.
+5. If this fails, check **Authentication → Logs** in the same Supabase project and the
+   app's `auth callback: email verification failed` log. Confirm Vercel's server and
+   public Supabase settings refer to that same project. Never share raw links, tokens,
+   session cookies, or service-role keys; share only the host/path, query parameter
+   names, timestamp, and error code. Email security scanners can consume single-use
+   links, invalidating that email's code too. Request a fresh email and enter its code
+   without opening the link. If scanners consume every new email automatically, use
+   the OTP-only template mitigation below; a scanner-safe confirmation interstitial
+   is a separate enhancement.
+
+If an immediate mitigation is needed before deployment, temporarily remove the link from
+both hosted email templates and keep `{{ .Token }}`. Re-enable the new hash link only after
+the callback is deployed. Do not re-enable `{{ .ConfirmationURL }}`.
 
 R2 runtime credentials have a two-pass setup:
 
