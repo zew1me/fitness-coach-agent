@@ -31,6 +31,7 @@
 - `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
 - `20261101120000_recovery_logs_source_free_form.sql` — replaces the vendor list in `recovery_logs_source_check` with a snake_case slug format check so wellness provenance is open-ended (#428)
 - `20261104061335_activity_sources_backfill.sql` — restart-safe historical activity-source capture, with a service-role-only progress record and operator RPCs (#533 PR B)
+- `20261110213928_revoke_client_table_writes.sql` — browser roles lose all direct table writes: `anon` loses every table privilege, `authenticated` loses INSERT/UPDATE/DELETE/TRUNCATE, the owner `for all` policies become `for select`, and default privileges stop granting browser roles access to future tables (#452)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -809,3 +810,25 @@ where not exists (
 the application deploy. Preview and production are separate Supabase projects and must
 each be linked and applied independently. The drop is irreversible; take a backup first
 if you want the legacy rows retained.
+
+`20261110213928` encodes that no browser flow writes application tables. Every write goes
+through the FastAPI backend or a Next.js server route using `service_role`, which bypasses RLS
+and keeps its own grants; the browser and SSR Supabase clients only call `supabase.auth.*`. It
+removes the "Users can manage their own ..." write policies, which checked only a row's own
+`user_id` and so let an athlete attach a row to another athlete's thread, plan or goal.
+Authenticated reads of an athlete's own rows are unchanged. It has no application-deploy
+ordering requirement and takes only brief catalog locks, so it can be applied at any time.
+
+- **Before applying to a hosted project:** confirm nothing outside this repository (a script,
+  dashboard or integration) writes tables with an anon or user JWT. Writes with the service
+  role key are unaffected.
+- **Hosted default grants:** hosted projects grant browser roles DML on public tables by
+  default, which is why the migration revokes privileges as well as dropping policies. The
+  default-privileges revocation applies to objects created by `postgres`, the role migrations
+  run as.
+- **Exceptions:** a table that later needs client writes must grant the privilege explicitly,
+  add a write policy that also verifies parent ownership, and be listed in
+  `CLIENT_WRITABLE_TABLES` in `tests/python/test_rls_matrix_db.py`.
+- **Rollback:** re-create the dropped policies and re-grant the privileges. Nothing is deleted.
+- **Verification:** `bun run db:reset && bun run test:db` replays all migrations and runs the
+  role matrix.
