@@ -16,10 +16,19 @@ Why this is a gated job rather than part of CI: it needs a Postgres with every m
 applied in canonical order, and CI does not start a Supabase stack. It runs alongside the
 other ``db``-marked suites.
 
-Table privileges differ between environments: hosted projects grant browser roles DML on
-public tables by default, while a fresh local bootstrap does not. Each test therefore grants
-DML to ``anon`` and ``authenticated`` inside its rolled-back transaction, so RLS, not a
-missing grant, is the barrier under test and the matrix means the same thing everywhere.
+Access model (#452): browser roles never write application tables. Every write goes through
+the FastAPI backend or a Next.js server route, both of which use ``service_role``. Two
+independent barriers enforce that, and each is tested on its own:
+
+* Privileges: ``anon`` holds nothing, and ``authenticated`` holds no INSERT / UPDATE / DELETE /
+  TRUNCATE on any public table. These checks read the real grants and so use a plain session.
+* RLS: no table has a write policy. Hosted projects grant browser roles DML by default, while a
+  fresh local bootstrap does not, so the ``matrix`` fixture grants DML to ``anon`` and
+  ``authenticated`` inside its rolled-back transaction. That emulates a hosted default (or an
+  accidental future grant) and proves RLS alone still denies the write.
+
+A table that genuinely needs client writes is an explicit exception: grant the privilege, add a
+write policy that also verifies parent ownership, and list it in ``CLIENT_WRITABLE_TABLES``.
 """
 
 import json
@@ -43,8 +52,9 @@ pytestmark = [
     ),
 ]
 
-# Tables an athlete reads and writes directly, scoped by their own ``user_id``.
-OWNER_MANAGED_TABLES = (
+# Tables of per-athlete rows, readable by their owner (scoped by ``user_id``) and never writable
+# by a browser role. Each has an insert builder below so the write denial can be exercised.
+OWNER_ROW_TABLES = (
     "athlete_profiles",
     "sport_thresholds",
     "goals",
@@ -59,7 +69,7 @@ OWNER_MANAGED_TABLES = (
     "chat_messages",
 )
 
-# Tables an athlete may read (own rows only) but never write directly.
+# Further per-athlete tables an athlete may read (own rows only), seeded without a builder.
 OWNER_READ_ONLY_TABLES = ("oauth_grants", "activity_sources", "load_rebuild_pending")
 
 # Server-only state: RLS enabled with no client policies at all.
@@ -72,6 +82,11 @@ SERVER_ONLY_TABLES = (
     "agent_emails",
     "activity_sources_backfill_progress",
 )
+
+# Tables that deliberately accept direct browser writes. None do today: the browser and SSR
+# Supabase clients only call ``supabase.auth.*``. Adding a name here is a security decision; the
+# table also needs an explicit grant and a write policy that verifies parent ownership.
+CLIENT_WRITABLE_TABLES: frozenset[str] = frozenset()
 
 # Shared reference data every signed-in athlete may read.
 REFERENCE_TABLES = ("activity_ingest_formats",)
@@ -107,7 +122,7 @@ def _new_athlete() -> Athlete:
     )
 
 
-# One fresh, non-conflicting row per owner-managed table, stamped with ``user_id`` and pointing
+# One fresh, non-conflicting row per owner-row table, stamped with ``user_id`` and pointing
 # at ``parent``'s rows (normally the same athlete). ``day`` keeps dated unique keys distinct.
 Statement = sql.SQL | sql.Composed
 InsertBuilder = Callable[[str, Athlete, int], tuple[Statement, tuple[Any, ...]]]
@@ -216,7 +231,7 @@ def _seed(cursor: Cursor[Any], athlete: Athlete) -> None:
         (athlete.grant_id, user),
     )
     seeded_with_known_ids = {"athlete_profiles", "goals", "training_plans", "chat_threads"}
-    for table in OWNER_MANAGED_TABLES:
+    for table in OWNER_ROW_TABLES:
         if table in seeded_with_known_ids:
             continue  # seeded above with the ids the relationship checks need
         statement, params = _INSERTS[table](user, athlete, 1)
@@ -357,7 +372,7 @@ def test_every_public_table_has_rls_enabled_and_is_classified(matrix: Matrix) ->
 
     assert [name for name, enabled in tables.items() if not enabled] == []
     classified = (
-        set(OWNER_MANAGED_TABLES)
+        set(OWNER_ROW_TABLES)
         | set(OWNER_READ_ONLY_TABLES)
         | set(SERVER_ONLY_TABLES)
         | set(REFERENCE_TABLES)
@@ -387,129 +402,132 @@ def test_server_only_tables_have_no_client_policies(matrix: Matrix) -> None:
     assert matrix.cursor.fetchall() == []
 
 
-def test_read_only_tables_expose_only_select_policies(matrix: Matrix) -> None:
+def test_no_table_has_a_client_write_policy(matrix: Matrix) -> None:
     matrix.cursor.execute(
-        "select tablename, cmd from pg_policies where schemaname = 'public'"
-        " and tablename = any(%s) and cmd <> 'SELECT'",
-        (list(OWNER_READ_ONLY_TABLES + REFERENCE_TABLES),),
+        "select tablename, policyname, cmd from pg_policies where schemaname = 'public'"
+        " and cmd <> 'SELECT' and tablename <> all(%s::text[])",
+        (list(CLIENT_WRITABLE_TABLES),),
     )
     assert matrix.cursor.fetchall() == []
 
 
-# ── Owner-managed tables: own rows allowed, other athlete's rows denied ──────
+# ── Privileges: the first barrier, read from the real grants ─────────────────
+
+_WRITE_PRIVILEGES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
+_ALL_PRIVILEGES = ("SELECT", *_WRITE_PRIVILEGES, "REFERENCES", "TRIGGER")
 
 
-@pytest.mark.parametrize("table", OWNER_MANAGED_TABLES)
+def _public_tables(cursor: Cursor[Any]) -> list[str]:
+    cursor.execute(
+        "select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+        " where n.nspname = 'public' and c.relkind in ('r', 'p') order by 1"
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def _granted(
+    cursor: Cursor[Any], role: str, tables: list[str], privileges: tuple[str, ...]
+) -> list[tuple[str, str]]:
+    """``(table, privilege)`` pairs ``role`` holds; ``tables`` are plain lowercase identifiers."""
+    held: list[tuple[str, str]] = []
+    for table in tables:
+        for privilege in privileges:
+            cursor.execute(
+                "select has_table_privilege(%s, %s, %s)", (role, f"public.{table}", privilege)
+            )
+            row = cursor.fetchone()
+            if row is not None and row[0]:
+                held.append((table, privilege))
+    return held
+
+
+def test_authenticated_holds_no_write_privilege_on_public_tables() -> None:
+    with direct_session() as session:
+        tables = [t for t in _public_tables(session.cursor) if t not in CLIENT_WRITABLE_TABLES]
+        assert tables
+        assert _granted(session.cursor, "authenticated", tables, _WRITE_PRIVILEGES) == []
+
+
+def test_anon_holds_no_privilege_on_public_tables() -> None:
+    with direct_session() as session:
+        tables = _public_tables(session.cursor)
+        assert tables
+        assert _granted(session.cursor, "anon", tables, _ALL_PRIVILEGES) == []
+
+
+def test_new_public_tables_start_without_browser_privileges() -> None:
+    # Hosted projects add default grants for anon/authenticated on tables that postgres-owned
+    # migrations create; the migration revokes them so a future table is closed by default.
+    with direct_session() as session:
+        session.cursor.execute("create table public.rls_matrix_acl_probe (id int)")
+        for role in ("anon", "authenticated"):
+            held = _granted(session.cursor, role, ["rls_matrix_acl_probe"], _ALL_PRIVILEGES)
+            assert held == [], role
+
+
+# ── Per-athlete tables: readable by their owner, never writable ──────────────
+
+_ATHLETE_TABLES = OWNER_ROW_TABLES + OWNER_READ_ONLY_TABLES
+
+
+@pytest.mark.parametrize("table", _ATHLETE_TABLES)
 def test_athlete_sees_only_their_own_rows(matrix: Matrix, table: str) -> None:
+    assert matrix.rows_for(table, matrix.athlete) > 0
+
     matrix.become("authenticated", matrix.athlete)
     assert matrix.owners(table) == {matrix.athlete.user_id}
 
 
-@pytest.mark.parametrize("table", OWNER_MANAGED_TABLES)
-def test_athlete_can_update_and_delete_own_rows_only(matrix: Matrix, table: str) -> None:
-    other_rows = matrix.rows_for(table, matrix.other)
-    own_rows = matrix.rows_for(table, matrix.athlete)
+@pytest.mark.parametrize("table", _ATHLETE_TABLES)
+def test_athlete_cannot_update_or_delete_any_rows(matrix: Matrix, table: str) -> None:
+    before = {a.user_id: matrix.rows_for(table, a) for a in (matrix.athlete, matrix.other)}
+    assert before[matrix.athlete.user_id] > 0
     touch = sql.SQL("update public.{} set user_id = user_id where user_id = %s").format(
         _table(table)
     )
     remove = sql.SQL("delete from public.{} where user_id = %s").format(_table(table))
 
     matrix.become("authenticated", matrix.athlete)
-    assert matrix.attempt(touch, (matrix.other.user_id,)) == 0
-    assert matrix.attempt(remove, (matrix.other.user_id,)) == 0
-    assert matrix.attempt(touch, (matrix.athlete.user_id,)) == own_rows
-    # Last, because it is destructive. FK cascades may remove the athlete's rows in other
-    # tables, so assert the outcome rather than tying the rowcount to the seed.
-    outcome = matrix.attempt(remove, (matrix.athlete.user_id,))
-    assert not isinstance(outcome, pg_errors.Error), outcome
+    for owner in (matrix.athlete, matrix.other):
+        assert matrix.attempt(touch, (owner.user_id,)) == 0
+        assert matrix.attempt(remove, (owner.user_id,)) == 0
 
-    assert matrix.rows_for(table, matrix.athlete) == 0
-    assert matrix.rows_for(table, matrix.other) == other_rows
+    after = {a.user_id: matrix.rows_for(table, a) for a in (matrix.athlete, matrix.other)}
+    assert after == before
 
 
-@pytest.mark.parametrize("table", OWNER_MANAGED_TABLES)
-def test_athlete_cannot_reassign_a_row_to_another_athlete(matrix: Matrix, table: str) -> None:
-    reassign = sql.SQL("update public.{} set user_id = %s where user_id = %s").format(_table(table))
-    matrix.become("authenticated", matrix.athlete)
-    outcome = matrix.attempt(reassign, (matrix.other.user_id, matrix.athlete.user_id))
-    assert _is_rls_denial(outcome), outcome
-
-
-@pytest.mark.parametrize("table", OWNER_MANAGED_TABLES)
-def test_athlete_cannot_insert_a_row_for_another_athlete(matrix: Matrix, table: str) -> None:
-    statement, params = _INSERTS[table](matrix.other.user_id, matrix.other, 2)
+@pytest.mark.parametrize("target", ["own", "other"])
+@pytest.mark.parametrize("table", OWNER_ROW_TABLES)
+def test_athlete_cannot_insert_rows(matrix: Matrix, table: str, target: str) -> None:
+    victim = matrix.athlete if target == "own" else matrix.other
+    statement, params = _INSERTS[table](victim.user_id, victim, 2)
     matrix.become("authenticated", matrix.athlete)
     outcome = matrix.attempt(statement, params)
     assert _is_rls_denial(outcome), outcome
 
 
-@pytest.mark.parametrize(
-    "table", [table for table in OWNER_MANAGED_TABLES if table not in _ONE_ROW_PER_ATHLETE]
-)
-def test_athlete_can_insert_their_own_row(matrix: Matrix, table: str) -> None:
-    statement, params = _INSERTS[table](matrix.athlete.user_id, matrix.athlete, 2)
-    matrix.become("authenticated", matrix.athlete)
-    assert matrix.attempt(statement, params) == 1
-
-
-# ── Relationship-bearing tables: parent ownership ────────────────────────────
+# ── Relationship-bearing tables: no write path means no cross-athlete parent ─
+#
+# #452: the old ``for all`` policies checked only the child's own ``user_id``, so an athlete
+# could attach a row to another athlete's thread, plan or goal. With no client write path the
+# gap cannot occur; these cases keep it from coming back through a future write policy that
+# forgets to verify the parent.
 
 # Child tables whose rows reference a parent row (thread, plan, goal) by id.
 _RELATIONSHIPS = ("chat_messages", "plan_workouts", "training_plans")
 
 
+@pytest.mark.parametrize("parent", ["own", "other"])
 @pytest.mark.parametrize("table", _RELATIONSHIPS)
-def test_athlete_can_attach_a_child_to_their_own_parent(matrix: Matrix, table: str) -> None:
-    statement, params = _INSERTS[table](matrix.athlete.user_id, matrix.athlete, 3)
-    matrix.become("authenticated", matrix.athlete)
-    assert matrix.attempt(statement, params) == 1
-
-
-class CrossAthleteParentAcceptedError(AssertionError):
-    """The known #452 gap: a child row referencing another athlete's parent was inserted."""
-
-
-@pytest.mark.xfail(
-    strict=True,
-    # Only the known gap is expected; any other error (a broken seed, a renamed column) must
-    # still fail the run instead of hiding behind the expected failure.
-    raises=CrossAthleteParentAcceptedError,
-    reason=(
-        "#452: policies check only the child's own user_id, not the referenced parent's owner."
-        " Remove this marker when #452 lands."
-    ),
-)
-@pytest.mark.parametrize("table", _RELATIONSHIPS)
-def test_athlete_cannot_attach_a_child_to_another_athletes_parent(
-    matrix: Matrix, table: str
+def test_athlete_cannot_attach_a_child_to_any_parent(
+    matrix: Matrix, table: str, parent: str
 ) -> None:
-    # The child carries the caller's own user_id, so only a parent-ownership check can stop it.
-    statement, params = _INSERTS[table](matrix.athlete.user_id, matrix.other, 4)
+    owner = matrix.athlete if parent == "own" else matrix.other
+    # The child carries the caller's own user_id, as the old gap required.
+    statement, params = _INSERTS[table](matrix.athlete.user_id, owner, 4)
     matrix.become("authenticated", matrix.athlete)
     outcome = matrix.attempt(statement, params)
-    if outcome == 1:
-        raise CrossAthleteParentAcceptedError(table)
     assert _is_rls_denial(outcome), outcome
-
-
-# ── Read-only and reference tables ───────────────────────────────────────────
-
-
-@pytest.mark.parametrize("table", OWNER_READ_ONLY_TABLES)
-def test_athlete_reads_but_cannot_write_own_read_only_rows(matrix: Matrix, table: str) -> None:
-    own_rows = matrix.rows_for(table, matrix.athlete)
-    assert own_rows > 0
-
-    matrix.become("authenticated", matrix.athlete)
-    assert matrix.owners(table) == {matrix.athlete.user_id}
-    touch = sql.SQL("update public.{} set user_id = user_id where user_id = %s").format(
-        _table(table)
-    )
-    remove = sql.SQL("delete from public.{} where user_id = %s").format(_table(table))
-    assert matrix.attempt(touch, (matrix.athlete.user_id,)) == 0
-    assert matrix.attempt(remove, (matrix.athlete.user_id,)) == 0
-
-    assert matrix.rows_for(table, matrix.athlete) == own_rows
 
 
 def test_athlete_cannot_insert_an_oauth_grant(matrix: Matrix) -> None:
@@ -586,7 +604,7 @@ def test_athlete_cannot_insert_server_only_state(matrix: Matrix) -> None:
 # ── Anonymous role: no application rows, no mutation ─────────────────────────
 
 
-ALL_USER_TABLES = OWNER_MANAGED_TABLES + OWNER_READ_ONLY_TABLES + SERVER_ONLY_USER_TABLES
+ALL_USER_TABLES = OWNER_ROW_TABLES + OWNER_READ_ONLY_TABLES + SERVER_ONLY_USER_TABLES
 
 
 @pytest.mark.parametrize("table", ALL_USER_TABLES + REFERENCE_TABLES)
@@ -609,7 +627,7 @@ def test_anon_cannot_update_or_delete(matrix: Matrix, table: str) -> None:
     assert matrix.rows_for(table, matrix.athlete) == rows
 
 
-@pytest.mark.parametrize("table", OWNER_MANAGED_TABLES)
+@pytest.mark.parametrize("table", OWNER_ROW_TABLES)
 def test_anon_cannot_insert(matrix: Matrix, table: str) -> None:
     statement, params = _INSERTS[table](matrix.athlete.user_id, matrix.athlete, 5)
     matrix.become("anon")
@@ -626,7 +644,7 @@ def test_service_role_reads_every_athletes_rows(matrix: Matrix, table: str) -> N
     assert {matrix.athlete.user_id, matrix.other.user_id} <= matrix.owners(table)
 
 
-@pytest.mark.parametrize("table", OWNER_MANAGED_TABLES)
+@pytest.mark.parametrize("table", OWNER_ROW_TABLES)
 def test_service_role_writes_any_athletes_rows(matrix: Matrix, table: str) -> None:
     statement, params = _INSERTS[table](matrix.other.user_id, matrix.other, 6)
     touch = sql.SQL("update public.{} set user_id = user_id where user_id = %s").format(
