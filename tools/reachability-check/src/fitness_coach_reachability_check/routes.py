@@ -63,7 +63,9 @@ def _segment_matches(route_segment: str, client_segment: str) -> bool:
     if route_segment == client_segment or _ROUTE_PARAM.fullmatch(route_segment):
         return True
     if INTERPOLATION not in client_segment:
-        return False
+        # Escape every static fragment; only actual route parameters are wildcards.
+        pattern = "[^/]+".join(re.escape(part) for part in _ROUTE_PARAM.split(route_segment))
+        return re.fullmatch(pattern, client_segment) is not None
     # `events-${id}` matches a static route segment that has the same literal parts around it.
     pattern = ".*".join(re.escape(part) for part in client_segment.split(INTERPOLATION))
     return re.fullmatch(pattern, route_segment) is not None
