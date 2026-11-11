@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 from urllib.parse import urlencode, urlparse
+from uuid import uuid4
 
 import httpx
 import jwt
@@ -14,6 +15,7 @@ from backend.config import settings
 from backend.models.auth import (
     BrowserSessionContext,
     BrowserTokenResponse,
+    CliLoginResponse,
     OAuthAuthorizeRequest,
     OAuthRevokeRequest,
     OAuthTokenRequest,
@@ -21,8 +23,19 @@ from backend.models.auth import (
     UserContext,
 )
 from backend.repos.oauth_repo import OAuthRepository, OAuthRepositoryNotConfiguredError
+from backend.services.attempt_limiter import AttemptLimiter
 
 logger = logging.getLogger(__name__)
+
+# First-party client id for the headless coach CLI (tools/coach-cli). Refresh requests must
+# present it, because /api/oauth/token checks the refresh token's client id.
+CLI_CLIENT_ID = "fitness-coach-cli"
+# Each CLI login gets its own grant, keyed by a unique pseudo redirect URI, so logging out
+# (revoking that grant) on one machine leaves the athlete's other CLI sessions alone.
+_CLI_GRANT_URI_PREFIX = "urn:fitness-coach-cli:login:"
+_CLI_OTP_MAX_ATTEMPTS = 5
+_CLI_OTP_WINDOW_SECONDS = 15 * 60
+_GOTRUE_TIMEOUT_SECONDS = 10.0
 
 
 class OAuthError(ValueError):
@@ -41,6 +54,22 @@ class OAuthInvalidGrantError(OAuthError):
     """Raised when a code or refresh token is invalid."""
 
 
+class OtpVerificationError(OAuthError):
+    """Raised for any rejected email code; deliberately says nothing about the account."""
+
+
+class OtpRateLimitedError(OAuthError):
+    """Raised when too many codes were tried for one email address."""
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        super().__init__("Too many sign-in attempts. Wait and request a new code.")
+        self.retry_after_seconds = retry_after_seconds
+
+
+class AuthUpstreamUnavailableError(OAuthError):
+    """Raised when Supabase Auth cannot be reached or fails on its side."""
+
+
 class AuthService:
     """Issue durable OAuth artifacts and verify browser-backed consent sessions."""
 
@@ -56,6 +85,9 @@ class AuthService:
 
     def __init__(self, oauth_repo: OAuthRepository | None = None) -> None:
         self._oauth_repo = oauth_repo or OAuthRepository()
+        self._otp_limiter = AttemptLimiter(
+            max_attempts=_CLI_OTP_MAX_ATTEMPTS, window_seconds=_CLI_OTP_WINDOW_SECONDS
+        )
 
     async def aclose(self) -> None:
         """Release the OAuth repository's HTTP connections at application shutdown."""
@@ -327,6 +359,37 @@ class AuthService:
             user_id=session.user_id,
         )
 
+    async def verify_cli_otp(self, *, email: str, token: str) -> CliLoginResponse:
+        """Exchange an emailed code for a CLI grant without the caller touching Supabase.
+
+        ``email`` must already be normalized (``CliVerifyOtpRequest`` does this).
+        """
+        limiter_key = hashlib.sha256(email.encode("utf-8")).hexdigest()
+        retry_after = self._otp_limiter.try_acquire(limiter_key)
+        if retry_after is not None:
+            logger.warning("cli otp verify rate limited")
+            raise OtpRateLimitedError(retry_after_seconds=max(1, int(retry_after)))
+        user_id = await self._verify_email_otp(email=email, token=token)
+        self._otp_limiter.reset(limiter_key)
+        scopes = sorted(self._supported_scopes)
+        grant = await self._oauth_repo.upsert_grant(
+            user_id=user_id,
+            client_id=CLI_CLIENT_ID,
+            redirect_uri=f"{_CLI_GRANT_URI_PREFIX}{uuid4()}",
+            scopes=scopes,
+        )
+        refresh_token = await self._oauth_repo.create_refresh_token(
+            grant_id=grant.id, user_id=user_id, client_id=CLI_CLIENT_ID, scopes=scopes
+        )
+        logger.info("cli login user_id=%s grant_id=%s", user_id, grant.id)
+        return CliLoginResponse(
+            access_token=self._issue_access_token(
+                user_id=user_id, client_id=CLI_CLIENT_ID, scopes=scopes, grant_id=grant.id
+            ),
+            refresh_token=refresh_token,
+            user_id=user_id,
+        )
+
     def get_browser_session_from_cookie(self, token: str | None) -> BrowserSessionContext:
         if token is None:
             raise OAuthLoginRequiredError("No browser session cookie is present.")
@@ -378,26 +441,80 @@ class AuthService:
         return str(claims.get("jti", "")) or None
 
     async def _fetch_supabase_user(self, access_token: str) -> dict[str, Any]:
-        if not settings.supabase_url or not settings.supabase_service_role_key:
-            raise OAuthRepositoryNotConfiguredError(
-                "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
-            )
-        url = f"{settings.supabase_url.rstrip('/')}/auth/v1/user"
+        url, headers = self._gotrue_endpoint("user", bearer=access_token)
         logger.debug("supabase user fetch start")
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "apikey": settings.supabase_service_role_key,
-                },
-            )
+        async with httpx.AsyncClient(timeout=_GOTRUE_TIMEOUT_SECONDS) as client:
+            response = await client.get(url, headers=headers)
         logger.debug("supabase user fetch status=%d", response.status_code)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
             raise OAuthLoginRequiredError("Supabase returned an unexpected user payload.")
         return payload
+
+    async def _verify_email_otp(self, *, email: str, token: str) -> str:
+        """Verify the code with Supabase Auth over plain HTTP and return the user id.
+
+        A direct request (rather than supabase-py's ``verify_otp``) keeps the resulting user
+        session off any shared client, so it can never leak into service-role database calls.
+        """
+        url, headers = self._gotrue_endpoint("verify")
+        try:
+            async with httpx.AsyncClient(timeout=_GOTRUE_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    url, headers=headers, json={"type": "email", "email": email, "token": token}
+                )
+                payload = response.json() if response.is_success else None
+                if isinstance(payload, dict):
+                    await self._discard_supabase_session(client, payload.get("access_token"))
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("cli otp verify transport failure error_type=%s", type(exc).__name__)
+            raise AuthUpstreamUnavailableError("Sign-in is temporarily unavailable.") from exc
+        if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+            # Supabase's per-IP verify limit sees our shared egress IPs, not the athlete.
+            logger.warning("cli otp verify upstream rate limited")
+            raise OtpRateLimitedError(retry_after_seconds=60)
+        if response.status_code >= httpx.codes.INTERNAL_SERVER_ERROR:
+            logger.warning("cli otp verify upstream status=%d", response.status_code)
+            raise AuthUpstreamUnavailableError("Sign-in is temporarily unavailable.")
+        user = payload.get("user") if isinstance(payload, dict) else None
+        user_id = user.get("id") if isinstance(user, dict) else None
+        if not isinstance(user_id, str) or not user_id:
+            # Every rejection (unknown email, wrong or expired code) collapses to one
+            # answer so the endpoint never reveals whether an account exists.
+            logger.info("cli otp verify rejected status=%d", response.status_code)
+            raise OtpVerificationError("Invalid or expired code.")
+        return user_id
+
+    async def _discard_supabase_session(
+        self, client: httpx.AsyncClient, access_token: object
+    ) -> None:
+        """Best-effort sign-out of the Supabase session that verification created.
+
+        The CLI only ever receives our own grant tokens, so nothing should keep a usable
+        Supabase refresh token alive. Failure here must not fail an otherwise valid login.
+        """
+        if not isinstance(access_token, str) or not access_token:
+            return
+        url, headers = self._gotrue_endpoint("logout?scope=local", bearer=access_token)
+        try:
+            response = await client.post(url, headers=headers)
+        except httpx.HTTPError as exc:
+            logger.warning("supabase session discard failed error_type=%s", type(exc).__name__)
+            return
+        if not response.is_success:
+            logger.warning("supabase session discard status=%d", response.status_code)
+
+    @staticmethod
+    def _gotrue_endpoint(path: str, *, bearer: str | None = None) -> tuple[str, dict[str, str]]:
+        if not settings.supabase_url or not settings.supabase_service_role_key:
+            raise OAuthRepositoryNotConfiguredError(
+                "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+            )
+        headers = {"apikey": settings.supabase_service_role_key}
+        if bearer is not None:
+            headers = {"Authorization": f"Bearer {bearer}", **headers}
+        return f"{settings.supabase_url.rstrip('/')}/auth/v1/{path}", headers
 
     def _issue_access_token(
         self, *, user_id: str, client_id: str, scopes: list[str], grant_id: str

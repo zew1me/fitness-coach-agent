@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class BrowserSessionRequest(BaseModel):
@@ -95,3 +95,24 @@ class TokenBundle(BaseModel):
     expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + timedelta(minutes=15))
     refresh_token: str
     token_type: str = "Bearer"
+
+
+class CliVerifyOtpRequest(BaseModel):
+    """Headless email-OTP exchange for the first-party coach CLI (issue #568)."""
+
+    email: str = Field(min_length=3, max_length=320)
+    # Supabase's email OTP length is configurable (6 by default, up to 10).
+    token: str = Field(pattern=r"^[0-9]{6,10}$")
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        """Match /api/auth/request-otp, which trims and lowercases before sending the code."""
+        normalized = value.strip().lower()
+        if "@" not in normalized:
+            raise ValueError("Enter a valid email address.")
+        return normalized
+
+
+class CliLoginResponse(TokenBundle):
+    user_id: str

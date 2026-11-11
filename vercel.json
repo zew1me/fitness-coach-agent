@@ -1,6 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
+    { "source": "/api/auth/whoami", "destination": "/api/index.py" },
+    { "source": "/api/auth/cli/:path*", "destination": "/api/index.py" },
     { "source": "/api/intervals/:path*", "destination": "/api/index.py" },
     { "source": "/api/oauth/:path*", "destination": "/api/index.py" },
     { "source": "/api/engine/:path*", "destination": "/api/index.py" },

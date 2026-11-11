@@ -23,6 +23,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "fitness-coach-cli",
   "fitness-coach-garmin-sidecar",
   "fitness-coach-reachability-check",
   "fitness-coach-self-data-backup",
@@ -35,6 +36,7 @@ dev = [
 ]
 
 [tool.uv.sources]
+fitness-coach-cli = { workspace = true }
 fitness-coach-garmin-sidecar = { workspace = true }
 fitness-coach-reachability-check = { workspace = true }
 fitness-coach-self-data-backup = { workspace = true }
@@ -168,6 +170,16 @@ reason = "Manual operator rebuild endpoint (docs/training-load-rebuilds.md); no 
 kind = "client-path"
 target = "/api/oauth/register"
 reason = "Known gap: advertised as registration_endpoint in OAuth metadata but no route serves it."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/auth/cli/verify-otp"
+reason = "Called by the first-party coach CLI (tools/coach-cli, Python), outside client_roots."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/auth/whoami"
+reason = "Called by the first-party coach CLI (tools/coach-cli, Python), outside client_roots."
 
 [[tool.reachability-check.allow]]
 kind = "module"

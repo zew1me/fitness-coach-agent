@@ -74,6 +74,14 @@ describe("vercel routing", () => {
     );
   });
 
+  it("routes coach CLI auth to FastAPI without stealing the Next.js OTP route", () => {
+    expect(rewrittenDestination("/api/auth/whoami")).toBe("/api/index.py");
+    expect(rewrittenDestination("/api/auth/cli/verify-otp")).toBe(
+      "/api/index.py",
+    );
+    expect(rewrittenDestination("/api/auth/request-otp")).toBeUndefined();
+  });
+
   it("does not rewrite the exact Next.js chat streaming route", () => {
     expect(rewrittenDestination("/api/chat")).toBeUndefined();
   });

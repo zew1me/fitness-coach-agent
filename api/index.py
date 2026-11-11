@@ -59,6 +59,8 @@ from backend.models.auth import (
     BrowserSessionContext,
     BrowserSessionRequest,
     BrowserTokenResponse,
+    CliLoginResponse,
+    CliVerifyOtpRequest,
     OAuthAuthorizeRequest,
     OAuthRevokeRequest,
     OAuthTokenRequest,
@@ -83,10 +85,13 @@ from backend.repos.supabase_repo import (
 )
 from backend.services.auth import (
     AuthService,
+    AuthUpstreamUnavailableError,
     OAuthConsentRequiredError,
     OAuthError,
     OAuthInvalidGrantError,
     OAuthLoginRequiredError,
+    OtpRateLimitedError,
+    OtpVerificationError,
 )
 from backend.services.chat import ChatService, ChatUnavailableError
 from backend.services.course import AthleteCourseContext, build_course_payload
@@ -322,7 +327,43 @@ async def _run_chat_model_state_operation(
 
 @app.get("/health")
 async def health() -> Mapping[str, str]:
-    return {"status": "ok"}
+    # `environment` lets the coach CLI ask for confirmation before signing in to production.
+    return {"status": "ok", "environment": settings.app_env}
+
+
+# ── Headless CLI sign-in (issue #568) ─────────────────────────
+
+
+@app.post("/api/auth/cli/verify-otp")
+async def auth_cli_verify_otp(payload: CliVerifyOtpRequest, response: Response) -> CliLoginResponse:
+    """Verify an emailed sign-in code server-side and mint a revocable CLI grant."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await auth_service.verify_cli_otp(email=payload.email, token=payload.token)
+    except OtpRateLimitedError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    except OtpVerificationError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired code.") from exc
+    except (AuthUpstreamUnavailableError, OAuthRepositoryNotConfiguredError) as exc:
+        raise HTTPException(status_code=503, detail="Sign-in is temporarily unavailable.") from exc
+
+
+@app.get("/api/auth/whoami")
+async def auth_whoami(
+    response: Response,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Return the verified caller's identity; never token or grant material."""
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "user_id": user_context.user_id,
+        "client_id": user_context.client_id,
+        "scopes": user_context.scopes,
+    }
 
 
 # ── OAuth ───────────────────────────────────────────────────

@@ -34,6 +34,7 @@ uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
 uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
 uv run pytest tools/self-data-backup/tests/  # backup workspace tool
+uv run pytest tools/coach-cli/tests/  # headless coach CLI workspace tool
 uv run pytest tools/reachability-check/tests/  # reachability workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
@@ -212,6 +213,15 @@ The app implements OAuth 2.0 PKCE as a provider (not consumer). ChatGPT is the O
 - `POST /api/oauth/revoke` — revoke grant
 
 Consent grants are durable (persisted to `oauth_grants` table). The `require_user_context()` FastAPI dependency validates bearer JWTs on protected endpoints.
+
+**Headless CLI sign-in (#568).** `tools/coach-cli` (`coach`) signs in without a browser:
+`POST /api/auth/request-otp` emails a code, then `POST /api/auth/cli/verify-otp` verifies it
+against Supabase Auth **server-side** and mints a normal grant for client id
+`fitness-coach-cli`. Each login is its own grant (unique `urn:fitness-coach-cli:login:<uuid>`
+redirect URI), so logout on one machine leaves others alone. The CLI never holds a Supabase
+URL or key; refresh and revoke reuse `/api/oauth/token` and `/api/oauth/revoke`, and
+`GET /api/auth/whoami` reports the bearer's identity. Verify attempts are limited per email,
+best-effort per instance (`backend/services/attempt_limiter.py`). See `docs/coach-cli.md`.
 
 ### Database (Supabase + Postgres)
 
