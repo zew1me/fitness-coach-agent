@@ -1796,14 +1796,21 @@ _IMAGE_SUFFIX_TO_CONTENT_TYPE: Mapping[str, str] = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
-# Decompression guards. `zipfile` never yields more than a member's declared
-# `file_size` (it truncates the stream there and the CRC check then fails), so the
-# declared size is a trustworthy upper bound on the bytes a read inflates into memory.
-# The per-member cap bounds one read; the archive-wide budget bounds their sum, which
-# the member-count cap alone would let reach 20 x 25 MB = 500 MB (#351).
+# Decompression guards. `zipfile` never returns more than a member's declared
+# `file_size`, but an unbounded `archive.read()` inflates the whole compressed stream
+# before truncating to it, so a forged small size would not bound memory. Members are
+# therefore read in fixed-size chunks (`_read_zip_member_bounded`), which caps each
+# decompress call's output and makes the declared size a real bound on what is
+# inflated. The per-member cap bounds one read; the archive-wide budget bounds their
+# sum, which the member-count cap alone would let reach 20 x 25 MB = 500 MB (#351).
 _ZIP_MEMBER_MAX_BYTES = 25 * 1024 * 1024
 _ZIP_MAX_PROCESSED_MEMBERS = 20
 _ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+_ZIP_READ_CHUNK_BYTES = 1024 * 1024
+# Only codecs whose chunked reads bound decompressor output on every supported Python.
+# Before 3.13, bzip2/LZMA members inflate a whole compressed chunk per call, so they are
+# declined; real activity exports and archivers use deflate (or store).
+_ZIP_BOUNDED_COMPRESSION_TYPES = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 
 
 @dataclass(frozen=True)
@@ -1825,6 +1832,15 @@ class _ZipWorkUsed:
 
     attempts: int = 0
     decompressed_bytes: int = 0
+
+
+def _read_zip_member_bounded(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bytes:
+    """Inflate one member in fixed-size chunks so memory tracks its declared size."""
+    chunks: list[bytes] = []
+    with archive.open(member) as stream:
+        while chunk := stream.read(_ZIP_READ_CHUNK_BYTES):
+            chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _is_zip_junk_member(name: str, basename: str) -> bool:
@@ -1964,12 +1980,14 @@ async def _process_zip_member(
     activity_content_type = _ACTIVITY_SUFFIX_TO_CONTENT_TYPE.get(suffix)
     image_content_type = _IMAGE_SUFFIX_TO_CONTENT_TYPE.get(suffix)
 
-    # Cheap rejects — junk, unknown type, oversized. We never read these, so they
-    # cost nothing and must not consume the work budget.
+    # Cheap rejects — junk, unknown type, oversized, or a codec whose decompression we
+    # cannot bound. We never read these, so they cost nothing and must not consume the
+    # work budget.
     is_unprocessable = (
         _is_zip_junk_member(member.filename, filename)
         or (activity_content_type is None and image_content_type is None)
         or member.file_size > _ZIP_MEMBER_MAX_BYTES
+        or member.compress_type not in _ZIP_BOUNDED_COMPRESSION_TYPES
     )
     if is_unprocessable:
         return _ZipMemberResult(counts_as_skipped=True)
@@ -1993,7 +2011,7 @@ async def _process_zip_member(
         return _ZipMemberResult(counts_as_skipped=True)
 
     try:
-        member_bytes = archive.read(member)
+        member_bytes = _read_zip_member_bounded(archive, member)
     except Exception:  # a corrupt member must not abort the whole zip
         logger.warning("failed to read zip member user_id=%s", user_id)
         return _ZipMemberResult(counts_as_skipped=True, counts_as_attempt=True)
