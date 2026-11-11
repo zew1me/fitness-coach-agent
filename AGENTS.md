@@ -231,7 +231,9 @@ Supabase clients only call `supabase.auth.*`. `anon` holds no table privileges, 
 holds no INSERT/UPDATE/DELETE/TRUNCATE, and RLS only has SELECT policies (an athlete can read
 their own rows). A table that needs client writes is an explicit exception: grant the privilege,
 add a write policy that also verifies parent ownership, and list it in `CLIENT_WRITABLE_TABLES`
-in `tests/python/test_rls_matrix_db.py`.
+in `tests/python/test_rls_matrix_db.py`. Listing it there only exempts it from the grant and
+policy checks; also update `test_athlete_cannot_insert_rows` and the parent-attachment denial
+tests so they accept the intended owner writes and still reject cross-athlete ones.
 
 ### Chat persistence
 
