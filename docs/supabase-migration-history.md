@@ -845,10 +845,22 @@ is short, but apply it in a quiet window rather than "at any time".
   `CLIENT_WRITABLE_TABLES` in `tests/python/test_rls_matrix_db.py`.
 - **Rollback:** re-create the dropped policies and re-grant the privileges. Nothing is deleted.
   The migration also changes `postgres`'s default privileges for new public tables, which
-  re-granting existing tables does not undo. Before applying to a hosted project, record them
-  (`select defaclrole::regrole, defaclobjtype, defaclacl from pg_default_acl`), and on
-  rollback restore them with `alter default privileges for role postgres in schema public
-grant ... on tables to anon, authenticated` using the recorded values.
+  re-granting existing tables does not undo. Before applying to a hosted project, record the
+  affected schema-specific table defaults (other schemas and global defaults are unchanged):
+
+  ```sql
+  select defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl
+  from pg_default_acl
+  where defaclrole = 'postgres'::regrole
+    and defaclnamespace = 'public'::regnamespace
+    and defaclobjtype = 'r';
+  ```
+
+  On rollback restore only the previously recorded browser grants with `alter default
+privileges for role postgres in schema public grant ... on tables to anon, authenticated`,
+  preserving any recorded grant options. No row (or no browser grants in the ACL) means there
+  are no prior schema-specific browser defaults to re-grant; do not invent new ones.
+
 - **Verification:** `bun run db:reset && bun run test:db` replays all migrations and runs the
   role matrix. Alongside the steady-state new-table probe, a regression seeds browser-role
   default grants, proves they reach a new table, then replays this actual migration after
