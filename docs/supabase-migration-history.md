@@ -850,4 +850,8 @@ is short, but apply it in a quiet window rather than "at any time".
   rollback restore them with `alter default privileges for role postgres in schema public
 grant ... on tables to anon, authenticated` using the recorded values.
 - **Verification:** `bun run db:reset && bun run test:db` replays all migrations and runs the
-  role matrix.
+  role matrix. Alongside the steady-state new-table probe, a regression seeds browser-role
+  default grants, proves they reach a new table, then replays this actual migration after
+  temporarily removing its conflicting owner-read policies. A second table must inherit no
+  browser privileges. The existing local-only helper rolls back all grants, tables, and policy
+  changes, so the regression needs neither a copied revoke statement nor a separate harness.

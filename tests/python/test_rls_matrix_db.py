@@ -36,7 +36,8 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, LiteralString, cast
 
 import pytest
 from psycopg import Cursor, sql
@@ -463,6 +464,50 @@ def test_new_public_tables_start_without_browser_privileges() -> None:
         for role in ("anon", "authenticated"):
             held = _granted(session.cursor, role, ["rls_matrix_acl_probe"], _ALL_PRIVILEGES)
             assert held == [], role
+
+
+def test_migration_revokes_preexisting_browser_default_privileges() -> None:
+    # Unlike the steady-state probe above, seed grants so omitting the default revoke fails.
+    # Everything, including policy drops and the migration replay, is rolled back on exit.
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "supabase/migrations/20261110213928_revoke_client_table_writes.sql"
+    )
+    with direct_session() as session:
+        cursor = session.cursor
+        cursor.execute("set local lock_timeout = '5s'")
+        cursor.execute("set local statement_timeout = '30s'")
+        cursor.execute("set local role postgres")
+        cursor.execute(
+            "alter default privileges for role postgres in schema public"
+            " grant all on tables to anon, authenticated"
+        )
+        cursor.execute("create table public.rls_matrix_before_acl_probe (id int)")
+        for role in ("anon", "authenticated"):
+            assert _granted(cursor, role, ["rls_matrix_before_acl_probe"], _ALL_PRIVILEGES) == [
+                ("rls_matrix_before_acl_probe", privilege) for privilege in _ALL_PRIVILEGES
+            ], role
+
+        # CREATE POLICY is not idempotent. Remove its owner-read policies transactionally,
+        # then execute the actual migration file rather than a copy of its revoke statement.
+        cursor.execute(
+            "select tablename, policyname from pg_policies where schemaname = 'public'"
+            " and cmd = 'SELECT' and tablename = any(%s)",
+            (list(OWNER_ROW_TABLES),),
+        )
+        for table, policy in cursor.fetchall():
+            cursor.execute(
+                sql.SQL("drop policy {} on public.{}").format(
+                    sql.Identifier(policy), sql.Identifier(table)
+                )
+            )
+        # This fixed, repository-owned file is executable SQL, never caller-supplied text.
+        cursor.execute(cast(LiteralString, migration.read_text(encoding="utf-8")))
+        cursor.execute("create table public.rls_matrix_after_acl_probe (id int)")
+        for role in ("anon", "authenticated"):
+            assert _granted(cursor, role, ["rls_matrix_after_acl_probe"], _ALL_PRIVILEGES) == [], (
+                role
+            )
 
 
 # ── Per-athlete tables: readable by their owner, never writable ──────────────
