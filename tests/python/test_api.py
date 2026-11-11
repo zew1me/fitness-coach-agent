@@ -1093,6 +1093,91 @@ async def test_process_uploaded_zip_cap_counts_failed_member_attempts(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_enforces_archive_wide_decompression_budget(
+    monkeypatch,
+) -> None:
+    # Each member is under the per-member cap and the member-count cap, but their
+    # combined inflated size is not: the archive-wide budget must stop reading once
+    # it would be exceeded, before the over-budget member is ever inflated (#351).
+    member_size = len(_SAMPLE_GPX)
+    monkeypatch.setattr("api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES", 2 * member_size)
+
+    attempts = 0
+
+    async def counting_entry(**_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+
+    monkeypatch.setattr(api_index, "_zip_activity_entry", counting_entry)
+
+    zip_bytes = _make_zip({f"run{i}.gpx": _SAMPLE_GPX for i in range(5)})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    # Two members fit the budget exactly; the other three are declined unread. Failed
+    # parses still charge the budget, so corrupt members cannot bypass it either.
+    assert attempts == 2
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_admits_smaller_later_member(monkeypatch) -> None:
+    # The budget declines a member, not the whole archive: once a large member does
+    # not fit, a smaller later one that still fits is processed.
+    big = _SAMPLE_GPX + b"<!--" + b"x" * len(_SAMPLE_GPX) + b"-->"
+    monkeypatch.setattr(
+        "api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES", len(_SAMPLE_GPX) + len(big) - 1
+    )
+    zip_bytes = _make_zip({"a.gpx": _SAMPLE_GPX, "b.gpx": big, "c.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    # a.gpx fits; b.gpx would exceed the budget; c.gpx (smaller) still fits.
+    assert len(body["processed"]) == 2
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_bounds_lying_size_header(monkeypatch) -> None:
+    # A zip bomb can understate a member's uncompressed size in its header. zipfile
+    # stops inflating at the declared size (and the CRC check then fails), so the
+    # declared size the budget charges is a true upper bound on what was inflated.
+    import io
+    import zipfile
+
+    payload = b"0" * (1024 * 1024)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("bomb.gpx", payload)
+    raw = bytearray(buffer.getvalue())
+    declared = 64
+    # Rewrite the uncompressed-size fields in both the local header (offset 22) and
+    # the central directory record (offset 24) to a much smaller lie.
+    local = raw.find(b"PK\x03\x04")
+    central = raw.find(b"PK\x01\x02")
+    raw[local + 22 : local + 26] = declared.to_bytes(4, "little")
+    raw[central + 24 : central + 28] = declared.to_bytes(4, "little")
+
+    with zipfile.ZipFile(io.BytesIO(bytes(raw))) as archive:
+        member = archive.infolist()[0]
+        assert member.file_size == declared
+        with pytest.raises(zipfile.BadZipFile):
+            archive.read(member)
+        # With the CRC check disabled, the read still yields only the declared bytes:
+        # the cap on inflation is the size field itself, not the integrity check.
+        with monkeypatch.context() as patch:
+            patch.setattr(zipfile.ZipExtFile, "_update_crc", lambda _self, _data: None)
+            assert len(archive.read(member)) == declared
+
+    # End to end, the lying member is charged and read best-effort without aborting.
+    body = await _post_process_zip(bytes(raw), monkeypatch)
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_skips_directory_entries_without_counting(
     monkeypatch,
 ) -> None:
@@ -1124,7 +1209,7 @@ async def test_process_zip_member_counts_read_failure_as_skipped(monkeypatch) ->
             member=member,
             user_id=_ZIP_TEST_USER.user_id,
             zip_object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
-            attempted_count=0,
+            used=api_index._ZipWorkUsed(),
         )
 
     assert result.entry is None
