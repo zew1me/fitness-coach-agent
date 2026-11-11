@@ -1277,14 +1277,19 @@ async def test_process_uploaded_zip_declines_unboundable_codec_unread(monkeypatc
         archive.writestr("run.gpx", _SAMPLE_GPX, compress_type=zipfile.ZIP_BZIP2)
         archive.writestr("ride.gpx", _SAMPLE_GPX, compress_type=zipfile.ZIP_DEFLATED)
 
-    def fail_if_bzip2_read(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bytes:
-        assert member.compress_type != zipfile.ZIP_BZIP2
+    read_types: list[int] = []
+
+    def recording_reader(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bytes:
+        read_types.append(member.compress_type)
         return archive.read(member)
 
-    monkeypatch.setattr(api_index, "_read_zip_member_bounded", fail_if_bzip2_read)
+    monkeypatch.setattr(api_index, "_read_zip_member_bounded", recording_reader)
 
     body = await _post_process_zip(buffer.getvalue(), monkeypatch)
 
+    # Asserted here, not in the reader: an assertion raised inside the reader would be
+    # swallowed by _process_zip_member's best-effort read handler and still pass.
+    assert read_types == [zipfile.ZIP_DEFLATED]
     assert body["status"] == "ok"
     assert len(body["processed"]) == 1
     assert body["skipped_count"] == 1
