@@ -140,7 +140,7 @@ class CoachClient:
         try:
             if not credentials.is_fresh():
                 credentials = self._refresh(credentials)
-            self._revoke(credentials.access_token, hint=None)
+            grant_revoked = self._revoke(credentials.access_token, hint=None)
             self._revoke(credentials.refresh_token, hint="refresh_token")
         except CoachError as exc:
             if exc.error != "session_expired":
@@ -154,7 +154,8 @@ class CoachClient:
         finally:
             with self._store.locked():
                 self._store.delete(self.base_url)
-        return "revoked"
+        # The server answers false when the grant was already revoked elsewhere.
+        return "revoked" if grant_revoked else "already_invalid"
 
     # ── internals ────────────────────────────────────────────────
 
@@ -206,11 +207,14 @@ class CoachClient:
             self._store.save(self.base_url, refreshed)
             return refreshed
 
-    def _revoke(self, token: str, *, hint: str | None) -> None:
+    def _revoke(self, token: str, *, hint: str | None) -> bool:
         body: dict[str, str] = {"token": token, "client_id": CLI_CLIENT_ID}
         if hint is not None:
             body["token_type_hint"] = hint
-        self._raise_for_status(self._send("POST", "/api/oauth/revoke", json=body))
+        response = self._send("POST", "/api/oauth/revoke", json=body)
+        self._raise_for_status(response)
+        payload = self._json(response)
+        return isinstance(payload, dict) and payload.get("revoked") is True
 
     def _session_expired(self, status: int | None) -> CoachError:
         return CoachError(
@@ -232,11 +236,35 @@ class CoachClient:
         if credentials is not None:
             headers["Authorization"] = f"Bearer {credentials.access_token}"
         try:
-            return self._http.request(method, path, headers=headers, **kwargs)
+            response = self._http.request(method, path, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
             raise CoachError(
                 "network_error", f"Could not reach {self.base_url}: {type(exc).__name__}: {exc}"
             ) from exc
+        self._raise_if_blocked_before_app(response)
+        return response
+
+    def _raise_if_blocked_before_app(self, response: httpx.Response) -> None:
+        """Reject a non-JSON 401/403, which the app never sends but an edge proxy does.
+
+        Vercel Deployment Protection answers previews with an HTML 401. Treating that as an
+        expired session would send an agent into a pointless re-login loop.
+        """
+        blocked = response.status_code in {httpx.codes.UNAUTHORIZED, httpx.codes.FORBIDDEN}
+        if not blocked or "json" in response.headers.get("content-type", ""):
+            return
+        hint = (
+            "This preview is behind Vercel Deployment Protection; set "
+            "VERCEL_AUTOMATION_BYPASS_SECRET (see .env.agent.example)."
+            if is_vercel_host(self.base_url)
+            else "Something in front of the deployment rejected the request."
+        )
+        raise CoachError(
+            "deployment_protected",
+            f"{self.base_url} refused the request before it reached the coach API.",
+            status=response.status_code,
+            hint=hint,
+        )
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:

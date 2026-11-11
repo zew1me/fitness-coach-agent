@@ -101,11 +101,14 @@ class FakeDeployment:
         return httpx.Response(200, json=self._tokens())
 
     def _revoke(self, body: dict[str, Any]) -> httpx.Response:
+        token = body["token"]
         if body.get("token_type_hint") == "refresh_token":
-            self.live_refresh.discard(body["token"])
-        elif body["token"] in self.live_access:
-            self.revoked_grant = True
-        return httpx.Response(200, json={"revoked": True})
+            revoked = token in self.live_refresh
+            self.live_refresh.discard(token)
+        else:
+            revoked = token in self.live_access and not self.revoked_grant
+            self.revoked_grant = self.revoked_grant or revoked
+        return httpx.Response(200, json={"revoked": revoked})
 
     def paths(self) -> list[str]:
         return [request.url.path for request in self.requests]
@@ -373,6 +376,54 @@ def test_logout_after_server_side_revocation_still_clears_local_state(
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["status"] == "already_invalid"
     assert CredentialStore(store_path).load(BASE) is None
+
+
+def test_logout_reports_a_grant_revoked_elsewhere(
+    run: Any, deployment: FakeDeployment, store_path: Path
+) -> None:
+    _login(run)
+    deployment.revoked_grant = True  # e.g. revoked from another device; access token still fresh
+
+    result = run("--json", "logout")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "already_invalid"
+    assert CredentialStore(store_path).load(BASE) is None
+
+
+@pytest.mark.parametrize(
+    ("base_url", "hint_fragment"),
+    [
+        ("https://app-git-branch.vercel.app", "VERCEL_AUTOMATION_BYPASS_SECRET"),
+        ("https://coach.example.com", "in front of the deployment"),
+    ],
+)
+def test_html_401_from_an_edge_proxy_is_not_a_session_problem(
+    store_path: Path, base_url: str, hint_fragment: str
+) -> None:
+    CredentialStore(store_path).save(
+        base_url, Credentials("a", "r", datetime.now(UTC) + timedelta(hours=1), "user-1")
+    )
+    protection_page = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            401, text="<html>Authentication Required</html>", headers={"content-type": "text/html"}
+        )
+    )
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["--credentials-file", str(store_path), "--base-url", base_url, "--json", "whoami"],
+        obj={"transport": protection_page},
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.stderr)
+    assert error["error"] == "deployment_protected"
+    assert hint_fragment in error["hint"]
+    # No refresh was attempted, so the stored sign-in is untouched.
+    stored = CredentialStore(store_path).load(base_url)
+    assert stored is not None
+    assert stored.refresh_token == "r"
 
 
 def test_logout_network_failure_still_clears_local_state(store_path: Path) -> None:

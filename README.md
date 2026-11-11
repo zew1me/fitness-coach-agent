@@ -66,6 +66,16 @@ uv run --package fitness-coach-garmin-sidecar garmin-sidecar download \
   2026-07-01 2026-07-31 --output-dir downloads/garmin-fit
 ```
 
+### Coach CLI
+
+A headless Typer workspace CLI signs in as an athlete with the emailed code (no browser) and
+calls coach operations against a deployment. See [`docs/coach-cli.md`](docs/coach-cli.md).
+
+```bash
+uv run --package fitness-coach-cli coach --base-url http://localhost:3000 login --email me@example.com
+uv run --package fitness-coach-cli coach --base-url http://localhost:3000 call get-athlete-summary
+```
+
 ### Personal-data backup
 
 Local Garmin FIT downloads can be copied to Google Drive or another rclone remote with the

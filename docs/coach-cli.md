@@ -86,16 +86,17 @@ non-zero, and with `--json` it prints a machine-readable error on stderr:
 }
 ```
 
-| `error`                                | Meaning                                                                                 |
-| -------------------------------------- | --------------------------------------------------------------------------------------- |
-| `not_logged_in`                        | No stored sign-in for this `--base-url`                                                 |
-| `session_expired`                      | Refresh was rejected: the grant was revoked or the refresh token expired. Sign in again |
-| `rate_limited`                         | Too many attempts; `hint` carries `Retry-After`                                         |
-| `confirmation_required`                | Production or unknown target without `--yes`                                            |
-| `invalid_base_url`, `missing_base_url` | Fix the target                                                                          |
-| `invalid_input`, `invalid_operation`   | Bad `--data` or operation name; nothing was sent                                        |
-| `http_error`                           | Any other non-2xx; `status` and `detail` come from the server                           |
-| `network_error`, `invalid_response`    | Transport failure or unexpected body                                                    |
+| `error`                                | Meaning                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `not_logged_in`                        | No stored sign-in for this `--base-url`                                                                |
+| `session_expired`                      | Refresh was rejected: the grant was revoked or the refresh token expired. Sign in again                |
+| `rate_limited`                         | Too many attempts; `hint` carries `Retry-After`                                                        |
+| `confirmation_required`                | Production or unknown target without `--yes`                                                           |
+| `invalid_base_url`, `missing_base_url` | Fix the target                                                                                         |
+| `invalid_input`, `invalid_operation`   | Bad `--data` or operation name; nothing was sent                                                       |
+| `deployment_protected`                 | A non-JSON 401/403 from in front of the app (e.g. Vercel Deployment Protection); not a sign-in problem |
+| `http_error`                           | Any other non-2xx; `status` and `detail` come from the server                                          |
+| `network_error`, `invalid_response`    | Transport failure or unexpected body                                                                   |
 
 ## Credentials
 
