@@ -1801,8 +1801,9 @@ _IMAGE_SUFFIX_TO_CONTENT_TYPE: Mapping[str, str] = {
 # before truncating to it, so a forged small size would not bound memory. Members are
 # therefore read in fixed-size chunks (`_read_zip_member_bounded`), which caps each
 # decompress call's output and makes the declared size a real bound on what is
-# inflated. The per-member cap bounds one read; the archive-wide budget bounds their
-# sum, which the member-count cap alone would let reach 20 x 25 MB = 500 MB (#351).
+# inflated (plus at most one chunk of overshoot, which the budget also charges). The
+# per-member cap bounds one read; the archive-wide budget bounds their sum, which the
+# member-count cap alone would let reach 20 x 25 MB = 500 MB (#351).
 _ZIP_MEMBER_MAX_BYTES = 25 * 1024 * 1024
 _ZIP_MAX_PROCESSED_MEMBERS = 20
 _ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
@@ -1841,6 +1842,15 @@ def _read_zip_member_bounded(archive: zipfile.ZipFile, member: zipfile.ZipInfo) 
         while chunk := stream.read(_ZIP_READ_CHUNK_BYTES):
             chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _zip_member_inflation_bound(member: zipfile.ZipInfo) -> int:
+    """Most bytes a bounded read of ``member`` can make the decompressor emit.
+
+    Output stops once the declared size is reached, but the final capped decompress
+    call can overshoot it by up to one chunk before truncation, so charge that too.
+    """
+    return member.file_size + _ZIP_READ_CHUNK_BYTES
 
 
 def _is_zip_junk_member(name: str, basename: str) -> bool:
@@ -2001,12 +2011,13 @@ async def _process_zip_member(
         return _ZipMemberResult(counts_as_skipped=True)
     # Same for the archive-wide decompression budget: decline before inflating. A
     # smaller later member may still fit, so this skips the member, not the archive.
-    if used.decompressed_bytes + member.file_size > _ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES:
+    charge = _zip_member_inflation_bound(member)
+    if used.decompressed_bytes + charge > _ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES:
         logger.warning(
             "zip member exceeds decompression budget user_id=%s used=%d member=%d",
             user_id,
             used.decompressed_bytes,
-            member.file_size,
+            charge,
         )
         return _ZipMemberResult(counts_as_skipped=True)
 
@@ -2070,12 +2081,14 @@ async def process_uploaded_zip_endpoint(
                 zip_object_key=object_key,
                 used=used,
             )
-            # Charge the declared size of every member we tried to read: it bounds
-            # what the read inflated, including reads that later failed to parse.
+            # Charge every member we tried to read with the most its bounded read can
+            # inflate, including reads that later failed (e.g. a forged size whose CRC
+            # check fails), so total decompressor output stays within the budget.
             if result.counts_as_attempt:
                 used = _ZipWorkUsed(
                     attempts=used.attempts + 1,
-                    decompressed_bytes=used.decompressed_bytes + member.file_size,
+                    decompressed_bytes=used.decompressed_bytes
+                    + _zip_member_inflation_bound(member),
                 )
             skipped_count += int(result.counts_as_skipped)
             if result.entry is not None:
