@@ -23,6 +23,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "fitness-coach-cli",
   "fitness-coach-garmin-sidecar",
   "fitness-coach-self-data-backup",
   "psycopg[binary]>=3.2,<4.0",
@@ -34,6 +35,7 @@ dev = [
 ]
 
 [tool.uv.sources]
+fitness-coach-cli = { workspace = true }
 fitness-coach-garmin-sidecar = { workspace = true }
 fitness-coach-self-data-backup = { workspace = true }
 

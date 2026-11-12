@@ -1,0 +1,16 @@
+[project]
+name = "fitness-coach-cli"
+version = "0.1.0"
+description = "Authenticated hosted fitness-coach client for athletes and coding agents."
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.28.1,<0.29.0",
+  "typer>=0.16.0,<1.0.0",
+]
+
+[project.scripts]
+coach = "fitness_coach_cli.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"

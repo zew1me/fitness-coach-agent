@@ -34,6 +34,8 @@ uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
 uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
 uv run pytest tools/self-data-backup/tests/  # backup workspace tool
+uv run pytest tools/coach-cli/tests/  # hosted athlete CLI
+uv run coach --help                  # browser-approved CLI; see docs/coach-cli.md
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
@@ -47,6 +49,13 @@ Before adding or expanding repository automation, read [SCRIPTS.md](SCRIPTS.md).
 one-shot repository glue in `scripts/`; build durable, configurable, dependency-owning, or
 user-facing Python CLIs as Typer packages under `tools/` in the uv workspace. Update the shared
 lockfile and root checks whenever a workspace tool is added.
+
+### Hosted athlete CLI
+
+`tools/coach-cli` (`uv run coach`) talks only to the explicitly selected deployment. Login uses
+browser consent with S256 PKCE and a configurable loopback callback; `--no-browser` supports manual
+opening or an SSH-forwarded port, not a device-code grant. Never give the CLI Supabase/service-role
+credentials. See [docs/coach-cli.md](docs/coach-cli.md) for login, token storage, Garmin push, and chat.
 
 ### Agent preview E2E credentials
 
