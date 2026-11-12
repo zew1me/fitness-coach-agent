@@ -295,5 +295,5 @@ def format_wellness_text(
 
 
 def format_wellness_json(rows: Sequence[Mapping[str, WellnessValue]]) -> str:
-    """Format the same export rows as JSON for automation."""
-    return json.dumps(list(rows), indent=2)
+    """Include per-entry provenance so piping JSON to coach cannot label Garmin data manual."""
+    return json.dumps([{**row, "source": "garmin_sidecar"} for row in rows], indent=2)

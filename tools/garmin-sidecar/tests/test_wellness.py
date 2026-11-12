@@ -171,7 +171,10 @@ def test_text_and_json_formatters_emit_the_same_rows() -> None:
         "log_date=2026-08-15 sleep_duration_hours=7.4 body_battery=0\n"
         "=== END WELLNESS EXPORT ==="
     )
-    assert json.loads(wellness.format_wellness_json(rows)) == rows
+    assert json.loads(wellness.format_wellness_json(rows)) == [
+        {**row, "source": "garmin_sidecar"} for row in rows
+    ]
+    assert all("source" not in row for row in rows)  # Formatting must not mutate collected data.
 
 
 def test_wellness_cli_reports_partial_failure_after_printing_export(
@@ -225,7 +228,9 @@ def test_wellness_json_is_machine_readable_when_a_metric_fails(
     )
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == summary.rows
+    assert json.loads(result.stdout) == [
+        {**row, "source": "garmin_sidecar"} for row in summary.rows
+    ]
     assert "failed 2026-08-15 hrv: missing" in result.stderr
 
 
