@@ -23,6 +23,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "fitness-coach-activity-sources-backfill",
   "fitness-coach-cli",
   "fitness-coach-garmin-sidecar",
   "fitness-coach-reachability-check",
@@ -36,6 +37,7 @@ dev = [
 ]
 
 [tool.uv.sources]
+fitness-coach-activity-sources-backfill = { workspace = true }
 fitness-coach-cli = { workspace = true }
 fitness-coach-garmin-sidecar = { workspace = true }
 fitness-coach-reachability-check = { workspace = true }
