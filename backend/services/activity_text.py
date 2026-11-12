@@ -676,15 +676,6 @@ async def build_activity_from_text(
     return ActivityTextBuildResult(activity=activity, missing=[], raw_extraction=raw_extraction)
 
 
-def _parse_iso_date(value: str | None) -> date:
-    if value is None:
-        raise ValueError("Activity date is required.")
-    parsed = _try_parse_iso_date(value)
-    if parsed is None:
-        raise ValueError("Activity date must be an ISO date.")
-    return parsed
-
-
 def _plausible_local_dates(started_at: datetime | None) -> set[date] | None:
     if started_at is None:
         return None
