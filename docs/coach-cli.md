@@ -77,8 +77,10 @@ uv run coach --base-url https://YOUR-DEPLOYMENT logout
 
 Logout revokes the current **grant** remotely before removing that target's local credentials.
 It retains credentials if remote revocation fails, so an outage is not reported as a successful
-logout. An already-revoked grant may require a fresh login; manual file deletion alone does not
-revoke a still-active remote grant.
+logout. If another terminal logs in while revocation is pending, its newer credentials are preserved;
+the result reports `newer_login_preserved: true` rather than claiming that newer login was logged out.
+An already-revoked grant may require a fresh login; manual file deletion alone does not revoke a
+still-active remote grant.
 
 ## Operations and Garmin push
 

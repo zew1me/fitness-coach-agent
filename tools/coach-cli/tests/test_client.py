@@ -181,6 +181,18 @@ def test_multi_request_command_keeps_its_starting_login(store: CredentialStore) 
     assert calls == ["Bearer access"]
 
 
+def test_logout_preserves_a_newer_login(store: CredentialStore) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["token"] == "access"
+        with store.locked():
+            store.save(BASE, Tokens.parse(token_payload("athlete-b")))
+        return httpx.Response(200, json={"revoked": True})
+
+    with CoachClient(BASE, store, transport=httpx.MockTransport(handler)) as client:
+        assert client.logout() is False
+    assert store.get(BASE).access_token == "athlete-b"
+
+
 def test_transport_failure_does_not_replay_write(store: CredentialStore) -> None:
     calls = []
 

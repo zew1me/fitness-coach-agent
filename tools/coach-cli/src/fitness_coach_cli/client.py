@@ -125,8 +125,8 @@ class CoachClient:
                     return
             token = self._access_token(rejected=token)
 
-    def logout(self) -> None:
-        """Revoke the current grant before removing this deployment's local tokens."""
+    def logout(self) -> bool:
+        """Revoke the starting grant; return whether that login is also removed locally."""
         token = self._access_token()
         response = self.http.post(
             "/api/oauth/revoke", json={"client_id": CLIENT_ID, "token": token.access_token}
@@ -135,7 +135,16 @@ class CoachClient:
         if response.json().get("revoked") is not True:
             raise CoachError("Grant was not revoked; credentials retained. Try login/logout again.")
         with self.store.locked():
+            try:
+                current = self.store.get(self.base_url)
+            except CoachError as error:
+                if error.status == HTTPStatus.UNAUTHORIZED:
+                    return True  # Another logout already removed this target.
+                raise
+            if current.generation != token.generation:
+                return False  # A new login must survive an old logout finishing late.
             self.store.save(self.base_url, None)
+            return True
 
 
 def _decode_event(payload: str) -> dict[str, Any]:

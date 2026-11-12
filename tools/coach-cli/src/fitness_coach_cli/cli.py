@@ -168,8 +168,16 @@ def whoami(ctx: typer.Context) -> None:
 def logout(ctx: typer.Context) -> None:
     """Revoke the current OAuth grant remotely, then remove this target's local tokens."""
     with _client(ctx) as client:
-        client.logout()
-        _output(ctx, {"logged_out": True, "base_url": client.base_url})
+        removed = client.logout()
+        _output(
+            ctx,
+            {
+                "grant_revoked": True,
+                "logged_out": removed,
+                "newer_login_preserved": not removed,
+                "base_url": client.base_url,
+            },
+        )
 
 
 @app.command("call")
