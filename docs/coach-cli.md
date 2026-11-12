@@ -67,7 +67,9 @@ or commit the store. Login replaces the saved identity for that origin; targets 
 Access tokens expire after 15 minutes. The CLI refreshes near expiry or after one explicit 401;
 a transport failure never automatically replays a possibly completed write. The backend checks
 that the OAuth grant is active on every authenticated request. Revocation produces a re-login
-hint rather than silently switching to browser cookies or another target.
+hint rather than silently switching to browser cookies or another target. Each command also pins a
+random login generation: a concurrent login in another terminal cannot cause a 401 retry or a later
+step of a multi-request upload to run as a different athlete. Concurrent refreshes within the same login remain reusable.
 
 ```sh
 uv run coach --base-url https://YOUR-DEPLOYMENT logout

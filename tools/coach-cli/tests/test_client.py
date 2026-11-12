@@ -115,6 +115,72 @@ def test_revoked_refresh_fails_without_retry_storm(store: CredentialStore) -> No
     assert calls == ["/api/auth/whoami", "/api/oauth/token"]
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_401_never_replays_a_request_as_a_new_login(
+    store: CredentialStore, streaming: bool
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers.get("authorization"))
+        if len(calls) == 1:
+            with store.locked():
+                store.save(BASE, Tokens.parse(token_payload("athlete-b")))
+            return httpx.Response(401)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, json={})
+
+    with (
+        CoachClient(BASE, store, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(CoachError, match="Login changed"),
+    ):
+        if streaming:
+            with client.stream({"message": {}}):
+                raise AssertionError("must not open a chat as athlete B")
+        else:
+            client.request("POST", "/api/engine/update-athlete-profile", json={"name": "athlete-a"})
+    assert calls == ["Bearer access"]
+    assert store.get(BASE).access_token == "athlete-b"
+
+
+def test_401_reuses_a_concurrent_refresh_within_the_same_login(store: CredentialStore) -> None:
+    from dataclasses import replace
+
+    original = store.get(BASE)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers.get("authorization"))
+        if len(calls) == 1:
+            refreshed = replace(
+                Tokens.parse(token_payload("refreshed")), generation=original.generation
+            )
+            with store.locked():
+                store.save(BASE, refreshed)
+            return httpx.Response(401)
+        assert request.url.path == "/api/auth/whoami"  # No second refresh-token rotation.
+        return httpx.Response(200, json={"user_id": "athlete-a"})
+
+    with CoachClient(BASE, store, transport=httpx.MockTransport(handler)) as client:
+        assert client.request("GET", "/api/auth/whoami") == {"user_id": "athlete-a"}
+    assert calls == ["Bearer access", "Bearer refreshed"]
+
+
+def test_multi_request_command_keeps_its_starting_login(store: CredentialStore) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.headers["authorization"])
+        return httpx.Response(200, json={"ok": True})
+
+    with CoachClient(BASE, store, transport=httpx.MockTransport(handler)) as client:
+        client.request("GET", "/api/auth/whoami")
+        with store.locked():
+            store.save(BASE, Tokens.parse(token_payload("athlete-b")))
+        with pytest.raises(CoachError, match="Login changed"):
+            client.request("POST", "/api/engine/update-athlete-profile", json={})
+    assert calls == ["Bearer access"]
+
+
 def test_transport_failure_does_not_replay_write(store: CredentialStore) -> None:
     calls = []
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import secrets
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ class Tokens:
     access_token: str
     refresh_token: str
     expires_at: datetime
+    generation: str
 
     @classmethod
     def parse(cls, payload: Any) -> Tokens:  # HTTP and file data are untrusted until validated.
@@ -65,13 +67,17 @@ class Tokens:
             raise CoachError("Invalid token expiry; log in again.") from error
         if expires_at.tzinfo is None or payload.get("token_type", "Bearer") != "Bearer":
             raise CoachError("Invalid token response or credential file; log in again.")
-        return cls(access, refresh, expires_at)
+        generation = payload.get("generation", secrets.token_urlsafe(24))
+        if not isinstance(generation, str) or not generation:
+            raise CoachError("Invalid login generation; log in again.")
+        return cls(access, refresh, expires_at, generation)
 
     def payload(self) -> dict[str, str]:
         return {
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
             "expires_at": self.expires_at.isoformat(),
+            "generation": self.generation,
         }
 
     def needs_refresh(self) -> bool:

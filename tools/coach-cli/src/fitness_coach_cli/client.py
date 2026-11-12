@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from http import HTTPStatus
 from typing import Any
 
@@ -32,6 +33,7 @@ class CoachClient:
     ) -> None:
         self.base_url = normalize_base_url(base_url)
         self.store = store
+        self._generation: str | None = None
         self.http = httpx.Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(30, read=180),
@@ -60,13 +62,21 @@ class CoachClient:
         tokens = Tokens.parse(response.json())
         with self.store.locked():
             self.store.save(self.base_url, tokens)
+            self._generation = tokens.generation
 
-    def _access_token(self, rejected: str | None = None) -> str:
+    def _access_token(self, rejected: Tokens | None = None) -> Tokens:
         with self.store.locked():
             tokens = self.store.get(self.base_url)
-            # A different process may already have rotated the rejected token while we waited.
-            if not tokens.needs_refresh() and tokens.access_token != rejected:
-                return tokens.access_token
+            expected = rejected.generation if rejected is not None else self._generation
+            if expected is not None and tokens.generation != expected:
+                raise CoachError(
+                    "Login changed in another terminal; request was not sent or retried."
+                )
+            self._generation = tokens.generation
+            # A concurrent refresh is reusable, but a different login must never inherit a write.
+            rejected_access = rejected.access_token if rejected is not None else None
+            if not tokens.needs_refresh() and tokens.access_token != rejected_access:
+                return tokens
             response = self.http.post(
                 "/api/oauth/token",
                 json={
@@ -76,20 +86,20 @@ class CoachClient:
                 },
             )
             check_response(response)
-            replacement = Tokens.parse(response.json())
+            replacement = replace(Tokens.parse(response.json()), generation=tokens.generation)
             self.store.save(self.base_url, replacement)
-            return replacement.access_token
+            return replacement
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         """Retry only an explicit 401 once; never replay a write after a transport error."""
         token = self._access_token()
         response = self.http.request(
-            method, path, headers={"Authorization": f"Bearer {token}"}, **kwargs
+            method, path, headers={"Authorization": f"Bearer {token.access_token}"}, **kwargs
         )
         if response.status_code == HTTPStatus.UNAUTHORIZED:
             token = self._access_token(rejected=token)
             response = self.http.request(
-                method, path, headers={"Authorization": f"Bearer {token}"}, **kwargs
+                method, path, headers={"Authorization": f"Bearer {token.access_token}"}, **kwargs
             )
         check_response(response)
         return response.json()
@@ -103,7 +113,7 @@ class CoachClient:
                 "/api/chat",
                 json=payload,
                 headers={
-                    "Authorization": f"Bearer {token}",
+                    "Authorization": f"Bearer {token.access_token}",
                     "Accept": "text/event-stream",
                 },
             ) as response:
@@ -119,7 +129,7 @@ class CoachClient:
         """Revoke the current grant before removing this deployment's local tokens."""
         token = self._access_token()
         response = self.http.post(
-            "/api/oauth/revoke", json={"client_id": CLIENT_ID, "token": token}
+            "/api/oauth/revoke", json={"client_id": CLIENT_ID, "token": token.access_token}
         )
         check_response(response)
         if response.json().get("revoked") is not True:
