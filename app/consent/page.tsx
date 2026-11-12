@@ -38,13 +38,15 @@ function ConsentPageContent(): ReactNode {
     codeChallengeMethod,
   } = readConsentParams(searchParams);
   const scopes = formatScopes(scope);
+  const clientLabel =
+    clientId === "fitness-coach-cli" ? "Coach CLI" : "ChatGPT";
 
   return (
     <main className="page">
       <section className="page-card">
-        <h1>Connect ChatGPT</h1>
+        <h1>Connect {clientLabel}</h1>
         <p>
-          Approve ChatGPT to read and update training data for the athlete
+          Approve {clientLabel} to read and update training data for the athlete
           account in this browser.
         </p>
         <p>Client: {clientId || "Unknown client"}</p>

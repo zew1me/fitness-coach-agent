@@ -59,6 +59,21 @@ describe("ConsentPage readConsentParams", () => {
     expect(getByText("plans:write")).toBeTruthy();
   });
 
+  it("names Coach CLI during browser approval and preserves the loopback callback", () => {
+    navigationMock.query = new URLSearchParams({
+      client_id: "fitness-coach-cli",
+      redirect_uri: "http://127.0.0.1:8765/callback",
+      state: "cli-state",
+      code_challenge: "cli-challenge",
+    }).toString();
+    const { container, getByRole, getByText } = render(<ConsentPage />);
+    expect(getByRole("heading", { name: "Connect Coach CLI" })).toBeTruthy();
+    expect(getByText(/Approve Coach CLI to read and update/)).toBeTruthy();
+    expect(hiddenValues(container)["redirect_uri"]).toBe(
+      "http://127.0.0.1:8765/callback",
+    );
+  });
+
   it("applies defaults when no params are present", () => {
     const { container, getByText } = render(<ConsentPage />);
 
