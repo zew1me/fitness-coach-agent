@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -236,17 +236,3 @@ class PlanWorkout(BaseModel):
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
-
-
-class AdaptedPlan(BaseModel):
-    """Legacy-compatible plan summary returned from plan generation."""
-
-    user_id: str
-    plan_id: str | None = None
-    title: str
-    summary: str
-    start_date: date
-    end_date: date
-    phases: list[dict[str, Any]] = Field(default_factory=list)
-    weekly_tss_target: float | None = None
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
