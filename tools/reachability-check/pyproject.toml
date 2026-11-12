@@ -1,0 +1,15 @@
+[project]
+name = "fitness-coach-reachability-check"
+version = "0.1.0"
+description = "Cross-boundary reachability gate: FastAPI routes, client API paths, and backend modules."
+requires-python = ">=3.12"
+dependencies = [
+  "typer>=0.16.0,<1.0.0",
+]
+
+[project.scripts]
+reachability-check = "fitness_coach_reachability_check.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
