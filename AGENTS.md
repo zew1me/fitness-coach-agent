@@ -34,11 +34,13 @@ uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
 uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
 uv run pytest tools/self-data-backup/tests/  # backup workspace tool
+uv run pytest tools/reachability-check/tests/  # reachability workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
 uv run ty check                      # type checking
 uv run vulture                       # dead-code detection
+uv run reachability-check check      # unreachable routes, client paths, backend modules
 ```
 
 ## Scripts and local tools
@@ -380,11 +382,32 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml` (CI runs
 | `typecheck`         | `bun run typecheck`                                   |
 | `ty`                | `uv run ty check`                                     |
 | `vulture`           | `uv run vulture`                                      |
+| `reachability`      | `uv run reachability-check check` (see below)         |
 | `vitest`            | `bun run test`                                        |
 | `pytest`            | `uv run pytest`                                       |
 | `cpd`               | `bun run cpd` (copy-paste detection, ≤1% duplication) |
 | `knip`              | `bun run knip` (dead-code / unused-export detection)  |
 | `playwright`        | Full Playwright UI suite                              |
+
+### Reachability gate
+
+`uv run reachability-check check` (`tools/reachability-check/`, issue #417) catches what vulture,
+knip and ruff cannot see across the client/server boundary, and fails on:
+
+- a FastAPI route in `api/index.py` whose path no string literal in `app/`, `components/` or
+  `lib/` references;
+- an `/api/...` or `/.well-known/...` path in those sources that matches no FastAPI route and no
+  Next.js `route.ts` handler;
+- a module under `backend/engine/` or `backend/services/` that no import chain from the deployed
+  entrypoints reaches (an import from tests alone does not count).
+
+Matching is path-level (HTTP methods are not compared) and reads source statically; paths in
+comments do not count as callers. Routes come only from `@app.<method>(...)` and
+`@app.api_route(...)` decorators in the entrypoints: `APIRouter`/`include_router` routes are not followed (none exist today), so add that
+support before introducing a router. Configuration and the allowlist live in
+`[tool.reachability-check]` in `pyproject.toml`. Every allow entry needs a `reason`, and an entry
+that stops matching a finding fails the check as stale, so remove it when the underlying item is
+fixed. Prefer deleting dead code or adding the missing caller over allowlisting.
 
 ### Changes that don't impact the UI layer
 
