@@ -769,6 +769,27 @@ It is already applied to the hosted preview and production databases. A fresh
 local reset applies it after `20261027190000_activity_sources.sql`; it does not
 run a backfill automatically.
 
+**Operator tooling (#533 PR B):** See [the backfill runbook](activity-sources-backfill.md)
+for the `activity-sources-backfill` uv workspace CLI, explicit-target confirmation, resumable
+batch execution, two-pass verification, and conflict handling. All three commands update
+progress state; none is a read-only dry run. No application presentation behaviour changes.
+
+**Security note:** The progress table has RLS enabled and no browser-role grants. All three
+RPCs are `security definer`, use an empty search path, and grant execution only to
+`service_role`. The CLI requires an operator credential from the environment; it does not
+accept keys on argv or echo raw row/error payloads.
+
+**Rollout status (remaining evidence):**
+
+| Environment | Migration installation     | Backfill completion / clean verification                                                             | Legacy-capture telemetry / PR C      |
+| ----------- | -------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Preview     | Applied, as recorded above | Not freshly verified by the operator-tool implementation; must record actual results before contract | Not collected here; contract blocked |
+| Production  | Applied, as recorded above | Not freshly verified by the operator-tool implementation; must record actual results before contract | Not collected here; contract blocked |
+
+Neither environment was mutated by implementing/testing the operator tool. Do not remove the
+legacy trigger or progress table based on migration presence alone. PR C remains a separate,
+explicitly gated change; local test results do not satisfy either hosted environment's gate.
+
 ## 20261106120000 — drop legacy chat `content` column and `chat_attachments` (2026-11-06)
 
 **File:** `supabase/migrations/20261106120000_drop_legacy_chat_content_and_attachments.sql`
