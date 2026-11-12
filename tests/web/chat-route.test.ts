@@ -455,6 +455,179 @@ describe("app/api/chat route", () => {
   });
 });
 
+describe("app/api/chat route bearer authentication", () => {
+  function bearerRequest(
+    authorization = "Bearer cli-token",
+    signal: AbortSignal | null = null,
+  ): Request {
+    return new Request("https://preview.example.com/api/chat", {
+      method: "POST",
+      headers: {
+        authorization,
+        cookie: "coach_browser_session=other-athlete-session",
+      },
+      body: JSON.stringify({ messages: [] }),
+      signal,
+    });
+  }
+
+  it.each([
+    { authorization: "Bearer cli-token", withCookie: false },
+    { authorization: "Bearer cli-token", withCookie: true },
+    { authorization: "bearer cli-token", withCookie: true },
+  ])(
+    "verifies $authorization through same-origin whoami (cookie=$withCookie)",
+    async ({ authorization, withCookie }) => {
+      process.env["VERCEL_AUTOMATION_BYPASS_SECRET"] = "preview-bypass";
+      const fetchMock = vi.fn((url: RequestInfo | URL) =>
+        Promise.resolve(
+          Response.json(
+            String(url).endsWith("/api/auth/whoami")
+              ? {
+                  user_id: "cli-athlete",
+                  client_id: "coach-cli",
+                  scopes: ["profile:read"],
+                }
+              : athleteContextFixture,
+          ),
+        ),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const request = bearerRequest(authorization);
+      if (!withCookie) request.headers.delete("cookie");
+      const response = await POST(request);
+
+      expect(response.status).toBe(200);
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        1,
+        "https://preview.example.com/api/auth/whoami",
+        expect.objectContaining({
+          method: "GET",
+          headers: {
+            Authorization: "Bearer cli-token",
+            "x-vercel-protection-bypass": "preview-bypass",
+          },
+          cache: "no-store",
+          redirect: "error",
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("browser-token"),
+        ),
+      ).toBe(false);
+      expect(streamCoachTurn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accessToken: "cli-token",
+          signal: request.signal,
+        }),
+      );
+    },
+  );
+
+  it.each(["", "Bearer", "Bearer token extra", "Basic credentials"])(
+    "rejects malformed authorization %j without trying the cookie",
+    async (authorization) => {
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock;
+      const response = await POST(bearerRequest(authorization));
+      expect(response.status).toBe(401);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(streamCoachTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [401, 401],
+    [403, 503],
+    [500, 503],
+    [503, 503],
+  ])(
+    "maps whoami status %i to %i without cookie fallback",
+    async (upstreamStatus, expectedStatus) => {
+      const fetchMock = vi.fn(() =>
+        Promise.resolve(
+          new Response("upstream details", { status: upstreamStatus }),
+        ),
+      );
+      globalThis.fetch = fetchMock;
+      const response = await POST(bearerRequest());
+      expect(response.status).toBe(expectedStatus);
+      expect(await response.text()).not.toContain("upstream details");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(streamCoachTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    null,
+    {},
+    { user_id: "athlete", client_id: "coach-cli" },
+    { user_id: 123, client_id: "coach-cli", scopes: [] },
+    { user_id: "", client_id: "coach-cli", scopes: [] },
+    { user_id: "athlete", client_id: {}, scopes: [] },
+    { user_id: "athlete", client_id: "coach-cli", scopes: "profile:read" },
+    { user_id: "athlete", client_id: "coach-cli", scopes: [123] },
+  ])("rejects invalid whoami response data %j", async (identity) => {
+    const fetchMock = vi.fn(() => Promise.resolve(Response.json(identity)));
+    globalThis.fetch = fetchMock;
+    expect((await POST(bearerRequest())).status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(streamCoachTurn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on invalid JSON", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response("not json")));
+    globalThis.fetch = fetchMock;
+    expect((await POST(bearerRequest())).status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(streamCoachTurn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the identity service connection fails", async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error("socket hang up")));
+    globalThis.fetch = fetchMock;
+    expect((await POST(bearerRequest())).status).toBe(503);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(streamCoachTurn).not.toHaveBeenCalled();
+  });
+
+  it.each(["request", "timeout"])(
+    "aborts bearer verification on %s cancellation",
+    async (source) => {
+      const requestController = new AbortController();
+      const timeoutController = new AbortController();
+      const timeoutSpy = vi
+        .spyOn(AbortSignal, "timeout")
+        .mockReturnValueOnce(timeoutController.signal);
+      const fetchMock = vi.fn(
+        (_url: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      try {
+        const pending = POST(
+          bearerRequest("Bearer cli-token", requestController.signal),
+        );
+        expect(timeoutSpy).toHaveBeenCalledWith(5_000);
+        (source === "request" ? requestController : timeoutController).abort();
+        expect((await pending).status).toBe(503);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(streamCoachTurn).not.toHaveBeenCalled();
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    },
+  );
+});
+
 describe("app/api/chat route model context", () => {
   it("keeps short conversations intact for model context", () => {
     const messages = Array.from({ length: 4 }, (_, index) => ({

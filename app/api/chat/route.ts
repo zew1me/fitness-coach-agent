@@ -18,6 +18,7 @@ import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
 import { createLogger, type Logger } from "../../../lib/logger";
 import {
+  authWhoamiResponseSchema,
   chatRequestBodySchema,
   type ChatRequestBody,
 } from "../../../lib/schemas";
@@ -25,7 +26,7 @@ import { buildTavilyMcpUrl } from "../../../lib/site";
 
 export const runtime = "nodejs";
 
-type BrowserTokenResponse = {
+type ChatToken = {
   access_token: string;
   user_id: string;
 };
@@ -38,7 +39,7 @@ type LatestUserTurn = {
 const AUTH_UNAVAILABLE_MESSAGE =
   "Something went wrong. Please refresh and try again.";
 
-const BROWSER_TOKEN_TIMEOUT_MS = 5_000;
+const AUTH_TIMEOUT_MS = 5_000;
 const ATHLETE_CONTEXT_TIMEOUT_MS = 20_000;
 const PERSIST_MESSAGE_TIMEOUT_MS = 10_000;
 const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 180_000;
@@ -76,7 +77,7 @@ function safeErrorMessage(error: unknown): string {
 async function loadBrowserToken(
   request: Request,
   logger: Logger,
-): Promise<BrowserTokenResponse | null> {
+): Promise<ChatToken | null> {
   const cookie = request.headers.get("cookie");
   if (!cookie?.includes("coach_browser_session=")) {
     return null;
@@ -87,7 +88,7 @@ async function loadBrowserToken(
     {
       method: "POST",
       headers: { cookie, ...vercelProtectionBypassHeaders() },
-      signal: AbortSignal.timeout(BROWSER_TOKEN_TIMEOUT_MS),
+      signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
     },
   );
   if (!response.ok) {
@@ -98,12 +99,45 @@ async function loadBrowserToken(
       `Browser token fetch failed with status ${response.status}`,
     );
   }
-  return (await response.json()) as BrowserTokenResponse;
+  return (await response.json()) as ChatToken;
+}
+
+async function loadBearerToken(
+  request: Request,
+  authorization: string,
+): Promise<ChatToken | null> {
+  const match = /^Bearer\s+(\S+)$/i.exec(authorization);
+  const accessToken = match?.[1];
+  if (!accessToken) return null;
+
+  const response = await fetch(`${requestOrigin(request)}/api/auth/whoami`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      ...vercelProtectionBypassHeaders(),
+    },
+    cache: "no-store",
+    // Credentials must not follow an unexpected upstream redirect.
+    redirect: "error",
+    signal: AbortSignal.any([
+      request.signal,
+      AbortSignal.timeout(AUTH_TIMEOUT_MS),
+    ]),
+  });
+  if (response.status === 401) return null;
+  if (!response.ok) {
+    throw new Error(
+      `Bearer verification failed with status ${response.status}`,
+    );
+  }
+  const identity = authWhoamiResponseSchema.safeParse(await response.json());
+  if (!identity.success) throw new Error("Invalid authentication response.");
+  return { access_token: accessToken, user_id: identity.data.user_id };
 }
 
 async function loadAthleteContext(
   request: Request,
-  token: BrowserTokenResponse,
+  token: ChatToken,
   logger: Logger,
 ): Promise<AthleteContextBundle> {
   const response = await fetch(
@@ -160,7 +194,7 @@ function messagesForContextStrategy(
 
 async function persistUserMessage(
   request: Request,
-  token: BrowserTokenResponse,
+  token: ChatToken,
   turn: LatestUserTurn,
   logger: Logger,
 ): Promise<void> {
@@ -198,7 +232,7 @@ async function persistUserMessage(
 
 async function extractImageContent(
   request: Request,
-  token: BrowserTokenResponse,
+  token: ChatToken,
   imageUrl: string,
   logger: Logger,
 ): Promise<{ data: unknown; screenshot_type: string } | null> {
@@ -242,7 +276,7 @@ async function extractImageContent(
 
 async function handleChatRequest(
   request: Request,
-  token: BrowserTokenResponse,
+  token: ChatToken,
   logger: Logger,
 ): Promise<Response> {
   let parsedBody: ChatRequestBody;
@@ -347,11 +381,17 @@ export async function POST(request: Request): Promise<Response> {
     }
   });
 
-  let token: BrowserTokenResponse | null;
+  const authorization = request.headers.get("authorization");
+  let token: ChatToken | null;
   try {
-    token = await loadBrowserToken(request, logger);
+    // An explicit credential is authoritative: never retry invalid bearer auth
+    // with a browser cookie, which may belong to a different athlete.
+    token =
+      authorization !== null
+        ? await loadBearerToken(request, authorization)
+        : await loadBrowserToken(request, logger);
   } catch (error) {
-    logger.error("chat: loadBrowserToken failed", {
+    logger.error("chat: authentication failed", {
       error: safeErrorMessage(error),
       stack: error instanceof Error ? error.stack : undefined,
     });
@@ -359,6 +399,10 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   if (token === null) {
+    if (authorization !== null) {
+      logger.warn("chat: invalid bearer token");
+      return jsonError("Invalid bearer token.", 401);
+    }
     logger.warn("chat: missing browser session cookie");
     return jsonError("Missing browser session cookie.", 401);
   }

@@ -3,6 +3,12 @@ import { z } from "zod";
 
 import type { ChatMessage, IntervalsSyncResponse } from "./types";
 
+export const authWhoamiResponseSchema = z.object({
+  user_id: z.string().trim().min(1),
+  client_id: z.string().trim().min(1).nullable(),
+  scopes: z.array(z.string().trim().min(1)),
+});
+
 export const athleteProfileSchema = z.object({
   coaching_state: z.string().min(1).default("onboarding"),
   dietary_restrictions: z.array(z.string().trim().min(1)).optional(),

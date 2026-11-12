@@ -325,6 +325,20 @@ async def health() -> Mapping[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/auth/whoami")
+async def auth_whoami(
+    response: Response,
+    user_context: UserContext = Depends(require_user_context),
+) -> Mapping[str, object]:
+    """Return only the verified caller's public identity, never token or grant material."""
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "user_id": user_context.user_id,
+        "client_id": user_context.client_id,
+        "scopes": user_context.scopes,
+    }
+
+
 # ── OAuth ───────────────────────────────────────────────────
 
 

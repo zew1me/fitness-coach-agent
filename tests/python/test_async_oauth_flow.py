@@ -40,15 +40,24 @@ async def async_oauth_client(
     await service.aclose()
 
 
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "https://example.com/callback",
+        "http://localhost:49152/callback",
+        "http://127.0.0.1:57321/callback",
+    ],
+)
 async def test_consent_code_refresh_bearer_and_revoke_use_async_repository(
     async_oauth_client: tuple[httpx.AsyncClient, AsyncFakeSupabaseClient],
+    redirect_uri: str,
 ) -> None:
     client, database = async_oauth_client
     verifier = "verifier"
     challenge = base64.urlsafe_b64encode(sha256(verifier.encode()).digest()).decode().rstrip("=")
     authorize = {
         "client_id": "client-1",
-        "redirect_uri": "https://example.com/callback",
+        "redirect_uri": redirect_uri,
         "scope": "profile:read",
         "code_challenge": challenge,
         "code_challenge_method": "S256",
@@ -67,6 +76,7 @@ async def test_consent_code_refresh_bearer_and_revoke_use_async_repository(
     # Reauthorization must read the persisted grant and issue a code without consent.
     authorized = await client.get("/api/oauth/authorize", params=authorize)
     assert authorized.status_code == 302
+    assert authorized.headers["location"].startswith(f"{redirect_uri}?code=")
     redirect = parse_qs(urlparse(authorized.headers["location"]).query)
     assert redirect["state"] == ["state-1"]
     exchange = {
@@ -82,6 +92,14 @@ async def test_consent_code_refresh_bearer_and_revoke_use_async_repository(
     assert (await client.post("/api/oauth/token", json=exchange)).status_code == 400
     headers = {"Authorization": f"Bearer {token.json()['access_token']}"}
     assert (await client.post("/api/mcp", headers=headers)).status_code == 200
+    identity = await client.get("/api/auth/whoami", headers=headers)
+    assert identity.status_code == 200
+    assert identity.json() == {
+        "user_id": "user-1",
+        "client_id": "client-1",
+        "scopes": ["profile:read"],
+    }
+    assert identity.headers["cache-control"] == "no-store"
 
     refresh = {
         "grant_type": "refresh_token",
@@ -97,11 +115,47 @@ async def test_consent_code_refresh_bearer_and_revoke_use_async_repository(
     assert revoked.json() == {"revoked": True}
     assert all(row["revoked_at"] is not None for row in database.tables[TOKENS_TABLE])
     assert (await client.post("/api/mcp", headers=headers)).status_code == 401
+    assert (await client.get("/api/auth/whoami", headers=headers)).status_code == 401
     assert (
         await client.post(
             "/api/oauth/token", json={**refresh, "refresh_token": rotated.json()["refresh_token"]}
         )
     ).status_code == 400
+
+
+@pytest.mark.parametrize("authorization", [None, "Basic invalid", "Bearer invalid", "Bearer "])
+async def test_whoami_requires_valid_bearer_even_with_browser_cookie(
+    async_oauth_client: tuple[httpx.AsyncClient, AsyncFakeSupabaseClient],
+    authorization: str | None,
+) -> None:
+    client, _ = async_oauth_client
+    headers = {"Authorization": authorization} if authorization is not None else {}
+    response = await client.get("/api/auth/whoami", headers=headers)
+    assert response.status_code == 401
+    assert "user_id" not in response.json()
+
+
+async def test_whoami_isolates_bearer_identity_from_cookie_and_query_parameters(
+    async_oauth_client: tuple[httpx.AsyncClient, AsyncFakeSupabaseClient],
+) -> None:
+    client, _ = async_oauth_client
+    # The fixture's browser cookie belongs to user-1 throughout; each bearer
+    # must independently determine identity, ignoring caller-supplied user IDs.
+    for user_id in ["user-1", "user-2"]:
+        token = await api_index.auth_service.create_browser_token(
+            BrowserSessionContext(user_id=user_id)
+        )
+        response = await client.get(
+            "/api/auth/whoami",
+            headers={"Authorization": f"Bearer {token.access_token}"},
+            params={"user_id": "attacker-selected", "client_id": "forged-client"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "user_id": user_id,
+            "client_id": api_index.settings.base_url,
+            "scopes": token.scopes,
+        }
 
 
 @pytest.mark.parametrize("code,expected_status", [("23505", 409), ("23503", 422), ("504", 503)])
