@@ -14,7 +14,8 @@ Run with::
 
 Why this is a gated job rather than part of CI: it needs a Postgres with every migration
 applied in canonical order, and CI does not start a Supabase stack. It runs alongside the
-other ``db``-marked suites.
+other ``db``-marked suites. PostgreSQL 17 is the supported baseline, matching
+``supabase/config.toml``; older-server stand-ins are not supported.
 
 Access model (#452): browser roles never write application tables. Every write goes through
 the FastAPI backend or a Next.js server route, both of which use ``service_role``. Two
@@ -415,7 +416,8 @@ def test_no_table_has_a_client_write_policy(matrix: Matrix) -> None:
 # ── Privileges: the first barrier, read from the real grants ─────────────────
 
 _WRITE_PRIVILEGES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
-_ALL_PRIVILEGES = ("SELECT", *_WRITE_PRIVILEGES, "REFERENCES", "TRIGGER")
+# PG17's GRANT ALL includes MAINTAIN; omitting it would hide maintenance-only access.
+_ALL_PRIVILEGES = ("SELECT", *_WRITE_PRIVILEGES, "REFERENCES", "TRIGGER", "MAINTAIN")
 
 
 def _public_tables(cursor: Cursor[Any]) -> list[str]:
