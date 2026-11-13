@@ -62,12 +62,14 @@ export function buildCalendarWeeks(start: string, end: string): string[][] {
   return weeks;
 }
 
+const MONTH_LABEL_FORMAT = new Intl.DateTimeFormat("en-US", {
+  month: "long",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
 export function monthLabel(iso: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(toUtc(iso));
+  return MONTH_LABEL_FORMAT.format(toUtc(iso));
 }
 
 /** Mirrors backend `_NON_TRAINING_TYPES` (backend/services/compliance.py) — these

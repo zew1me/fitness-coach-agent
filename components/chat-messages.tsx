@@ -47,11 +47,13 @@ const COACHING_STARTERS: StarterPrompt[] = [
   },
 ];
 
+const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function readableTime(timestamp: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(timestamp));
+  return MESSAGE_TIME_FORMAT.format(new Date(timestamp));
 }
 
 function friendlyToolStatus(toolName: string): string {
