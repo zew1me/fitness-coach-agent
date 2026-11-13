@@ -130,7 +130,7 @@ The backend needs bucket-scoped R2 S3 credentials. Each run resolves them from t
 
 1. **`.env.bootstrap`** — `R2_ACCESS_KEY_ID_PREVIEW` / `R2_SECRET_ACCESS_KEY_PREVIEW` (or the matching `_PROD` values). Set both or neither; one without the other aborts the run.
 2. **The state file** — credentials saved by an earlier run (see [State files](#state-files)).
-3. **Minted through the Cloudflare API** — bootstrap creates a token named `fitness-coach-agent-{env}` scoped to the bucket and saves it to the state file. This is the only path that needs **API Tokens:Edit** on `CF_API_TOKEN`.
+3. **Minted through the Cloudflare API** — bootstrap creates a token named `fitness-coach-agent-{env}` scoped to the bucket and saves it to the state file. A token with that name that already exists is deleted first, because Cloudflare shows a token's secret only at creation; anything else using the old token loses R2 access, and stays without it if the replacement fails. This is the only path that needs **API Tokens:Edit** on `CF_API_TOKEN`.
 
 So leave the `R2_*` values blank to have bootstrap mint the credentials. To keep `CF_API_TOKEN` limited to **Workers R2 Storage:Edit**, supply them yourself in two passes:
 
