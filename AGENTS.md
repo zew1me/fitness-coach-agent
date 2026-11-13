@@ -227,6 +227,16 @@ notes stay current.
 
 Use separate Supabase projects per environment (development (local) / preview / production).
 
+Browser roles (`anon`, `authenticated`) never write application tables directly. Every write goes
+through the FastAPI backend or a Next.js server route using `service_role`; the browser and SSR
+Supabase clients only call `supabase.auth.*`. `anon` holds no table privileges, `authenticated`
+holds no INSERT/UPDATE/DELETE/TRUNCATE, and RLS only has SELECT policies (an athlete can read
+their own rows). A table that needs client writes is an explicit exception: grant the privilege,
+add a write policy that also verifies parent ownership, and list it in `CLIENT_WRITABLE_TABLES`
+in `tests/python/test_rls_matrix_db.py`. Listing it there only exempts it from the grant and
+policy checks; also update `test_athlete_cannot_insert_rows` and the parent-attachment denial
+tests so they accept the intended owner writes and still reject cross-athlete ones.
+
 ### Chat persistence
 
 `chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table.
@@ -344,7 +354,7 @@ See `.env.example`. Required:
 - Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
 - Python tests: `tests/python/` plus co-located `tools/*/tests/` workspace-tool tests — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for application fixtures; workspace tools should keep tool-specific fixtures local
-- RLS role matrix: `tests/python/test_rls_matrix_db.py` (`db` marker, so not in CI; run `bun run db:reset && bun run test:db`) asserts `anon`, two authenticated athletes and `service_role` against every public table. A new public table fails it until it is classified into one of the file's access classes
+- RLS role matrix: `tests/python/test_rls_matrix_db.py` (`db` marker, so not in CI; run `bun run db:reset && bun run test:db`) asserts `anon`, two authenticated athletes and `service_role` against every public table. A new public table fails it until it is classified into one of the file's access classes, and it fails if a browser role gains a write privilege or policy outside `CLIENT_WRITABLE_TABLES`
 - UI tests: `tests/ui/` — Playwright. The auto-started dev server uses port 3000 in the primary checkout and a stable per-worktree port in a linked git worktree, so concurrent runs in different worktrees never share a server (a worktree never reuses an already-running server, so a rare port collision fails loudly); set `PLAYWRIGHT_PORT` to choose the port, or `BASE_URL` to target a deployed preview
 - Touch-device UI tests: name a spec `*.touch.spec.ts` to run it only in the `mobile-touch` Playwright project (iPhone-class emulation with `isMobile`/`hasTouch` on Chromium) instead of the desktop `chromium` project. Use `locator.tap()` for taps and CDP `Input.dispatchTouchEvent` for swipes; it covers the touch/viewport contract, not WebKit rendering
 

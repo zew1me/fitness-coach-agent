@@ -31,6 +31,8 @@
 - `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
 - `20261101120000_recovery_logs_source_free_form.sql` — replaces the vendor list in `recovery_logs_source_check` with a snake_case slug format check so wellness provenance is open-ended (#428)
 - `20261104061335_activity_sources_backfill.sql` — restart-safe historical activity-source capture, with a service-role-only progress record and operator RPCs (#533 PR B)
+- `20261106120000_drop_legacy_chat_content_and_attachments.sql` — drops `chat_messages.content` and `chat_attachments`; **deploy the application change first**, because earlier application code still sends `content` on every chat-message insert (#303)
+- `20261110213928_revoke_client_table_writes.sql` — browser roles lose all direct table writes: `anon` loses every table privilege, `authenticated` loses INSERT/UPDATE/DELETE/TRUNCATE, the owner `for all` policies become `for select`, and default privileges stop granting browser roles access to future tables (#452)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -809,3 +811,59 @@ where not exists (
 the application deploy. Preview and production are separate Supabase projects and must
 each be linked and applied independently. The drop is irreversible; take a backup first
 if you want the legacy rows retained.
+
+## 20261110213928 — browser roles lose direct table writes (2026-11-10)
+
+**File:** `supabase/migrations/20261110213928_revoke_client_table_writes.sql`
+
+**Change:** encodes that no browser flow writes application tables. Every write goes
+through the FastAPI backend or a Next.js server route using `service_role`, which bypasses RLS
+and keeps its own grants; the browser and SSR Supabase clients only call `supabase.auth.*`. It
+removes the "Users can manage their own ..." write policies, which checked only a row's own
+`user_id` and so let an athlete attach a row to another athlete's thread, plan or goal.
+Authenticated reads of an athlete's own rows are unchanged.
+
+**Ordering:** it has no application-deploy requirement. It is independent of the
+`20261106120000` deploy-first prerequisite above, but `supabase db push` applies pending
+migrations in order, so a pending `20261106120000` still needs its application deploy first.
+
+**Locks:** `CREATE POLICY` and `DROP POLICY` each take an `ACCESS EXCLUSIVE` lock on the table
+(confirmed on PostgreSQL 16), held until the migration transaction ends, and the migration
+touches 12 tables. A long-running transaction on any of them delays the migration, and the
+migration in turn blocks application queries on those tables while it waits or runs. The work
+is short, but apply it in a quiet window rather than "at any time".
+
+- **Before applying to a hosted project:** confirm nothing outside this repository (a script,
+  dashboard or integration) writes tables with an anon or user JWT. Writes with the service
+  role key are unaffected.
+- **Hosted default grants:** hosted projects grant browser roles DML on public tables by
+  default, which is why the migration revokes privileges as well as dropping policies. The
+  default-privileges revocation applies to objects created by `postgres`, the role migrations
+  run as.
+- **Exceptions:** a table that later needs client writes must grant the privilege explicitly,
+  add a write policy that also verifies parent ownership, and be listed in
+  `CLIENT_WRITABLE_TABLES` in `tests/python/test_rls_matrix_db.py`.
+- **Rollback:** re-create the dropped policies and re-grant the privileges. Nothing is deleted.
+  The migration also changes `postgres`'s default privileges for new public tables, which
+  re-granting existing tables does not undo. Before applying to a hosted project, record the
+  affected schema-specific table defaults (other schemas and global defaults are unchanged):
+
+  ```sql
+  select defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl
+  from pg_default_acl
+  where defaclrole = 'postgres'::regrole
+    and defaclnamespace = 'public'::regnamespace
+    and defaclobjtype = 'r';
+  ```
+
+  On rollback restore only the previously recorded browser grants with `alter default
+privileges for role postgres in schema public grant ... on tables to anon, authenticated`,
+  preserving any recorded grant options. No row (or no browser grants in the ACL) means there
+  are no prior schema-specific browser defaults to re-grant; do not invent new ones.
+
+- **Verification:** `bun run db:reset && bun run test:db` replays all migrations and runs the
+  role matrix. Alongside the steady-state new-table probe, a regression seeds browser-role
+  default grants, proves they reach a new table, then replays this actual migration after
+  temporarily removing its conflicting owner-read policies. A second table must inherit no
+  browser privileges. The existing local-only helper rolls back all grants, tables, and policy
+  changes, so the regression needs neither a copied revoke statement nor a separate harness.
