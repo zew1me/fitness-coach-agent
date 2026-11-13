@@ -1,4 +1,4 @@
-import type { ReactDoctorConfig } from "react-doctor";
+import type { ReactDoctorConfig } from "react-doctor/api";
 
 // React Doctor (issue #444) runs in CI and pre-push via `bun run react-doctor`. The gate
 // fails on warnings as well as errors, matching ESLint's zero-warnings policy.
