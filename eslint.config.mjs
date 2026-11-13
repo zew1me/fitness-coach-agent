@@ -103,6 +103,7 @@ export default defineConfig([
   },
   {
     files: [
+      "doctor.config.ts",
       "next.config.ts",
       "vitest.config.ts",
       "vitest.oai.config.ts",

@@ -29,6 +29,7 @@
     "components",
     "lib",
     "next-env.d.ts",
+    "doctor.config.ts",
     "next.config.ts",
     "playwright.config.ts",
     "tests/integration",
