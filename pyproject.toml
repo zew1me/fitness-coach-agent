@@ -24,6 +24,7 @@ dependencies = [
 [dependency-groups]
 dev = [
   "fitness-coach-garmin-sidecar",
+  "fitness-coach-reachability-check",
   "fitness-coach-self-data-backup",
   "psycopg[binary]>=3.2,<4.0",
   "pytest>=8.3.5,<9.0.0",
@@ -35,6 +36,7 @@ dev = [
 
 [tool.uv.sources]
 fitness-coach-garmin-sidecar = { workspace = true }
+fitness-coach-reachability-check = { workspace = true }
 fitness-coach-self-data-backup = { workspace = true }
 
 [tool.uv.workspace]
@@ -107,6 +109,70 @@ min_confidence = 80
 # Protocol and keyword calls type-check; Vulture sees only their stub declarations. `cls` is the
 # conventional receiver name for class-level validators.
 ignore_names = ["activitytype", "cls", "dl_fmt"]
+
+[tool.reachability-check]
+# Deployed FastAPI entrypoints: route decorators are read from these, and the Python import walk
+# starts here. Tests are deliberately not roots, so a module only tests import is still flagged.
+entrypoints = ["api/index.py", "api/[...route].py"]
+python_packages = ["api", "backend"]
+module_scopes = ["backend/engine", "backend/services"]
+client_roots = ["app", "components", "lib"]
+next_app_dir = "app"
+
+# Each allow entry must carry a reason (the tool rejects an empty one) and is reported as stale
+# once it no longer matches a finding, so fixed items cannot linger here and mask a regression.
+# The entries below are the findings present when the gate landed (#417); those marked "Known gap"
+# are surfaced for an owner decision rather than resolved in the change that added the gate.
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/health"
+reason = "Liveness probe for uptime monitoring and the vercel.json rewrite; never called by the app."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/.well-known/oauth-authorization-server"
+reason = "OAuth discovery document fetched by external OAuth clients (ChatGPT), not by our UI."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/.well-known/oauth-protected-resource"
+reason = "OAuth protected-resource metadata fetched by external OAuth clients, not by our UI."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/intervals/callback"
+reason = "OAuth redirect URI: intervals.icu sends the browser here; no in-repo code calls it."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/files/presign-upload"
+reason = "Known gap: documented upload contract in AGENTS.md with no in-repo caller; keep or remove."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/engine/compute-tss"
+reason = "Known gap: covered by tests but no client or coach tool routes to it; keep or remove."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/engine/recalibration-candidate-decision"
+reason = "Known gap: covered by tests but no client or coach tool routes to it; keep or remove."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/engine/recompute-load"
+reason = "Manual operator rebuild endpoint (docs/training-load-rebuilds.md); no in-repo caller yet."
+
+[[tool.reachability-check.allow]]
+kind = "client-path"
+target = "/api/oauth/register"
+reason = "Known gap: advertised as registration_endpoint in OAuth metadata but no route serves it."
+
+[[tool.reachability-check.allow]]
+kind = "module"
+target = "backend/engine/screenshot_analyzer.py"
+reason = "Known gap: backward-compatible re-export shim that nothing in the repo imports any more."
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python", "tools/*/tests"]
