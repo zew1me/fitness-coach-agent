@@ -14,6 +14,19 @@ const config: ReactDoctorConfig = {
   // PR instead.
   supplyChain: { enabled: false },
   ignore: {
+    // Generated and vendored trees, all gitignored. They exist only after a local build,
+    // dev server, Playwright run or `uv sync`, so scanning them makes the result depend
+    // on what happens to be on disk: CI's web job never builds. The first hits were
+    // supabase-js JSDoc examples ("your-secret-key") in a .next dev chunk and a pygments
+    // file in .venv.
+    files: [
+      ".next/**",
+      ".venv/**",
+      ".cache/**",
+      ".vercel/**",
+      ".worktrees/**",
+      "test-results/**",
+    ],
     // This rule reads each migration on its own. It flags tables created in
     // 0001_schema.sql and two early migrations because RLS is not enabled in the same
     // file. 20260816191358_rls_and_security.sql enables RLS on all 18 flagged tables, and
