@@ -76,14 +76,19 @@ export function useMessageWindow({
   setThreadError,
 }: MessageWindowOptions): MessageWindow {
   const messageEndRef = useRef<HTMLDivElement | null>(null);
-  // The count is stored with the thread it belongs to and read as the default
-  // batch for any other thread. Switching threads therefore resets the window in
-  // the same render, instead of an effect rendering the new thread with the old
-  // count first and then correcting it.
+  // The count is stored with the thread it belongs to. When the thread changes,
+  // the stored window is replaced during render (React re-runs the render before
+  // committing, so no frame shows the old count), instead of an effect rendering
+  // the new thread with the old count first and then correcting it. Replacing it,
+  // rather than only reading the default for a foreign thread, also means
+  // returning to an earlier thread starts from the default batch again.
   const [visibleWindow, setVisibleWindow] = useState<VisibleWindow>({
     threadId,
     count: MESSAGE_RENDER_BATCH_SIZE,
   });
+  if (visibleWindow.threadId !== threadId) {
+    setVisibleWindow({ threadId, count: MESSAGE_RENDER_BATCH_SIZE });
+  }
   const visibleMessageCount =
     visibleWindow.threadId === threadId
       ? visibleWindow.count

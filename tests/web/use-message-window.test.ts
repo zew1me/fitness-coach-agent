@@ -62,5 +62,10 @@ describe("useMessageWindow", () => {
     const threadBRenders = hiddenByThread.filter(([id]) => id === "thread-b");
     expect(threadBRenders.length).toBeGreaterThan(0);
     expect(threadBRenders.every(([, hidden]) => hidden === 40)).toBe(true);
+
+    // Returning to thread-a starts from the default batch again, not from the
+    // window it had expanded before the switch.
+    rerender({ threadId: "thread-a" });
+    expect(result.current.hiddenMessageCount).toBe(40);
   });
 });
