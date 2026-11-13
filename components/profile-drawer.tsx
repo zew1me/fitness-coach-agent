@@ -154,6 +154,10 @@ export function ProfileDrawer({
         className={styles.drawer}
         onClick={(event) => event.stopPropagation()}
         ref={drawerRef}
+        // Focus moves in on open, Tab is trapped by trapDrawerFocus, Escape
+        // closes and focus returns to the opener, so this already behaves as a
+        // modal. A native <dialog> rewrite is out of scope for #444.
+        // react-doctor-disable-next-line react-doctor/prefer-html-dialog
         role="dialog"
       >
         <div className={styles.drawerHeader}>

@@ -52,7 +52,11 @@ function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
     filename: file.name,
     object_key: "",
     preview_url: file.type.startsWith("image/")
-      ? URL.createObjectURL(file)
+      ? // The URL is revoked by removePreviewUrls, from the [attachments] cleanup
+        // effect in useChatDraft or from the failed-send path in use-chat-send.
+        // It is stored on the attachment, so the rule cannot see that hand-off.
+        // react-doctor-disable-next-line react-doctor/no-create-object-url-without-revoke
+        URL.createObjectURL(file)
       : null,
     public_url: null,
     status: "uploading",

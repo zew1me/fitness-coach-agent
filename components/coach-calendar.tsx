@@ -37,7 +37,10 @@ const EMPTY_DAY: CalendarDayItems = { planned: [], activities: [] };
 
 function localTodayIso(): string {
   // en-CA formats as YYYY-MM-DD in the viewer's local timezone, so "today"
-  // matches the athlete's wall clock rather than UTC.
+  // matches the athlete's wall clock rather than UTC. Built per call on
+  // purpose: it runs once per mount (useMemo), and a module-level formatter
+  // would freeze the timezone at load.
+  // react-doctor-disable-next-line react-doctor/js-hoist-intl
   return new Intl.DateTimeFormat("en-CA").format(new Date());
 }
 
@@ -533,6 +536,10 @@ function DayDetailPanel({
         data-testid="calendar-day-detail"
         onClick={(event) => event.stopPropagation()}
         ref={panelRef}
+        // Focus moves in on open, Tab is trapped by trapDrawerFocus, Escape
+        // closes and focus returns to the day cell, so this already behaves as
+        // a modal. A native <dialog> rewrite is out of scope for #444.
+        // react-doctor-disable-next-line react-doctor/prefer-html-dialog
         role="dialog"
       >
         <div className={styles.drawerHeader}>
