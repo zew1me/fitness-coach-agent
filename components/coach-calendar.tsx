@@ -28,6 +28,7 @@ import { useBrowserSession } from "../lib/use-browser-session";
 import { AccountMenuButton } from "./account-menu";
 import { CalendarLegend } from "./calendar-legend";
 import styles from "./coach-calendar.module.css";
+import { trapDrawerFocus } from "./drawer-focus-trap";
 import { ProfileDrawer } from "./profile-drawer";
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -497,9 +498,11 @@ function DayDetailPanel({
 }>): ReactNode {
   const isEmpty = items.planned.length === 0 && items.activities.length === 0;
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
 
-  // Modal behavior: move focus into the dialog on open, close on Escape, and
-  // hand focus back to the triggering day cell when the panel unmounts.
+  // Modal behavior: move focus into the dialog on open, keep Tab inside it,
+  // close on Escape, and hand focus back to the triggering day cell when the
+  // panel unmounts.
   useEffect(() => {
     const previouslyFocused =
       document.activeElement instanceof HTMLElement
@@ -508,6 +511,7 @@ function DayDetailPanel({
     closeButtonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") onClose();
+      if (event.key === "Tab") trapDrawerFocus(event, panelRef.current);
     };
     document.addEventListener("keydown", onKeyDown);
     return (): void => {
@@ -528,6 +532,7 @@ function DayDetailPanel({
         className={styles.drawer}
         data-testid="calendar-day-detail"
         onClick={(event) => event.stopPropagation()}
+        ref={panelRef}
         role="dialog"
       >
         <div className={styles.drawerHeader}>
