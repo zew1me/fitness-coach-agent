@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
+import { createElement } from "react";
+import type { ReactNode } from "react";
+import { hydrateRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useIsMobile } from "../../lib/use-is-mobile";
@@ -70,5 +73,40 @@ describe("useIsMobile", () => {
       emit(false);
     });
     expect(result.current).toBe(false);
+  });
+});
+
+describe("useIsMobile hydration", () => {
+  function Probe(): ReactNode {
+    return createElement("span", null, useIsMobile() ? "mobile" : "desktop");
+  }
+
+  // The server has no viewport, so it renders the desktop branch. On a phone
+  // the first client render must still match that markup, then switch to the
+  // mobile value, or React reports a hydration mismatch and re-renders the tree.
+  it("hydrates server markup on a mobile viewport without a mismatch", async () => {
+    const { mql } = createMediaQueryListMock(true);
+    vi.spyOn(window, "matchMedia").mockReturnValue(mql);
+    const container = document.createElement("div");
+    container.innerHTML = "<span>desktop</span>";
+    document.body.appendChild(container);
+    const recoverableErrors: unknown[] = [];
+
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    await act(async () => {
+      root = hydrateRoot(container, createElement(Probe), {
+        onRecoverableError: (error) => {
+          recoverableErrors.push(error);
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(recoverableErrors).toEqual([]);
+    expect(container.textContent).toBe("mobile");
+    act(() => {
+      root?.unmount();
+    });
+    container.remove();
   });
 });
