@@ -1,5 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
 import {
@@ -134,10 +134,17 @@ export function useChatDraft(
   const skipNextAttachmentPreviewCleanupRef = useRef(false);
   // Mirror the latest draft so the failed-send restore path can tell whether the
   // user has started a new draft since we cleared it (see handleSend's catch).
+  // Synced in a layout effect, not during render: React can render and then
+  // discard work, and a ref written by a discarded render would report a draft
+  // the user never committed. Layout effects run in the same commit as the
+  // render, so the mirror is current before any later event or async callback
+  // reads it.
   const latestComposerRef = useRef(composer);
-  latestComposerRef.current = composer;
   const latestAttachmentsRef = useRef(attachments);
-  latestAttachmentsRef.current = attachments;
+  useLayoutEffect(() => {
+    latestComposerRef.current = composer;
+    latestAttachmentsRef.current = attachments;
+  }, [composer, attachments]);
 
   useEffect((): (() => void) => {
     return (): void => {
