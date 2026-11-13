@@ -1,8 +1,21 @@
-import { describe, expect, it, vi } from "vitest";
+import { RunContext, type FunctionTool } from "@openai/agents";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { createCoachTools } from "../../lib/agent/coach-tools";
+import {
+  type CoachAgentRunContext,
+  createAgentCoachTools,
+  createCoachTools,
+} from "../../lib/agent/coach-tools";
+import type { SupabaseAgentSession } from "../../lib/agent/supabase-agent-session";
+import { ToolRoundBudget } from "../../lib/agent/tool-round-budget";
 import { coachToolDefinitions } from "../../lib/agent/tools";
+
+const sentryMocks = vi.hoisted(() => ({
+  captureException: vi.fn(),
+}));
+
+vi.mock("@sentry/nextjs", () => sentryMocks);
 
 type RecordedRequest = { body: unknown; url: string };
 
@@ -81,6 +94,51 @@ describe("coachToolDefinitions", () => {
       "adjust_plan",
       "recalibrate_thresholds",
     ]);
+  });
+
+  it("accepts maximal efforts for estimate_thresholds", () => {
+    const schema = coachToolDefinitions.estimate_thresholds.inputSchema;
+    const singleTest = {
+      race_distance_meters: null,
+      race_time_seconds: null,
+      sport: "cycling",
+      test_duration_minutes: 20,
+      test_power_watts: 300,
+    };
+    const efforts = [
+      { duration_seconds: 300, power_watts: 345.5 },
+      { duration_seconds: 1200, power_watts: 297 },
+    ];
+
+    expect(schema.parse({ ...singleTest, efforts }).efforts).toEqual(efforts);
+    expect(schema.parse({ ...singleTest, efforts: null }).efforts).toBeNull();
+    // Nullable, not optional: OpenAI rejects tool schemas with incomplete `required`.
+    expect(schema.safeParse(singleTest).success).toBe(false);
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300.5, power_watts: 345 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300, power_watts: 0 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300, power_watts: 3000 }],
+      }).success,
+    ).toBe(true);
+    // Mirrors the engine's ceiling so a unit error fails at the tool boundary.
+    expect(
+      schema.safeParse({
+        ...singleTest,
+        efforts: [{ duration_seconds: 300, power_watts: 3001 }],
+      }).success,
+    ).toBe(false);
   });
 
   it("validates a goal update payload with course details", () => {
@@ -179,6 +237,36 @@ describe("coachToolDefinitions", () => {
     });
   });
 
+  it("accepts a zero-minute rest day in an exact workout schedule", () => {
+    // Real preview payload that was rejected with the SDK's generic
+    // "Invalid JSON input for tool" because duration had to be positive.
+    const restDay = {
+      sport: "rest",
+      title: "Rest",
+      phase_name: "constrained reset",
+      target_tss: null,
+      description: "Full rest day.",
+      workout_date: "2026-10-22",
+      workout_type: "rest",
+      target_distance_meters: null,
+      target_duration_minutes: 0,
+    };
+    const schema = coachToolDefinitions.generate_training_plan.inputSchema;
+
+    const parsed = schema.safeParse({
+      title: "Constrained reset",
+      goal_id: "335cbb02-356c-4faa-8d8b-a21aa493735a",
+      workouts: [restDay, { ...restDay, target_distance_meters: 0 }],
+      training_model: "performance",
+    });
+    const negative = schema.safeParse({
+      workouts: [{ ...restDay, target_duration_minutes: -1 }],
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(negative.success).toBe(false);
+  });
+
   it("accepts complete and abandon actions without a goal payload", () => {
     for (const action of ["complete", "abandon"] as const) {
       const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
@@ -189,6 +277,22 @@ describe("coachToolDefinitions", () => {
       expect(
         parsed.success,
         `${action} should be a valid update_goals call`,
+      ).toBe(true);
+    }
+  });
+
+  it("accepts complete and abandon actions with an explicit null goal", () => {
+    // Real preview payload previously rejected as "Invalid JSON input for tool".
+    for (const action of ["complete", "abandon"] as const) {
+      const parsed = coachToolDefinitions.update_goals.inputSchema.safeParse({
+        goal: null,
+        action,
+        goal_id: "21a5eb90-b47d-49bc-af20-1a19cba0d041",
+      });
+
+      expect(
+        parsed.success,
+        `${action} with goal: null should be a valid update_goals call`,
       ).toBe(true);
     }
   });
@@ -283,6 +387,7 @@ describe("coachToolDefinitions", () => {
             sleep_consistency_pct: null,
             sleep_duration_hours: 7.5,
             sleep_score: null,
+            source: null,
             stress_score: 22,
             subjective_energy: 4,
           },
@@ -1227,6 +1332,229 @@ describe("coachToolDefinitions upload handling", () => {
     expect(result).toMatchObject({
       status: "unsupported_file_type",
       tool: "process_uploaded_file",
+    });
+  });
+});
+
+describe("createAgentCoachTools input validation errors", () => {
+  const restDay = {
+    description: "Full rest day.",
+    phase_name: "constrained reset",
+    sport: "rest",
+    target_distance_meters: null,
+    target_duration_minutes: 0,
+    target_tss: null,
+    title: "Rest",
+    workout_date: "2026-10-22",
+    workout_type: "rest",
+  };
+
+  beforeEach(() => {
+    sentryMocks.captureException.mockClear();
+  });
+
+  function agentTool(
+    name: string,
+    fetchImpl: typeof fetch,
+  ): FunctionTool<CoachAgentRunContext> {
+    const modelSession = {
+      updateCoachingMemory: vi.fn(),
+    } as unknown as SupabaseAgentSession;
+    const found = createAgentCoachTools({
+      accessToken: "token",
+      baseUrl: "https://coach.test",
+      fetchImpl,
+      modelSession,
+    }).find((candidate) => candidate.name === name);
+    if (found?.type !== "function") {
+      throw new Error(`Missing function tool ${name}`);
+    }
+    return found;
+  }
+
+  function invoke(
+    tool: FunctionTool<CoachAgentRunContext>,
+    rawArgs: string,
+  ): Promise<unknown> {
+    return tool.invoke(
+      new RunContext<CoachAgentRunContext>({
+        hasActivityFileAttachment: false,
+        toolCalled: false,
+        toolRounds: new ToolRoundBudget(),
+      }),
+      rawArgs,
+    );
+  }
+
+  it("names the failing fields to the model and reports them to Sentry at error level", async () => {
+    const { fetchImpl, requests } = createRecordingFetch({});
+    const tool = agentTool("generate_training_plan", fetchImpl);
+
+    const output = await invoke(
+      tool,
+      JSON.stringify({
+        title: "Constrained reset",
+        goal_id: "335cbb02-356c-4faa-8d8b-a21aa493735a",
+        workouts: [restDay, { ...restDay, target_duration_minutes: -5 }],
+        training_model: "performance",
+      }),
+    );
+
+    expect(requests).toEqual([]);
+    expect(output).toEqual(
+      expect.stringContaining(
+        "Invalid input for generate_training_plan: workouts[1].target_duration_minutes:",
+      ),
+    );
+    expect(output).not.toContain("Invalid JSON input for tool");
+    expect(sentryMocks.captureException).toHaveBeenCalledTimes(1);
+    const [, captureContext] = sentryMocks.captureException.mock.calls[0] as [
+      unknown,
+      {
+        extra: { issues: string[] };
+        fingerprint: string[];
+        level: string;
+        tags: Record<string, string>;
+      },
+    ];
+    expect(captureContext.level).toBe("error");
+    expect(captureContext.fingerprint).toEqual([
+      "coach-tool-input-invalid",
+      "generate_training_plan",
+    ]);
+    expect(captureContext.tags).toMatchObject({
+      tool: "generate_training_plan",
+    });
+    expect(captureContext.extra.issues).toEqual([
+      expect.stringMatching(/^workouts\[1\]\.target_duration_minutes: /),
+    ]);
+    // Raw arguments carry athlete data and must not be attached.
+    expect(JSON.stringify(captureContext)).not.toContain("Full rest day.");
+  });
+
+  it("reports cross-field update_goals refinements with their path", async () => {
+    const { fetchImpl } = createRecordingFetch({});
+    const tool = agentTool("update_goals", fetchImpl);
+
+    const output = await invoke(
+      tool,
+      JSON.stringify({ action: "complete", goal: null }),
+    );
+
+    expect(output).toEqual(
+      expect.stringContaining(
+        "Invalid input for update_goals: goal_id: goal_id is required for complete/abandon.",
+      ),
+    );
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        fingerprint: ["coach-tool-input-invalid", "update_goals"],
+        level: "error",
+      }),
+    );
+  });
+
+  it("covers update_coaching_memory and malformed JSON arguments", async () => {
+    const { fetchImpl } = createRecordingFetch({});
+    const tool = agentTool("update_coaching_memory", fetchImpl);
+
+    // V8 quotes a fragment of the input in some JSON.parse messages.
+    const output = await invoke(tool, '{"note": "left knee pain" oops}');
+
+    expect(output).toEqual(
+      expect.stringContaining(
+        "Invalid input for update_coaching_memory: arguments are not valid JSON",
+      ),
+    );
+    expect(String(output)).not.toContain("knee");
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        fingerprint: ["coach-tool-input-invalid", "update_coaching_memory"],
+        level: "error",
+        extra: { issues: ["arguments are not valid JSON"] },
+      }),
+    );
+  });
+
+  it("keeps the default tool error for failures after validation", async () => {
+    const fetchImpl = (): Promise<Response> =>
+      Promise.resolve(new Response("boom", { status: 500 }));
+    const tool = agentTool("update_goals", fetchImpl);
+
+    const output = await invoke(
+      tool,
+      JSON.stringify({
+        action: "complete",
+        goal: null,
+        goal_id: "21a5eb90-b47d-49bc-af20-1a19cba0d041",
+      }),
+    );
+
+    expect(output).toEqual(
+      expect.stringContaining(
+        "An error occurred while running the tool. Please try again. Error: Error: Engine request failed for /api/engine/update-goals: HTTP 500",
+      ),
+    );
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
+  });
+
+  describe("save_recovery_data source provenance", () => {
+    const baseEntry = {
+      body_battery: null,
+      hrv_ms: 48,
+      log_date: "2026-05-30",
+      notes: null,
+      resting_hr_bpm: null,
+      sleep_consistency_pct: null,
+      sleep_duration_hours: 7.5,
+      sleep_score: null,
+      stress_score: null,
+      subjective_energy: null,
+    };
+    const schema = coachToolDefinitions.save_recovery_data.inputSchema;
+
+    it("accepts a null source", () => {
+      expect(
+        schema.parse({ entries: [{ ...baseEntry, source: null }] }),
+      ).toMatchObject({ entries: [{ source: null }] });
+    });
+
+    it.each(["", "   ", "x".repeat(65)])(
+      "rejects an empty or oversized source %j at the Zod boundary",
+      (source) => {
+        expect(() =>
+          schema.parse({ entries: [{ ...baseEntry, source }] }),
+        ).toThrow();
+      },
+    );
+
+    // Each of these passes trim/min/max but is rejected by normalize_recovery_source in
+    // backend/models/athlete.py, so it has to fail before tool execution.
+    it.each([
+      ["symbols only", "!!!"],
+      ["separators only", "---"],
+      ["underscores only", "___"],
+      ["no ASCII letter or digit", "心拍"],
+    ])("rejects a source that normalizes to nothing: %s", (_label, source) => {
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source }] }),
+      ).toThrow("source must contain at least one Latin letter or digit");
+    });
+
+    it("rejects a source whose slug outgrows the limit once folded", () => {
+      // Each "ﬃ" ligature folds to "ffi", so 22 raw characters become a 66-character slug.
+      const source = "ﬃ".repeat(22);
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source }] }),
+      ).toThrow("source must normalize to at most 64 characters");
+    });
+
+    it("accepts a dotted capital I, which folds to a plain ASCII letter", () => {
+      expect(() =>
+        schema.parse({ entries: [{ ...baseEntry, source: "İ".repeat(64) }] }),
+      ).not.toThrow();
     });
   });
 });

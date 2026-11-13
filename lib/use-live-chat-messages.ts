@@ -1,7 +1,11 @@
 import { useChat, type UseChatHelpers } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { useEffect, useMemo, useRef } from "react";
+import { type RefObject, useCallback, useEffect, useMemo, useRef } from "react";
 
+import {
+  ChatRequestError,
+  chatRequestErrorFromResponse,
+} from "./chat-request-error";
 import { toLiveChatMessage, toUiMessage } from "./chat-ui-messages";
 import type { ChatMessage } from "./types";
 
@@ -11,6 +15,17 @@ type LiveChatMessages = Pick<
 > & {
   displayedMessages: ChatMessage[];
 };
+
+// Reads and clears the recorded failure in one step. A function call also keeps
+// TypeScript from narrowing the ref to `null` across the awaited send, which
+// the transport's fetch mutates.
+function takeRequestFailure(
+  ref: RefObject<ChatRequestError | null>,
+): ChatRequestError | null {
+  const failure = ref.current;
+  ref.current = null;
+  return failure;
+}
 
 function browserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -45,9 +60,16 @@ export function useLiveChatMessages(
       knownPersistedMessageIdsRef.current.add(message.id);
     }
   }, [persistedMessages]);
+  // The AI SDK's sendMessage resolves (it only records an error status) when
+  // the POST itself fails, e.g. a lease-conflict 409 or the route's 503. Record
+  // those pre-stream failures here so sendMessage can rethrow them to the
+  // caller, which restores the draft and shows the message (#346). Errors
+  // inside an already-started stream are not recorded: the assistant has
+  // replied with its own error text by then and the turn is persisted.
+  const requestFailureRef = useRef<ChatRequestError | null>(null);
   const {
     messages: liveMessages,
-    sendMessage,
+    sendMessage: sdkSendMessage,
     setMessages,
   } = useChat({
     id: threadId,
@@ -55,6 +77,25 @@ export function useLiveChatMessages(
     transport: new DefaultChatTransport({
       api: "/api/chat",
       credentials: "include",
+      fetch: async (input, init): Promise<Response> => {
+        let response: Response;
+        try {
+          response = await fetch(input, init);
+        } catch (error) {
+          if (!init?.signal?.aborted) {
+            requestFailureRef.current = new ChatRequestError(
+              "Unable to reach the coach. Check your connection and try again.",
+            );
+          }
+          throw error;
+        }
+        if (!response.ok) {
+          requestFailureRef.current = await chatRequestErrorFromResponse(
+            response.clone(),
+          );
+        }
+        return response;
+      },
       headers: (): Record<string, string> => ({
         "X-Athlete-Timezone": browserTimeZone(),
       }),
@@ -79,6 +120,16 @@ export function useLiveChatMessages(
       .filter((m): m is ChatMessage => m !== null && m.parts.length > 0);
     return [...persistedMessages, ...additional];
   }, [liveMessages, persistedMessageIds, persistedMessages, threadId, userId]);
+
+  const sendMessage = useCallback<LiveChatMessages["sendMessage"]>(
+    async (...args) => {
+      takeRequestFailure(requestFailureRef);
+      await sdkSendMessage(...args);
+      const failure = takeRequestFailure(requestFailureRef);
+      if (failure !== null) throw failure;
+    },
+    [sdkSendMessage],
+  );
 
   return { displayedMessages, sendMessage, setMessages };
 }

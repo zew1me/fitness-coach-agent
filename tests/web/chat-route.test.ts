@@ -969,6 +969,46 @@ describe("app/api/chat route error handling", () => {
       "Coach is out to lunch. Please try again later.",
     );
   });
+
+  it("answers a held turn lease with a retry-soon 409 instead of the generic 503 (#346)", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn((url: RequestInfo | URL) => {
+      const requestedUrl = String(url);
+      requestedUrls.push(requestedUrl);
+      if (requestedUrl.endsWith("/api/oauth/browser-token")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ access_token: "token-1", user_id: "athlete-1" }),
+            { headers: { "content-type": "application/json" }, status: 200 },
+          ),
+        );
+      }
+      if (requestedUrl.endsWith("/api/chat/model-state/lease")) {
+        return Promise.resolve(new Response("conflict", { status: 409 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(athleteContextFixture), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        }),
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        headers: { cookie: "coach_browser_session=session-token" },
+        body: JSON.stringify({ messages: [] }),
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(streamCoachTurn).not.toHaveBeenCalled();
+    expect(requestedUrls).not.toContain(
+      "http://localhost/api/engine/get-athlete-summary",
+    );
+  });
 });
 
 describe("app/api/chat route tool execution", () => {
@@ -1169,6 +1209,32 @@ describe("app/api/chat route engine tool execution", () => {
         }),
         method: "POST",
       }),
+    );
+  });
+
+  it("forwards maximal efforts from estimate_thresholds to the engine", async () => {
+    const fit = { cp_watts: 280, ftp_watts: 280, sport: "cycling" };
+    const fetchMock = vi.fn(() => Promise.resolve(Response.json(fit)));
+    const tools = createCoachTools({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    const estimateThresholds = tools["estimate_thresholds"] as {
+      execute: (...args: unknown[]) => Promise<unknown>;
+    };
+    const input = {
+      efforts: [
+        { duration_seconds: 300, power_watts: 345 },
+        { duration_seconds: 1200, power_watts: 297 },
+      ],
+      sport: "cycling",
+    };
+
+    await expect(estimateThresholds.execute(input)).resolves.toEqual(fit);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost/api/engine/estimate-thresholds",
+      expect.objectContaining({ body: JSON.stringify(input), method: "POST" }),
     );
   });
 
@@ -1580,8 +1646,9 @@ describe("app/api/chat route deferred cleanup", () => {
     expect(Sentry.logger.warn).toHaveBeenCalledWith(
       "chat: Sentry.flush timed out; some spans may be lost",
     );
+    // The facade sends the same line to both channels (issue #267).
     expect(consoleSpy).toHaveBeenCalledWith(
-      "[chat] Sentry.flush timed out; some spans may be lost",
+      "chat: Sentry.flush timed out; some spans may be lost",
     );
     consoleSpy.mockRestore();
   });

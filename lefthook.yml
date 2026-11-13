@@ -1,5 +1,6 @@
 # Pre-commit: fast autofix on staged files only.
-# Pre-push: full CI gate — mirrors .github/workflows/ci.yml exactly, plus jscpd/knip/actionlint (pinned zew1me fork via scripts/actionlint.sh).
+# Pre-push: full CI gate — mirrors every check in .github/workflows/ci.yml, including jscpd, knip and
+# actionlint (pinned zew1me fork via scripts/actionlint.sh).
 
 pre-commit:
   parallel: true
@@ -49,14 +50,16 @@ pre-push:
       run: uv run ty check
     vulture:
       run: uv run vulture
+    reachability:
+      run: uv run reachability-check check
     vitest:
       run: bun run test
     pytest:
       run: uv run pytest
     cpd:
-      run: ./node_modules/.bin/cpd app components lib api backend -t 1 -k 50 -r ai --no-tips
+      run: bun run cpd
     knip:
-      run: ./node_modules/.bin/knip
+      run: bun run knip
     playwright:
       run: |
         if [ "${LEFTHOOK_SKIP_UI:-0}" = "1" ] || git log -1 --pretty=%s | grep -q "lefthook-skip-ui"; then

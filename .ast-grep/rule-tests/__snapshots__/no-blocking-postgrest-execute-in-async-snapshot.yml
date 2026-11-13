@@ -1,0 +1,89 @@
+id: no-blocking-postgrest-execute-in-async
+snapshots:
+  ? |
+    async def read(client):
+        return client.table("goals").select("*").execute()
+  : labels:
+      - source: client.table("goals").select("*").execute()
+        style: primary
+        start: 35
+        end: 78
+      - source: |-
+          async def read(client):
+              return client.table("goals").select("*").execute()
+        style: secondary
+        start: 0
+        end: 78
+  ? |
+    async def read(query):
+        return (lambda: query.execute())()
+  : labels:
+      - source: query.execute()
+        style: primary
+        start: 43
+        end: 58
+      - source: |-
+          async def read(query):
+              return (lambda: query.execute())()
+        style: secondary
+        start: 0
+        end: 61
+  ? |
+    async def read(query):
+        return await asyncio.to_thread(query.execute())
+  : labels:
+      - source: query.execute()
+        style: primary
+        start: 58
+        end: 73
+      - source: |-
+          async def read(query):
+              return await asyncio.to_thread(query.execute())
+        style: secondary
+        start: 0
+        end: 74
+  ? |
+    async def read(query, flag):
+        return query.upsert(1).execute() if flag else await _execute(query)
+  : labels:
+      - source: query.upsert(1).execute()
+        style: primary
+        start: 40
+        end: 65
+      - source: |-
+          async def read(query, flag):
+              return query.upsert(1).execute() if flag else await _execute(query)
+        style: secondary
+        start: 0
+        end: 100
+  ? |
+    async def write(client, payload):
+        response = client.table("goals").insert(payload).execute()
+        return response.data
+  : labels:
+      - source: client.table("goals").insert(payload).execute()
+        style: primary
+        start: 49
+        end: 96
+      - source: |-
+          async def write(client, payload):
+              response = client.table("goals").insert(payload).execute()
+              return response.data
+        style: secondary
+        start: 0
+        end: 121
+  ? |
+    class Repo:
+        async def update(self, client):
+            client.table("goals").update({"a": 1}).eq("id", 1).execute()
+  : labels:
+      - source: 'client.table("goals").update({"a": 1}).eq("id", 1).execute()'
+        style: primary
+        start: 56
+        end: 116
+      - source: |-
+          async def update(self, client):
+                  client.table("goals").update({"a": 1}).eq("id", 1).execute()
+        style: secondary
+        start: 16
+        end: 116

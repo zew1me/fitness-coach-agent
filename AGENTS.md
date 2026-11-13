@@ -21,21 +21,26 @@ bun run db:reset    # wipe + replay all migrations locally
 bun dev          # Next.js dev server
 bun run build    # Production build
 bun run lint     # ESLint (zero warnings)
+bun run lint:css  # Stylelint on CSS
 bun run lint:actions  # actionlint (pinned zew1me fork) on GitHub workflows
 bun run typecheck  # tsc + Next.js typegen
 bun run test     # Vitest unit tests (tests/web/)
-bun run check    # lint + typecheck + test
+bun run check    # lint + lint:css + lint:actions + typecheck + test + ast-grep:check
+bun run cpd      # jscpd copy-paste detection over app/ components/ lib/ api/ backend/
+bun run knip     # unused files, exports and dependencies
 
 # Python backend and uv workspace tools
 uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
 uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
 uv run pytest tools/self-data-backup/tests/  # backup workspace tool
+uv run pytest tools/reachability-check/tests/  # reachability workspace tool
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
 uv run ty check                      # type checking
 uv run vulture                       # dead-code detection
+uv run reachability-check check      # unreachable routes, client paths, backend modules
 ```
 
 ## Scripts and local tools
@@ -44,6 +49,15 @@ Before adding or expanding repository automation, read [SCRIPTS.md](SCRIPTS.md).
 one-shot repository glue in `scripts/`; build durable, configurable, dependency-owning, or
 user-facing Python CLIs as Typer packages under `tools/` in the uv workspace. Update the shared
 lockfile and root checks whenever a workspace tool is added.
+
+### Agent preview E2E credentials
+
+Agents that test Vercel preview deployments (throwaway inbox, invite code, automation bypass,
+preview Supabase) read a gitignored `.env.agent`. A human creates it once with
+`scripts/setup-agent-e2e.sh`; run `scripts/setup-agent-e2e.sh --check` to see which gates are
+missing. Keys and their sources are documented in `.env.agent.example`. A linked worktree has its
+own `.env.agent`, so copy it in or set `AGENT_ENV_FILE`. Never point it at the production
+Supabase project.
 
 ## ast-grep guardrails
 
@@ -115,7 +129,7 @@ execution, bounded output, and machine-readable output when supported. Use this 
 Next.js 15 App Router. Key pages:
 
 - `app/login/page.tsx` — magic link OTP via Supabase
-- `app/auth/callback/page.tsx` — Supabase auth callback
+- `app/auth/callback/route.ts` — Supabase auth callback
 - `app/consent/page.tsx` — OAuth consent UI (POSTs to `/api/oauth/authorize/decision`)
 - `app/profile/page.tsx` — athlete profile management
 - `app/calendar/page.tsx` — read-only training calendar (past 42 days + upcoming 8 weeks of planned workouts and recorded activities via `GET /api/calendar`; issue #212 MVP)
@@ -127,9 +141,9 @@ Next.js 15 App Router. Key pages:
 `api/index.py` is the Vercel Functions entrypoint (FastAPI app). Domain logic lives in `backend/`:
 
 - `backend/config.py` — Pydantic Settings (reads env vars)
-- `backend/models/` — Pydantic models: `auth.py` (OAuth + JWT), `planning.py` (plans), `storage.py` (R2)
+- `backend/models/` — Pydantic models: `auth.py` (OAuth + JWT), `training.py` (plans, workouts, goals), `storage.py` (R2)
 - `backend/repos/` — Supabase persistence: `oauth_repo.py` (grants/codes/refresh tokens), `supabase_repo.py` (athlete profiles + check-ins)
-- `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `planner.py` (14-day plan composition), `r2.py` (Cloudflare R2 presigned URLs)
+- `backend/services/` — Business logic: `auth.py` (PKCE OAuth flow, JWT issuance), `plan_composer.py` (daily workout composition from the plan skeleton), `r2.py` (Cloudflare R2 presigned URLs)
 
 `api/index.py` has a centralized `PostgRESTAPIError` exception handler that maps
 Postgres SQLSTATE codes to the shared 409/422/503 response contract. Route handlers
@@ -175,8 +189,8 @@ No new tables were introduced for this lifecycle work (all app-level).
 
 ### OpenAI model resilience
 
-Coach turns use the model ladder defined in `lib/agent/model-tiers.ts`: `gpt-5.6-luna`
-(medium), then `gpt-5.4-mini` (medium), then `gpt-5.6-terra` (low). SDK calls retry
+Coach turns use the model ladder defined in `lib/agent/model-tiers.ts`: `gpt-6-luna`
+(medium), then `gpt-5.4-mini` (medium), then `gpt-6.1-terra` (low). SDK calls retry
 429/503/network failures before the orchestrator falls back to the next model. The
 module-scope circuit breaker opens after three consecutive rate-limited turns,
 allows one lazy half-open probe after its cooldown, and automatically closes on
@@ -217,11 +231,11 @@ Use separate Supabase projects per environment (development (local) / preview / 
 
 `chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table.
 
-The legacy columns `chat_messages.content` (denormalized text mirror) and the separate `chat_attachments` table are still present for one release window; a follow-up migration will drop them once readers have fully cut over.
+The legacy `chat_messages.content` text mirror and the separate `chat_attachments` table were dropped by `20261106120000_drop_legacy_chat_content_and_attachments.sql` (#303); `parts` and `attachments` are the only message payload columns.
 
 #### Compaction
 
-See [COMPACTION_DESIGN.md](COMPACTION_DESIGN.md).
+See [docs/COMPACTION_DESIGN.md](docs/COMPACTION_DESIGN.md).
 
 ### Storage
 
@@ -297,7 +311,7 @@ description of how the code works today.
 
 OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
 
-**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards both `/api/chat/attachments/presign` and `/api/files/presign-upload` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`. Everything else (including PDFs) returns 400 with a message telling the athlete to paste content as text.
+**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards both `/api/chat/attachments/presign` and `/api/files/presign-upload` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`, `application/zip`, `application/x-zip-compressed` (zip archives are unpacked by `/api/engine/process-uploaded-zip`). Everything else (including PDFs) returns 400 with a message listing the supported types.
 
 Contract: every non-image, non-rejected file part (i.e. `.fit` / `.gpx` activity files) is converted to an `input_text` description that **preserves the link** (`public_url` / `object_key`) so the coach can still resolve it — files are never dropped silently. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
 
@@ -330,6 +344,9 @@ See `.env.example`. Required:
 - Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
 - Python tests: `tests/python/` plus co-located `tools/*/tests/` workspace-tool tests — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for application fixtures; workspace tools should keep tool-specific fixtures local
+- RLS role matrix: `tests/python/test_rls_matrix_db.py` (`db` marker, so not in CI; run `bun run db:reset && bun run test:db`) asserts `anon`, two authenticated athletes and `service_role` against every public table. A new public table fails it until it is classified into one of the file's access classes
+- UI tests: `tests/ui/` — Playwright. The auto-started dev server uses port 3000 in the primary checkout and a stable per-worktree port in a linked git worktree, so concurrent runs in different worktrees never share a server (a worktree never reuses an already-running server, so a rare port collision fails loudly); set `PLAYWRIGHT_PORT` to choose the port, or `BASE_URL` to target a deployed preview
+- Touch-device UI tests: name a spec `*.touch.spec.ts` to run it only in the `mobile-touch` Playwright project (iPhone-class emulation with `isMobile`/`hasTouch` on Chromium) instead of the desktop `chromium` project. Use `locator.tap()` for taps and CDP `Input.dispatchTouchEvent` for swipes; it covers the touch/viewport contract, not WebKit rendering
 
 ## Local hooks (lefthook)
 
@@ -352,23 +369,45 @@ actionlint needs no manual install: `scripts/actionlint.sh` downloads the pinned
 
 ### Pre-push (full CI gate)
 
-Runs sequentially and mirrors every check in `.github/workflows/ci.yml`, plus three additional static checks:
+Runs sequentially and mirrors every check in `.github/workflows/ci.yml` (CI runs `cpd` and `knip` in the `web` job):
 
-| Step                | Command                                                                       |
-| ------------------- | ----------------------------------------------------------------------------- |
-| `lint`              | `bun run lint`                                                                |
-| `stylelint`         | `bun run lint:css`                                                            |
-| `actionlint`        | `bun run lint:actions`                                                        |
-| `ruff-check`        | `uv run ruff check .`                                                         |
-| `ruff-format-check` | `uv run ruff format --check .`                                                |
-| `typecheck`         | `bun run typecheck`                                                           |
-| `ty`                | `uv run ty check`                                                             |
-| `vulture`           | `uv run vulture`                                                              |
-| `vitest`            | `bun run test`                                                                |
-| `pytest`            | `uv run pytest`                                                               |
-| `cpd`               | Copy-paste detection across `app/`, `components/`, `lib/`, `api/`, `backend/` |
-| `knip`              | Dead-code / unused-export detection (production code only)                    |
-| `playwright`        | Full Playwright UI suite                                                      |
+| Step                | Command                                               |
+| ------------------- | ----------------------------------------------------- |
+| `lint`              | `bun run lint`                                        |
+| `stylelint`         | `bun run lint:css`                                    |
+| `actionlint`        | `bun run lint:actions`                                |
+| `ast-grep`          | `bun run ast-grep:check`                              |
+| `ruff-check`        | `uv run ruff check .`                                 |
+| `ruff-format-check` | `uv run ruff format --check .`                        |
+| `typecheck`         | `bun run typecheck`                                   |
+| `ty`                | `uv run ty check`                                     |
+| `vulture`           | `uv run vulture`                                      |
+| `reachability`      | `uv run reachability-check check` (see below)         |
+| `vitest`            | `bun run test`                                        |
+| `pytest`            | `uv run pytest`                                       |
+| `cpd`               | `bun run cpd` (copy-paste detection, ≤1% duplication) |
+| `knip`              | `bun run knip` (dead-code / unused-export detection)  |
+| `playwright`        | Full Playwright UI suite                              |
+
+### Reachability gate
+
+`uv run reachability-check check` (`tools/reachability-check/`, issue #417) catches what vulture,
+knip and ruff cannot see across the client/server boundary, and fails on:
+
+- a FastAPI route in `api/index.py` whose path no string literal in `app/`, `components/` or
+  `lib/` references;
+- an `/api/...` or `/.well-known/...` path in those sources that matches no FastAPI route and no
+  Next.js `route.ts` handler;
+- a module under `backend/engine/` or `backend/services/` that no import chain from the deployed
+  entrypoints reaches (an import from tests alone does not count).
+
+Matching is path-level (HTTP methods are not compared) and reads source statically; paths in
+comments do not count as callers. Routes come only from `@app.<method>(...)` and
+`@app.api_route(...)` decorators in the entrypoints: `APIRouter`/`include_router` routes are not followed (none exist today), so add that
+support before introducing a router. Configuration and the allowlist live in
+`[tool.reachability-check]` in `pyproject.toml`. Every allow entry needs a `reason`, and an entry
+that stops matching a finding fails the check as stale, so remove it when the underlying item is
+fixed. Prefer deleting dead code or adding the missing caller over allowlisting.
 
 ### Changes that don't impact the UI layer
 

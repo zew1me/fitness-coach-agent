@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect } from "react";
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import { StatusCard } from "../../components/status-card";
 
@@ -12,7 +12,7 @@ import styles from "./profile.module.css";
 import { useIntervalsConnection } from "./use-intervals-connection";
 import { useProfileData } from "./use-profile-data";
 
-export default function ProfilePage(): JSX.Element {
+export default function ProfilePage(): ReactNode {
   const data = useProfileData();
   const intervals = useIntervalsConnection();
   const { load: loadProfile, metrics, error, userId } = data;

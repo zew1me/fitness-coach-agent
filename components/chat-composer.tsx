@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState } from "react";
-import type { ChangeEvent, JSX } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 
 import {
   fileTypeBadge,
@@ -14,7 +14,7 @@ import styles from "./coach-chat.module.css";
 const CHAT_ATTACHMENT_ACCEPT =
   "image/*,application/gpx+xml,.gpx,.fit,.tcx,application/zip,.zip";
 
-function SendIcon(): JSX.Element {
+function SendIcon(): ReactNode {
   return (
     <svg
       aria-hidden="true"
@@ -36,7 +36,7 @@ function SendIcon(): JSX.Element {
 
 function UploadChip({
   attachment,
-}: Readonly<{ attachment: LocalAttachment }>): JSX.Element {
+}: Readonly<{ attachment: LocalAttachment }>): ReactNode {
   const badge = fileTypeBadge(attachment);
   const statusLabel =
     attachment.status === "uploading"
@@ -55,7 +55,7 @@ function UploadChip({
 
 function UploadChips({
   attachments,
-}: Readonly<{ attachments: LocalAttachment[] }>): JSX.Element | null {
+}: Readonly<{ attachments: LocalAttachment[] }>): ReactNode {
   if (attachments.length === 0) return null;
   return (
     <div className={styles.uploadRow}>
@@ -80,7 +80,7 @@ function SendButton({
   sending: boolean;
   syncingThread: boolean;
   onSend: () => void;
-}>): JSX.Element {
+}>): ReactNode {
   const disabled = composerBusy || !hasSendableContent(composer, attachments);
   const label = syncingThread ? "Syncing" : sending ? "Sending..." : "Send";
   return (
@@ -110,7 +110,7 @@ function ComposerHint({
   threadError: string | null;
   isMobile: boolean;
   waitingStatus: string | undefined;
-}>): JSX.Element {
+}>): ReactNode {
   if (syncingThread) {
     return (
       <span aria-live="polite" className={styles.waitingStatus} role="status">
@@ -172,7 +172,7 @@ export function Composer({
   placeholder: string;
   onSend: () => void;
   onFilesAdded: (_files: File[]) => void;
-}>): JSX.Element {
+}>): ReactNode {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragActive, setDragActive] = useState(false);
 

@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { JSX, RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 
 import {
   buildCalendarWeeks,
@@ -169,7 +169,7 @@ function dayCellAriaLabel(dayIso: string, items: CalendarDayItems): string {
   return `${longDayLabel(dayIso)}. ${plannedLabel}. ${activityLabel}.`;
 }
 
-export function CoachCalendar(): JSX.Element {
+export function CoachCalendar(): ReactNode {
   const session = useBrowserSession();
   if (session.loading) {
     return (
@@ -186,7 +186,7 @@ export function CoachCalendar(): JSX.Element {
   return <SignedInCalendar token={session.token} />;
 }
 
-function LoggedOutCalendar(): JSX.Element {
+function LoggedOutCalendar(): ReactNode {
   return (
     <main className={styles.landingWrap}>
       <section className={styles.landingCard}>
@@ -211,7 +211,7 @@ function LoggedOutCalendar(): JSX.Element {
 
 function SignedInCalendar({
   token,
-}: Readonly<{ token: BrowserTokenResponse }>): JSX.Element {
+}: Readonly<{ token: BrowserTokenResponse }>): ReactNode {
   const athleteProfile = useAthleteProfile(token);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const todayIso = useMemo(() => localTodayIso(), []);
@@ -329,7 +329,7 @@ function CalendarBody({
   error: string | null;
   onRetry: () => void;
   onSelectDay: (_dayIso: string) => void;
-}>): JSX.Element {
+}>): ReactNode {
   const todayCellRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
@@ -409,7 +409,7 @@ function DayCell({
   todayIso: string;
   todayRef: RefObject<HTMLButtonElement | null> | null;
   onSelect: (_dayIso: string) => void;
-}>): JSX.Element {
+}>): ReactNode {
   const isToday = dayIso === todayIso;
   const isPast = dayIso < todayIso;
   const cellClass = [
@@ -420,7 +420,7 @@ function DayCell({
     .filter((name) => name.length > 0)
     .join(" ");
 
-  const chips: JSX.Element[] = [
+  const chips: ReactNode[] = [
     ...items.planned.map((workout) => {
       const status = derivedWorkoutStatus(workout, todayIso);
       return (
@@ -492,7 +492,7 @@ function DayDetailPanel({
   items: CalendarDayItems;
   onClose: () => void;
   todayIso: string;
-}>): JSX.Element {
+}>): ReactNode {
   const isEmpty = items.planned.length === 0 && items.activities.length === 0;
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -584,7 +584,7 @@ function PlannedWorkoutDetail({
 }: Readonly<{
   workout: CalendarPlannedWorkout;
   todayIso: string;
-}>): JSX.Element {
+}>): ReactNode {
   const queryClient = useQueryClient();
   const [resolveError, setResolveError] = useState<string | null>(null);
   const resolveMutation = useMutation({
@@ -653,7 +653,7 @@ function PlannedWorkoutDetail({
 
 function ActivityDetail({
   activity,
-}: Readonly<{ activity: CalendarActivity }>): JSX.Element {
+}: Readonly<{ activity: CalendarActivity }>): ReactNode {
   return (
     <article className={`${styles.detailItem} ${styles.detailItemActivity}`}>
       <h4 className={styles.detailItemTitle}>{activity.sport}</h4>

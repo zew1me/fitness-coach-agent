@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type { JSX, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import type { AthleteProfile } from "../lib/types";
 
@@ -25,7 +25,7 @@ function AccountMenu({
   onOpenProfile: () => void;
   extraItems: ReactNode | undefined;
   onMenuItemClick: () => void;
-}>): JSX.Element {
+}>): ReactNode {
   return (
     <div
       aria-label="Account"
@@ -63,12 +63,9 @@ function AccountMenu({
         className={styles.menuForm}
         method="post"
       >
-        <button
-          className={styles.menuItem}
-          data-menu-item
-          role="menuitem"
-          type="submit"
-        >
+        {/* No data-menu-item: closing the menu on click unmounts this form before the
+            browser runs the submit, so Sign out would do nothing. The POST navigates away. */}
+        <button className={styles.menuItem} role="menuitem" type="submit">
           Sign out
         </button>
       </form>
@@ -84,7 +81,7 @@ export function AccountMenuButton({
   profile: AthleteProfile | null;
   onOpenProfile: () => void;
   extraItems?: ReactNode;
-}>): JSX.Element {
+}>): ReactNode {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 

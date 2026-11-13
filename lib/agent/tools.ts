@@ -85,16 +85,25 @@ const updateGoalsInputSchema = z
         path: ["goal_id"],
       });
     }
-    if (input.goal !== undefined) {
+    // The model routinely sends `goal: null` here, which carries no goal data;
+    // the engine ignores the goal for terminal actions, so only a real goal
+    // object is a mistake worth rejecting.
+    if (input.goal != null) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "goal must be omitted for complete/abandon.",
+        message: "goal must be omitted or null for complete/abandon.",
         path: ["goal"],
       });
     }
   });
 
+const maxEffortSchema = z.object({
+  duration_seconds: z.number().int().positive(),
+  power_watts: z.number().positive().max(3000),
+});
+
 const thresholdInputSchema = z.object({
+  efforts: z.array(maxEffortSchema).nullable(),
   race_distance_meters: z.number().positive().nullable(),
   race_time_seconds: z.number().int().positive().nullable(),
   sport: z.string().min(1),
@@ -125,6 +134,42 @@ const uploadedFileInputSchema = z.object({
   public_url: z.string().nullable(),
 });
 
+// Where the numbers came from, not who typed them. Deliberately open-ended: any device or
+// app the coach can identify is a valid source. The backend normalizes it to the snake_case
+// slug recovery_logs_source_check expects ("Eight Sleep" -> "eight_sleep").
+const RECOVERY_SOURCE_MAX_LENGTH = 64;
+
+// Mirrors normalize_recovery_source in backend/models/athlete.py so a value the backend would
+// reject fails here, where the coach can correct it, instead of as a 422 after tool execution.
+// Accents fold to ASCII first (NFKD, then drop what is left outside ASCII), so "Ōura" keeps
+// its letter as "oura". The slug is checked rather than the raw text because the two can
+// disagree: "心拍" has letters but no ASCII form, and folding can lengthen text past the
+// limit ("ﬃ" becomes "ffi").
+function recoverySourceSlug(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0080-\uffff]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const recoverySourceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(RECOVERY_SOURCE_MAX_LENGTH)
+  .refine((value) => recoverySourceSlug(value).length > 0, {
+    message: "source must contain at least one Latin letter or digit",
+  })
+  .refine(
+    (value) => recoverySourceSlug(value).length <= RECOVERY_SOURCE_MAX_LENGTH,
+    {
+      message: `source must normalize to at most ${RECOVERY_SOURCE_MAX_LENGTH} characters`,
+    },
+  );
+
 const recoveryEntrySchema = z.object({
   body_battery: z.number().int().min(0).max(100).nullable(),
   hrv_ms: z.number().positive().nullable(),
@@ -134,6 +179,7 @@ const recoveryEntrySchema = z.object({
   sleep_consistency_pct: z.number().min(0).max(100).nullable(),
   sleep_duration_hours: z.number().nonnegative().nullable(),
   sleep_score: z.number().nonnegative().nullable(),
+  source: recoverySourceSchema.nullable(),
   stress_score: z.number().nonnegative().nullable(),
   subjective_energy: z.number().int().min(1).max(5).nullable(),
 });
@@ -214,11 +260,13 @@ const explicitPlanWorkoutSchema = z.object({
   // OpenAI strict tool schemas require every nested object field to be present.
   // Nullable targets let the coach represent a prescribed session without
   // inventing duration, distance, or TSS values the athlete never supplied.
+  // Zero is a legitimate target (the coach prescribes rest days as 0 minutes),
+  // so these are nonnegative like target_tss rather than strictly positive.
   description: z.string().min(1).nullable(),
   phase_name: z.string().min(1).nullable(),
   sport: z.string().min(1),
-  target_distance_meters: z.number().positive().nullable(),
-  target_duration_minutes: z.number().int().positive().nullable(),
+  target_distance_meters: z.number().nonnegative().nullable(),
+  target_duration_minutes: z.number().int().nonnegative().nullable(),
   target_tss: z.number().nonnegative().nullable(),
   title: z.string().min(1),
   workout_date: z.iso.date(),
@@ -327,7 +375,7 @@ export const coachToolDefinitions = {
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(
-    "Persist recovery and wellness observations.",
+    "Persist recovery and wellness observations. Set each entry's source to where the numbers came from, not who typed them, as a short snake_case name: e.g. screenshot_extract for a wellness screenshot, or the device/app for exports and syncs (garmin_api, garmin_sidecar, intervals_sync, apple_health, whoop, oura, polar, fitbit, suunto, withings, eight_sleep, elite_hrv, ...). Any identifiable source is accepted; a pasted device export is never manual. For entries that carry only the athlete's own subjective report (energy, notes), pass null: a new day's row then defaults to manual, and a day that already holds device numbers keeps its source instead of being relabelled manual.",
     recoveryInputSchema,
   ),
   update_schedule: defineTool(
@@ -347,7 +395,7 @@ export const coachToolDefinitions = {
     zonesInputSchema,
   ),
   estimate_thresholds: defineTool(
-    "Estimate LT1/LT2 thresholds from tests or races.",
+    "Estimate LT1/LT2 thresholds from tests or races. For cycling, prefer efforts: 2+ true maximal efforts of 3-20 minutes at different durations, ideally including one of 12+ minutes, which fits critical power and W'. A rejected fit says why; relay that rather than estimating by hand.",
     thresholdInputSchema,
   ),
   generate_training_plan: defineTool(

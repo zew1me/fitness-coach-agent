@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef } from "react";
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import type { AthleteProfile } from "../lib/types";
 
@@ -49,7 +49,7 @@ function ProfileDrawerFields({
   saving: boolean;
   status: string | null;
   onSave: () => void;
-}>): JSX.Element {
+}>): ReactNode {
   return (
     <div className={styles.fieldGrid}>
       <label className={styles.fieldLabel}>
@@ -131,7 +131,7 @@ export function ProfileDrawer({
   saving: boolean;
   status: string | null;
   onSave: () => void;
-}>): JSX.Element | null {
+}>): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const drawerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
@@ -225,7 +225,7 @@ function ProfileDrawerBody({
   saving: boolean;
   status: string | null;
   onSave: () => void;
-}>): JSX.Element {
+}>): ReactNode {
   if (saving && profile === null) {
     return <p className={styles.drawerStatus}>Loading your settings…</p>;
   }

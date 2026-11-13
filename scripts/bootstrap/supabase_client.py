@@ -15,11 +15,13 @@ _POLL_INTERVAL = 5  # seconds
 _POLL_MAX = 60  # attempts (~5 minutes)
 _HTTP_UNAUTHORIZED = 401
 _HTTP_FORBIDDEN = 403
-_EMAIL_OTP_TEMPLATE = """<h2>Your sign-in code</h2>
-<p>Enter this code to sign in:</p>
-<p><strong>{{ .Token }}</strong></p>
-<p>Or use this link:</p>
-<p><a href="{{ .ConfirmationURL }}">Sign in</a></p>"""
+# request-otp always supplies RedirectTo with a ?return_to= query. Append the
+# hash to that exact origin (not SiteURL, which may be a different deployment).
+# ConfirmationURL uses implicit auth for our server-side OTP sender; its tokens
+# land in a URL fragment that the server callback cannot read (issue #524).
+_EMAIL_OTP_TEMPLATE = (
+    Path(__file__).resolve().parents[2] / "supabase" / "templates" / "email-otp.html"
+).read_text(encoding="utf-8")
 
 
 def _print_auth_config_instructions(
@@ -35,7 +37,10 @@ def _print_auth_config_instructions(
         "  Dashboard → Authentication → Providers → Email:\n"
         "    Disable 'Confirm email' so first-time signups receive OTP codes.\n"
         "  Dashboard → Authentication → Email Templates:\n"
-        "    Include {{ .Token }} and {{ .ConfirmationURL }} in Magic Link and Confirm Signup."
+        "    Use this body for both Magic Link and Confirm Signup:\n"
+        f"{_EMAIL_OTP_TEMPLATE}\n"
+        "    Deploy the token_hash-capable /auth/callback before updating templates.\n"
+        "    RedirectTo must include ?return_to= (provided by /api/auth/request-otp)."
     )
     if smtp:
         print(

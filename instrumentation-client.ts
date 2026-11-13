@@ -4,6 +4,8 @@
 
 import * as Sentry from "@sentry/nextjs";
 
+import { dropVerboseSentryLogs } from "./lib/sentry-logs";
+
 const dsn = process.env["NEXT_PUBLIC_SENTRY_DSN"];
 if (!dsn) {
   // ESLint's no-console allows only warn/error; warn surfaces this once at load.
@@ -15,6 +17,7 @@ if (!dsn) {
 Sentry.init({
   dsn,
   enableLogs: true,
+  beforeSendLog: dropVerboseSentryLogs,
   environment: process.env["NEXT_PUBLIC_VERCEL_ENV"] ?? "development",
   integrations: [Sentry.browserTracingIntegration()],
   tracePropagationTargets: [

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import { siteConfig } from "../../lib/site";
 
@@ -11,7 +11,7 @@ export const metadata: Metadata = {
   description: `${siteConfig.appName} privacy policy.`,
 };
 
-export default function PrivacyPage(): JSX.Element {
+export default function PrivacyPage(): ReactNode {
   return (
     <main className={styles.page}>
       <article className={styles.shell}>

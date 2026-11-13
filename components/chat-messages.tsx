@@ -1,7 +1,7 @@
 "use client";
 
 import type { FileUIPart, UIMessage } from "ai";
-import type { JSX, ReactNode, RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 
 import { fileTypeBadge } from "../lib/chat-attachments";
 import { onlyWelcomeMessage } from "../lib/chat-ui-messages";
@@ -83,7 +83,7 @@ function uiPartText(part: UIMessage["parts"][number]): string | null {
   return null;
 }
 
-function PlanCard({ plan }: Readonly<{ plan: AdaptedPlan }>): JSX.Element {
+function PlanCard({ plan }: Readonly<{ plan: AdaptedPlan }>): ReactNode {
   return (
     <section className={styles.planCard}>
       <div className={styles.planMeta}>
@@ -105,7 +105,7 @@ function PlanCard({ plan }: Readonly<{ plan: AdaptedPlan }>): JSX.Element {
   );
 }
 
-function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): JSX.Element {
+function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): ReactNode {
   const filename = part.filename ?? "attachment";
   const contentType = part.mediaType;
   const isImage = contentType.startsWith("image/");
@@ -133,7 +133,7 @@ function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): JSX.Element {
  * aria-live region while `sending`, so a second live region here would
  * double-announce to screen readers.
  */
-function ThinkingIndicator(): JSX.Element {
+function ThinkingIndicator(): ReactNode {
   return (
     <span
       aria-hidden="true"
@@ -171,7 +171,7 @@ function shouldShowThinking(
 
 function MessageBubble({
   message,
-}: Readonly<{ message: ChatMessage }>): JSX.Element {
+}: Readonly<{ message: ChatMessage }>): ReactNode {
   const rowClass =
     message.role === "assistant" ? styles.rowAssistant : styles.rowUser;
   const bubbleClass =
@@ -234,7 +234,7 @@ function MessageList({
   onShowMore: () => void;
   messageEndRef: RefObject<HTMLDivElement | null>;
   olderAvailable: boolean;
-}>): JSX.Element {
+}>): ReactNode {
   return (
     <div className={styles.messageStack}>
       {hiddenMessageCount > 0 || olderAvailable ? (
@@ -265,7 +265,7 @@ function EmptyChatLandingCard({
   variant: "coaching" | "onboarding";
   onPrefill: (_text: string) => void;
   children: ReactNode;
-}>): JSX.Element {
+}>): ReactNode {
   const starters =
     variant === "onboarding" ? ONBOARDING_STARTERS : COACHING_STARTERS;
   const title =
@@ -315,7 +315,7 @@ export function MessagesSection({
   messageEndRef: RefObject<HTMLDivElement | null>;
   profileComplete: boolean;
   olderAvailable: boolean;
-}>): JSX.Element {
+}>): ReactNode {
   const messageList = (
     <MessageList
       hiddenMessageCount={hiddenMessageCount}

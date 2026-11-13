@@ -48,3 +48,42 @@ describe("useChatTurnLease", () => {
     expect(result.current.turnInFlight).toBe(false);
   });
 });
+
+describe("useChatTurnLease cancelTurn", () => {
+  it("does not schedule a release refresh from a poll that lands after a refused send", async () => {
+    const pendingPolls: Array<
+      (_value: { expires_at: null; in_flight: boolean }) => void
+    > = [];
+    loadLeaseStatusMock
+      .mockResolvedValueOnce({ expires_at: null, in_flight: false })
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            pendingPolls.push(resolve);
+          }),
+      );
+
+    const { result } = renderHook(() => useChatTurnLease("athlete-1"), {
+      wrapper,
+    });
+    await act(async () => Promise.resolve());
+    expect(result.current.turnInFlight).toBe(false);
+
+    act(() => {
+      result.current.startTurn();
+    });
+    expect(pendingPolls.length).toBeGreaterThan(0);
+
+    // The send is refused and cancelled while the turn's status poll is still
+    // in flight; the poll resolves before React commits the cleared flag.
+    await act(async () => {
+      result.current.cancelTurn();
+      for (const resolve of pendingPolls.splice(0)) {
+        resolve({ expires_at: null, in_flight: false });
+      }
+      await Promise.resolve();
+    });
+
+    expect(result.current.releaseVersion).toBe(0);
+  });
+});

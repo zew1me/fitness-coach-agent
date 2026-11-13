@@ -34,6 +34,16 @@ from backend.repos.supabase_repo import RecordNotFoundError, RepositoryNotConfig
 from backend.services.auth import AuthService
 
 
+def browser_session_cookie_header(cookie_value: str) -> dict[str, str]:
+    """Send the browser-session cookie on one request only.
+
+    httpx deprecates per-request ``cookies=`` (issue #260). An explicit ``Cookie`` header keeps
+    the same one-request scope without touching the client's cookie jar, which the stdlib jar
+    leaves alone whenever a request already carries its own ``Cookie`` header.
+    """
+    return {"Cookie": f"coach_browser_session={cookie_value}"}
+
+
 class GrantRecord(TypedDict):
     id: str
     user_id: str
@@ -1083,6 +1093,209 @@ async def test_process_uploaded_zip_cap_counts_failed_member_attempts(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_enforces_archive_wide_decompression_budget(
+    monkeypatch,
+) -> None:
+    # Each member is under the per-member cap and the member-count cap, but their
+    # combined inflated size is not: the archive-wide budget must stop reading once
+    # it would be exceeded, before the over-budget member is ever inflated (#351).
+    chunk = 4096
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    # Each attempt is charged its declared size plus one chunk of possible overshoot.
+    member_charge = len(_SAMPLE_GPX) + chunk
+    monkeypatch.setattr("api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES", 2 * member_charge)
+
+    attempts = 0
+
+    async def counting_entry(**_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+
+    monkeypatch.setattr(api_index, "_zip_activity_entry", counting_entry)
+
+    zip_bytes = _make_zip({f"run{i}.gpx": _SAMPLE_GPX for i in range(5)})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    # Two members fit the budget exactly; the other three are declined unread. Failed
+    # parses still charge the budget, so corrupt members cannot bypass it either.
+    assert attempts == 2
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_admits_smaller_later_member(monkeypatch) -> None:
+    # The budget declines a member, not the whole archive: once a large member does
+    # not fit, a smaller later one that still fits is processed.
+    big = _SAMPLE_GPX + b"<!--" + b"x" * len(_SAMPLE_GPX) + b"-->"
+    chunk = 4096
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    monkeypatch.setattr(
+        "api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES",
+        (len(_SAMPLE_GPX) + chunk) + (len(big) + chunk) - 1,
+    )
+    zip_bytes = _make_zip({"a.gpx": _SAMPLE_GPX, "b.gpx": big, "c.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    # a.gpx fits; b.gpx would exceed the budget; c.gpx (smaller) still fits.
+    assert len(body["processed"]) == 2
+    assert body["skipped_count"] == 1
+
+
+def _zip_with_understated_size(payload: bytes, declared: int, count: int = 1) -> bytes:
+    """Deflate ``count`` copies of ``payload`` into a zip whose headers claim ``declared``."""
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for i in range(count):
+            archive.writestr(f"bomb{i}.gpx", payload)
+    raw = bytearray(buffer.getvalue())
+    size = declared.to_bytes(4, "little")
+    # Rewrite the uncompressed-size field of every local header (offset 22) and
+    # central directory record (offset 24).
+    for signature, offset in ((b"PK\x03\x04", 22), (b"PK\x01\x02", 24)):
+        at = raw.find(signature)
+        while at != -1:
+            raw[at + offset : at + offset + 4] = size
+            at = raw.find(signature, at + 4)
+    return bytes(raw)
+
+
+def _count_decompressor_output(monkeypatch) -> list[int]:
+    """Count bytes zipfile's decompressors emit, before any truncation to file_size.
+
+    Returns a one-element list holding the running total; callers may reset it.
+    """
+    import zipfile
+
+    total = [0]
+    # `_get_decompressor` is CPython's private codec factory, absent from typeshed's
+    # stub; looked up via the module dict so it is wrapped as the runtime defines it.
+    real_get_decompressor = vars(zipfile)["_get_decompressor"]
+
+    class Counting:
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+        def decompress(self, data: bytes, *args) -> bytes:
+            out = self._inner.decompress(data, *args)
+            total[0] += len(out)
+            return out
+
+        def flush(self, *args) -> bytes:
+            out = self._inner.flush(*args)
+            total[0] += len(out)
+            return out
+
+    monkeypatch.setattr(
+        "zipfile._get_decompressor",
+        lambda compress_type: Counting(real_get_decompressor(compress_type)),
+    )
+    return total
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_bounds_lying_size_header(monkeypatch) -> None:
+    # A zip bomb can understate a member's uncompressed size in its header. An
+    # unbounded archive.read() inflates the whole stream before truncating to that
+    # size, so the bounded reader must cap what the *decompressor* emits, not merely
+    # what it returns; otherwise the budget would charge 64 bytes for megabytes.
+    import io
+    import zipfile
+
+    payload = b"0" * (8 * 1024 * 1024)
+    declared = 64
+    chunk = 64 * 1024
+    raw = _zip_with_understated_size(payload, declared)
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    inflated = _count_decompressor_output(monkeypatch)
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        member = archive.infolist()[0]
+        assert member.file_size == declared
+
+        # The hazard: an unbounded read inflates the full payload before the CRC fails.
+        with pytest.raises(zipfile.BadZipFile):
+            archive.read(member)
+        assert inflated[0] >= len(payload)
+
+        # The bounded reader stops after one capped decompress call.
+        inflated[0] = 0
+        with pytest.raises(zipfile.BadZipFile):
+            api_index._read_zip_member_bounded(archive, member)
+        assert inflated[0] <= chunk
+
+    # End to end, the lying member is skipped best-effort without aborting the archive.
+    inflated[0] = 0
+    body = await _post_process_zip(raw, monkeypatch)
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 1
+    assert inflated[0] <= chunk
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_bounds_aggregate_forged_inflation(
+    monkeypatch,
+) -> None:
+    # Each bounded read of a forged member can overshoot its declared size by up to
+    # one chunk before truncation. The budget charges that overshoot, so the total the
+    # decompressor emits across many forged members stays within the archive budget.
+    declared = 64
+    chunk = 64 * 1024
+    budget = 3 * (declared + chunk)
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    monkeypatch.setattr("api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES", budget)
+    inflated = _count_decompressor_output(monkeypatch)
+
+    forged = _zip_with_understated_size(b"0" * (2 * 1024 * 1024), declared, count=10)
+    body = await _post_process_zip(forged, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 10
+    # Three forged members fit the budget. Charging only the 64 declared bytes would
+    # admit all ten, inflating ~10 chunks against a 3-chunk budget.
+    assert 0 < inflated[0] <= budget
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_declines_unboundable_codec_unread(monkeypatch) -> None:
+    # bzip2/LZMA chunked reads do not bound decompressor output before Python 3.13,
+    # so such members are declined before any read and cost no work budget.
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("run.gpx", _SAMPLE_GPX, compress_type=zipfile.ZIP_BZIP2)
+        archive.writestr("ride.gpx", _SAMPLE_GPX, compress_type=zipfile.ZIP_DEFLATED)
+
+    read_types: list[int] = []
+
+    def recording_reader(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bytes:
+        read_types.append(member.compress_type)
+        return archive.read(member)
+
+    monkeypatch.setattr(api_index, "_read_zip_member_bounded", recording_reader)
+
+    body = await _post_process_zip(buffer.getvalue(), monkeypatch)
+
+    # Asserted here, not in the reader: an assertion raised inside the reader would be
+    # swallowed by _process_zip_member's best-effort read handler and still pass.
+    assert read_types == [zipfile.ZIP_DEFLATED]
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_skips_directory_entries_without_counting(
     monkeypatch,
 ) -> None:
@@ -1105,16 +1318,16 @@ async def test_process_zip_member_counts_read_failure_as_skipped(monkeypatch) ->
     with zipfile.ZipFile(io.BytesIO(_make_zip({"run.gpx": _SAMPLE_GPX}))) as archive:
         member = archive.infolist()[0]
 
-        def fail_to_read_member(_member: zipfile.ZipInfo) -> bytes:
+        def fail_to_read_member(_archive: zipfile.ZipFile, _member: zipfile.ZipInfo) -> bytes:
             raise zipfile.BadZipFile("corrupt member")
 
-        monkeypatch.setattr(archive, "read", fail_to_read_member)
+        monkeypatch.setattr(api_index, "_read_zip_member_bounded", fail_to_read_member)
         result = await api_index._process_zip_member(
             archive=archive,
             member=member,
             user_id=_ZIP_TEST_USER.user_id,
             zip_object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
-            attempted_count=0,
+            used=api_index._ZipWorkUsed(),
         )
 
     assert result.entry is None
@@ -1304,7 +1517,7 @@ async def test_chat_attachments_upload_validates_object_key_scope(
         # Then get a valid token
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1351,7 +1564,7 @@ async def test_chat_attachments_upload_success(auth_service_fixture, monkeypatch
 
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1462,7 +1675,7 @@ async def test_process_uploaded_file_parses_gpx_from_authenticated_object(
 
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1532,7 +1745,7 @@ async def test_process_uploaded_file_recovers_key_from_public_url(
         cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1590,7 +1803,7 @@ async def test_process_uploaded_file_persists_activity(auth_service_fixture, mon
         cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1662,7 +1875,7 @@ async def test_process_uploaded_file_parses_tcx_with_hrv_metadata(
         cookie_value = cookie_header.split("coach_browser_session=")[1].split(";")[0]
         token_response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": cookie_value},
+            headers=browser_session_cookie_header(cookie_value),
         )
         token_body = token_response.json()
 
@@ -1741,7 +1954,7 @@ async def test_oauth_authorize_redirects_to_consent_when_grant_missing(
                 "code_challenge": "challenge-1",
                 "code_challenge_method": "S256",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -1807,7 +2020,7 @@ async def test_oauth_authorize_invalid_browser_cookie_redirects_to_login(
                 "code_challenge": "challenge-1",
                 "code_challenge_method": "S256",
             },
-            cookies={"coach_browser_session": "not-a-jwt"},
+            headers=browser_session_cookie_header("not-a-jwt"),
             follow_redirects=False,
         )
 
@@ -1841,7 +2054,7 @@ async def test_oauth_authorize_prompt_consent_forces_consent(
                 "code_challenge": "challenge-1",
                 "code_challenge_method": "S256",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -1869,7 +2082,7 @@ async def test_oauth_authorize_decision_denial_redirects_back_with_error(
                 "code_challenge_method": "S256",
                 "decision": "deny",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -1905,7 +2118,7 @@ async def test_oauth_authorize_decision_exchanges_code_refresh_and_revokes(
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
 
@@ -2011,7 +2224,7 @@ async def test_oauth_browser_token_issues_same_origin_bearer(auth_service_fixtur
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(
             "/api/oauth/browser-token",
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
         )
 
     assert response.status_code == 200
@@ -2053,7 +2266,7 @@ async def test_oauth_token_rejects_bad_code_verifier(auth_service_fixture) -> No
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
         code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
@@ -2100,7 +2313,7 @@ async def test_oauth_token_rejects_client_mismatch_without_consuming_code(
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
         code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
@@ -2145,7 +2358,7 @@ async def test_oauth_token_rejects_reused_authorization_code(auth_service_fixtur
                 "code_challenge_method": "S256",
                 "decision": "approve",
             },
-            cookies={"coach_browser_session": browser_cookie},
+            headers=browser_session_cookie_header(browser_cookie),
             follow_redirects=False,
         )
         code = decision_response.headers["location"].split("code=")[1].split("&", 1)[0]
@@ -2287,6 +2500,116 @@ async def test_estimate_thresholds_returns_running_paces() -> None:
     body = response.json()
     assert body["sport"] == "running"
     assert body["lt1_pace_sec_km"] > body["lt2_pace_sec_km"]
+
+
+async def _post_estimate_thresholds(payload: dict[str, object]) -> httpx.Response:
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["profile:read"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/estimate-thresholds", json=payload)
+    api_index.app.dependency_overrides.clear()
+    return response
+
+
+# Maximal efforts for an athlete with CP 280 W and W' 20 kJ: P(t) = CP + W'/t.
+_CP_EFFORTS = [
+    {"duration_seconds": 180, "power_watts": 280 + 20_000 / 180},
+    {"duration_seconds": 480, "power_watts": 280 + 20_000 / 480},
+    {"duration_seconds": 1200, "power_watts": 280 + 20_000 / 1200},
+]
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_fits_critical_power_from_efforts() -> None:
+    response = await _post_estimate_thresholds({"sport": "cycling", "efforts": _CP_EFFORTS})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sport": "cycling",
+        "cp_watts": 280,
+        "w_prime_joules": 20_000,
+        "cp_standard_error_watts": 0,
+        "w_prime_standard_error_joules": 0,
+        "confidence": "high",
+        "ftp_watts": 280,
+        "lt1_watts": 210,
+    }
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_prefers_efforts_over_a_single_test() -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": _CP_EFFORTS,
+            "test_power_watts": 400,
+            "test_duration_minutes": 20,
+        }
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ftp_watts"] == 280
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("efforts", [None, []])
+async def test_estimate_thresholds_without_efforts_keeps_the_single_test_path(
+    efforts: list[object] | None,
+) -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": efforts,
+            "test_power_watts": 300,
+            "test_duration_minutes": 20,
+        }
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"sport": "cycling", "ftp_watts": 285, "lt1_watts": 214}
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_explains_efforts_that_cannot_be_fit() -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": [{"duration_seconds": 300, "power_watts": 350}],
+            "test_power_watts": 300,
+            "test_duration_minutes": 20,
+        }
+    )
+
+    assert response.status_code == 422
+    assert "at least 2" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("power_watts", [0, -300, 3001, 1e308])
+async def test_estimate_thresholds_rejects_out_of_range_effort_power(power_watts: float) -> None:
+    response = await _post_estimate_thresholds(
+        {
+            "sport": "cycling",
+            "efforts": [
+                {"duration_seconds": 300, "power_watts": power_watts},
+                {"duration_seconds": 1200, "power_watts": 300},
+            ],
+        }
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_estimate_thresholds_does_not_fit_power_efforts_for_other_sports() -> None:
+    response = await _post_estimate_thresholds({"sport": "running", "efforts": _CP_EFFORTS})
+
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -2579,7 +2902,17 @@ async def test_update_goals_update_is_scoped_to_authenticated_user_and_sanitized
 
 
 @pytest.mark.asyncio
-async def test_update_goals_complete_allows_omitted_goal(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "complete", "goal_id": "goal-1"},
+        # The coach tool forwards the model's explicit `goal: null` unchanged.
+        {"action": "complete", "goal_id": "goal-1", "goal": None},
+    ],
+)
+async def test_update_goals_complete_allows_omitted_goal(
+    monkeypatch, body: dict[str, object]
+) -> None:
     class GoalRepository(EngineRepository):
         def __init__(self) -> None:
             self.update_call: tuple[str, str, dict[str, object]] | None = None
@@ -2604,7 +2937,7 @@ async def test_update_goals_complete_allows_omitted_goal(monkeypatch) -> None:
         async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
                 "/api/engine/update-goals",
-                json={"action": "complete", "goal_id": "goal-1"},
+                json=body,
             )
     finally:
         restore_override()
@@ -3064,6 +3397,102 @@ async def test_save_recovery_data_defaults_missing_log_date_to_today(monkeypatch
 
     assert response.status_code == 200
     assert repository.saved[0].log_date == datetime.now(UTC).date()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+async def test_save_recovery_data_persists_explicit_source(monkeypatch) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={
+                "entries": [
+                    {"log_date": "2026-05-30", "hrv_ms": 48, "source": "garmin_sidecar"},
+                    {"log_date": "2026-05-31", "hrv_ms": 50, "source": "intervals_sync"},
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert [log.source for log in repository.saved] == ["garmin_sidecar", "intervals_sync"]
+    assert all("source" in log.model_fields_set for log in repository.saved)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+@pytest.mark.parametrize("entry_extra", [{}, {"source": None}])
+async def test_save_recovery_data_omitted_or_null_source_defaults_to_manual_without_overwrite(
+    monkeypatch, entry_extra
+) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, **entry_extra}]},
+        )
+
+    assert response.status_code == 200
+    saved = repository.saved[0]
+    assert saved.source == "manual"
+    # Unset source must stay out of fields_set so the repo never overwrites stored provenance.
+    assert "source" not in saved.model_fields_set
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+@pytest.mark.parametrize(
+    ("raw_source", "stored"),
+    [
+        ("whoop", "whoop"),
+        ("Oura Ring", "oura_ring"),
+        ("  Eight Sleep ", "eight_sleep"),
+        ("Elite-HRV", "elite_hrv"),
+        ("Polar Flow (export)", "polar_flow_export"),
+        ("Ōura", "oura"),
+        ("Suunto Café", "suunto_cafe"),
+        ("İ" * 64, "i" * 64),
+    ],
+)
+async def test_save_recovery_data_accepts_any_source_as_normalized_slug(
+    monkeypatch, raw_source: str, stored: str
+) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, "source": raw_source}]},
+        )
+
+    assert response.status_code == 200
+    assert repository.saved[0].source == stored
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("recovery_user_context")
+@pytest.mark.parametrize("raw_source", ["--", "   ", "!!!", "心拍", "ﬃ" * 22, "x" * 65])
+async def test_save_recovery_data_rejects_unusable_source(monkeypatch, raw_source: str) -> None:
+    repository = RecoveryRepository()
+    monkeypatch.setattr(api_index, "repo", repository)
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/save-recovery-data",
+            json={"entries": [{"log_date": "2026-05-30", "hrv_ms": 48, "source": raw_source}]},
+        )
+
+    assert response.status_code == 422
+    assert repository.saved == []
 
 
 @pytest.mark.asyncio
@@ -4076,6 +4505,76 @@ async def test_generate_plan_structure_persists_explicit_mixed_sport_schedule(
 
 
 @pytest.mark.asyncio
+async def test_generate_plan_structure_accepts_zero_minute_rest_day(monkeypatch) -> None:
+    # Regression: the coach prescribes rest days as 0 minutes / 0 meters; rejecting
+    # zero made every explicit plan containing a rest day fail to save.
+    class RecordingRepository(EngineRepository):
+        def __init__(self) -> None:
+            self.created_plan: TrainingPlan | None = None
+            self.created_workouts: list[PlanWorkout] = []
+
+        async def create_training_plan(self, plan: TrainingPlan) -> TrainingPlan:
+            self.created_plan = plan
+            return plan.model_copy(update={"id": "plan-rest"})
+
+        async def create_plan_workouts(self, workouts: list[PlanWorkout]) -> list[PlanWorkout]:
+            self.created_workouts = workouts
+            return workouts
+
+    recording_repo = RecordingRepository()
+    api_index.app.dependency_overrides[api_index.require_user_context] = lambda: UserContext(
+        user_id="athlete-1",
+        scopes=["plans:write"],
+        client_id="test-client",
+        grant_id="grant-1",
+    )
+    monkeypatch.setattr(api_index, "repo", recording_repo)
+
+    workouts = [
+        {
+            "description": "Easy spin.",
+            "phase_name": "constrained reset",
+            "sport": "cycling",
+            "target_distance_meters": None,
+            "target_duration_minutes": 60,
+            "target_tss": None,
+            "title": "Easy ride",
+            "workout_date": "2026-10-21",
+            "workout_type": "endurance",
+        },
+        {
+            "description": "Full rest day.",
+            "phase_name": "constrained reset",
+            "sport": "rest",
+            "target_distance_meters": 0,
+            "target_duration_minutes": 0,
+            "target_tss": None,
+            "title": "Rest",
+            "workout_date": "2026-10-22",
+            "workout_type": "rest",
+        },
+    ]
+
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/engine/generate-plan-structure",
+            json={"title": "Reset block", "training_model": "performance", "workouts": workouts},
+        )
+
+    api_index.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["workouts_created"] == 2
+    rest = recording_repo.created_workouts[1]
+    assert rest.workout_type == "rest"
+    assert rest.target_duration_minutes == 0
+    assert rest.target_distance_meters == 0
+    assert recording_repo.created_plan is not None
+    assert recording_repo.created_plan.weekly_hours_target == 1.0
+
+
+@pytest.mark.asyncio
 async def test_generate_plan_structure_rejects_unknown_goal_for_explicit_schedule(
     monkeypatch,
 ) -> None:
@@ -4788,7 +5287,7 @@ async def test_process_uploaded_file_returns_404_on_no_such_key(
         token_body = (
             await client.post(
                 "/api/oauth/browser-token",
-                cookies={"coach_browser_session": cookie_value},
+                headers=browser_session_cookie_header(cookie_value),
             )
         ).json()
 
@@ -4830,7 +5329,7 @@ async def test_process_uploaded_zip_returns_404_on_no_such_key(
         token_body = (
             await client.post(
                 "/api/oauth/browser-token",
-                cookies={"coach_browser_session": cookie_value},
+                headers=browser_session_cookie_header(cookie_value),
             )
         ).json()
 

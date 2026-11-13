@@ -10,6 +10,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Every job only checks out code and runs local checks; actions/cache and
+# upload-artifact use the runner's own runtime token, not GITHUB_TOKEN scopes.
+permissions:
+  contents: read
+
 jobs:
   web:
     runs-on: ubuntu-latest
@@ -26,6 +31,8 @@ jobs:
       - run: bun run ast-grep:check
       - run: bun run typecheck
       - run: bun run test
+      - run: bun run cpd
+      - run: bun run knip
 
   ui:
     runs-on: ubuntu-latest
@@ -96,4 +103,5 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ty check
       - run: uv run vulture
+      - run: uv run reachability-check check
       - run: uv run pytest

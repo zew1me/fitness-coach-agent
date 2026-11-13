@@ -1,11 +1,11 @@
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import { siteConfig } from "../lib/site";
 
 import { BrandMark } from "./brand-mark";
 import styles from "./session-loading.module.css";
 
-export function SessionLoading(): JSX.Element {
+export function SessionLoading(): ReactNode {
   return (
     <main aria-busy="true" className={styles.page}>
       <section aria-labelledby="session-loading-title" className={styles.card}>

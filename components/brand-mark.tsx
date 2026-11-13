@@ -1,6 +1,6 @@
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
-export function BrandMark(): JSX.Element {
+export function BrandMark(): ReactNode {
   return (
     <svg
       aria-hidden="true"

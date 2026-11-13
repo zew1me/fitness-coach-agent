@@ -28,6 +28,7 @@ from backend.models.chat import (
 from backend.models.training import (
     Activity,
     ActivityLoadInput,
+    ActivitySource,
     DailyLoadSnapshot,
     Goal,
     PlanWorkout,
@@ -57,6 +58,19 @@ _SCHEMA_CACHE_RETRY_ATTEMPTS = 3
 _SCHEMA_CACHE_RETRY_BACKOFF_SECONDS = 0.5
 
 _T = TypeVar("_T")
+
+
+async def _execute(query: Any) -> Any:
+    """Send a synchronous PostgREST request without blocking the event loop.
+
+    ``SupabaseRepository`` uses the synchronous Supabase client, whose ``execute()``
+    performs blocking HTTP I/O. Every repository method is ``async def`` and runs on
+    the event loop, so calling ``execute()`` inline stalls every other in-flight
+    request on the instance for the duration of the round trip (#283). Running it in
+    a worker thread keeps the loop free; the sync client's connection pool is
+    thread-safe, and errors (including ``PostgRESTAPIError``) propagate unchanged.
+    """
+    return await asyncio.to_thread(query.execute)
 
 
 async def _with_schema_cache_retry(operation: Callable[[], Awaitable[_T]]) -> _T:
@@ -267,6 +281,21 @@ def build_activity_summary_from_fields(activity: Activity) -> dict[str, Any]:
     return summary
 
 
+# Columns the materialization RPCs own (docs/ACTIVITY_MATERIALIZATION_DESIGN.md, "Changes to
+# `activities`"). They are never written from an `Activity` model, which would let a plain
+# `update_activity` reset a superseded or recomposed row to the model defaults.
+_ACTIVITY_PROJECTION_METADATA = frozenset(
+    {
+        "source_count",
+        "field_provenance",
+        "presentation_state",
+        "superseded_by_activity_id",
+        "materialized_at",
+    }
+)
+_INTERVALS_KEY_PREFIX = "intervals:"
+
+
 def _activity_payload(activity: Activity) -> dict[str, Any]:
     activity_to_persist = activity
     if not activity.activity_summary:
@@ -276,7 +305,22 @@ def _activity_payload(activity: Activity) -> dict[str, Any]:
                 "activity_summary": build_activity_summary_from_fields(activity),
             }
         )
-    return activity_to_persist.model_dump(mode="json", exclude={"created_at", "updated_at"})
+    return activity_to_persist.model_dump(
+        mode="json", exclude={"created_at", "updated_at", *_ACTIVITY_PROJECTION_METADATA}
+    )
+
+
+def _activity_source_payload(activity: Activity) -> dict[str, Any]:
+    """The evidence the writer can see; SQL derives and cross-checks everything else.
+
+    ``source_file_key`` is the object key for every format. For Intervals the key is
+    ``intervals:{id}`` and the provider id inside it is the source's ``external_id``.
+    ``create_activity_with_source`` raises ``22023`` if either disagrees with the activity.
+    """
+    external_id: str | None = None
+    if activity.source == "intervals_sync" and activity.source_file_key is not None:
+        external_id = activity.source_file_key.removeprefix(_INTERVALS_KEY_PREFIX) or None
+    return {"object_key": activity.source_file_key, "external_id": external_id}
 
 
 class SupabaseRepository:
@@ -289,7 +333,9 @@ class SupabaseRepository:
 
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         client = self._require_client()
-        response = client.table("athlete_profiles").select("*").eq("user_id", user_id).execute()
+        response = await _execute(
+            client.table("athlete_profiles").select("*").eq("user_id", user_id)
+        )
         rows = response.data or []
         if not rows:
             raise RecordNotFoundError(f"No athlete profile found for user '{user_id}'.")
@@ -298,7 +344,9 @@ class SupabaseRepository:
     async def upsert_athlete_profile(self, profile: AthleteProfile) -> AthleteProfile:
         client = self._require_client()
         payload = profile.model_dump(mode="json", exclude={"created_at", "updated_at"})
-        response = client.table("athlete_profiles").upsert(payload, on_conflict="user_id").execute()
+        response = await _execute(
+            client.table("athlete_profiles").upsert(payload, on_conflict="user_id")
+        )
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the upserted athlete profile row.")
@@ -309,8 +357,8 @@ class SupabaseRepository:
         client = self._require_client()
         safe_fields = _safe_athlete_profile_fields(fields)
         safe_fields["user_id"] = user_id
-        response = (
-            client.table("athlete_profiles").upsert(safe_fields, on_conflict="user_id").execute()
+        response = await _execute(
+            client.table("athlete_profiles").upsert(safe_fields, on_conflict="user_id")
         )
         rows = response.data or []
         if not rows:
@@ -321,31 +369,43 @@ class SupabaseRepository:
 
     async def get_active_thresholds(self, user_id: str) -> list[SportThreshold]:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("sport_thresholds")
             .select("*")
             .eq("user_id", user_id)
             .is_("superseded_at", "null")
             .order("effective_from", desc=True)
-            .execute()
         )
         return [SportThreshold.model_validate(r) for r in (response.data or [])]
+
+    async def confirm_active_threshold(self, user_id: str, sport: str) -> None:
+        """Mark the athlete's active threshold for ``sport`` as user-confirmed."""
+        client = self._require_client()
+        await _execute(
+            client.table("sport_thresholds")
+            .update({"estimation_method": "manual", "confidence": "high", "source": "user"})
+            .eq("user_id", user_id)
+            .eq("sport", sport)
+            .is_("superseded_at", "null")
+        )
 
     async def upsert_sport_threshold(self, threshold: SportThreshold) -> SportThreshold:
         client = self._require_client()
         # Supersede existing active threshold for this sport
-        client.table("sport_thresholds").update(
-            {"superseded_at": datetime.now(UTC).isoformat()}
-        ).eq("user_id", threshold.user_id).eq("sport", threshold.sport).is_(
-            "superseded_at", "null"
-        ).execute()
+        await _execute(
+            client.table("sport_thresholds")
+            .update({"superseded_at": datetime.now(UTC).isoformat()})
+            .eq("user_id", threshold.user_id)
+            .eq("sport", threshold.sport)
+            .is_("superseded_at", "null")
+        )
 
         payload = threshold.model_dump(
             mode="json", exclude={"created_at", "updated_at", "superseded_at"}
         )
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = client.table("sport_thresholds").insert(payload).execute()
+        response = await _execute(client.table("sport_thresholds").insert(payload))
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted sport threshold row.")
@@ -355,14 +415,13 @@ class SupabaseRepository:
         self, user_id: str, sport: str
     ) -> ThresholdRecalibrationCandidate | None:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("threshold_recalibration_candidates")
             .select("*")
             .eq("user_id", user_id)
             .eq("sport", sport)
             .order("generated_at", desc=True)
             .limit(1)
-            .execute()
         )
         rows = response.data or []
         return ThresholdRecalibrationCandidate.model_validate(rows[0]) if rows else None
@@ -374,9 +433,9 @@ class SupabaseRepository:
         payload = candidate.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = client.rpc(
-            "create_recalibration_candidate_atomic", {"p_candidate": payload}
-        ).execute()
+        response = await _execute(
+            client.rpc("create_recalibration_candidate_atomic", {"p_candidate": payload})
+        )
         # Declared `returns public.threshold_recalibration_candidates` (a single composite
         # row), so PostgREST returns a JSON object, not an array — same shape contract as
         # `create_training_plan_atomic`. Indexing it as a list raises `KeyError: 0`.
@@ -389,12 +448,11 @@ class SupabaseRepository:
         self, user_id: str, candidate_id: str
     ) -> ThresholdRecalibrationCandidate | None:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("threshold_recalibration_candidates")
             .select("*")
             .eq("id", candidate_id)
             .eq("user_id", user_id)
-            .execute()
         )
         rows = response.data or []
         return ThresholdRecalibrationCandidate.model_validate(rows[0]) if rows else None
@@ -415,15 +473,17 @@ class SupabaseRepository:
             )
             if not threshold_payload.get("id"):
                 threshold_payload["id"] = str(uuid4())
-        response = client.rpc(
-            "decide_recalibration_candidate_atomic",
-            {
-                "p_user_id": user_id,
-                "p_candidate_id": candidate_id,
-                "p_status": status,
-                "p_threshold": threshold_payload,
-            },
-        ).execute()
+        response = await _execute(
+            client.rpc(
+                "decide_recalibration_candidate_atomic",
+                {
+                    "p_user_id": user_id,
+                    "p_candidate_id": candidate_id,
+                    "p_status": status,
+                    "p_threshold": threshold_payload,
+                },
+            )
+        )
         result = response.data
         if not result:
             raise RecordNotFoundError("Recalibration candidate not found.")
@@ -438,43 +498,90 @@ class SupabaseRepository:
     # ── Activities ────────────────────────────────────────────
 
     async def create_activity(self, activity: Activity) -> Activity:
-        client = self._require_client()
-        payload = _activity_payload(activity)
-        if not payload.get("id"):
-            payload["id"] = str(uuid4())
-        response = client.table("activities").insert(payload).execute()
-        rows = response.data or []
-        if not rows:
-            raise RuntimeError("Supabase did not return the inserted activity row.")
-        return Activity.model_validate(rows[0])
+        """Insert an activity; an Intervals activity that is already synced is returned as-is.
 
-    async def create_intervals_activity(self, activity: Activity) -> Activity | None:
-        """Insert an Intervals activity, returning ``None`` when it was already synced."""
+        Overlapping syncs, or a re-pull after lost state, legitimately offer the same Intervals
+        activity twice, so that case is idempotent rather than an error.
+        """
+        created = await self._create_activity_with_source(activity)
+        if created is not None:
+            return created
+        existing = await self._get_synced_intervals_activity(activity)
+        if existing is None:
+            raise RuntimeError("Supabase did not return the inserted activity row.")
+        return existing
+
+    async def _get_synced_intervals_activity(self, activity: Activity) -> Activity | None:
+        if activity.source != "intervals_sync" or not activity.source_file_key:
+            return None
         client = self._require_client()
-        payload = _activity_payload(activity)
-        if not payload.get("id"):
-            payload["id"] = str(uuid4())
-        response = (
+        response = await _execute(
             client.table("activities")
-            .upsert(
-                payload,
-                on_conflict="user_id,intervals_source_file_key",
-                ignore_duplicates=True,
-            )
-            .execute()
+            .select("*")
+            .eq("user_id", activity.user_id)
+            .eq("source", "intervals_sync")
+            .eq("source_file_key", activity.source_file_key)
+            .limit(1)
         )
         rows = response.data or []
         return Activity.model_validate(rows[0]) if rows else None
 
+    async def create_intervals_activity(self, activity: Activity) -> Activity | None:
+        """Insert an Intervals activity, returning ``None`` when it was already synced."""
+        return await self._create_activity_with_source(activity)
+
+    async def _create_activity_with_source(self, activity: Activity) -> Activity | None:
+        """Insert an activity and its bootstrap source atomically via the shadow-writer RPC.
+
+        The RPC returns NULL, not an error, when an Intervals activity with the same
+        ``(user_id, intervals_source_file_key)`` already exists.
+        """
+        client = self._require_client()
+        payload = _activity_payload(activity)
+        if not payload.get("id"):
+            payload["id"] = str(uuid4())
+        response = await _execute(
+            client.rpc(
+                "create_activity_with_source",
+                {
+                    "p_user_id": activity.user_id,
+                    "p_activity": payload,
+                    "p_source": _activity_source_payload(activity),
+                },
+            )
+        )
+        row = response.data
+        # A function declared `returns public.activities` that returns SQL NULL reaches us as
+        # an object whose columns are all null (PostgREST does not emit JSON null for it), so
+        # a missing primary key is the "already synced" signal, not just an empty body.
+        if not row or row.get("id") is None:
+            return None
+        return Activity.model_validate(row)
+
+    async def list_live_activity_sources(
+        self, user_id: str, activity_id: str
+    ) -> list[ActivitySource]:
+        """Non-retired sources of one activity, oldest first (ties broken by id)."""
+        client = self._require_client()
+        response = await _execute(
+            client.table("activity_sources")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("activity_id", activity_id)
+            .is_("retired_at", "null")
+            .order("created_at")
+            .order("id")
+        )
+        return [ActivitySource.model_validate(r) for r in (response.data or [])]
+
     async def get_activity(self, user_id: str, activity_id: str) -> Activity:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("activities")
             .select("*")
             .eq("user_id", user_id)
             .eq("id", activity_id)
             .limit(1)
-            .execute()
         )
         rows = response.data or []
         if not rows:
@@ -488,12 +595,11 @@ class SupabaseRepository:
             raise ValueError("Activity id is required for update.")
         client = self._require_client()
         payload = _activity_payload(activity)
-        response = (
+        response = await _execute(
             client.table("activities")
             .update(payload)
             .eq("user_id", activity.user_id)
             .eq("id", activity.id)
-            .execute()
         )
         rows = response.data or []
         if not rows:
@@ -514,21 +620,20 @@ class SupabaseRepository:
             query = query.eq("sport", sport)
         if since:
             query = query.gte("activity_date", since.isoformat())
-        response = query.order("activity_date", desc=True).limit(limit).execute()
+        response = await _execute(query.order("activity_date", desc=True).limit(limit))
         return [Activity.model_validate(r) for r in (response.data or [])]
 
     async def list_activities_between(
         self, user_id: str, *, start: date, end: date
     ) -> list[Activity]:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("activities")
             .select("*")
             .eq("user_id", user_id)
             .gte("activity_date", start.isoformat())
             .lte("activity_date", end.isoformat())
             .order("activity_date")
-            .execute()
         )
         return [Activity.model_validate(r) for r in (response.data or [])]
 
@@ -566,7 +671,7 @@ class SupabaseRepository:
                 query = query.eq("sport", sport)
             if cursor is not None:
                 query = query.gt("id", str(cursor))
-            response = await asyncio.to_thread(query.execute)
+            response = await _execute(query)
             rows = response.data or []
             if not rows:
                 return daily_tss
@@ -594,7 +699,7 @@ class SupabaseRepository:
             )
             if last_key is not None:
                 query = query.gt("source_file_key", last_key)
-            response = query.execute()
+            response = await _execute(query)
             rows = response.data or []
             page_keys = [
                 key for row in rows if isinstance((key := row.get("source_file_key")), str) and key
@@ -620,9 +725,11 @@ class SupabaseRepository:
                 if isinstance(s["snapshot_date"], date)
                 else s["snapshot_date"]
             )
-        client.table("daily_load_snapshots").upsert(
-            snapshots, on_conflict="user_id,snapshot_date,sport"
-        ).execute()
+        await _execute(
+            client.table("daily_load_snapshots").upsert(
+                snapshots, on_conflict="user_id,snapshot_date,sport"
+            )
+        )
 
     async def get_latest_load(
         self, user_id: str, sport: str | None = None
@@ -630,7 +737,7 @@ class SupabaseRepository:
         client = self._require_client()
         query = client.table("daily_load_snapshots").select("*").eq("user_id", user_id)
         query = query.is_("sport", "null") if sport is None else query.eq("sport", sport)
-        response = query.order("snapshot_date", desc=True).limit(1).execute()
+        response = await _execute(query.order("snapshot_date", desc=True).limit(1))
         rows = response.data or []
         if not rows:
             return None
@@ -642,11 +749,10 @@ class SupabaseRepository:
         client = self._require_client()
         query = client.table("daily_load_snapshots").select("*").eq("user_id", user_id)
         query = query.is_("sport", "null") if sport is None else query.eq("sport", sport)
-        response = (
+        response = await _execute(
             query.lte("snapshot_date", on_date.isoformat())
             .order("snapshot_date", desc=True)
             .limit(1)
-            .execute()
         )
         rows = response.data or []
         if not rows:
@@ -660,7 +766,7 @@ class SupabaseRepository:
         payload = goal.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = client.table("goals").insert(payload).execute()
+        response = await _execute(client.table("goals").insert(payload))
         rows = response.data or []
         if not rows:
             raise RuntimeError("Supabase did not return the inserted goal row.")
@@ -668,20 +774,19 @@ class SupabaseRepository:
 
     async def list_active_goals(self, user_id: str) -> list[Goal]:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("goals")
             .select("*")
             .eq("user_id", user_id)
             .eq("status", "active")
             .order("priority")
-            .execute()
         )
         return [Goal.model_validate(r) for r in (response.data or [])]
 
     async def get_goal(self, goal_id: str, user_id: str) -> Goal:
         client = self._require_client()
-        response = (
-            client.table("goals").select("*").eq("id", goal_id).eq("user_id", user_id).execute()
+        response = await _execute(
+            client.table("goals").select("*").eq("id", goal_id).eq("user_id", user_id)
         )
         rows = response.data or []
         if not rows:
@@ -690,8 +795,8 @@ class SupabaseRepository:
 
     async def update_goal(self, goal_id: str, user_id: str, updates: dict) -> Goal:
         client = self._require_client()
-        response = (
-            client.table("goals").update(updates).eq("id", goal_id).eq("user_id", user_id).execute()
+        response = await _execute(
+            client.table("goals").update(updates).eq("id", goal_id).eq("user_id", user_id)
         )
         rows = response.data or []
         if not rows:
@@ -703,14 +808,16 @@ class SupabaseRepository:
     ) -> Goal:
         """Atomically merge course-profile notes without overwriting sibling keys."""
         client = self._require_client()
-        response = client.rpc(
-            "update_goal_course_profile_notes_atomic",
-            {
-                "p_goal_id": goal_id,
-                "p_user_id": user_id,
-                "p_notes": notes,
-            },
-        ).execute()
+        response = await _execute(
+            client.rpc(
+                "update_goal_course_profile_notes_atomic",
+                {
+                    "p_goal_id": goal_id,
+                    "p_user_id": user_id,
+                    "p_notes": notes,
+                },
+            )
+        )
         row = response.data
         if not row:
             raise RecordNotFoundError(f"Goal '{goal_id}' not found.")
@@ -731,8 +838,8 @@ class SupabaseRepository:
             payload.pop("source", None)
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = (
-            client.table("recovery_logs").upsert(payload, on_conflict="user_id,log_date").execute()
+        response = await _execute(
+            client.table("recovery_logs").upsert(payload, on_conflict="user_id,log_date")
         )
         rows = response.data or []
         if not rows:
@@ -746,7 +853,7 @@ class SupabaseRepository:
         query = client.table("recovery_logs").select("*").eq("user_id", user_id)
         if since:
             query = query.gte("log_date", since.isoformat())
-        response = query.order("log_date", desc=True).limit(limit).execute()
+        response = await _execute(query.order("log_date", desc=True).limit(limit))
         return [RecoveryLog.model_validate(r) for r in (response.data or [])]
 
     # ── Schedule ──────────────────────────────────────────────
@@ -756,8 +863,8 @@ class SupabaseRepository:
         payload = schedule.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = (
-            client.table("schedule_availability").upsert(payload, on_conflict="user_id").execute()
+        response = await _execute(
+            client.table("schedule_availability").upsert(payload, on_conflict="user_id")
         )
         rows = response.data or []
         if not rows:
@@ -766,8 +873,8 @@ class SupabaseRepository:
 
     async def get_schedule(self, user_id: str) -> ScheduleAvailability | None:
         client = self._require_client()
-        response = (
-            client.table("schedule_availability").select("*").eq("user_id", user_id).execute()
+        response = await _execute(
+            client.table("schedule_availability").select("*").eq("user_id", user_id)
         )
         rows = response.data or []
         return ScheduleAvailability.model_validate(rows[0]) if rows else None
@@ -777,10 +884,8 @@ class SupabaseRepository:
         payload = override.model_dump(mode="json", exclude={"created_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = (
-            client.table("schedule_overrides")
-            .upsert(payload, on_conflict="user_id,override_date")
-            .execute()
+        response = await _execute(
+            client.table("schedule_overrides").upsert(payload, on_conflict="user_id,override_date")
         )
         rows = response.data or []
         if not rows:
@@ -792,14 +897,13 @@ class SupabaseRepository:
     ) -> list[ScheduleOverride]:
         """Dated availability overrides in ``[start, end]`` (issue #232)."""
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("schedule_overrides")
             .select("*")
             .eq("user_id", user_id)
             .gte("override_date", start.isoformat())
             .lte("override_date", end.isoformat())
             .order("override_date")
-            .execute()
         )
         return [ScheduleOverride.model_validate(r) for r in (response.data or [])]
 
@@ -810,7 +914,7 @@ class SupabaseRepository:
         payload = plan.model_dump(mode="json", exclude={"created_at", "updated_at"})
         if not payload.get("id"):
             payload["id"] = str(uuid4())
-        response = client.rpc("create_training_plan_atomic", {"p_plan": payload}).execute()
+        response = await _execute(client.rpc("create_training_plan_atomic", {"p_plan": payload}))
         # ``create_training_plan_atomic`` is declared ``returns public.training_plans``
         # (a single composite row, not ``setof``), so PostgREST returns the inserted row
         # as a JSON *object*, not an array. Treating it as a list (``rows[0]``) raised
@@ -822,29 +926,34 @@ class SupabaseRepository:
 
     async def update_training_plan_status(self, user_id: str, plan_id: str, status: str) -> None:
         client = self._require_client()
-        client.table("training_plans").update({"status": status}).eq("user_id", user_id).eq(
-            "id", plan_id
-        ).execute()
+        await _execute(
+            client.table("training_plans")
+            .update({"status": status})
+            .eq("user_id", user_id)
+            .eq("id", plan_id)
+        )
 
     async def update_training_plan_generation_context(
         self, user_id: str, plan_id: str, generation_context: dict[str, Any]
     ) -> None:
         """Persist a fresh ``generation_context`` (e.g. append an adjust audit entry)."""
         client = self._require_client()
-        client.table("training_plans").update({"generation_context": generation_context}).eq(
-            "user_id", user_id
-        ).eq("id", plan_id).execute()
+        await _execute(
+            client.table("training_plans")
+            .update({"generation_context": generation_context})
+            .eq("user_id", user_id)
+            .eq("id", plan_id)
+        )
 
     async def get_active_plan(self, user_id: str) -> TrainingPlan | None:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("training_plans")
             .select("*")
             .eq("user_id", user_id)
             .eq("status", "active")
             .order("created_at", desc=True)
             .limit(1)
-            .execute()
         )
         rows = response.data or []
         return TrainingPlan.model_validate(rows[0]) if rows else None
@@ -857,7 +966,7 @@ class SupabaseRepository:
             if not p.get("id"):
                 p["id"] = str(uuid4())
             payloads.append(p)
-        response = client.table("plan_workouts").insert(payloads).execute()
+        response = await _execute(client.table("plan_workouts").insert(payloads))
         return [PlanWorkout.model_validate(r) for r in (response.data or [])]
 
     async def delete_future_scheduled_workouts(
@@ -872,7 +981,7 @@ class SupabaseRepository:
         left alone. Returns the number of rows removed.
         """
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("plan_workouts")
             .delete()
             .eq("user_id", user_id)
@@ -880,7 +989,6 @@ class SupabaseRepository:
             .eq("status", "scheduled")
             .is_("actual_activity_id", "null")
             .gte("workout_date", from_date.isoformat())
-            .execute()
         )
         return len(response.data or [])
 
@@ -891,18 +999,17 @@ class SupabaseRepository:
         query = client.table("plan_workouts").select("*").eq("plan_id", plan_id)
         if since:
             query = query.gte("workout_date", since.isoformat())
-        response = query.order("workout_date").execute()
+        response = await _execute(query.order("workout_date"))
         return [PlanWorkout.model_validate(r) for r in (response.data or [])]
 
     async def get_plan_workout(self, user_id: str, workout_id: str) -> PlanWorkout:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("plan_workouts")
             .select("*")
             .eq("user_id", user_id)
             .eq("id", workout_id)
             .limit(1)
-            .execute()
         )
         rows = response.data or []
         if not rows:
@@ -924,12 +1031,8 @@ class SupabaseRepository:
         if disallowed:
             raise ValueError(f"Fields not patchable on plan_workouts: {sorted(disallowed)}")
         client = self._require_client()
-        response = (
-            client.table("plan_workouts")
-            .update(fields)
-            .eq("user_id", user_id)
-            .eq("id", workout_id)
-            .execute()
+        response = await _execute(
+            client.table("plan_workouts").update(fields).eq("user_id", user_id).eq("id", workout_id)
         )
         rows = response.data or []
         if not rows:
@@ -955,14 +1058,16 @@ class SupabaseRepository:
         activity_id: str,
     ) -> Activity:
         client = self._require_client()
-        response = client.rpc(
-            "unlink_plan_workout_from_activity",
-            {
-                "p_user_id": user_id,
-                "p_plan_workout_id": workout_id,
-                "p_activity_id": activity_id,
-            },
-        ).execute()
+        response = await _execute(
+            client.rpc(
+                "unlink_plan_workout_from_activity",
+                {
+                    "p_user_id": user_id,
+                    "p_plan_workout_id": workout_id,
+                    "p_activity_id": activity_id,
+                },
+            )
+        )
         row = response.data
         if not row:
             raise RuntimeError("Supabase RPC did not return the unlinked activity row.")
@@ -977,15 +1082,17 @@ class SupabaseRepository:
         completion_source: str,
     ) -> PlanWorkout:
         client = self._require_client()
-        response = client.rpc(
-            "match_plan_workout_to_activity",
-            {
-                "p_user_id": user_id,
-                "p_plan_workout_id": workout_id,
-                "p_activity_id": activity_id,
-                "p_completion_source": completion_source,
-            },
-        ).execute()
+        response = await _execute(
+            client.rpc(
+                "match_plan_workout_to_activity",
+                {
+                    "p_user_id": user_id,
+                    "p_plan_workout_id": workout_id,
+                    "p_activity_id": activity_id,
+                    "p_completion_source": completion_source,
+                },
+            )
+        )
         return self._plan_workout_from_rpc_response(response.data, workout_id)
 
     async def resolve_plan_workout_atomic(
@@ -998,30 +1105,31 @@ class SupabaseRepository:
         source: str,
     ) -> PlanWorkout:
         client = self._require_client()
-        response = client.rpc(
-            "resolve_plan_workout",
-            {
-                "p_user_id": user_id,
-                "p_plan_workout_id": workout_id,
-                "p_outcome": outcome,
-                "p_activity_id": activity_id,
-                "p_source": source,
-            },
-        ).execute()
+        response = await _execute(
+            client.rpc(
+                "resolve_plan_workout",
+                {
+                    "p_user_id": user_id,
+                    "p_plan_workout_id": workout_id,
+                    "p_outcome": outcome,
+                    "p_activity_id": activity_id,
+                    "p_source": source,
+                },
+            )
+        )
         return self._plan_workout_from_rpc_response(response.data, workout_id)
 
     async def list_plan_workouts_between(
         self, user_id: str, *, start: date, end: date
     ) -> list[PlanWorkout]:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("plan_workouts")
             .select("*")
             .eq("user_id", user_id)
             .gte("workout_date", start.isoformat())
             .lte("workout_date", end.isoformat())
             .order("workout_date")
-            .execute()
         )
         return [PlanWorkout.model_validate(r) for r in (response.data or [])]
 
@@ -1031,7 +1139,7 @@ class SupabaseRepository:
         self, user_id: str, *, include_messages: bool = True
     ) -> ChatThread:
         client = self._require_client()
-        response = client.table("chat_threads").select("*").eq("user_id", user_id).execute()
+        response = await _execute(client.table("chat_threads").select("*").eq("user_id", user_id))
         rows = response.data or []
         if rows:
             thread = self._parse_chat_thread(rows[0])
@@ -1043,7 +1151,7 @@ class SupabaseRepository:
                 "created_at": datetime.now(UTC).isoformat(),
                 "updated_at": datetime.now(UTC).isoformat(),
             }
-            created = client.table("chat_threads").insert(payload).execute()
+            created = await _execute(client.table("chat_threads").insert(payload))
             created_rows = created.data or []
             if not created_rows:
                 raise RuntimeError("Supabase did not return the inserted chat thread row.")
@@ -1055,7 +1163,7 @@ class SupabaseRepository:
 
     async def get_chat_thread(self, user_id: str) -> ChatThread | None:
         client = self._require_client()
-        response = client.table("chat_threads").select("*").eq("user_id", user_id).execute()
+        response = await _execute(client.table("chat_threads").select("*").eq("user_id", user_id))
         rows = response.data or []
         if not rows:
             return None
@@ -1063,8 +1171,8 @@ class SupabaseRepository:
 
     async def update_chat_thread_state(self, thread_id: str, state: dict[str, Any]) -> ChatThread:
         client = self._require_client()
-        response = (
-            client.table("chat_threads").update({"state": state}).eq("id", thread_id).execute()
+        response = await _execute(
+            client.table("chat_threads").update({"state": state}).eq("id", thread_id)
         )
         rows = response.data or []
         if not rows:
@@ -1092,8 +1200,8 @@ class SupabaseRepository:
             query = query.or_(
                 f"created_at.lt.{timestamp},and(created_at.eq.{timestamp},id.lt.{message_id})"
             )
-        response = (
-            query.order("created_at", desc=True).order("id", desc=True).limit(limit).execute()
+        response = await _execute(
+            query.order("created_at", desc=True).order("id", desc=True).limit(limit)
         )
         rows = response.data or []
         return list(reversed([self._parse_chat_message(row) for row in rows]))
@@ -1112,16 +1220,11 @@ class SupabaseRepository:
         client = self._require_client()
         caller_supplied_id = message_id is not None
         message_id = message_id or str(uuid4())
-        # `content` is denormalized plain text kept for one release window so
-        # existing readers (exports, search) keep working until the follow-up
-        # drop migration. Derive it from any text parts.
-        content = "".join(str(part.get("text", "")) for part in parts if part.get("type") == "text")
         payload = {
             "id": message_id,
             "thread_id": thread_id,
             "user_id": user_id,
             "role": role,
-            "content": content,
             "parts": parts,
             "attachments": attachments or [],
             "metadata": metadata or {},
@@ -1129,18 +1232,17 @@ class SupabaseRepository:
         }
         query = client.table("chat_messages")
         response = (
-            query.upsert(payload, on_conflict="id", ignore_duplicates=True).execute()
+            await _execute(query.upsert(payload, on_conflict="id", ignore_duplicates=True))
             if caller_supplied_id
-            else query.insert(payload).execute()
+            else await _execute(query.insert(payload))
         )
         rows = response.data or []
         if caller_supplied_id and not rows:
-            existing = (
+            existing = await _execute(
                 client.table("chat_messages")
                 .select("*")
                 .eq("id", message_id)
                 .eq("user_id", user_id)
-                .execute()
             )
             rows = existing.data or []
         if not rows:
@@ -1151,12 +1253,11 @@ class SupabaseRepository:
         self, *, thread_id: str, user_id: str
     ) -> ChatModelState:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("chat_model_states")
             .select("*")
             .eq("thread_id", thread_id)
             .eq("user_id", user_id)
-            .execute()
         )
         rows = response.data or []
         if rows:
@@ -1175,20 +1276,19 @@ class SupabaseRepository:
             "created_at": now,
             "updated_at": now,
         }
-        created = (
-            client.table("chat_model_states")
-            .upsert(payload, on_conflict="thread_id", ignore_duplicates=True)
-            .execute()
+        created = await _execute(
+            client.table("chat_model_states").upsert(
+                payload, on_conflict="thread_id", ignore_duplicates=True
+            )
         )
         created_rows = created.data or []
         if created_rows:
             return self._parse_chat_model_state(created_rows[0])
-        concurrent = (
+        concurrent = await _execute(
             client.table("chat_model_states")
             .select("*")
             .eq("thread_id", thread_id)
             .eq("user_id", user_id)
-            .execute()
         )
         concurrent_rows = concurrent.data or []
         if not concurrent_rows:
@@ -1210,7 +1310,7 @@ class SupabaseRepository:
             "version": replacement.expected_version + 1,
             "updated_at": datetime.now(UTC).isoformat(),
         }
-        response = (
+        response = await _execute(
             client.table("chat_model_states")
             .update(payload)
             .eq("thread_id", thread_id)
@@ -1218,7 +1318,6 @@ class SupabaseRepository:
             .eq("version", replacement.expected_version)
             .eq("lease_id", replacement.lease_id)
             .gt("lease_expires_at", datetime.now(UTC).isoformat())
-            .execute()
         )
         rows = response.data or []
         if not rows:
@@ -1230,13 +1329,12 @@ class SupabaseRepository:
     ) -> ChatTurnLeaseStatus:
         async def _attempt() -> ChatTurnLeaseStatus:
             client = self._require_client()
-            response = (
+            response = await _execute(
                 client.table("chat_model_states")
                 .select("lease_id,lease_expires_at")
                 .eq("thread_id", thread_id)
                 .eq("user_id", user_id)
                 .limit(1)
-                .execute()
             )
             rows = response.data or []
             if not rows:
@@ -1268,7 +1366,7 @@ class SupabaseRepository:
         async def _attempt() -> ChatModelState:
             client = self._require_client()
             now = datetime.now(UTC)
-            response = (
+            response = await _execute(
                 client.table("chat_model_states")
                 .update(
                     {
@@ -1280,7 +1378,6 @@ class SupabaseRepository:
                 .eq("user_id", user_id)
                 .eq("lease_id", lease_id)
                 .gt("lease_expires_at", now.isoformat())
-                .execute()
             )
             rows = response.data or []
             if not rows:
@@ -1313,7 +1410,7 @@ class SupabaseRepository:
                     return current
                 raise ValueError("A chat turn is already in progress.")
             client = self._require_client()
-            response = (
+            response = await _execute(
                 client.table("chat_model_states")
                 .update(
                     {
@@ -1326,7 +1423,6 @@ class SupabaseRepository:
                 .eq("thread_id", thread_id)
                 .eq("user_id", user_id)
                 .eq("version", current.version)
-                .execute()
             )
             rows = response.data or []
             if not rows:
@@ -1339,7 +1435,7 @@ class SupabaseRepository:
         self, *, thread_id: str, user_id: str, lease_id: str
     ) -> ChatModelState:
         client = self._require_client()
-        response = (
+        response = await _execute(
             client.table("chat_model_states")
             .update(
                 {
@@ -1351,7 +1447,6 @@ class SupabaseRepository:
             .eq("thread_id", thread_id)
             .eq("user_id", user_id)
             .eq("lease_id", lease_id)
-            .execute()
         )
         rows = response.data or []
         if not rows:

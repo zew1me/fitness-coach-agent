@@ -98,3 +98,39 @@ export async function mockAuthenticatedSession(page: Page): Promise<void> {
 /** A real 1×1 transparent PNG, base64-encoded — handy for attachment specs. */
 export const ONE_BY_ONE_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+/**
+ * Serve a completed-profile thread of `count` alternating user/assistant
+ * messages ("Message <i>: keep it steady."), tall enough to overflow a phone.
+ * Layer it AFTER `mockAuthenticatedSession` so it overrides the empty thread.
+ */
+export async function mockLongThread(page: Page, count = 40): Promise<void> {
+  await page.route("**/api/chat/thread", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        attachments_enabled: true,
+        next_cursor: null,
+        profile_complete: true,
+        thread: {
+          id: "thread-test-1",
+          user_id: TEST_USER_ID,
+          state: {},
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          messages: Array.from({ length: count }, (_, i) => ({
+            id: `msg-${i}`,
+            role: i % 2 === 0 ? "user" : "assistant",
+            thread_id: "thread-test-1",
+            user_id: TEST_USER_ID,
+            created_at: "2026-01-01T00:00:00Z",
+            metadata: {},
+            attachments: [],
+            parts: [{ type: "text", text: `Message ${i}: keep it steady.` }],
+          })),
+        },
+      }),
+    }),
+  );
+}

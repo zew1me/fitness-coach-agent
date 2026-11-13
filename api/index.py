@@ -7,7 +7,7 @@ import os
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
@@ -1125,6 +1125,12 @@ async def compute_tss_endpoint(
     return {"tss": round(tss, 1)}
 
 
+class MaxEffortInput(BaseModel):
+    duration_seconds: int
+    # The ceiling also keeps non-finite and overflowing values out of the fit arithmetic.
+    power_watts: float = Field(gt=0, le=3000)
+
+
 class EstimateThresholdsRequest(BaseModel):
     sport: str
     # Running
@@ -1133,6 +1139,7 @@ class EstimateThresholdsRequest(BaseModel):
     # Cycling
     test_power_watts: int | None = None
     test_duration_minutes: int | None = None
+    efforts: list[MaxEffortInput] | None = None
 
 
 @app.post("/api/engine/estimate-thresholds")
@@ -1140,9 +1147,25 @@ async def estimate_thresholds_endpoint(
     payload: EstimateThresholdsRequest,
     _: UserContext = Depends(require_user_context),
 ) -> Mapping[str, object]:
+    """Estimate thresholds from a critical power fit, a race result or a single cycling test."""
+    from backend.engine.critical_power import MaxEffort, fit_critical_power
     from backend.engine.thresholds import estimate_cycling_thresholds, estimate_running_thresholds
 
     logger.info("estimate thresholds sport=%s", payload.sport)
+    # Several efforts beat a single test. A failed fit is reported, not replaced by the
+    # single-test path, so the coach can tell the athlete why those efforts did not work.
+    if payload.sport == "cycling" and payload.efforts:
+        try:
+            fit = fit_critical_power(
+                [
+                    MaxEffort(effort.duration_seconds, effort.power_watts)
+                    for effort in payload.efforts
+                ]
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"sport": "cycling", **asdict(fit)}
+
     if payload.sport == "running" and payload.race_time_seconds:
         result = estimate_running_thresholds(
             payload.race_time_seconds,
@@ -1773,9 +1796,22 @@ _IMAGE_SUFFIX_TO_CONTENT_TYPE: Mapping[str, str] = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
-# Lightweight MVP guards. Full zip-bomb / decompression-ratio hardening is deferred.
+# Decompression guards. `zipfile` never returns more than a member's declared
+# `file_size`, but an unbounded `archive.read()` inflates the whole compressed stream
+# before truncating to it, so a forged small size would not bound memory. Members are
+# therefore read in fixed-size chunks (`_read_zip_member_bounded`), which caps each
+# decompress call's output and makes the declared size a real bound on what is
+# inflated (plus at most one chunk of overshoot, which the budget also charges). The
+# per-member cap bounds one read; the archive-wide budget bounds their sum, which the
+# member-count cap alone would let reach 20 x 25 MB = 500 MB (#351).
 _ZIP_MEMBER_MAX_BYTES = 25 * 1024 * 1024
 _ZIP_MAX_PROCESSED_MEMBERS = 20
+_ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+_ZIP_READ_CHUNK_BYTES = 1024 * 1024
+# Only codecs whose chunked reads bound decompressor output on every supported Python.
+# Before 3.13, bzip2/LZMA members inflate a whole compressed chunk per call, so they are
+# declined; real activity exports and archivers use deflate (or store).
+_ZIP_BOUNDED_COMPRESSION_TYPES = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 
 
 @dataclass(frozen=True)
@@ -1789,6 +1825,32 @@ class _ZipMemberResult:
     # the per-archive cap counts attempts, not just successes, so an archive full
     # of corrupt members cannot make us read every one of them.
     counts_as_attempt: bool = False
+
+
+@dataclass(frozen=True)
+class _ZipWorkUsed:
+    """Work already spent on an archive, checked against the caps before each read."""
+
+    attempts: int = 0
+    decompressed_bytes: int = 0
+
+
+def _read_zip_member_bounded(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bytes:
+    """Inflate one member in fixed-size chunks so memory tracks its declared size."""
+    chunks: list[bytes] = []
+    with archive.open(member) as stream:
+        while chunk := stream.read(_ZIP_READ_CHUNK_BYTES):
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _zip_member_inflation_bound(member: zipfile.ZipInfo) -> int:
+    """Most bytes a bounded read of ``member`` can make the decompressor emit.
+
+    Output stops once the declared size is reached, but the final capped decompress
+    call can overshoot it by up to one chunk before truncation, so charge that too.
+    """
+    return member.file_size + _ZIP_READ_CHUNK_BYTES
 
 
 def _is_zip_junk_member(name: str, basename: str) -> bool:
@@ -1916,7 +1978,7 @@ async def _process_zip_member(
     member: zipfile.ZipInfo,
     user_id: str,
     zip_object_key: str,
-    attempted_count: int,
+    used: _ZipWorkUsed,
 ) -> _ZipMemberResult:
     """Filter, read, and convert one member without aborting the archive."""
     if member.is_dir():
@@ -1928,12 +1990,14 @@ async def _process_zip_member(
     activity_content_type = _ACTIVITY_SUFFIX_TO_CONTENT_TYPE.get(suffix)
     image_content_type = _IMAGE_SUFFIX_TO_CONTENT_TYPE.get(suffix)
 
-    # Cheap rejects — junk, unknown type, oversized. We never read these, so they
-    # cost nothing and must not consume the work budget.
+    # Cheap rejects — junk, unknown type, oversized, or a codec whose decompression we
+    # cannot bound. We never read these, so they cost nothing and must not consume the
+    # work budget.
     is_unprocessable = (
         _is_zip_junk_member(member.filename, filename)
         or (activity_content_type is None and image_content_type is None)
         or member.file_size > _ZIP_MEMBER_MAX_BYTES
+        or member.compress_type not in _ZIP_BOUNDED_COMPRESSION_TYPES
     )
     if is_unprocessable:
         return _ZipMemberResult(counts_as_skipped=True)
@@ -1943,11 +2007,22 @@ async def _process_zip_member(
     # so declining an over-budget member costs nothing and does not count as an
     # attempt. Counting only successes would let a corrupt-heavy archive read every
     # member — the cap must count attempts.
-    if attempted_count >= _ZIP_MAX_PROCESSED_MEMBERS:
+    if used.attempts >= _ZIP_MAX_PROCESSED_MEMBERS:
+        return _ZipMemberResult(counts_as_skipped=True)
+    # Same for the archive-wide decompression budget: decline before inflating. A
+    # smaller later member may still fit, so this skips the member, not the archive.
+    charge = _zip_member_inflation_bound(member)
+    if used.decompressed_bytes + charge > _ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES:
+        logger.warning(
+            "zip member exceeds decompression budget user_id=%s used=%d member=%d",
+            user_id,
+            used.decompressed_bytes,
+            charge,
+        )
         return _ZipMemberResult(counts_as_skipped=True)
 
     try:
-        member_bytes = archive.read(member)
+        member_bytes = _read_zip_member_bounded(archive, member)
     except Exception:  # a corrupt member must not abort the whole zip
         logger.warning("failed to read zip member user_id=%s", user_id)
         return _ZipMemberResult(counts_as_skipped=True, counts_as_attempt=True)
@@ -1996,7 +2071,7 @@ async def process_uploaded_zip_endpoint(
 
     processed: list[dict[str, object]] = []
     skipped_count = 0
-    attempted = 0
+    used = _ZipWorkUsed()
     with archive:
         for member in archive.infolist():
             result = await _process_zip_member(
@@ -2004,9 +2079,17 @@ async def process_uploaded_zip_endpoint(
                 member=member,
                 user_id=user_id,
                 zip_object_key=object_key,
-                attempted_count=attempted,
+                used=used,
             )
-            attempted += int(result.counts_as_attempt)
+            # Charge every member we tried to read with the most its bounded read can
+            # inflate, including reads that later failed (e.g. a forged size whose CRC
+            # check fails), so total decompressor output stays within the budget.
+            if result.counts_as_attempt:
+                used = _ZipWorkUsed(
+                    attempts=used.attempts + 1,
+                    decompressed_bytes=used.decompressed_bytes
+                    + _zip_member_inflation_bound(member),
+                )
             skipped_count += int(result.counts_as_skipped)
             if result.entry is not None:
                 processed.append(result.entry)
@@ -2221,6 +2304,11 @@ class SaveRecoveryDataRequest(BaseModel):
 def _recovery_log_from_entry(entry: Mapping[str, object], user_id: str) -> RecoveryLog:
     # user_id is always derived from the bearer token; never trust the client payload.
     fields = {key: value for key, value in entry.items() if key != "user_id"}
+    # The coach tool sends source=null when it has no provenance to report. Drop it so it
+    # stays out of model_fields_set: a new row then takes the column default ('manual') and
+    # a partial update never overwrites the provenance already stored on that day's row.
+    if fields.get("source") is None:
+        fields.pop("source", None)
     if fields.get("log_date") is None:
         fields["log_date"] = datetime.now(UTC).date().isoformat()
     fields["user_id"] = user_id
@@ -2238,7 +2326,11 @@ async def save_recovery_data_endpoint(
     try:
         logs = [_recovery_log_from_entry(entry, user_id) for entry in payload.entries]
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+        # Validator ValueErrors land in ctx as exception objects, which FastAPI cannot
+        # JSON-encode; without include_context=False a bad source would surface as a 500.
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_context=False, include_url=False)
+        ) from exc
 
     saved: list[Mapping[str, object]] = []
     try:
@@ -2521,8 +2613,9 @@ class ExplicitPlanWorkoutRequest(BaseModel):
     description: str | None
     phase_name: str | None
     sport: str = Field(min_length=1)
-    target_distance_meters: float | None = Field(gt=0)
-    target_duration_minutes: int | None = Field(gt=0)
+    # Zero is a real prescription (a rest day is 0 minutes), mirroring target_tss.
+    target_distance_meters: float | None = Field(ge=0)
+    target_duration_minutes: int | None = Field(ge=0)
     target_tss: float | None = Field(ge=0)
     title: str = Field(min_length=1)
     workout_date: date
@@ -3305,10 +3398,7 @@ async def confirm_threshold(
     Sets estimation_method=manual, confidence=high, source=user.
     """
     user_id = user_context.user_id
-    client = repo._require_client()
-    client.table("sport_thresholds").update(
-        {"estimation_method": "manual", "confidence": "high", "source": "user"}
-    ).eq("user_id", user_id).eq("sport", payload.sport).is_("superseded_at", "null").execute()
+    await repo.confirm_active_threshold(user_id, payload.sport)
     logger.info("threshold confirmed user_id=%s sport=%s", user_id, payload.sport)
 
     thresholds = await repo.get_active_thresholds(user_id)

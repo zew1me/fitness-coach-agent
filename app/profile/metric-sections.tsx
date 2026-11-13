@@ -1,4 +1,4 @@
-import type { JSX } from "react";
+import type { ReactNode } from "react";
 
 import {
   confirmProfileMetric,
@@ -69,7 +69,7 @@ const SOURCE_LABELS: Record<ThresholdSource, string> = {
   user: "confirmed",
 };
 
-function SourceBadge({ source }: { source: ThresholdSource }): JSX.Element {
+function SourceBadge({ source }: { source: ThresholdSource }): ReactNode {
   return (
     <span className={`${styles.badge} ${styles[`badge_${source}`]}`}>
       {SOURCE_LABELS[source]}
@@ -86,11 +86,7 @@ type MetricRowProps = {
   tv: ThresholdValue;
 };
 
-function AgeLabel({
-  measured_at,
-}: {
-  measured_at: string | null;
-}): JSX.Element | null {
+function AgeLabel({ measured_at }: { measured_at: string | null }): ReactNode {
   if (!measured_at) return null;
   const stale = isStale(measured_at);
   const text = formatMeasuredAt(measured_at) + (stale ? " · stale" : "");
@@ -104,7 +100,7 @@ function MetricRow({
   tv,
   onConfirm,
   confirming,
-}: MetricRowProps): JSX.Element {
+}: MetricRowProps): ReactNode {
   return (
     <div className={styles.metricRow}>
       <div className={styles.metricLabel}>{label}</div>
@@ -134,7 +130,7 @@ function MetricRow({
 
 // ── Best times ────────────────────────────────────────────────
 
-function BestTimeRow({ bt }: { bt: BestTime }): JSX.Element {
+function BestTimeRow({ bt }: { bt: BestTime }): ReactNode {
   return (
     <div className={styles.metricRow}>
       <div className={styles.metricLabel}>{bt.distance_label}</div>
@@ -146,11 +142,7 @@ function BestTimeRow({ bt }: { bt: BestTime }): JSX.Element {
   );
 }
 
-function BestTimesSection({
-  times,
-}: {
-  times: BestTime[];
-}): JSX.Element | null {
+function BestTimesSection({ times }: { times: BestTime[] }): ReactNode {
   if (times.length === 0) return null;
   return (
     <section className={styles.section}>
@@ -168,7 +160,7 @@ function NutritionSection({
   profile,
 }: {
   profile: AthleteProfile | null;
-}): JSX.Element | null {
+}): ReactNode {
   if (profile === null) return null;
   const restrictions = (profile.dietary_restrictions ?? [])
     .map((restriction) => restriction.trim())
@@ -222,7 +214,7 @@ function SportSection({
   userId,
   onConfirm,
   isConfirming,
-}: SportSectionProps): JSX.Element {
+}: SportSectionProps): ReactNode {
   return (
     <section className={styles.section}>
       <h2 className={styles.sectionTitle}>{title}</h2>
@@ -252,7 +244,7 @@ function PhysiologySection({
   onConfirm,
   isConfirming,
   userId,
-}: PhysiologyProps): JSX.Element | null {
+}: PhysiologyProps): ReactNode {
   if (metrics.max_hr === undefined && metrics.weight === undefined) return null;
   return (
     <section className={styles.section}>
@@ -303,7 +295,7 @@ export function LoadedView({
   confirming,
   profile,
   userId,
-}: LoadedViewProps): JSX.Element {
+}: LoadedViewProps): ReactNode {
   const isConfirming = (key: ConfirmKey): boolean => confirming === key;
   return (
     <>

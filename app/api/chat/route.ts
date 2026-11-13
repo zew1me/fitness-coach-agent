@@ -5,6 +5,7 @@ import { after } from "next/server";
 import {
   CHAT_TURN_LEASE_TTL_SECONDS,
   acquireChatTurnLease,
+  LeaseAcquisitionError,
   LeaseReleaseError,
   releaseChatTurnLease,
 } from "../../../lib/agent/lease-client";
@@ -15,6 +16,7 @@ import {
 } from "../../../lib/agent/message-context";
 import { streamCoachTurn } from "../../../lib/agent/orchestrator";
 import type { AthleteContextBundle } from "../../../lib/agent/types";
+import { createLogger, type Logger } from "../../../lib/logger";
 import {
   chatRequestBodySchema,
   type ChatRequestBody,
@@ -42,6 +44,11 @@ const PERSIST_MESSAGE_TIMEOUT_MS = 10_000;
 const SCREENSHOT_ANALYSIS_TIMEOUT_MS = 180_000;
 const COACH_UNAVAILABLE_MESSAGE =
   "Coach is out to lunch. Please try again later.";
+// Another turn on this thread still holds the lease. It is renewed while that
+// turn streams and lapses CHAT_TURN_LEASE_TTL_SECONDS after it stops, so the
+// athlete can retry within about a minute (#346).
+const COACH_BUSY_MESSAGE =
+  "Coach is deep in contemplation. Please try again in a minute.";
 
 function jsonError(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
@@ -68,6 +75,7 @@ function safeErrorMessage(error: unknown): string {
 
 async function loadBrowserToken(
   request: Request,
+  logger: Logger,
 ): Promise<BrowserTokenResponse | null> {
   const cookie = request.headers.get("cookie");
   if (!cookie?.includes("coach_browser_session=")) {
@@ -83,7 +91,7 @@ async function loadBrowserToken(
     },
   );
   if (!response.ok) {
-    Sentry.logger.error("chat: browser token fetch failed", {
+    logger.error("chat: browser token fetch failed", {
       status: response.status,
     });
     throw new Error(
@@ -96,6 +104,7 @@ async function loadBrowserToken(
 async function loadAthleteContext(
   request: Request,
   token: BrowserTokenResponse,
+  logger: Logger,
 ): Promise<AthleteContextBundle> {
   const response = await fetch(
     `${requestOrigin(request)}/api/engine/get-athlete-summary`,
@@ -112,7 +121,7 @@ async function loadAthleteContext(
   );
 
   if (!response.ok) {
-    Sentry.logger.error("chat: athlete context load failed", {
+    logger.error("chat: athlete context load failed", {
       status: response.status,
     });
     throw new Error("Unable to load athlete context.");
@@ -153,6 +162,7 @@ async function persistUserMessage(
   request: Request,
   token: BrowserTokenResponse,
   turn: LatestUserTurn,
+  logger: Logger,
 ): Promise<void> {
   if (turn.parts.length === 0) return;
   try {
@@ -175,12 +185,12 @@ async function persistUserMessage(
       },
     );
     if (!response.ok) {
-      Sentry.logger.error("chat: persist user message failed", {
+      logger.error("chat: persist user message failed", {
         status: response.status,
       });
     }
   } catch (error) {
-    Sentry.logger.error("chat: persist user message error", {
+    logger.error("chat: persist user message error", {
       error: safeErrorMessage(error),
     });
   }
@@ -190,6 +200,7 @@ async function extractImageContent(
   request: Request,
   token: BrowserTokenResponse,
   imageUrl: string,
+  logger: Logger,
 ): Promise<{ data: unknown; screenshot_type: string } | null> {
   try {
     const response = await fetch(
@@ -222,7 +233,7 @@ async function extractImageContent(
           : "unknown",
     };
   } catch (error) {
-    Sentry.logger.warn("chat: screenshot extraction failed", {
+    logger.warn("chat: screenshot extraction failed", {
       error: safeErrorMessage(error),
     });
     return null;
@@ -232,6 +243,7 @@ async function extractImageContent(
 async function handleChatRequest(
   request: Request,
   token: BrowserTokenResponse,
+  logger: Logger,
 ): Promise<Response> {
   let parsedBody: ChatRequestBody;
   try {
@@ -279,20 +291,20 @@ async function handleChatRequest(
           signal: request.signal,
           ttlSeconds: CHAT_TURN_LEASE_TTL_SECONDS,
         });
-  Sentry.logger.info("chat turn start", {
+  logger.info("chat turn start", {
     user_id: token.user_id,
     message_count: messages.length,
     context_strategy: strategy,
   });
   const modelMessages = await appendImageExtractionsToMessages(
     convertUnsupportedFilePartsToText(selectMessagesForModel(messages)),
-    ({ imageUrl }) => extractImageContent(request, token, imageUrl),
+    ({ imageUrl }) => extractImageContent(request, token, imageUrl, logger),
   );
   const latestUserTurn = summarizeLatestUserTurn(messages);
   if (latestUserTurn !== null) {
-    await persistUserMessage(request, token, latestUserTurn);
+    await persistUserMessage(request, token, latestUserTurn, logger);
   }
-  const context = await loadAthleteContext(request, token);
+  const context = await loadAthleteContext(request, token, logger);
 
   const tavilyApiKey = process.env["TAVILY_API_KEY"];
   const tavilyMcpUrl = tavilyApiKey
@@ -306,6 +318,7 @@ async function handleChatRequest(
     context,
     extraHeaders,
     leaseId,
+    logger,
     messages: modelMessages,
     messagesAreModelSelected: true,
     useDurableSession: strategy !== "full_history",
@@ -317,18 +330,18 @@ async function handleChatRequest(
 }
 
 export async function POST(request: Request): Promise<Response> {
+  // Route handlers cannot take extra arguments, so the default Sentry + console
+  // logger is built here and passed down; every helper below receives it.
+  const logger = createLogger();
   after(async () => {
     try {
       const flushed = await Sentry.flush(5000);
       if (!flushed) {
-        console.warn("[chat] Sentry.flush timed out; some spans may be lost");
-        Sentry.logger.warn(
-          "chat: Sentry.flush timed out; some spans may be lost",
-        );
+        // The console sink is what still reaches Vercel when this fires.
+        logger.warn("chat: Sentry.flush timed out; some spans may be lost");
       }
     } catch (error) {
-      console.error("[chat] Sentry.flush threw unexpectedly:", error);
-      Sentry.logger.error("chat: Sentry.flush threw unexpectedly", {
+      logger.error("chat: Sentry.flush threw unexpectedly", {
         error: String(error),
       });
     }
@@ -336,24 +349,28 @@ export async function POST(request: Request): Promise<Response> {
 
   let token: BrowserTokenResponse | null;
   try {
-    token = await loadBrowserToken(request);
+    token = await loadBrowserToken(request, logger);
   } catch (error) {
-    console.error("[chat] loadBrowserToken failed", {
-      message: error instanceof Error ? error.message : String(error),
+    logger.error("chat: loadBrowserToken failed", {
+      error: safeErrorMessage(error),
       stack: error instanceof Error ? error.stack : undefined,
     });
     return jsonError(AUTH_UNAVAILABLE_MESSAGE, 503);
   }
 
   if (token === null) {
-    Sentry.logger.warn("chat: missing browser session cookie");
+    logger.warn("chat: missing browser session cookie");
     return jsonError("Missing browser session cookie.", 401);
   }
 
   try {
-    return await handleChatRequest(request, token);
+    return await handleChatRequest(request, token, logger);
   } catch (error) {
-    Sentry.logger.error("chat: POST error", { error: safeErrorMessage(error) });
+    if (error instanceof LeaseAcquisitionError && error.status === 409) {
+      logger.info("chat: turn lease already held");
+      return new Response(COACH_BUSY_MESSAGE, { status: 409 });
+    }
+    logger.error("chat: POST error", { error: safeErrorMessage(error) });
     return new Response(COACH_UNAVAILABLE_MESSAGE, { status: 503 });
   }
 }

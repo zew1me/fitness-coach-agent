@@ -27,6 +27,10 @@
 - `20260816191358_rls_and_security.sql` — RLS coverage for public tables and a fixed search path for `set_updated_at`
 - `20260920021259_restore_service_role_table_privileges.sql` — restores PostgREST DML privileges required by server-side repositories after a fresh bootstrap
 - `20261011183239_load_snapshot_null_identity.sql` — deduplicates aggregate load snapshots and makes `(user_id, snapshot_date, sport)` unique with NULLs treated as equal
+- `20261027190000_activity_sources.sql` — expand step for per-input activity evidence: `activity_ingest_formats`, `activity_sources`, `load_rebuild_pending`, new `activities` projection columns, a temporary legacy-insert trigger, and the `create_activity_with_source` shadow-writer RPC (#533 PR A)
+- `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
+- `20261101120000_recovery_logs_source_free_form.sql` — replaces the vendor list in `recovery_logs_source_check` with a snake_case slug format check so wellness provenance is open-ended (#428)
+- `20261104061335_activity_sources_backfill.sql` — restart-safe historical activity-source capture, with a service-role-only progress record and operator RPCs (#533 PR B)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -592,3 +596,216 @@ access model explicit and reproducible instead of relying on environment drift.
 **All environments:** Apply via `supabase db push` (or `bun run db:reset`
 locally). This is privilege metadata only; it does not rewrite application data
 or weaken RLS/browser policies.
+
+## 20261027190000 — activity sources: expand migration and shadow writer (2026-10-27)
+
+**File:** `supabase/migrations/20261027190000_activity_sources.sql`
+
+**Change:** Creates `activity_ingest_formats` (eight seeded fidelity ranks),
+`activity_sources` (one row per ingested input, evidence columns immutable by
+trigger, composite `(activity_id, user_id)` foreign keys, content-hash and
+known-provider external-id partial unique indexes, a non-unique fingerprint
+index, and a one-live-override index) and `load_rebuild_pending` (unused until a
+later phase). Adds `activities.unique (id, user_id)` plus the defaulted
+projection columns `source_count`, `field_provenance`, `presentation_state`,
+`superseded_by_activity_id` and `materialized_at`. Adds shared SQL helpers (a
+total legacy-source mapper that raises on any unmapped value, an Intervals
+external-id parser, the payload fingerprint, the projection-fields extractor and
+the bootstrap-source builder), a temporary `AFTER INSERT` trigger on `activities`
+that captures a bootstrap source for any legacy direct insert (logging a fixed
+`RAISE LOG` line), and the `create_activity_with_source(p_user_id, p_activity,
+p_source)` service-role RPC that inserts an activity and its bootstrap source
+atomically (returning NULL for an Intervals duplicate).
+
+**Why (issue #533, design #397/#445):** Activities are stored exactly as
+ingested, so one workout arriving twice is two rows. Phase 1 of
+`docs/ACTIVITY_MATERIALIZATION_DESIGN.md` makes every activity carry exactly one
+live source before any reader depends on it. This is PR A of three: the
+resumable backfill (PR B) and the contract step (PR C) are separate and ordered.
+Presentation behaviour is unchanged and shadow sources have a NULL
+`content_hash`, so nothing introduced here can reject an upload.
+
+**Security note:** `activity_sources` and `load_rebuild_pending` have owner-read
+RLS and `SELECT` for `authenticated`; all writes are `service_role` only.
+`activity_ingest_formats` is readable by `authenticated` and `service_role` and
+has `INSERT`/`UPDATE`/`DELETE` revoked from every application role, so the
+mapping changes only by migration. The helper functions and
+`create_activity_with_source` are revoked from `public`, `anon` and
+`authenticated` and granted to `service_role`. The legacy trigger function is
+`security definer` because browser roles can still insert into `activities`
+through RLS but cannot write `activity_sources`. The transaction-local marker the
+RPC sets is cutover coordination, not an authorization boundary.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally), preview then production; requires PostgreSQL 15+ (column-list
+`ON DELETE SET NULL`, `NULLS NOT DISTINCT`). Adding `unique (id, user_id)` builds
+an index on `activities` and briefly blocks writes; the new columns have constant
+defaults and do not rewrite the table. The migration does not backfill existing
+rows: until PR B runs, historical activities have no source. Do not deploy
+application code that calls `create_activity_with_source` before this migration
+is applied. Per-environment backfill and contract status will be recorded here by
+PR B and PR C.
+
+**Preview deployment repair (2026-11-01, PR #534):** Sentry issue `7822499376`
+reported `PGRST202` from `/api/engine/process-uploaded-file` on the PR preview.
+The preview project `psbteexygkspyotkyflc` (`fitness-coach-agent-preview`) was
+missing this migration; the CLI migration list and push dry run confirmed it was
+the only pending migration. Applied it with `supabase db push --linked
+--skip-vault` after verifying the linked project and obtaining approval. The
+remote migration list now includes `20261027190000`, and a subsequent dry run
+reports no pending migrations. Catalog checks confirmed the RPC's named arguments
+and service-role-only execution grants; the live PostgREST OpenAPI schema also
+exposes the RPC and `activity_sources`. No activity was inserted for verification.
+Production was not inspected or changed; this is not a production-apply record.
+Historical-source backfill and the contract step remain pending.
+
+For a recurrence, first verify the failing deployment's Supabase target, then
+check that environment's migration list and the catalog signature
+`public.create_activity_with_source(text,jsonb,jsonb)`. Apply a missing migration
+only after reviewing the dry run and approving the target. If the function exists
+but PostgREST still cannot find it, investigate its grants and schema cache rather
+than replaying the migration. Do not fall back to an untracked direct activity
+insert: that would discard source capture on an unmigrated database.
+
+## 20261028090000 — one-to-one plan workout/activity link (2026-10-28)
+
+**File:** `supabase/migrations/20261028090000_plan_workout_link_one_to_one.sql`
+
+**Change:** Replaces `match_plan_workout_to_activity` and `resolve_plan_workout`:
+
+- Both refuse with SQLSTATE `22023` to link an activity that a different workout already claims,
+  whether the claim is held by `plan_workouts.actual_activity_id` or by
+  `activities.planned_workout_id`. Nothing is written.
+- The clear-prior branches only null a prior activity's `planned_workout_id` while it still
+  points at this workout, and they now run before the new link is written.
+- `resolve_plan_workout(..., 'skipped', p_activity_id)` no longer writes the activity's reverse
+  link. Before this, a skip that named an activity pointed the activity at a workout whose
+  `actual_activity_id` had just been cleared.
+
+It also adds partial unique indexes `plan_workouts_actual_activity_unique` and
+`activities_planned_workout_unique` (each `where ... is not null`). Grants are restated
+unchanged: `service_role` only.
+
+**Why:** Issue #467. Neither link column had a uniqueness constraint, and the RPCs did not check
+the target activity. `resolve_plan_workout` is model-facing, so linking an already-linked activity
+to a second workout credited two completed workouts for one activity. It also left the first
+workout stuck: `unlink_plan_workout_from_activity` correctly refuses a pair whose reverse link has
+moved on. The only remaining fix, skipping the first workout, then cleared the other workout's
+reverse link. The auto-matcher was never affected because it skips linked rows on both sides.
+
+**Ordering note:** With the unique index on `activities.planned_workout_id`, reassigning a
+workout to a new activity must clear the old activity's link before setting the new one, or the
+statement fails with `23505`. Both RPCs do this.
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset` locally). No data
+rewrite. Hosted data was checked on 2026-09-01: neither link was claimed twice in preview or
+production. Before applying, re-run these checks. Both must return no rows:
+
+```sql
+select actual_activity_id from plan_workouts
+where actual_activity_id is not null group by 1 having count(*) > 1;
+select planned_workout_id from activities
+where planned_workout_id is not null group by 1 having count(*) > 1;
+```
+
+If a duplicate exists, index creation fails and the whole migration rolls back. Repair that pair
+by hand first; do not weaken the index.
+
+## 20261101120000 — free-form recovery log source (2026-11-01)
+
+**File:** `supabase/migrations/20261101120000_recovery_logs_source_free_form.sql`
+
+**Change:** Replaces `recovery_logs_source_check`, which enumerated `manual`,
+`garmin_api`, `apple_health` and `screenshot_extract`, with a format check: a
+lowercase `snake_case` slug (`^[a-z0-9]+(_[a-z0-9]+)*$`) of at most 64 characters.
+The constraint is added `NOT VALID` and then validated separately, mirroring
+`20260714130000`. Every previously allowed value already matches the new shape.
+
+**Why:** Daily wellness data arrives from an open-ended set of sources: the
+athlete's own words, screenshots, the Garmin sidecar CLI, intervals.icu, and any
+device or app an athlete exports from (Whoop, Oura, Polar, Fitbit, Withings,
+Eight Sleep, ...). The coach's `save_recovery_data` tool now passes a free-form
+per-entry `source`. The API normalizes it to a slug (`"Eight Sleep"` →
+`eight_sleep`), so the database only guards the shape and needs no new migration
+for each new vendor (#428).
+
+**Preview before applying:**
+
+```sql
+select distinct source
+from public.recovery_logs
+order by source;
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset`
+locally). Preview and production are separate Supabase projects and must each be
+linked and applied independently. Existing values all satisfy the new check, so
+no backfill or maintenance window is needed.
+
+## 20261104061335 — resumable activity-source backfill (2026-11-04)
+
+**File:** `supabase/migrations/20261104061335_activity_sources_backfill.sql`
+
+**Change:** Adds the service-role-only `activity_sources_backfill_progress` singleton and
+three RPCs: `activity_sources_backfill_preflight()`,
+`activity_sources_backfill_batch(integer)`, and
+`activity_sources_backfill_verify()`. They create a restart-safe historical
+activity-source backfill with preflight validation, a checkpointed batch cursor,
+and two clean verification passes.
+
+**Why:** The migration was applied to preview and production during the
+activity-sources rollout, but its file was accidentally omitted when the
+application changes merged. Production therefore recorded remote version
+`20261104061335` with no matching file in `main`, which blocks the Supabase
+GitHub integration. This restores the exact applied migration; it is not an
+empty placeholder or a new schema change.
+
+**All environments:** The migration must remain in the canonical local history.
+It is already applied to the hosted preview and production databases. A fresh
+local reset applies it after `20261027190000_activity_sources.sql`; it does not
+run a backfill automatically.
+
+## 20261106120000 — drop legacy chat `content` column and `chat_attachments` (2026-11-06)
+
+**File:** `supabase/migrations/20261106120000_drop_legacy_chat_content_and_attachments.sql`
+
+**Change:** Drops `chat_messages.content` and the `chat_attachments` table (with its
+RLS policy and index, via `cascade`). Both were kept by `0004_chat_messages_parts.sql`
+for one release window after messages moved to the `parts` / `attachments` JSON
+columns. Before dropping anything, a guard block aborts the migration if any message's
+non-empty `content` differs from the in-order concatenation of its text parts, or if any
+`chat_attachments` row's `object_key` is missing from its message's `attachments` JSON
+(#303).
+
+**Why:** Nothing reads either structure. The backend stopped writing `content` in the
+same change, and nothing has written `chat_attachments` since `0004`.
+
+**Deploy order (important):** Deploy the application change first, then apply this
+migration. Earlier application code still sends `content` on every chat-message insert,
+and PostgREST rejects that once the column is gone. The new code works against both the
+old and the new schema.
+
+**Preview before applying:**
+
+```sql
+-- Both must return 0, or the migration aborts.
+select count(*) from public.chat_messages m
+where coalesce(m.content, '') <> ''
+  and m.content is distinct from (
+    select coalesce(string_agg(coalesce(p.part ->> 'text', ''), '' order by p.ord), '')
+    from jsonb_array_elements(m.parts) with ordinality as p(part, ord)
+    where p.part ->> 'type' = 'text'
+  );
+
+select count(*) from public.chat_attachments a
+join public.chat_messages m on m.id = a.message_id
+where not exists (
+  select 1 from jsonb_array_elements(m.attachments) as e(entry)
+  where coalesce(e.entry ->> 'objectKey', e.entry ->> 'object_key') = a.object_key
+);
+```
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset` locally) after
+the application deploy. Preview and production are separate Supabase projects and must
+each be linked and applied independently. The drop is irreversible; take a backup first
+if you want the legacy rows retained.

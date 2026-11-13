@@ -333,7 +333,7 @@ describe("streamCoachTurn setup and attachments", () => {
       (config) => config["name"] === "Lead coach",
     );
     expect(leadConfig).toMatchObject({
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       name: "Lead coach",
     });
     // Tavily must never ride in mcpServers: the SDK skips isEnabled for MCP
@@ -354,8 +354,8 @@ describe("streamCoachTurn setup and attachments", () => {
       expect.objectContaining({
         groupId: "athlete-1",
         metadata: {
-          fallbackModels: "gpt-5.6-luna,gpt-5.4-mini,gpt-5.6-terra",
-          startingModel: "gpt-5.6-luna",
+          fallbackModels: "gpt-6-luna,gpt-5.4-mini,gpt-6.1-terra",
+          startingModel: "gpt-6-luna",
         },
       }),
     );
@@ -884,7 +884,7 @@ describe("streamCoachTurn model ladder and rate limits", () => {
     const leadModels = orchestratorMocks.agentConfigs
       .filter((config) => config["name"] === "Lead coach")
       .map((config) => config["model"]);
-    expect(leadModels).toEqual(["gpt-5.6-luna", "gpt-5.4-mini"]);
+    expect(leadModels).toEqual(["gpt-6-luna", "gpt-5.4-mini"]);
     expect(orchestratorMocks.withTrace).toHaveBeenCalledWith(
       "fitness-coach-tier-attempt",
       expect.any(Function),
@@ -1089,7 +1089,7 @@ describe("streamCoachTurn model ladder and rate limits", () => {
 
     expect(text).toContain("Thanks, I'll keep track of that information.");
     expect(text).toContain("Please try again in about 2 minutes.");
-    expect(modelCircuitBreaker.snapshot("gpt-5.6-luna")).toMatchObject({
+    expect(modelCircuitBreaker.snapshot("gpt-6-luna")).toMatchObject({
       consecutiveFailures: 1,
       state: "closed",
     });
@@ -1117,7 +1117,7 @@ describe("streamCoachTurn model ladder and rate limits", () => {
     });
     await response.text();
 
-    expect(modelCircuitBreaker.snapshot("gpt-5.6-luna")).toMatchObject({
+    expect(modelCircuitBreaker.snapshot("gpt-6-luna")).toMatchObject({
       consecutiveFailures: 1,
       state: "closed",
     });
@@ -1127,7 +1127,7 @@ describe("streamCoachTurn model ladder and rate limits", () => {
     for (let turn = 0; turn < 3; turn += 1) {
       modelCircuitBreaker.recordFailure({
         tier: {
-          model: "gpt-5.6-luna",
+          model: "gpt-6-luna",
           effort: "medium",
           verbosity: "low",
         },
@@ -1488,6 +1488,46 @@ describe("streamCoachTurn durable rollback, max turns and cold seeding", () => {
     expect(persistCall).toBeDefined();
     expect(String(persistCall?.[1]?.body)).not.toContain(
       "Coach is unavailable",
+    );
+  });
+
+  it("routes turn logs through an injected logger instead of Sentry", async () => {
+    tavilyMocks.connect.mockRejectedValueOnce(new Error("tavily unreachable"));
+    tavilyMocks.close.mockRejectedValueOnce(new Error("never connected"));
+    const logger = {
+      debug: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+    };
+
+    const response = await streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: athleteContextFixture,
+      logger,
+      messages: messages(),
+      tavilyMcpUrl: "https://tavily.example/mcp",
+    });
+    await response.text();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "coach: Tavily setup failed; continuing without it",
+      { error: "tavily unreachable" },
+    );
+    expect(logger.warn).toHaveBeenCalledWith("coach: Tavily close failed", {
+      error: "never connected",
+    });
+    expect(logger.info).toHaveBeenCalledWith("coach turn complete", {
+      textStarted: true,
+      user_id: "athlete-1",
+    });
+    // Modules outside #267's scope (e.g. agent-stream) still log to Sentry
+    // directly, so only the orchestrator's own lines are asserted absent.
+    expect(sentryMocks.logger.warn).not.toHaveBeenCalled();
+    expect(sentryMocks.logger.info).not.toHaveBeenCalledWith(
+      "coach turn complete",
+      expect.anything(),
     );
   });
 
