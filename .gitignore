@@ -97,3 +97,8 @@ production
 
 # Sentry Config File
 .env.sentry-build-plugin
+# Bun is the only package manager (bun.lock). A second lockfile makes Vercel
+# install with that manager instead, so production stops matching CI (#572).
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
