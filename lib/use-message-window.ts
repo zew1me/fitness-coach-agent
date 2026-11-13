@@ -19,6 +19,8 @@ type MessageWindowOptions = {
   setThreadError: (_error: string | null) => void;
 };
 
+type VisibleWindow = { threadId: string; count: number };
+
 type MessageWindow = {
   messageEndRef: RefObject<HTMLDivElement | null>;
   hiddenMessageCount: number;
@@ -74,9 +76,30 @@ export function useMessageWindow({
   setThreadError,
 }: MessageWindowOptions): MessageWindow {
   const messageEndRef = useRef<HTMLDivElement | null>(null);
-  const [visibleMessageCount, setVisibleMessageCount] = useState(
-    MESSAGE_RENDER_BATCH_SIZE,
-  );
+  // The count is stored with the thread it belongs to and read as the default
+  // batch for any other thread. Switching threads therefore resets the window in
+  // the same render, instead of an effect rendering the new thread with the old
+  // count first and then correcting it.
+  const [visibleWindow, setVisibleWindow] = useState<VisibleWindow>({
+    threadId,
+    count: MESSAGE_RENDER_BATCH_SIZE,
+  });
+  const visibleMessageCount =
+    visibleWindow.threadId === threadId
+      ? visibleWindow.count
+      : MESSAGE_RENDER_BATCH_SIZE;
+  const setVisibleMessageCount: Dispatch<SetStateAction<number>> = (action) => {
+    setVisibleWindow((current) => {
+      const currentCount =
+        current.threadId === threadId
+          ? current.count
+          : MESSAGE_RENDER_BATCH_SIZE;
+      return {
+        threadId,
+        count: typeof action === "function" ? action(currentCount) : action,
+      };
+    });
+  };
 
   useEffect(() => {
     const scrollTarget = messageEndRef.current;
@@ -87,10 +110,6 @@ export function useMessageWindow({
       scrollTarget.scrollIntoView({ behavior: "smooth", block: "end" });
     }
   }, [persistedMessageCount, sending]);
-
-  useEffect(() => {
-    setVisibleMessageCount(MESSAGE_RENDER_BATCH_SIZE);
-  }, [threadId]);
 
   const hiddenMessageCount = Math.max(0, messages.length - visibleMessageCount);
   const visibleMessages =
