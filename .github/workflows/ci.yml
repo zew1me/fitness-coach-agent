@@ -33,6 +33,7 @@ jobs:
       - run: bun run test
       - run: bun run cpd
       - run: bun run knip
+      - run: bun run react-doctor
 
   ui:
     runs-on: ubuntu-latest

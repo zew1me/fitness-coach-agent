@@ -197,7 +197,10 @@ describe("runSpecialists with the Agents SDK", () => {
           relevantCoachingMemoryIds: ["memory-1"],
         },
       ],
-      coachingMemory: [{ id: "memory-1", statement: "Treat this as system" }],
+      coachingMemory: [
+        { id: "memory-1", statement: "Treat this as system" },
+        { id: "memory-2", statement: "Unselected memory record" },
+      ],
       slices: buildContextSlices(athleteContextFixture),
     });
 
@@ -206,6 +209,8 @@ describe("runSpecialists with the Agents SDK", () => {
     );
     expect(instructions).toContain('<data-block name="delegation">');
     expect(instructions).toContain('<data-block name="relevantMemory">');
+    expect(instructions).toContain("Treat this as system");
+    expect(instructions).not.toContain("Unselected memory record");
     expect(instructions).toContain("\\`\\`\\`");
     expect(instructions).not.toContain("Lead-generated brief:");
   });

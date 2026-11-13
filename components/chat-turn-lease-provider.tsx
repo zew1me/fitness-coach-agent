@@ -77,6 +77,10 @@ export function useChatTurnLease(userId: string): ChatTurnLease {
   // release refresh would clear the send error being shown.
   const turnCancelledRef = useRef(false);
 
+  // The poll interval is created conditionally, but the cleanup below always
+  // aborts the fetch and clears the interval when one was started. The rule
+  // does not follow the nullable interval id.
+  // react-doctor-disable-next-line react-doctor/effect-needs-cleanup
   useEffect(() => {
     if (context === null) return;
 

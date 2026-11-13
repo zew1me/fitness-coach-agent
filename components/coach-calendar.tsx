@@ -28,6 +28,7 @@ import { useBrowserSession } from "../lib/use-browser-session";
 import { AccountMenuButton } from "./account-menu";
 import { CalendarLegend } from "./calendar-legend";
 import styles from "./coach-calendar.module.css";
+import { trapDrawerFocus } from "./drawer-focus-trap";
 import { ProfileDrawer } from "./profile-drawer";
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -36,18 +37,23 @@ const EMPTY_DAY: CalendarDayItems = { planned: [], activities: [] };
 
 function localTodayIso(): string {
   // en-CA formats as YYYY-MM-DD in the viewer's local timezone, so "today"
-  // matches the athlete's wall clock rather than UTC.
+  // matches the athlete's wall clock rather than UTC. Built per call on
+  // purpose: it runs once per mount (useMemo), and a module-level formatter
+  // would freeze the timezone at load.
+  // react-doctor-disable-next-line react-doctor/js-hoist-intl
   return new Intl.DateTimeFormat("en-CA").format(new Date());
 }
 
+const LONG_DAY_FORMAT = new Intl.DateTimeFormat("en-US", {
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
 function longDayLabel(iso: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(new Date(`${iso}T00:00:00Z`));
+  return LONG_DAY_FORMAT.format(new Date(`${iso}T00:00:00Z`));
 }
 
 function formatMinutes(totalMinutes: number): string {
@@ -495,9 +501,11 @@ function DayDetailPanel({
 }>): ReactNode {
   const isEmpty = items.planned.length === 0 && items.activities.length === 0;
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
 
-  // Modal behavior: move focus into the dialog on open, close on Escape, and
-  // hand focus back to the triggering day cell when the panel unmounts.
+  // Modal behavior: move focus into the dialog on open, keep Tab inside it,
+  // close on Escape, and hand focus back to the triggering day cell when the
+  // panel unmounts.
   useEffect(() => {
     const previouslyFocused =
       document.activeElement instanceof HTMLElement
@@ -506,6 +514,7 @@ function DayDetailPanel({
     closeButtonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") onClose();
+      if (event.key === "Tab") trapDrawerFocus(event, panelRef.current);
     };
     document.addEventListener("keydown", onKeyDown);
     return (): void => {
@@ -526,6 +535,11 @@ function DayDetailPanel({
         className={styles.drawer}
         data-testid="calendar-day-detail"
         onClick={(event) => event.stopPropagation()}
+        ref={panelRef}
+        // Focus moves in on open, Tab is trapped by trapDrawerFocus, Escape
+        // closes and focus returns to the day cell, so this already behaves as
+        // a modal. A native <dialog> rewrite is out of scope for #444.
+        // react-doctor-disable-next-line react-doctor/prefer-html-dialog
         role="dialog"
       >
         <div className={styles.drawerHeader}>
