@@ -1,6 +1,7 @@
 import * as Sentry from "@sentry/nextjs";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
+import { ZodError } from "zod";
 
 import {
   activityContentType,
@@ -10,14 +11,30 @@ import {
 } from "./chat-attachments";
 import { createChatUploadIntent, uploadFile } from "./coach-api";
 import { errorMessage } from "./errors";
+import {
+  attachmentSizeError,
+  AttachmentSizeError,
+  compressImage,
+  planAttachmentUpload,
+} from "./image-compression";
 
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20_000;
+const ATTACHMENT_COMPRESSION_TIMEOUT_MS = 60_000;
 
 type AttachmentPatch = Partial<
-  Pick<LocalAttachment, "object_key" | "public_url" | "status">
+  Pick<
+    LocalAttachment,
+    | "object_key"
+    | "public_url"
+    | "status"
+    | "content_type"
+    | "filename"
+    | "progress"
+  >
 >;
 
 type AttachmentUploadCallbacks = {
+  signal: AbortSignal;
   updateAttachment: (_attachmentId: string, _patch: AttachmentPatch) => void;
   setThreadError: (_error: string | null) => void;
 };
@@ -46,6 +63,7 @@ function attachmentLogContext(
 }
 
 function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
+  const plan = planAttachmentUpload(file);
   return {
     id: attachmentId,
     content_type: activityContentType(file),
@@ -55,29 +73,132 @@ function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
       ? URL.createObjectURL(file)
       : null,
     public_url: null,
-    status: "uploading",
+    status:
+      plan === "too-large"
+        ? "error"
+        : plan === "compress"
+          ? "compressing"
+          : "uploading",
+    progress: null,
   };
+}
+
+async function withAttachmentTimeout<T>(
+  draftSignal: AbortSignal,
+  timeoutMs: number,
+  operation: (_signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  // Forward both sources without requiring AbortSignal.any on older Safari.
+  // Aborting the derived signal also removes both forwarding listeners.
+  for (const source of [draftSignal, AbortSignal.timeout(timeoutMs)]) {
+    if (source.aborted) controller.abort(source.reason);
+    else
+      source.addEventListener("abort", () => controller.abort(source.reason), {
+        once: true,
+        signal: controller.signal,
+      });
+  }
+  try {
+    controller.signal.throwIfAborted();
+    return await operation(controller.signal);
+  } finally {
+    controller.abort();
+  }
+}
+
+async function prepareAttachment(
+  attachmentId: string,
+  file: File,
+  updateAttachment: AttachmentUploadCallbacks["updateAttachment"],
+  draftSignal: AbortSignal,
+): Promise<File> {
+  const plan = planAttachmentUpload(file);
+  if (plan === "too-large") throw attachmentSizeError();
+  if (plan === "as-is") return file;
+  return withAttachmentTimeout(
+    draftSignal,
+    ATTACHMENT_COMPRESSION_TIMEOUT_MS,
+    (signal) =>
+      compressImage(file, {
+        signal,
+        onProgress: (progress) => {
+          if (!signal.aborted)
+            updateAttachment(attachmentId, { progress: Math.round(progress) });
+        },
+      }),
+  );
+}
+
+type AttachmentUploadStage = "preparation" | "presign" | "upload";
+
+function attachmentFailureMessage(
+  error: unknown,
+  stage: AttachmentUploadStage,
+): string {
+  if (error instanceof AttachmentSizeError) {
+    return error.message;
+  }
+  if (stage === "presign" && error instanceof ZodError) {
+    return "That attachment couldn't be uploaded. Choose a non-empty file with a valid filename and try again.";
+  }
+  const timedOut =
+    error instanceof DOMException && error.name === "TimeoutError";
+  if (stage === "preparation") {
+    return timedOut
+      ? "Optimizing that image took too long and was cancelled. Try again or choose a smaller image."
+      : "We couldn't decode or optimize that image. Try another image or export it again.";
+  }
+  return timedOut
+    ? "That upload took too long and was cancelled. Check your connection and try again."
+    : errorMessage(error, "Unable to upload that attachment.");
 }
 
 async function uploadOneAttachment(
   attachmentId: string,
   file: File,
-  { updateAttachment, setThreadError }: AttachmentUploadCallbacks,
+  { updateAttachment, setThreadError, signal }: AttachmentUploadCallbacks,
 ): Promise<void> {
-  const contentType = activityContentType(file);
+  const originalSize = file.size;
+  let contentType = activityContentType(file);
+  let stage: AttachmentUploadStage = "preparation";
   try {
+    signal.throwIfAborted();
+    file = await prepareAttachment(
+      attachmentId,
+      file,
+      updateAttachment,
+      signal,
+    );
+    signal.throwIfAborted();
+    contentType = activityContentType(file);
+    updateAttachment(attachmentId, {
+      content_type: contentType,
+      filename: file.name,
+      status: "uploading",
+      progress: null,
+    });
+    Sentry.logger.info("chat attachment prepared", {
+      ...attachmentLogContext(file, contentType),
+      original_size: originalSize,
+      prepared_size: file.size,
+    });
+    stage = "presign";
     const intent = await createChatUploadIntent({
       content_length: file.size,
       content_type: contentType,
       filename: file.name,
       purpose: "chat-attachment",
     });
-    const uploaded = await uploadFile(
-      intent.object_key,
-      file,
-      undefined,
-      AbortSignal.timeout(ATTACHMENT_UPLOAD_TIMEOUT_MS),
+    signal.throwIfAborted();
+    stage = "upload";
+    const uploaded = await withAttachmentTimeout(
+      signal,
+      ATTACHMENT_UPLOAD_TIMEOUT_MS,
+      (uploadSignal) =>
+        uploadFile(intent.object_key, file, undefined, uploadSignal),
     );
+    signal.throwIfAborted();
     if (uploaded.public_url === null) {
       updateAttachment(attachmentId, {
         object_key: uploaded.object_key,
@@ -103,19 +224,20 @@ async function uploadOneAttachment(
       status: "uploaded",
     });
   } catch (error) {
-    Sentry.logger.error(
-      "chat attachment upload failed",
-      attachmentLogContext(file, contentType),
-    );
-    updateAttachment(attachmentId, { status: "error" });
-    const timedOut =
-      error instanceof DOMException && error.name === "TimeoutError";
+    // Navigating away discards the draft, not a failed upload to report in a new one.
+    if (signal.aborted) return;
+    Sentry.logger.error("chat attachment upload failed", {
+      ...attachmentLogContext(file, contentType),
+      original_size: originalSize,
+      failure_stage: stage,
+      failure_reason:
+        error instanceof DOMException
+          ? error.message
+          : errorMessage(error, "Unknown attachment failure"),
+    });
+    updateAttachment(attachmentId, { status: "error", progress: null });
     console.error("Chat attachment upload failed", error);
-    setThreadError(
-      timedOut
-        ? "That upload took too long and was cancelled. Check your connection and try again."
-        : errorMessage(error, "Unable to upload that attachment."),
-    );
+    setThreadError(attachmentFailureMessage(error, stage));
   }
 }
 
@@ -138,6 +260,13 @@ export function useChatDraft(
   latestComposerRef.current = composer;
   const latestAttachmentsRef = useRef(attachments);
   latestAttachmentsRef.current = attachments;
+  const draftControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    draftControllerRef.current = controller;
+    return (): void => controller.abort();
+  }, []);
 
   useEffect((): (() => void) => {
     return (): void => {
@@ -164,6 +293,8 @@ export function useChatDraft(
 
   async function handleFilesAdded(files: File[]): Promise<void> {
     if (files.length === 0) return;
+    const signal = draftControllerRef.current?.signal;
+    if (!signal || signal.aborted) return;
 
     const uploadQueue: Array<{ attachmentId: string; file: File }> = [];
     const nextLocalAttachments: LocalAttachment[] = [];
@@ -176,13 +307,20 @@ export function useChatDraft(
         continue;
       }
       const attachmentId = crypto.randomUUID();
+      const attachment = localAttachmentFor(attachmentId, file);
+      nextLocalAttachments.push(attachment);
+      // Reject immediately, even when an earlier file is still being optimized.
+      if (attachment.status === "error") {
+        setThreadError(attachmentSizeError().message);
+        continue;
+      }
       uploadQueue.push({ attachmentId, file });
-      nextLocalAttachments.push(localAttachmentFor(attachmentId, file));
     }
     setAttachments((current) => [...current, ...nextLocalAttachments]);
 
     for (const { attachmentId, file } of uploadQueue) {
       await uploadOneAttachment(attachmentId, file, {
+        signal,
         setThreadError,
         updateAttachment,
       });

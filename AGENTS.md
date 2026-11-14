@@ -251,6 +251,23 @@ See [docs/COMPACTION_DESIGN.md](docs/COMPACTION_DESIGN.md).
 
 Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
 
+Chat uploads still use the Vercel multipart proxy (not direct-to-R2). The browser lazily
+compresses JPEG/PNG/WebP files ≥4.0 MB to JPEG (2560 px, quality 0.8, ~3.8 MB target),
+stripping EXIF; GIFs and activity/ZIP files are never compressed. All prepared uploads
+are capped at 4.4 MB to leave framing room under Vercel's 4.5 MB request limit. Compression
+has a separate 60 s timeout and a progress chip. Compression is limited to one in-flight
+library call per tab, including after timeout until the decoder settles, because main-thread
+decoding cannot be cancelled. Separate image picks, drops and pastes queue in FIFO order;
+the 60 s preparation budget includes queue waiting, and cancelled queued work never decodes.
+Discarding the draft (for example, navigating to the calendar) cancels preparation/uploads
+and prevents stale progress or a completed presign from starting an abandoned upload. To avoid an extra worker copy in Vercel
+deployment artifacts (57,069 bytes in 2.0.2; the whole package is ~860 KB), the worker
+script is fetched from an exact-version CDN URL with
+SHA-384 integrity verification, then executed via a verified blob URL. Fetch/integrity
+failure falls back to the locally bundled library on the main thread, never unverified
+CDN code. When upgrading the dependency, update the URL and hash in
+`lib/image-compression.ts`; a drift test checks both against the installed package.
+
 ### Courses versus recorded activities (uploaded GPX/FIT/TCX)
 
 An uploaded route file is a **course** — something the athlete plans to do — not a
