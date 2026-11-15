@@ -31,6 +31,12 @@ describe("buildTavilyMcpUrl", () => {
 });
 
 describe("normalizeReturnTo", () => {
+  it("accepts the device-flow return path", () => {
+    expect(normalizeReturnTo("/api/oauth/device?user_code=BCDFGHJK")).toBe(
+      "/api/oauth/device?user_code=BCDFGHJK",
+    );
+  });
+
   it("keeps same-origin relative paths", () => {
     expect(normalizeReturnTo("/api/oauth/authorize?state=test")).toBe(
       "/api/oauth/authorize?state=test",
