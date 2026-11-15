@@ -63,6 +63,7 @@ from backend.models.auth import (
     CliVerifyOtpRequest,
     DeviceAuthorizationRequest,
     OAuthAuthorizeRequest,
+    OAuthDeviceCodeRecord,
     OAuthRevokeRequest,
     OAuthTokenRequest,
     UserContext,
@@ -88,6 +89,7 @@ from backend.repos.supabase_repo import (
 from backend.services.auth import (
     AuthService,
     OAuthConsentRequiredError,
+    OAuthDeviceConfirmationMismatchError,
     OAuthDeviceFlowError,
     OAuthError,
     OAuthInvalidGrantError,
@@ -580,6 +582,18 @@ def _invalid_device_code_page() -> RedirectResponse:
     return _device_page({"error": "invalid_code"})
 
 
+def _device_confirm_page(normalized: str, record: OAuthDeviceCodeRecord) -> RedirectResponse:
+    """Confirm step rendered from the stored request, never from caller-supplied values."""
+    return _device_page(
+        {
+            "step": "confirm",
+            "user_code": auth_service.format_user_code(normalized),
+            "client_id": record.client_id,
+            "scope": " ".join(record.scopes),
+        }
+    )
+
+
 @app.get("/api/oauth/device")
 async def oauth_device_verification(
     user_code: str | None = None,
@@ -615,23 +629,22 @@ async def oauth_device_verification(
         browser_session.user_id,
         record.client_id,
     )
-    return _device_page(
-        {
-            "step": "confirm",
-            "user_code": auth_service.format_user_code(normalized),
-            "client_id": record.client_id,
-            "scope": " ".join(record.scopes),
-        }
-    )
+    return _device_confirm_page(normalized, record)
 
 
 @app.post("/api/oauth/device/decision")
 async def oauth_device_decision(
     user_code: str = Form(default=""),
     decision: str = Form(default=""),
+    client_id: str = Form(default=""),
+    scope: str = Form(default=""),
     coach_browser_session: str | None = Cookie(default=None),
 ) -> RedirectResponse:
     """Approve or deny a pending device authorization.
+
+    ``client_id`` and ``scope`` echo what the confirm page displayed. Approval is bound to
+    them: a mismatch (for example a crafted link that understates the requested scopes)
+    approves nothing and re-renders the confirm step from the stored request.
 
     CSRF posture matches /api/oauth/authorize/decision: the session cookie is SameSite=Lax,
     so a cross-site form POST arrives without it and is bounced to login.
@@ -650,7 +663,10 @@ async def oauth_device_decision(
     try:
         if approve:
             await auth_service.approve_device_code(
-                user_code=normalized, browser_session=browser_session
+                user_code=normalized,
+                browser_session=browser_session,
+                shown_client_id=client_id,
+                shown_scope=scope,
             )
         else:
             await auth_service.deny_device_code(
@@ -658,6 +674,8 @@ async def oauth_device_decision(
             )
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthDeviceConfirmationMismatchError as exc:
+        return _device_confirm_page(normalized, exc.record)
     except OAuthInvalidUserCodeError:
         logger.info("oauth device decision invalid code user_id=%s", browser_session.user_id)
         return _invalid_device_code_page()

@@ -74,9 +74,18 @@ describe("DevicePage", () => {
     const form = container.querySelector("form");
     expect(form?.getAttribute("action")).toBe("/api/oauth/device/decision");
     expect(form?.getAttribute("method")).toBe("post");
-    expect(
-      container.querySelector<HTMLInputElement>('input[type="hidden"]')?.value,
-    ).toBe("BCDF-GHJK");
+    // The decision echoes exactly what was displayed; the backend approves only
+    // when it matches the stored request, so a crafted link cannot understate scopes.
+    const hidden = Object.fromEntries(
+      Array.from(
+        container.querySelectorAll<HTMLInputElement>('input[type="hidden"]'),
+      ).map((input) => [input.name, input.value]),
+    );
+    expect(hidden).toEqual({
+      user_code: "BCDF-GHJK",
+      client_id: "fitness-coach-cli",
+      scope: "profile:read plans:write",
+    });
     const buttons = Array.from(
       container.querySelectorAll<HTMLButtonElement>("button[name=decision]"),
     ).map((b) => [b.value, b.textContent]);

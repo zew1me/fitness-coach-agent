@@ -81,6 +81,8 @@ function ConfirmCard({
       </p>
       <form action="/api/oauth/device/decision" method="post">
         <input name="user_code" type="hidden" value={userCode} />
+        <input name="client_id" type="hidden" value={clientId} />
+        <input name="scope" type="hidden" value={scope} />
         <button
           className="button button-secondary"
           name="decision"

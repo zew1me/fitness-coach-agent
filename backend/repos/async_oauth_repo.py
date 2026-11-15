@@ -280,9 +280,19 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
         return self._parse_optional_device_code(response.data or [])
 
     async def record_device_code_poll(
-        self, record_id: str, *, polled_at: datetime, interval_seconds: int
-    ) -> None:
-        """Stamp a token poll on a pending row, raising its interval after ``slow_down``."""
+        self,
+        record_id: str,
+        *,
+        observed_polled_at: datetime | None,
+        polled_at: datetime,
+        interval_seconds: int,
+    ) -> bool:
+        """Stamp a token poll on a pending row, raising its interval after ``slow_down``.
+
+        The update only applies while ``last_polled_at`` still holds the value this poll read
+        (compare-and-set), so a stale concurrent poll can never overwrite a newer, larger
+        backoff. Returns ``False`` when another poll got there first.
+        """
         client = self._require_client()
         query = (
             client.table(self._device_codes_table)
@@ -290,7 +300,12 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
             .eq("id", record_id)
             .eq("status", "pending")
         )
-        await query.execute()
+        if observed_polled_at is None:
+            query = query.is_("last_polled_at", "null")
+        else:
+            query = query.eq("last_polled_at", observed_polled_at.isoformat())
+        response = await query.execute()
+        return bool(response.data)
 
     async def approve_device_code(
         self, record_id: str, *, user_id: str, grant_id: str

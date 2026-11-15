@@ -17,13 +17,14 @@ import pytest
 
 import api.index as api_index
 from backend.config import settings
-from backend.models.auth import BrowserSessionContext
+from backend.models.auth import BrowserSessionContext, OAuthDeviceCodeRecord
 from backend.repos.async_oauth_repo import AsyncOAuthRepository
 from backend.services.auth import (
     CLI_CLIENT_ID,
     CLI_REDIRECT_URI,
     DEVICE_CODE_GRANT_TYPE,
     AuthService,
+    OAuthDeviceFlowError,
 )
 from tests.python.test_async_oauth_repo import (
     DEVICE_CODES_TABLE,
@@ -134,9 +135,18 @@ def _redirect(response: httpx.Response) -> tuple[str, dict[str, str]]:
     return f"{parts.scheme}://{parts.netloc}{parts.path}", query
 
 
-async def _decide(harness: DeviceHarness, user_code: str, decision: str) -> httpx.Response:
+async def _decide(
+    harness: DeviceHarness,
+    user_code: str,
+    decision: str,
+    *,
+    client_id: str = CLI_CLIENT_ID,
+    scope: str = ALL_SCOPES,
+) -> httpx.Response:
+    """Submit the confirm form; ``client_id``/``scope`` are what the page displayed."""
     return await harness.client.post(
-        "/api/oauth/device/decision", data={"user_code": user_code, "decision": decision}
+        "/api/oauth/device/decision",
+        data={"user_code": user_code, "decision": decision, "client_id": client_id, "scope": scope},
     )
 
 
@@ -310,7 +320,7 @@ async def test_requested_scope_subset_is_honoured(harness: DeviceHarness) -> Non
         )
     )
     assert query["scope"] == "plans:read profile:read"
-    await _decide(harness, str(started["user_code"]), "approve")
+    await _decide(harness, str(started["user_code"]), "approve", scope=query["scope"])
     tokens = (await _poll(harness, started["device_code"])).json()
     assert tokens["scope"] == "plans:read profile:read"
 
@@ -654,3 +664,81 @@ async def test_device_flow_never_logs_codes_or_tokens(
         assert str(secret) not in server_logs
     assert USER_ID in server_logs
     assert "authorization_pending" in server_logs
+
+
+# ── Approval is bound to what the confirm page displayed ─────
+
+
+@pytest.mark.parametrize(
+    ("shown_client_id", "shown_scope"),
+    [
+        (CLI_CLIENT_ID, "profile:read"),  # crafted link understating the stored scopes
+        (CLI_CLIENT_ID, ""),  # no scope echoed at all
+        ("some-other-client", ALL_SCOPES),  # wrong client label
+    ],
+)
+async def test_approval_that_does_not_match_the_stored_request_approves_nothing(
+    harness: DeviceHarness, shown_client_id: str, shown_scope: str
+) -> None:
+    started = await _start(harness)
+    harness.sign_in()
+
+    response = await _decide(
+        harness,
+        str(started["user_code"]),
+        "approve",
+        client_id=shown_client_id,
+        scope=shown_scope,
+    )
+
+    # Back to the confirm step, rendered from the stored request rather than the form.
+    target, query = _redirect(response)
+    assert target == f"{BASE_URL}/device"
+    assert query["step"] == "confirm"
+    assert query["client_id"] == CLI_CLIENT_ID
+    assert query["scope"] == ALL_SCOPES
+    assert harness.device_row()["status"] == "pending"
+    assert harness.database.tables.get(GRANTS_TABLE, []) == []
+    _assert_oauth_error(await _poll(harness, started["device_code"]), "authorization_pending")
+
+
+async def test_matching_scope_in_a_different_order_is_accepted(harness: DeviceHarness) -> None:
+    started = await _start(harness)
+    harness.sign_in()
+
+    shuffled = " ".join(reversed(ALL_SCOPES.split()))
+    _, query = _redirect(
+        await _decide(harness, str(started["user_code"]), "approve", scope=shuffled)
+    )
+
+    assert query == {"status": "approved"}
+
+
+async def test_deny_needs_no_matching_confirmation(harness: DeviceHarness) -> None:
+    started = await _start(harness)
+    harness.sign_in()
+
+    _, query = _redirect(
+        await _decide(harness, str(started["user_code"]), "deny", scope="profile:read")
+    )
+
+    assert query == {"status": "denied"}
+
+
+async def test_a_stale_concurrent_poll_cannot_lower_the_backoff(harness: DeviceHarness) -> None:
+    started = await _start(harness)
+    await _poll(harness, started["device_code"])  # first poll stamps last_polled_at
+    stale_view = dict(harness.device_row())  # what a slow concurrent poll read
+
+    # A fast poll raises the interval to 10s.
+    _assert_oauth_error(await _poll(harness, started["device_code"]), "slow_down")
+    assert harness.device_row()["interval_seconds"] == 10
+    raised_row = dict(harness.device_row())
+
+    # The stale poll now tries to write interval 5 based on its old read: the
+    # compare-and-set misses, it answers slow_down, and the larger backoff survives.
+    record = OAuthDeviceCodeRecord.model_validate(stale_view)
+    with pytest.raises(OAuthDeviceFlowError) as excinfo:
+        await harness.service._reject_pending_device_poll(record, now=datetime.now(UTC))
+    assert excinfo.value.error == "slow_down"
+    assert harness.device_row() == raised_row

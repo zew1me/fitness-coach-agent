@@ -84,6 +84,18 @@ class OAuthInvalidUserCodeError(OAuthError):
     """Raised when a user code is malformed, unknown, expired, or no longer pending."""
 
 
+class OAuthDeviceConfirmationMismatchError(OAuthError):
+    """Raised when an approval's displayed client or scopes differ from the stored request.
+
+    The confirm page renders from query parameters, so a crafted link could describe fewer
+    permissions than the pending request actually holds. Approval is bound to what was shown.
+    """
+
+    def __init__(self, record: OAuthDeviceCodeRecord) -> None:
+        super().__init__("The confirmation does not match the pending request.")
+        self.record = record
+
+
 class OAuthInvalidOtpError(OAuthError):
     """Raised when Supabase rejects an email OTP (wrong, expired, or unknown email)."""
 
@@ -444,10 +456,27 @@ class AuthService:
         return record
 
     async def approve_device_code(
-        self, *, user_code: str, browser_session: BrowserSessionContext
+        self,
+        *,
+        user_code: str,
+        browser_session: BrowserSessionContext,
+        shown_client_id: str,
+        shown_scope: str,
     ) -> None:
-        """Approve a pending device authorization on the athlete's durable CLI grant."""
+        """Approve a pending device authorization on the athlete's durable CLI grant.
+
+        ``shown_client_id`` and ``shown_scope`` are what the confirm page displayed; approval
+        only proceeds when they match the stored request exactly.
+        """
         record = await self.get_pending_device_code(user_code)
+        shown_scopes = sorted(set(self._parse_scope_string(shown_scope)))
+        if shown_client_id != record.client_id or shown_scopes != sorted(record.scopes):
+            logger.warning(
+                "oauth device approval mismatch user_id=%s client_id=%s",
+                browser_session.user_id,
+                record.client_id,
+            )
+            raise OAuthDeviceConfirmationMismatchError(record)
         grant = await self._oauth_repo.upsert_grant(
             user_id=browser_session.user_id,
             client_id=CLI_CLIENT_ID,
@@ -519,9 +548,16 @@ class AuthService:
             seconds=record.interval_seconds
         )
         interval = record.interval_seconds + (DEVICE_CODE_SLOW_DOWN_SECONDS if too_fast else 0)
-        await self._oauth_repo.record_device_code_poll(
-            record.id, polled_at=now, interval_seconds=interval
+        stamped = await self._oauth_repo.record_device_code_poll(
+            record.id,
+            observed_polled_at=record.last_polled_at,
+            polled_at=now,
+            interval_seconds=interval,
         )
+        if not stamped:
+            # A concurrent poll stamped the row after this one read it, so this poll is
+            # too fast by definition; answer slow_down without writing over its backoff.
+            raise OAuthDeviceFlowError("slow_down", "Polling too fast; wait before polling again.")
         if too_fast:
             raise OAuthDeviceFlowError(
                 "slow_down", f"Polling too fast; wait at least {interval} seconds between polls."
