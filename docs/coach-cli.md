@@ -28,25 +28,66 @@ Global options (before the subcommand):
 Remote base URLs must be `https`. Failures exit non-zero; with `--json` stderr is
 `{"error": "...", "status": 409, "detail": ...}`.
 
-## Login (two steps)
+## Login
 
-Login is split so a non-interactive agent can run step 1, ask the human for the emailed code, then
-run step 2.
+### Device login (default)
+
+`coach login` with no `--email` runs the OAuth device flow (RFC 8628). It works from a remote or
+headless shell: the CLI prints a short code and a URL, you approve it in any browser where you are
+(or become, via the normal emailed-code web login) signed in, and the CLI stores the credentials.
 
 ```bash
 export COACH_BASE_URL=https://my-preview.vercel.app
+coach login [--no-browser] [--yes]
+# Open https://my-preview.vercel.app/device and enter code BCDF-GHJK
+# Or open: https://my-preview.vercel.app/api/oauth/device?user_code=BCDFGHJK
+# Waiting for approval in the browser (Ctrl-C to cancel)...
+```
+
+- The CLI tries to open the complete URL in a browser unless `--no-browser` is given, stdout is not
+  a terminal, or (on Linux) neither `$DISPLAY` nor `$WAYLAND_DISPLAY` is set. A browser that fails
+  to open never fails the login.
+- Check that the code on the page matches the one in your terminal before approving.
+- It polls the token endpoint every `interval` seconds (5s by default), adds 5s whenever the server
+  answers `slow_down`, and gives up after `expires_in` (10 minutes). Outcomes: logged in, `access_denied`
+  (you clicked Deny), or `expired` (code expired, unknown, or already used; run `coach login` again).
+
+**Agent harnesses (Claude Code, Codex, pi):** run `coach --json login`. Before polling it prints one
+JSON line on stdout, then blocks until the human approves and prints the result line:
+
+```json
+{"verification_uri":"https://my-preview.vercel.app/device","verification_uri_complete":"https://my-preview.vercel.app/api/oauth/device?user_code=BCDFGHJK","user_code":"BCDF-GHJK","expires_in":600}
+{"status":"logged_in","user_id":"...","base_url":"https://my-preview.vercel.app"}
+```
+
+Relay `user_code` and `verification_uri` (or the complete URL) to the human, then wait for the
+command to finish. Run it in the background or with a long timeout, since it blocks for up to
+`expires_in` seconds. Do not read the credentials file.
+
+### Emailed-code login (`--email`, two steps)
+
+The alternative for when a browser approval is not possible. It is split so a non-interactive agent
+can run step 1, ask the human for the emailed code, then run step 2.
+
+```bash
 coach login --email me@example.com [--invite-code CODE]   # step 1: emails a 6-digit code
 coach login --email me@example.com --code 123456          # step 2: verifies, stores credentials
 ```
 
 - New accounts need an invite code; without one step 1 fails with `invite_required`.
 - If `--code` is omitted and stdin is a terminal, the CLI prompts for the code after sending.
+- Too many wrong codes fail with `rate_limited` (HTTP 429); wait and retry.
+- `--code` and `--invite-code` are only valid together with `--email`.
+
+### Both paths
+
 - **Production guard:** unless the base URL is `localhost`, `127.0.0.1`, or a `*.vercel.app`
-  preview, login requires `--yes`. This is only a speed bump against pointing an agent at real data
-  by accident.
+  preview, login requires `--yes`, checked before any request is sent. This is only a speed bump
+  against pointing an agent at real data by accident.
 - `coach whoami` shows the user id, client id (`fitness-coach-cli`) and scopes.
-- `coach logout` revokes the refresh token and the grant server-side, then deletes the local
-  credentials (even if the server is unreachable; it then says revocation failed).
+- `coach logout` revokes the refresh token and the access token (which revokes the whole grant
+  server-side), then deletes the local credentials (even if the server is unreachable; it then says
+  revocation failed).
 
 Access tokens are refreshed automatically: proactively when within 60 seconds of expiry, and once
 after a 401. Rotated tokens are persisted. If refresh fails the command exits non-zero and asks you
@@ -112,5 +153,5 @@ deduplicated yet (issue #390).
   invalidates the CLI session only, not your browser login.
 - The CLI holds no Supabase or R2 keys and needs none. Do not give them to an agent.
 - Wellness and activity data is sensitive: avoid shell redirection into committed files.
-- Agents should run `coach` with `--json`, never log the credentials file, and ask the human for the
-  emailed code rather than reading mail themselves.
+- Agents should run `coach` with `--json`, never log the credentials file, and relay the device code to the
+  human (or ask for the emailed code with `--email`) rather than reading mail themselves.

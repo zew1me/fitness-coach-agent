@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
+import time
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -40,6 +44,10 @@ app.add_typer(activities_app, name="activities")
 
 # Tests point the CLI at an httpx.MockTransport by setting this; production leaves it None.
 _transport: httpx.BaseTransport | None = None
+# Device-flow wait/clock/opener hooks; tests replace them so polling runs instantly.
+_sleep = time.sleep
+_monotonic = time.monotonic
+_open_url = webbrowser.open
 
 
 @dataclass
@@ -135,21 +143,78 @@ def _confirm_target(base_url: str, *, yes: bool) -> None:
         )
 
 
+def _browser_plausible() -> bool:
+    """Whether opening a browser can reasonably work: a TTY, and a display on Linux."""
+    if not sys.stdout.isatty():
+        return False
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return True
+
+
+def _try_open_browser(url: str) -> None:
+    # A missing or broken browser must never fail login, so any opener error is swallowed.
+    with contextlib.suppress(Exception):
+        _open_url(url)
+
+
+def _require_email_for_otp_options(code: str | None, invite_code: str | None) -> None:
+    if code is not None or invite_code is not None:
+        raise CoachError("invalid_usage", "--code and --invite-code require --email.")
+
+
+def _login_device(opts: Options, client: CoachClient, *, no_browser: bool) -> None:
+    grant = client.start_device_flow()
+    if opts.json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "verification_uri": grant["verification_uri"],
+                    "verification_uri_complete": grant["verification_uri_complete"],
+                    "user_code": grant["user_code"],
+                    "expires_in": grant.get("expires_in"),
+                },
+                separators=(",", ":"),
+            )
+        )
+    else:
+        typer.echo(f"Open {grant['verification_uri']} and enter code {grant['user_code']}")
+        typer.echo(f"Or open: {grant['verification_uri_complete']}")
+        typer.echo("Waiting for approval in the browser (Ctrl-C to cancel)...")
+    if not no_browser and _browser_plausible():
+        _try_open_browser(grant["verification_uri_complete"])
+    creds = client.poll_device_flow(grant, sleep=_sleep, monotonic=_monotonic)
+    _emit(
+        opts,
+        {"status": "logged_in", "user_id": creds.user_id, "base_url": client.base_url},
+        f"Logged in to {client.base_url} as user {creds.user_id}.",
+    )
+
+
 @app.command()
 def login(
     ctx: typer.Context,
-    email: Annotated[str, typer.Option(help="Account email.")],
+    email: Annotated[
+        str | None, typer.Option(help="Use the emailed-code login for this account instead.")
+    ] = None,
     code: Annotated[str | None, typer.Option(help="6-digit code from the email (step 2).")] = None,
     invite_code: Annotated[str | None, typer.Option(help="Invite code for new accounts.")] = None,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Device login: do not try to open a browser.")
+    ] = False,
     yes: Annotated[
         bool, typer.Option("--yes", help="Confirm a non-local, non-preview (production) target.")
     ] = False,
 ) -> None:
-    """Step 1: email a code. Step 2 (--code): verify it and store credentials."""
+    """Log in. Default: device flow (approve a code in any browser). --email: emailed code."""
     opts = _options(ctx)
     try:
         _confirm_target(_base_url(opts), yes=yes)
         client = _client(opts)
+        if email is None:
+            _require_email_for_otp_options(code, invite_code)
+            _login_device(opts, client, no_browser=no_browser)
+            return
         email = email.strip().lower()
         if code is None:
             _login_step_one(opts, client, email, invite_code)

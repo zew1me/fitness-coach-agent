@@ -15,6 +15,10 @@ from fitness_coach_cli.errors import CoachError
 from fitness_coach_cli.tools import validate_operation
 
 CLIENT_ID = "fitness-coach-cli"
+DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+_SLOW_DOWN_STEP_SECONDS = 5.0
+_DEFAULT_DEVICE_INTERVAL = 5.0
+_HTTP_TOO_MANY_REQUESTS = 429
 REFRESH_SKEW_SECONDS = 60
 _DEFAULT_TTL_SECONDS = 900
 _REQUEST_TIMEOUT = 30.0
@@ -108,7 +112,7 @@ class CoachClient:
     def _login_required(self) -> CoachError:
         return CoachError(
             "not_logged_in",
-            f"Run `coach login --email <you> --base-url {self.base_url}` first.",
+            f"Run `coach login --base-url {self.base_url}` first.",
             status=_HTTP_UNAUTHORIZED,
         )
 
@@ -154,12 +158,71 @@ class CoachClient:
         self._json(self._send("POST", "/api/auth/request-otp", json=body))
 
     def verify_otp(self, email: str, code: str) -> Credentials:
-        bundle = self._json(
-            self._send("POST", "/api/auth/cli/verify-otp", json={"email": email, "token": code})
+        response = self._send(
+            "POST", "/api/auth/cli/verify-otp", json={"email": email, "token": code}
         )
+        if response.status_code == _HTTP_TOO_MANY_REQUESTS:
+            raise CoachError(
+                "rate_limited", _error_from_response(response).detail, status=response.status_code
+            )
+        bundle = self._json(response)
         creds = credentials_from_bundle(bundle, now=self._clock())
         self.store.save(self.base_url, creds)
         return creds
+
+    def start_device_flow(self) -> dict[str, Any]:
+        """RFC 8628 step 1: returns the device authorization response."""
+        body = self._json(
+            self._send("POST", "/api/oauth/device/code", json={"client_id": CLIENT_ID})
+        )
+        required = ("device_code", "user_code", "verification_uri", "verification_uri_complete")
+        if not isinstance(body, dict) or not all(isinstance(body.get(k), str) for k in required):
+            raise CoachError("invalid_response", "Device authorization response was incomplete.")
+        return body
+
+    def poll_device_flow(
+        self,
+        grant: dict[str, Any],
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> Credentials:
+        """RFC 8628 step 2: poll the token endpoint until approved, denied, or expired."""
+        expires_in = grant.get("expires_in")
+        lifetime = float(expires_in) if isinstance(expires_in, int | float) else 600.0
+        interval = grant.get("interval")
+        wait = float(interval) if isinstance(interval, int | float) else _DEFAULT_DEVICE_INTERVAL
+        deadline = monotonic() + lifetime
+        while True:
+            sleep(wait)
+            if monotonic() >= deadline:
+                raise CoachError("expired", "The login code expired before it was approved.")
+            response = self._send(
+                "POST",
+                "/api/oauth/token",
+                json={
+                    "grant_type": DEVICE_GRANT_TYPE,
+                    "device_code": grant["device_code"],
+                    "client_id": CLIENT_ID,
+                },
+            )
+            if response.status_code < _HTTP_ERROR_FLOOR:
+                creds = credentials_from_bundle(self._json(response), now=self._clock())
+                self.store.save(self.base_url, creds)
+                return creds
+            error = _error_from_response(response)
+            if error.error == "authorization_pending":
+                continue
+            if error.error == "slow_down":
+                wait += _SLOW_DOWN_STEP_SECONDS
+                continue
+            if error.error == "access_denied":
+                raise CoachError("access_denied", "The login request was denied.", status=400)
+            if error.error in {"expired_token", "invalid_grant"}:
+                raise CoachError(
+                    "expired", "The login code expired or is no longer valid.", status=400
+                )
+            raise error
 
     def logout(self) -> bool:
         """Revoke server-side (best effort), then always delete the local credentials.
