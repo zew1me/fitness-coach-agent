@@ -1,6 +1,14 @@
+import re
 from datetime import UTC, datetime, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+ACCESS_TOKEN_TTL = timedelta(minutes=15)
+
+# GoTrue's email OTP length is configurable from 6 to 10 digits.
+_CLI_OTP_PATTERN = re.compile(r"[0-9]{6,10}")  # ASCII only: ``\d`` matches any Unicode digit
+# Commonly cited upper bound for an email address (64-octet local part + 255-octet domain).
+_MAX_EMAIL_LENGTH = 320
 
 
 class BrowserSessionRequest(BaseModel):
@@ -14,7 +22,7 @@ class BrowserSessionContext(BaseModel):
 
 class BrowserTokenResponse(BaseModel):
     access_token: str
-    expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + timedelta(minutes=15))
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + ACCESS_TOKEN_TTL)
     scopes: list[str] = Field(default_factory=list)
     token_type: str = "Bearer"
     user_id: str
@@ -92,6 +100,43 @@ class OAuthRefreshTokenRecord(BaseModel):
 
 class TokenBundle(BaseModel):
     access_token: str
-    expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + timedelta(minutes=15))
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + ACCESS_TOKEN_TTL)
+    # RFC 6749 §5.1 fields, alongside the legacy absolute ``expires_at``.
+    expires_in: int = int(ACCESS_TOKEN_TTL.total_seconds())
     refresh_token: str
+    scope: str = ""
     token_type: str = "Bearer"
+
+
+class CliVerifyOtpRequest(BaseModel):
+    """Email OTP submitted by the first-party CLI for server-side verification."""
+
+    email: str = Field(max_length=_MAX_EMAIL_LENGTH)
+    token: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        # Mirror app/api/auth/request-otp: the code was issued to the trimmed, lowercased address.
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("email must not be empty")
+        return normalized
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, value: str) -> str:
+        stripped = value.strip()
+        if not _CLI_OTP_PATTERN.fullmatch(stripped):
+            raise ValueError("token must be a 6-10 digit code")
+        return stripped
+
+
+class CliTokenResponse(TokenBundle):
+    user_id: str
+
+
+class WhoAmIResponse(BaseModel):
+    client_id: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    user_id: str

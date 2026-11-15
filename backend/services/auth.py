@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from http import HTTPStatus
 from typing import Any, ClassVar
 from urllib.parse import urlencode, urlparse
 
@@ -12,9 +14,13 @@ import jwt
 
 from backend.config import settings
 from backend.models.auth import (
+    ACCESS_TOKEN_TTL,
     BrowserSessionContext,
     BrowserTokenResponse,
+    CliTokenResponse,
+    CliVerifyOtpRequest,
     OAuthAuthorizeRequest,
+    OAuthGrantRecord,
     OAuthRevokeRequest,
     OAuthTokenRequest,
     TokenBundle,
@@ -23,6 +29,13 @@ from backend.models.auth import (
 from backend.repos.oauth_repo import OAuthRepository, OAuthRepositoryNotConfiguredError
 
 logger = logging.getLogger(__name__)
+
+# First-party CLI client. Its grant row needs a redirect URI, but the CLI never takes part in
+# a redirect flow: tokens come from server-side OTP verification. The URN is not routable, and
+# parse_authorize_request reserves both values so the public authorize flow cannot mint codes
+# or tokens that impersonate the CLI.
+CLI_CLIENT_ID = "fitness-coach-cli"
+CLI_REDIRECT_URI = "urn:fitness-coach:cli"
 
 
 class OAuthError(ValueError):
@@ -41,6 +54,18 @@ class OAuthInvalidGrantError(OAuthError):
     """Raised when a code or refresh token is invalid."""
 
 
+class OAuthInvalidOtpError(OAuthError):
+    """Raised when Supabase rejects an email OTP (wrong, expired, or unknown email)."""
+
+
+class SupabaseAuthRateLimitedError(RuntimeError):
+    """Raised when Supabase Auth rate-limits a server-side OTP verification."""
+
+
+class SupabaseAuthUnavailableError(RuntimeError):
+    """Raised when Supabase Auth answers a server-side request with an unusable response."""
+
+
 class AuthService:
     """Issue durable OAuth artifacts and verify browser-backed consent sessions."""
 
@@ -54,8 +79,14 @@ class AuthService:
     _browser_session_cookie_name: ClassVar[str] = "coach_browser_session"
     _browser_session_max_age_seconds: ClassVar[int] = 12 * 60 * 60
 
-    def __init__(self, oauth_repo: OAuthRepository | None = None) -> None:
+    def __init__(
+        self,
+        oauth_repo: OAuthRepository | None = None,
+        *,
+        http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+    ) -> None:
         self._oauth_repo = oauth_repo or OAuthRepository()
+        self._http_client_factory = http_client_factory or (lambda: httpx.AsyncClient(timeout=10.0))
 
     async def aclose(self) -> None:
         """Release the OAuth repository's HTTP connections at application shutdown."""
@@ -90,6 +121,8 @@ class AuthService:
         }
 
     def parse_authorize_request(self, request: OAuthAuthorizeRequest) -> list[str]:
+        if request.client_id == CLI_CLIENT_ID or request.redirect_uri == CLI_REDIRECT_URI:
+            raise OAuthError("This client cannot use the authorization code flow.")
         if request.response_type != "code":
             raise OAuthError("Only authorization_code is supported.")
         if request.code_challenge is None or request.code_challenge_method is None:
@@ -218,27 +251,14 @@ class AuthService:
         grant = await self._oauth_repo.get_grant_by_id(code_record.grant_id)
         if grant is None or grant.revoked_at is not None:
             raise OAuthInvalidGrantError("The associated OAuth grant is no longer active.")
-        refresh_token = await self._oauth_repo.create_refresh_token(
-            grant_id=grant.id,
-            user_id=grant.user_id,
-            client_id=grant.client_id,
-            scopes=code_record.scopes,
-        )
+        bundle = await self._issue_token_bundle(grant=grant, scopes=code_record.scopes)
         logger.info(
             "oauth code exchanged user_id=%s client_id=%s scopes=%s",
             grant.user_id,
             grant.client_id,
             code_record.scopes,
         )
-        return TokenBundle(
-            access_token=self._issue_access_token(
-                user_id=grant.user_id,
-                client_id=grant.client_id,
-                scopes=code_record.scopes,
-                grant_id=grant.id,
-            ),
-            refresh_token=refresh_token,
-        )
+        return bundle
 
     async def refresh_access_token(self, request: OAuthTokenRequest) -> TokenBundle:
         if request.refresh_token is None:
@@ -262,13 +282,11 @@ class AuthService:
             refresh_record.user_id,
             refresh_record.client_id,
         )
-        return TokenBundle(
-            access_token=self._issue_access_token(
-                user_id=refresh_record.user_id,
-                client_id=refresh_record.client_id,
-                scopes=refresh_record.scopes,
-                grant_id=refresh_record.grant_id,
-            ),
+        return self._build_token_bundle(
+            user_id=refresh_record.user_id,
+            client_id=refresh_record.client_id,
+            scopes=refresh_record.scopes,
+            grant_id=refresh_record.grant_id,
             refresh_token=replacement,
         )
 
@@ -283,6 +301,25 @@ class AuthService:
             logger.info("oauth grant revoked grant_id=%s revoked=%s", grant_id, revoked)
             return revoked
         return await self._oauth_repo.revoke_refresh_token(request.token)
+
+    async def verify_cli_otp(self, request: CliVerifyOtpRequest) -> CliTokenResponse:
+        """Verify an email OTP with Supabase Auth and mint first-party CLI tokens.
+
+        The CLI never talks to Supabase: the server verifies the code, discards the
+        Supabase session, and issues this app's own access/refresh tokens on a durable
+        grant for ``CLI_CLIENT_ID``.
+        """
+        user_id = await self._verify_supabase_email_otp(email=request.email, token=request.token)
+        scopes = sorted(self._supported_scopes)
+        grant = await self._oauth_repo.upsert_grant(
+            user_id=user_id,
+            client_id=CLI_CLIENT_ID,
+            redirect_uri=CLI_REDIRECT_URI,
+            scopes=scopes,
+        )
+        bundle = await self._issue_token_bundle(grant=grant, scopes=scopes)
+        logger.info("cli otp verified user_id=%s client_id=%s", user_id, CLI_CLIENT_ID)
+        return CliTokenResponse(**bundle.model_dump(), user_id=user_id)
 
     async def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
         user = await self._fetch_supabase_user(supabase_access_token)
@@ -377,19 +414,64 @@ class AuthService:
             return None
         return str(claims.get("jti", "")) or None
 
-    async def _fetch_supabase_user(self, access_token: str) -> dict[str, Any]:
+    async def _verify_supabase_email_otp(self, *, email: str, token: str) -> str:
+        """Return the Supabase user id for a valid email OTP.
+
+        Every client-attributable rejection maps to one error so the response never
+        reveals whether the email has an account. Transport failures propagate as
+        ``httpx.HTTPError`` for the route to report as 503.
+        """
+        supabase_url, service_role_key = self._require_supabase_auth_config()
+        logger.debug("supabase otp verify start")
+        async with self._http_client_factory() as client:
+            response = await client.post(
+                f"{supabase_url}/auth/v1/verify",
+                headers={"apikey": service_role_key},
+                json={"type": "email", "email": email, "token": token},
+            )
+        status = response.status_code
+        logger.debug("supabase otp verify status=%d", status)
+        if status == HTTPStatus.TOO_MANY_REQUESTS:
+            raise SupabaseAuthRateLimitedError("Supabase Auth rate-limited OTP verification.")
+        if HTTPStatus.BAD_REQUEST <= status < HTTPStatus.INTERNAL_SERVER_ERROR:
+            logger.info("cli otp verification rejected status=%d", status)
+            raise OAuthInvalidOtpError("Invalid or expired code.")
+        response.raise_for_status()
+        user_id = self._user_id_from_verify_payload(response)
+        if user_id is None:
+            raise SupabaseAuthUnavailableError("Supabase Auth returned an unexpected payload.")
+        return user_id
+
+    @staticmethod
+    def _user_id_from_verify_payload(response: httpx.Response) -> str | None:
+        if response.status_code != HTTPStatus.OK:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        user = payload.get("user") if isinstance(payload, dict) else None
+        user_id = user.get("id") if isinstance(user, dict) else None
+        return user_id if isinstance(user_id, str) and user_id else None
+
+    @staticmethod
+    def _require_supabase_auth_config() -> tuple[str, str]:
         if not settings.supabase_url or not settings.supabase_service_role_key:
             raise OAuthRepositoryNotConfiguredError(
                 "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
             )
-        url = f"{settings.supabase_url.rstrip('/')}/auth/v1/user"
+        return settings.supabase_url.rstrip("/"), settings.supabase_service_role_key
+
+    async def _fetch_supabase_user(self, access_token: str) -> dict[str, Any]:
+        supabase_url, service_role_key = self._require_supabase_auth_config()
+        url = f"{supabase_url}/auth/v1/user"
         logger.debug("supabase user fetch start")
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with self._http_client_factory() as client:
             response = await client.get(
                 url,
                 headers={
                     "Authorization": f"Bearer {access_token}",
-                    "apikey": settings.supabase_service_role_key,
+                    "apikey": service_role_key,
                 },
             )
         logger.debug("supabase user fetch status=%d", response.status_code)
@@ -399,17 +481,60 @@ class AuthService:
             raise OAuthLoginRequiredError("Supabase returned an unexpected user payload.")
         return payload
 
+    async def _issue_token_bundle(
+        self, *, grant: OAuthGrantRecord, scopes: list[str]
+    ) -> TokenBundle:
+        """Mint a fresh refresh token on ``grant`` and pair it with an access token."""
+        refresh_token = await self._oauth_repo.create_refresh_token(
+            grant_id=grant.id,
+            user_id=grant.user_id,
+            client_id=grant.client_id,
+            scopes=scopes,
+        )
+        return self._build_token_bundle(
+            user_id=grant.user_id,
+            client_id=grant.client_id,
+            scopes=scopes,
+            grant_id=grant.id,
+            refresh_token=refresh_token,
+        )
+
+    def _build_token_bundle(
+        self, *, user_id: str, client_id: str, scopes: list[str], grant_id: str, refresh_token: str
+    ) -> TokenBundle:
+        issued_at = datetime.now(UTC)
+        return TokenBundle(
+            access_token=self._issue_access_token(
+                user_id=user_id,
+                client_id=client_id,
+                scopes=scopes,
+                grant_id=grant_id,
+                issued_at=issued_at,
+            ),
+            expires_at=issued_at + ACCESS_TOKEN_TTL,
+            expires_in=int(ACCESS_TOKEN_TTL.total_seconds()),
+            refresh_token=refresh_token,
+            scope=" ".join(scopes),
+        )
+
     def _issue_access_token(
-        self, *, user_id: str, client_id: str, scopes: list[str], grant_id: str
+        self,
+        *,
+        user_id: str,
+        client_id: str,
+        scopes: list[str],
+        grant_id: str,
+        issued_at: datetime | None = None,
     ) -> str:
+        issued_at = issued_at or datetime.now(UTC)
         return jwt.encode(
             {
                 "sub": user_id,
                 "aud": f"{settings.base_url}/api/mcp",
                 "azp": client_id,
                 "scope": " ".join(scopes),
-                "exp": datetime.now(UTC) + timedelta(minutes=15),
-                "iat": datetime.now(UTC),
+                "exp": issued_at + ACCESS_TOKEN_TTL,
+                "iat": issued_at,
                 "jti": grant_id,
             },
             settings.app_jwt_secret,

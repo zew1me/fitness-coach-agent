@@ -59,10 +59,13 @@ from backend.models.auth import (
     BrowserSessionContext,
     BrowserSessionRequest,
     BrowserTokenResponse,
+    CliTokenResponse,
+    CliVerifyOtpRequest,
     OAuthAuthorizeRequest,
     OAuthRevokeRequest,
     OAuthTokenRequest,
     UserContext,
+    WhoAmIResponse,
 )
 from backend.models.chat import (
     ChatModelState,
@@ -86,7 +89,10 @@ from backend.services.auth import (
     OAuthConsentRequiredError,
     OAuthError,
     OAuthInvalidGrantError,
+    OAuthInvalidOtpError,
     OAuthLoginRequiredError,
+    SupabaseAuthRateLimitedError,
+    SupabaseAuthUnavailableError,
 )
 from backend.services.chat import ChatService, ChatUnavailableError
 from backend.services.course import AthleteCourseContext, build_course_payload
@@ -485,6 +491,43 @@ async def oauth_browser_token(
         _set_browser_session_cookie(response, browser_session)
         logger.debug("browser token issued user_id=%s", browser_session.user_id)
         return token
+
+
+# ── First-party CLI auth ──────────────────────────────────────
+
+
+@app.post("/api/auth/cli/verify-otp")
+async def cli_verify_otp(payload: CliVerifyOtpRequest) -> CliTokenResponse:
+    """Exchange an emailed OTP for CLI tokens; the CLI never talks to Supabase directly.
+
+    Unknown email, wrong code and expired code all return the same 401 so the endpoint
+    cannot be used to enumerate accounts. The email and code are never logged.
+    """
+    try:
+        return await auth_service.verify_cli_otp(payload)
+    except OAuthInvalidOtpError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired code.") from exc
+    except SupabaseAuthRateLimitedError as exc:
+        logger.warning("cli otp verification rate-limited by supabase")
+        raise HTTPException(
+            status_code=429, detail="Too many verification attempts. Wait and try again."
+        ) from exc
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (httpx.HTTPError, SupabaseAuthUnavailableError) as exc:
+        logger.warning("cli otp verification upstream failure error_type=%s", type(exc).__name__)
+        raise HTTPException(
+            status_code=503, detail="Authentication service temporarily unavailable."
+        ) from exc
+
+
+@app.get("/api/auth/whoami")
+async def whoami(user_context: UserContext = Depends(require_user_context)) -> WhoAmIResponse:
+    return WhoAmIResponse(
+        user_id=user_context.user_id,
+        client_id=user_context.client_id,
+        scopes=user_context.scopes,
+    )
 
 
 # ── Intervals.icu OAuth ───────────────────────────────────────
