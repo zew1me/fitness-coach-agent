@@ -28,7 +28,13 @@ class WellnessMapping:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        # Python ints are always finite; math.isfinite() would raise OverflowError on a
+        # JSON integer too large for a float (e.g. 401 digits), so it is only used on floats.
+        return True
+    return isinstance(value, float) and math.isfinite(value)
 
 
 def _log_date(row: dict[str, Any]) -> str:

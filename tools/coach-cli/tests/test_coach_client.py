@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import threading
+import time
+import types
 from pathlib import Path
 from typing import Any
 
+import fitness_coach_cli.credentials as credentials_module
 import httpx
 import pytest
 from fitness_coach_cli.client import CLIENT_ID, CoachClient
@@ -226,3 +230,52 @@ def test_refresh_lock_file_is_private_and_serialises(
         lock = creds_path.with_name(f"{creds_path.name}.lock")
         assert lock.exists()
         assert lock.stat().st_mode & 0o777 == 0o600
+
+
+def test_refresh_lock_blocks_a_second_holder_until_the_first_saves(
+    store: CredentialStore,
+) -> None:
+    # Two descriptors on the lock file contend like two processes: the second refresh must
+    # not start until the first has finished its (deliberately slow) save.
+    events: list[str] = []
+    first_holds = threading.Event()
+
+    def first() -> None:
+        with store.refresh_lock():
+            first_holds.set()
+            time.sleep(0.2)  # a delayed save of the rotated token
+            events.append("first-saved")
+
+    def second() -> None:
+        first_holds.wait()
+        with store.refresh_lock():
+            events.append("second-acquired")
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert events == ["first-saved", "second-acquired"]
+
+
+def test_refresh_lock_uses_msvcrt_on_windows(
+    store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[int, int]] = []
+    attempts = iter([OSError("busy"), None])  # LK_LOCK times out once, then succeeds
+
+    def locking(fd: int, mode: int, nbytes: int) -> None:
+        calls.append((mode, nbytes))
+        outcome = next(attempts)
+        if outcome is not None:
+            raise outcome
+
+    fake_msvcrt = types.SimpleNamespace(LK_LOCK=1, locking=locking)
+    monkeypatch.setattr(credentials_module, "msvcrt", fake_msvcrt, raising=False)
+    monkeypatch.setattr(credentials_module.sys, "platform", "win32")
+
+    with store.refresh_lock():
+        pass
+
+    assert calls == [(1, 1), (1, 1)]

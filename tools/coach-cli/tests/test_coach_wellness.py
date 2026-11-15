@@ -82,3 +82,13 @@ def test_non_finite_values_are_dropped_not_crashing(literal: str, field: str) ->
     result = parse_sidecar_json(text)
     assert result.entries == [{"log_date": "2026-08-15", "source": "garmin", "body_battery": 50}]
     assert result.dropped_fields == {field}
+
+
+@pytest.mark.parametrize("field", ["sleep_score", "hrv_ms"])
+def test_huge_json_integer_does_not_crash(field: str) -> None:
+    # math.isfinite() raises OverflowError on an int too large for a float; ints are always
+    # finite, so the guard must not convert them. The backend still range-checks the value.
+    huge = "1" + "0" * 400
+    result = parse_sidecar_json(f'[{{"log_date": "2026-08-15", "{field}": {huge}}}]')
+    assert result.entries == [{"log_date": "2026-08-15", "source": "garmin", field: int(huge)}]
+    assert result.dropped_fields == set()

@@ -12,7 +12,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-if sys.platform != "win32":
+if sys.platform == "win32":
+    import msvcrt
+else:
     import fcntl
 
 from fitness_coach_cli.errors import CoachError
@@ -92,20 +94,17 @@ class CredentialStore:
         """Serialise token refreshes across processes sharing this credentials file.
 
         Refresh tokens rotate, so two processes presenting the same one would see the loser
-        rejected. Uses ``flock`` on a sibling ``.lock`` file (0600); where ``fcntl`` is
-        unavailable (Windows) it is a no-op and callers rely on their post-refresh reload check.
+        rejected. The lock is a sibling ``.lock`` file (0600) held for the whole
+        reload-refresh-save sequence: ``flock`` on POSIX, ``msvcrt.locking`` on Windows.
         """
-        if sys.platform == "win32":
-            yield
-            return
         _mkdir_private(self.path.parent)
         lock_path = self.path.with_name(f"{self.path.name}.lock")
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            _lock_fd(fd)
             yield
         finally:
-            os.close(fd)  # closing the descriptor releases the lock
+            os.close(fd)  # closing the descriptor releases either kind of lock
 
     def load(self, base_url: str) -> Credentials | None:
         entry = self._read_all().get(base_url)
@@ -137,3 +136,17 @@ class CredentialStore:
             with contextlib.suppress(FileNotFoundError):
                 self.path.unlink()
         return True
+
+
+def _lock_fd(fd: int) -> None:
+    """Block until this process holds an exclusive lock on ``fd``."""
+    if sys.platform == "win32":
+        # LK_LOCK retries for ~10s and then raises; loop so a long refresh elsewhere is
+        # waited out like POSIX flock rather than surfacing as an error. Locks byte 0.
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            except OSError:
+                continue
+            return
+    fcntl.flock(fd, fcntl.LOCK_EX)
