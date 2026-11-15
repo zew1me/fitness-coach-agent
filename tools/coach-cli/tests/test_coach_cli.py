@@ -90,6 +90,43 @@ def test_production_login_requires_yes(api: Any, run: Run, h: Any) -> None:
     assert allowed.exit_code == 0
 
 
+def test_preview_login_requires_yes(api: Any, run: Run) -> None:
+    refused = run("login", "--email", "a@b.c", auto_yes=False)
+    assert refused.exit_code == 1
+    assert "--yes" in refused.stderr
+    assert not api.requests
+
+
+def test_otp_continuation_hint_keeps_root_options_before_login(
+    api: Any, run: Run, creds_path: Path, h: Any
+) -> None:
+    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
+    result = run("login", "--email", "a@b.c")
+    assert result.exit_code == 0
+    expected = (
+        f"coach --base-url {h.BASE} --credentials-file {creds_path} "
+        "login --email a@b.c --code <code> --yes"
+    )
+    assert expected in result.output
+
+
+def test_otp_continuation_hint_json_flag_and_local_target(api: Any, run: Run) -> None:
+    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
+    result = run("--json", "login", "--email", "a@b.c", base="http://localhost:3000")
+    assert result.exit_code == 0
+    assert "otp_sent" in result.output
+    human = run("login", "--email", "a@b.c", base="http://localhost:3000")
+    assert "--base-url http://localhost:3000" in human.output
+    assert "--json" not in human.output
+    assert "--yes" not in human.output
+
+
+def test_malformed_base_url_yields_structured_json_error(run: Run) -> None:
+    result = run("--json", "whoami", base="https://example.com:bad")
+    assert result.exit_code == 1
+    assert '"error":"invalid_base_url"' in result.stderr
+
+
 def test_localhost_login_needs_no_yes(api: Any, run: Run) -> None:
     api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
     assert run("login", "--email", "a@b.c", base="http://localhost:3000").exit_code == 0
@@ -119,7 +156,7 @@ def test_whoami_human_and_json(api: Any, run: Run, h: Any) -> None:
 def test_whoami_without_login_fails(run: Run) -> None:
     result = run("whoami")
     assert result.exit_code == 1
-    assert "coach login" in result.stderr
+    assert "coach --base-url" in result.stderr and "login" in result.stderr
 
 
 def test_logout_revokes_and_deletes(api: Any, run: Run, creds_path: Path, h: Any) -> None:

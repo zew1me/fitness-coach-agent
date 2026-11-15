@@ -72,3 +72,13 @@ def test_invalid_input_is_rejected(payload: str) -> None:
 
 def test_parse_roundtrip() -> None:
     assert len(parse_sidecar_json(json.dumps(SIDECAR_SAMPLE)).entries) == 2
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("field", ["sleep_score", "hrv_ms"])
+def test_non_finite_values_are_dropped_not_crashing(literal: str, field: str) -> None:
+    # json.loads accepts these literals; round() would raise ValueError/OverflowError on them.
+    text = f'[{{"log_date": "2026-08-15", "{field}": {literal}, "body_battery": 50}}]'
+    result = parse_sidecar_json(text)
+    assert result.entries == [{"log_date": "2026-08-15", "source": "garmin", "body_battery": 50}]
+    assert result.dropped_fields == {field}

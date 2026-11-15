@@ -7,6 +7,7 @@ this module only encodes the (stable, documented) row shape.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -27,7 +28,7 @@ class WellnessMapping:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _log_date(row: dict[str, Any]) -> str:

@@ -99,7 +99,13 @@ def run(api: FakeApi, creds_path: Path, monkeypatch: pytest.MonkeyPatch) -> Call
     monkeypatch.delenv("COACH_CREDENTIALS_FILE", raising=False)
     runner = CliRunner()
 
-    def invoke(*args: str, input: str | None = None, base: str | None = BASE) -> Result:
+    def invoke(
+        *args: str, input: str | None = None, base: str | None = BASE, auto_yes: bool = True
+    ) -> Result:
+        # Every non-local target (even a *.vercel.app preview) needs --yes to log in; the
+        # default preview BASE gets it automatically so tests need not repeat it.
+        if auto_yes and base == BASE and "login" in args and "--yes" not in args:
+            args = (*args, "--yes")
         prefix = ["--credentials-file", str(creds_path)]
         if base is not None:
             prefix += ["--base-url", base]

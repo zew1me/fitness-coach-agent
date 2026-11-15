@@ -5,10 +5,15 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import tempfile
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+if sys.platform != "win32":
+    import fcntl
 
 from fitness_coach_cli.errors import CoachError
 
@@ -81,6 +86,26 @@ class CredentialStore:
     def _write_all(self, servers: dict[str, dict[str, Any]]) -> None:
         document = {"version": _FORMAT_VERSION, "servers": servers}
         _write_private_atomic(self.path, json.dumps(document, indent=2).encode("utf-8"))
+
+    @contextlib.contextmanager
+    def refresh_lock(self) -> Iterator[None]:
+        """Serialise token refreshes across processes sharing this credentials file.
+
+        Refresh tokens rotate, so two processes presenting the same one would see the loser
+        rejected. Uses ``flock`` on a sibling ``.lock`` file (0600); where ``fcntl`` is
+        unavailable (Windows) it is a no-op and callers rely on their post-refresh reload check.
+        """
+        if sys.platform == "win32":
+            yield
+            return
+        _mkdir_private(self.path.parent)
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing the descriptor releases the lock
 
     def load(self, base_url: str) -> Credentials | None:
         entry = self._read_all().get(base_url)

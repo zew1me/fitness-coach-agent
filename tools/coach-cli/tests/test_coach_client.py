@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 from fitness_coach_cli.client import CLIENT_ID, CoachClient
-from fitness_coach_cli.credentials import CredentialStore
+from fitness_coach_cli.credentials import Credentials, CredentialStore
 from fitness_coach_cli.errors import CoachError
 
 
@@ -134,7 +134,7 @@ def test_refresh_failure_asks_for_login(
     with pytest.raises(CoachError) as info:
         client.whoami()
     assert info.value.error == "session_expired"
-    assert "coach login" in str(info.value.detail)
+    assert f"coach --base-url {h.BASE} login" in str(info.value.detail)
 
 
 def test_network_error_is_wrapped(store: CredentialStore, h: Any) -> None:
@@ -176,3 +176,53 @@ def test_call_rejects_path_injection(client: CoachClient, store: CredentialStore
     with pytest.raises(CoachError) as info:
         client.call("../oauth/token", {})
     assert info.value.error == "invalid_operation"
+
+
+def test_not_logged_in_hint_puts_root_option_before_subcommand(client: CoachClient, h: Any) -> None:
+    with pytest.raises(CoachError) as info:
+        client.whoami()
+    assert f"coach --base-url {h.BASE} login" in str(info.value.detail)
+
+
+def test_refresh_reuses_credentials_rotated_by_another_process(
+    api: Any, client: CoachClient, store: CredentialStore, h: Any
+) -> None:
+    stale = h.seed(store, expires_at=h.NOW - 5)
+    # Another process rotated and saved between our load and our refresh.
+    store.save(h.BASE, Credentials("acc-2", "ref-2", h.NOW + 3600, "user-1"))
+    assert client._refresh(stale).refresh_token == "ref-2"
+    assert api.to("/api/oauth/token") == []
+
+
+def test_refresh_rejected_after_concurrent_rotation_uses_stored_credentials(
+    api: Any, client: CoachClient, store: CredentialStore, h: Any
+) -> None:
+    stale = h.seed(store, expires_at=h.NOW - 5)
+
+    def rejected(_req: httpx.Request) -> httpx.Response:
+        # The server revoked ref-1 because another process rotated it; that process saved.
+        store.save(h.BASE, Credentials("acc-2", "ref-2", h.NOW + 3600, "user-1"))
+        return httpx.Response(400, json={"detail": "Invalid refresh token."})
+
+    # Simulate a writer outside the lock: the store still holds `stale` when the lock is taken.
+    api.on("POST", "/api/oauth/token", handler=rejected)
+    assert client._refresh_locked(stale).access_token == "acc-2"
+
+
+def test_refresh_rejected_with_unchanged_store_is_session_expired(
+    api: Any, client: CoachClient, store: CredentialStore, h: Any
+) -> None:
+    stale = h.seed(store, expires_at=h.NOW - 5)
+    api.on("POST", "/api/oauth/token", status=401, json={"detail": "revoked"})
+    with pytest.raises(CoachError) as info:
+        client._refresh(stale)
+    assert info.value.error == "session_expired"
+
+
+def test_refresh_lock_file_is_private_and_serialises(
+    store: CredentialStore, creds_path: Path
+) -> None:
+    with store.refresh_lock():
+        lock = creds_path.with_name(f"{creds_path.name}.lock")
+        assert lock.exists()
+        assert lock.stat().st_mode & 0o777 == 0o600

@@ -89,10 +89,20 @@ def test_normalize_base_url_collapses_spellings() -> None:
     [
         ("http://localhost:3000", False),
         ("http://127.0.0.1:8000", False),
-        ("https://my-preview-git-x.vercel.app", False),
+        ("https://my-preview-git-x.vercel.app", True),  # vercel.app can serve production too
+        ("http://[::1]:3000", False),
         ("https://coach.example.com", True),
         ("https://vercel.app.evil.com", True),
     ],
 )
 def test_requires_confirmation(url: str, needs_yes: bool) -> None:
     assert requires_confirmation(url) is needs_yes
+
+
+@pytest.mark.parametrize(
+    "raw", ["https://[::1", "https://example.com:bad", "https://example.com:99999"]
+)
+def test_malformed_base_url_is_a_coach_error(raw: str) -> None:
+    with pytest.raises(CoachError) as info:
+        normalize_base_url(raw)
+    assert info.value.error == "invalid_base_url"

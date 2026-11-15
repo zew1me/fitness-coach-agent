@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 import sys
 import time
 import webbrowser
@@ -117,12 +118,30 @@ def root(
     ctx.obj = Options(base_url, credentials_file, json_output)
 
 
+def _continue_command(opts: Options, client: CoachClient, email: str) -> str:
+    """The step-2 command, keeping the target the user selected.
+
+    Root options (--base-url, --credentials-file, --json) must precede the subcommand or Typer
+    rejects them.
+    """
+    parts = ["coach", "--base-url", client.base_url]
+    if opts.credentials_file is not None:
+        parts += ["--credentials-file", str(opts.credentials_file)]
+    if opts.json_output:
+        parts.append("--json")
+    parts += ["login", "--email", email, "--code", "<code>"]
+    if requires_confirmation(client.base_url):
+        parts.append("--yes")
+    return " ".join(p if p == "<code>" else shlex.quote(p) for p in parts)
+
+
 def _login_step_one(opts: Options, client: CoachClient, email: str, invite: str | None) -> None:
     client.request_otp(email, invite)
+    command = _continue_command(opts, client, email)
     _emit(
         opts,
         {"status": "otp_sent", "email": email},
-        f"A login code was emailed to {email}. Then run: coach login --email {email} --code <code>",
+        f"A login code was emailed to {email}. Then run: {command}",
     )
 
 
@@ -139,7 +158,7 @@ def _confirm_target(base_url: str, *, yes: bool) -> None:
     if requires_confirmation(base_url) and not yes:
         raise CoachError(
             "confirmation_required",
-            f"{base_url} is not localhost or a *.vercel.app preview; re-run with --yes.",
+            f"{base_url} is not localhost (this includes preview deployments); re-run with --yes.",
         )
 
 
@@ -203,7 +222,7 @@ def login(
         bool, typer.Option("--no-browser", help="Device login: do not try to open a browser.")
     ] = False,
     yes: Annotated[
-        bool, typer.Option("--yes", help="Confirm a non-local, non-preview (production) target.")
+        bool, typer.Option("--yes", help="Confirm a non-local target (preview or production).")
     ] = False,
 ) -> None:
     """Log in. Default: device flow (approve a code in any browser). --email: emailed code."""

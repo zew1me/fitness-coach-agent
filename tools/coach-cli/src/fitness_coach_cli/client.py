@@ -112,11 +112,22 @@ class CoachClient:
     def _login_required(self) -> CoachError:
         return CoachError(
             "not_logged_in",
-            f"Run `coach login --base-url {self.base_url}` first.",
+            f"Run `coach --base-url {self.base_url} login` first.",
             status=_HTTP_UNAUTHORIZED,
         )
 
+    def _is_fresh(self, creds: Credentials) -> bool:
+        return creds.expires_at - self._clock() > REFRESH_SKEW_SECONDS
+
     def _refresh(self, current: Credentials) -> Credentials:
+        # Refresh tokens rotate, so concurrent CLI processes must not both present the same one.
+        with self.store.refresh_lock():
+            stored = self.store.load(self.base_url)
+            if stored is not None and stored != current and self._is_fresh(stored):
+                return stored  # another process already refreshed while we waited
+            return self._refresh_locked(stored or current)
+
+    def _refresh_locked(self, current: Credentials) -> Credentials:
         response = self._send(
             "POST",
             "/api/oauth/token",
@@ -127,9 +138,19 @@ class CoachClient:
             },
         )
         if response.status_code in {400, _HTTP_UNAUTHORIZED}:
+            # Lock-less platforms (or a writer outside the lock) may have rotated the token
+            # under us; valid, different stored credentials mean the session is still alive.
+            reloaded = self.store.load(self.base_url)
+            if (
+                reloaded is not None
+                and reloaded.refresh_token != current.refresh_token
+                and self._is_fresh(reloaded)
+            ):
+                return reloaded
             raise CoachError(
                 "session_expired",
-                f"Session can no longer be refreshed; run `coach login` against {self.base_url}.",
+                "Session can no longer be refreshed; run "
+                f"`coach --base-url {self.base_url} login`.",
                 status=response.status_code,
             )
         bundle = self._json(response)

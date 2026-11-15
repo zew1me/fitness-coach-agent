@@ -38,7 +38,7 @@ headless shell: the CLI prints a short code and a URL, you approve it in any bro
 
 ```bash
 export COACH_BASE_URL=https://my-preview.vercel.app
-coach login [--no-browser] [--yes]
+coach login [--no-browser] --yes
 # Open https://my-preview.vercel.app/device and enter code BCDF-GHJK
 # Or open: https://my-preview.vercel.app/api/oauth/device?user_code=BCDFGHJK
 # Waiting for approval in the browser (Ctrl-C to cancel)...
@@ -81,8 +81,9 @@ coach login --email me@example.com --code 123456          # step 2: verifies, st
 
 ### Both paths
 
-- **Production guard:** unless the base URL is `localhost`, `127.0.0.1`, or a `*.vercel.app`
-  preview, login requires `--yes`, checked before any request is sent. This is only a speed bump
+- **Production guard:** unless the base URL is `localhost`, `127.0.0.1`, or `::1`, login requires
+  `--yes`, checked before any request is sent. This includes `*.vercel.app` preview deployments,
+  because Vercel production can be served on `.vercel.app` too. This is only a speed bump
   against pointing an agent at real data by accident.
 - `coach whoami` shows the user id, client id (`fitness-coach-cli`) and scopes.
 - `coach logout` revokes the refresh token and the access token (which revokes the whole grant
@@ -90,7 +91,9 @@ coach login --email me@example.com --code 123456          # step 2: verifies, st
   revocation failed).
 
 Access tokens are refreshed automatically: proactively when within 60 seconds of expiry, and once
-after a 401. Rotated tokens are persisted. If refresh fails the command exits non-zero and asks you
+after a 401. Rotated tokens are persisted. Refreshes take a per-credentials-file lock
+(`<credentials>.lock`, POSIX only) so concurrent `coach` processes do not race on the rotating
+refresh token; a process that loses the race reuses the credentials the winner saved. If refresh fails the command exits non-zero and asks you
 to run `coach login` again.
 
 ## Commands
