@@ -109,32 +109,3 @@ def compute_tss(  # noqa: PLR0913
         return rpe_tss(duration_seconds, rpe)
 
     return 0.0
-
-
-def compute_normalized_power(power_stream: list[int], sample_rate_seconds: int = 1) -> int:
-    """Compute Normalized Power from a power data stream.
-
-    NP = (mean of (30s rolling avg)^4)^0.25
-    """
-    if not power_stream:
-        return 0
-    window_samples = max(1, 30 // sample_rate_seconds)
-    if len(power_stream) < window_samples:
-        return round(sum(power_stream) / len(power_stream))
-
-    # Rolling 30-second average
-    rolling_sum = sum(power_stream[:window_samples])
-    fourth_powers: list[float] = []
-
-    for i in range(window_samples, len(power_stream)):
-        avg = rolling_sum / window_samples
-        fourth_powers.append(avg**4)
-        rolling_sum += power_stream[i] - power_stream[i - window_samples]
-
-    # Include the last window
-    avg = rolling_sum / window_samples
-    fourth_powers.append(avg**4)
-
-    if not fourth_powers:
-        return 0
-    return round((sum(fourth_powers) / len(fourth_powers)) ** 0.25)

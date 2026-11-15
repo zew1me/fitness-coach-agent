@@ -1093,6 +1093,209 @@ async def test_process_uploaded_zip_cap_counts_failed_member_attempts(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_process_uploaded_zip_enforces_archive_wide_decompression_budget(
+    monkeypatch,
+) -> None:
+    # Each member is under the per-member cap and the member-count cap, but their
+    # combined inflated size is not: the archive-wide budget must stop reading once
+    # it would be exceeded, before the over-budget member is ever inflated (#351).
+    chunk = 4096
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    # Each attempt is charged its declared size plus one chunk of possible overshoot.
+    member_charge = len(_SAMPLE_GPX) + chunk
+    monkeypatch.setattr("api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES", 2 * member_charge)
+
+    attempts = 0
+
+    async def counting_entry(**_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+
+    monkeypatch.setattr(api_index, "_zip_activity_entry", counting_entry)
+
+    zip_bytes = _make_zip({f"run{i}.gpx": _SAMPLE_GPX for i in range(5)})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    # Two members fit the budget exactly; the other three are declined unread. Failed
+    # parses still charge the budget, so corrupt members cannot bypass it either.
+    assert attempts == 2
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_admits_smaller_later_member(monkeypatch) -> None:
+    # The budget declines a member, not the whole archive: once a large member does
+    # not fit, a smaller later one that still fits is processed.
+    big = _SAMPLE_GPX + b"<!--" + b"x" * len(_SAMPLE_GPX) + b"-->"
+    chunk = 4096
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    monkeypatch.setattr(
+        "api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES",
+        (len(_SAMPLE_GPX) + chunk) + (len(big) + chunk) - 1,
+    )
+    zip_bytes = _make_zip({"a.gpx": _SAMPLE_GPX, "b.gpx": big, "c.gpx": _SAMPLE_GPX})
+
+    body = await _post_process_zip(zip_bytes, monkeypatch)
+
+    assert body["status"] == "ok"
+    # a.gpx fits; b.gpx would exceed the budget; c.gpx (smaller) still fits.
+    assert len(body["processed"]) == 2
+    assert body["skipped_count"] == 1
+
+
+def _zip_with_understated_size(payload: bytes, declared: int, count: int = 1) -> bytes:
+    """Deflate ``count`` copies of ``payload`` into a zip whose headers claim ``declared``."""
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for i in range(count):
+            archive.writestr(f"bomb{i}.gpx", payload)
+    raw = bytearray(buffer.getvalue())
+    size = declared.to_bytes(4, "little")
+    # Rewrite the uncompressed-size field of every local header (offset 22) and
+    # central directory record (offset 24).
+    for signature, offset in ((b"PK\x03\x04", 22), (b"PK\x01\x02", 24)):
+        at = raw.find(signature)
+        while at != -1:
+            raw[at + offset : at + offset + 4] = size
+            at = raw.find(signature, at + 4)
+    return bytes(raw)
+
+
+def _count_decompressor_output(monkeypatch) -> list[int]:
+    """Count bytes zipfile's decompressors emit, before any truncation to file_size.
+
+    Returns a one-element list holding the running total; callers may reset it.
+    """
+    import zipfile
+
+    total = [0]
+    # `_get_decompressor` is CPython's private codec factory, absent from typeshed's
+    # stub; looked up via the module dict so it is wrapped as the runtime defines it.
+    real_get_decompressor = vars(zipfile)["_get_decompressor"]
+
+    class Counting:
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+        def decompress(self, data: bytes, *args) -> bytes:
+            out = self._inner.decompress(data, *args)
+            total[0] += len(out)
+            return out
+
+        def flush(self, *args) -> bytes:
+            out = self._inner.flush(*args)
+            total[0] += len(out)
+            return out
+
+    monkeypatch.setattr(
+        "zipfile._get_decompressor",
+        lambda compress_type: Counting(real_get_decompressor(compress_type)),
+    )
+    return total
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_bounds_lying_size_header(monkeypatch) -> None:
+    # A zip bomb can understate a member's uncompressed size in its header. An
+    # unbounded archive.read() inflates the whole stream before truncating to that
+    # size, so the bounded reader must cap what the *decompressor* emits, not merely
+    # what it returns; otherwise the budget would charge 64 bytes for megabytes.
+    import io
+    import zipfile
+
+    payload = b"0" * (8 * 1024 * 1024)
+    declared = 64
+    chunk = 64 * 1024
+    raw = _zip_with_understated_size(payload, declared)
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    inflated = _count_decompressor_output(monkeypatch)
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        member = archive.infolist()[0]
+        assert member.file_size == declared
+
+        # The hazard: an unbounded read inflates the full payload before the CRC fails.
+        with pytest.raises(zipfile.BadZipFile):
+            archive.read(member)
+        assert inflated[0] >= len(payload)
+
+        # The bounded reader stops after one capped decompress call.
+        inflated[0] = 0
+        with pytest.raises(zipfile.BadZipFile):
+            api_index._read_zip_member_bounded(archive, member)
+        assert inflated[0] <= chunk
+
+    # End to end, the lying member is skipped best-effort without aborting the archive.
+    inflated[0] = 0
+    body = await _post_process_zip(raw, monkeypatch)
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 1
+    assert inflated[0] <= chunk
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_budget_bounds_aggregate_forged_inflation(
+    monkeypatch,
+) -> None:
+    # Each bounded read of a forged member can overshoot its declared size by up to
+    # one chunk before truncation. The budget charges that overshoot, so the total the
+    # decompressor emits across many forged members stays within the archive budget.
+    declared = 64
+    chunk = 64 * 1024
+    budget = 3 * (declared + chunk)
+    monkeypatch.setattr("api.index._ZIP_READ_CHUNK_BYTES", chunk)
+    monkeypatch.setattr("api.index._ZIP_MAX_TOTAL_UNCOMPRESSED_BYTES", budget)
+    inflated = _count_decompressor_output(monkeypatch)
+
+    forged = _zip_with_understated_size(b"0" * (2 * 1024 * 1024), declared, count=10)
+    body = await _post_process_zip(forged, monkeypatch)
+
+    assert body["status"] == "no_processable_files"
+    assert body["skipped_count"] == 10
+    # Three forged members fit the budget. Charging only the 64 declared bytes would
+    # admit all ten, inflating ~10 chunks against a 3-chunk budget.
+    assert 0 < inflated[0] <= budget
+
+
+@pytest.mark.asyncio
+async def test_process_uploaded_zip_declines_unboundable_codec_unread(monkeypatch) -> None:
+    # bzip2/LZMA chunked reads do not bound decompressor output before Python 3.13,
+    # so such members are declined before any read and cost no work budget.
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("run.gpx", _SAMPLE_GPX, compress_type=zipfile.ZIP_BZIP2)
+        archive.writestr("ride.gpx", _SAMPLE_GPX, compress_type=zipfile.ZIP_DEFLATED)
+
+    read_types: list[int] = []
+
+    def recording_reader(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> bytes:
+        read_types.append(member.compress_type)
+        return archive.read(member)
+
+    monkeypatch.setattr(api_index, "_read_zip_member_bounded", recording_reader)
+
+    body = await _post_process_zip(buffer.getvalue(), monkeypatch)
+
+    # Asserted here, not in the reader: an assertion raised inside the reader would be
+    # swallowed by _process_zip_member's best-effort read handler and still pass.
+    assert read_types == [zipfile.ZIP_DEFLATED]
+    assert body["status"] == "ok"
+    assert len(body["processed"]) == 1
+    assert body["skipped_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_process_uploaded_zip_skips_directory_entries_without_counting(
     monkeypatch,
 ) -> None:
@@ -1115,16 +1318,16 @@ async def test_process_zip_member_counts_read_failure_as_skipped(monkeypatch) ->
     with zipfile.ZipFile(io.BytesIO(_make_zip({"run.gpx": _SAMPLE_GPX}))) as archive:
         member = archive.infolist()[0]
 
-        def fail_to_read_member(_member: zipfile.ZipInfo) -> bytes:
+        def fail_to_read_member(_archive: zipfile.ZipFile, _member: zipfile.ZipInfo) -> bytes:
             raise zipfile.BadZipFile("corrupt member")
 
-        monkeypatch.setattr(archive, "read", fail_to_read_member)
+        monkeypatch.setattr(api_index, "_read_zip_member_bounded", fail_to_read_member)
         result = await api_index._process_zip_member(
             archive=archive,
             member=member,
             user_id=_ZIP_TEST_USER.user_id,
             zip_object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
-            attempted_count=0,
+            used=api_index._ZipWorkUsed(),
         )
 
     assert result.entry is None

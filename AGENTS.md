@@ -34,12 +34,14 @@ uv run pytest                         # all Python and workspace-tool tests
 uv run pytest tests/python/test_api.py  # single application test file
 uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
 uv run pytest tools/self-data-backup/tests/  # backup workspace tool
+uv run pytest tools/reachability-check/tests/  # reachability workspace tool
 uv run pytest tools/coach-cli/tests/  # coach CLI workspace tool (docs/coach-cli.md)
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format
 uv run ty check                      # type checking
 uv run vulture                       # dead-code detection
+uv run reachability-check check      # unreachable routes, client paths, backend modules
 ```
 
 ## Scripts and local tools
@@ -226,6 +228,16 @@ notes stay current.
 
 Use separate Supabase projects per environment (development (local) / preview / production).
 
+Browser roles (`anon`, `authenticated`) never write application tables directly. Every write goes
+through the FastAPI backend or a Next.js server route using `service_role`; the browser and SSR
+Supabase clients only call `supabase.auth.*`. `anon` holds no table privileges, `authenticated`
+holds no INSERT/UPDATE/DELETE/TRUNCATE, and RLS only has SELECT policies (an athlete can read
+their own rows). A table that needs client writes is an explicit exception: grant the privilege,
+add a write policy that also verifies parent ownership, and list it in `CLIENT_WRITABLE_TABLES`
+in `tests/python/test_rls_matrix_db.py`. Listing it there only exempts it from the grant and
+policy checks; also update `test_athlete_cannot_insert_rows` and the parent-attachment denial
+tests so they accept the intended owner writes and still reject cross-athlete ones.
+
 ### Chat persistence
 
 `chat_messages` stores each turn as a `parts jsonb` array matching the AI SDK [`UIMessage`](https://sdk.vercel.ai) shape — text parts, file parts, tool-call parts, and reasoning parts ride together on one row. This mirrors vercel/chatbot's `Message_v2` table.
@@ -310,7 +322,7 @@ description of how the code works today.
 
 OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
 
-**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards both `/api/chat/attachments/presign` and `/api/files/presign-upload` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`. Everything else (including PDFs) returns 400 with a message telling the athlete to paste content as text.
+**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards both `/api/chat/attachments/presign` and `/api/files/presign-upload` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`, `application/zip`, `application/x-zip-compressed` (zip archives are unpacked by `/api/engine/process-uploaded-zip`). Everything else (including PDFs) returns 400 with a message listing the supported types.
 
 Contract: every non-image, non-rejected file part (i.e. `.fit` / `.gpx` activity files) is converted to an `input_text` description that **preserves the link** (`public_url` / `object_key`) so the coach can still resolve it — files are never dropped silently. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
 
@@ -343,7 +355,7 @@ See `.env.example`. Required:
 - Web tests: `tests/web/` — Vitest with `environment: "node"` by default; DOM-based component tests use `@vitest-environment jsdom` directive for React rendering and testing-library interactions
 - Python tests: `tests/python/` plus co-located `tools/*/tests/` workspace-tool tests — pytest with `asyncio_mode = "auto"`
 - Python test config: `conftest.py` for application fixtures; workspace tools should keep tool-specific fixtures local
-- RLS role matrix: `tests/python/test_rls_matrix_db.py` (`db` marker, so not in CI; run `bun run db:reset && bun run test:db`) asserts `anon`, two authenticated athletes and `service_role` against every public table. A new public table fails it until it is classified into one of the file's access classes
+- RLS role matrix: `tests/python/test_rls_matrix_db.py` (`db` marker, so not in CI; run `bun run db:reset && bun run test:db`) asserts `anon`, two authenticated athletes and `service_role` against every public table. A new public table fails it until it is classified into one of the file's access classes, and it fails if a browser role gains a write privilege or policy outside `CLIENT_WRITABLE_TABLES`
 - UI tests: `tests/ui/` — Playwright. The auto-started dev server uses port 3000 in the primary checkout and a stable per-worktree port in a linked git worktree, so concurrent runs in different worktrees never share a server (a worktree never reuses an already-running server, so a rare port collision fails loudly); set `PLAYWRIGHT_PORT` to choose the port, or `BASE_URL` to target a deployed preview
 - Touch-device UI tests: name a spec `*.touch.spec.ts` to run it only in the `mobile-touch` Playwright project (iPhone-class emulation with `isMobile`/`hasTouch` on Chromium) instead of the desktop `chromium` project. Use `locator.tap()` for taps and CDP `Input.dispatchTouchEvent` for swipes; it covers the touch/viewport contract, not WebKit rendering
 
@@ -381,11 +393,32 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml` (CI runs
 | `typecheck`         | `bun run typecheck`                                   |
 | `ty`                | `uv run ty check`                                     |
 | `vulture`           | `uv run vulture`                                      |
+| `reachability`      | `uv run reachability-check check` (see below)         |
 | `vitest`            | `bun run test`                                        |
 | `pytest`            | `uv run pytest`                                       |
 | `cpd`               | `bun run cpd` (copy-paste detection, ≤1% duplication) |
 | `knip`              | `bun run knip` (dead-code / unused-export detection)  |
 | `playwright`        | Full Playwright UI suite                              |
+
+### Reachability gate
+
+`uv run reachability-check check` (`tools/reachability-check/`, issue #417) catches what vulture,
+knip and ruff cannot see across the client/server boundary, and fails on:
+
+- a FastAPI route in `api/index.py` whose path no string literal in `app/`, `components/` or
+  `lib/` references;
+- an `/api/...` or `/.well-known/...` path in those sources that matches no FastAPI route and no
+  Next.js `route.ts` handler;
+- a module under `backend/engine/` or `backend/services/` that no import chain from the deployed
+  entrypoints reaches (an import from tests alone does not count).
+
+Matching is path-level (HTTP methods are not compared) and reads source statically; paths in
+comments do not count as callers. Routes come only from `@app.<method>(...)` and
+`@app.api_route(...)` decorators in the entrypoints: `APIRouter`/`include_router` routes are not followed (none exist today), so add that
+support before introducing a router. Configuration and the allowlist live in
+`[tool.reachability-check]` in `pyproject.toml`. Every allow entry needs a `reason`, and an entry
+that stops matching a finding fails the check as stale, so remove it when the underlying item is
+fixed. Prefer deleting dead code or adding the missing caller over allowlisting.
 
 ### Changes that don't impact the UI layer
 

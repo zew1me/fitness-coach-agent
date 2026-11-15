@@ -1,6 +1,6 @@
 # Exercise Training Plan GPT
 
-ChatGPT-first endurance coaching app scaffold with:
+ChatGPT-first endurance coaching app with:
 
 - Next.js + TypeScript on Vercel
 - Python API functions on Vercel
@@ -132,7 +132,7 @@ Required runtime variables for all three environments:
 Vercel deployment checklist:
 
 1. Create one Vercel project for this repo and leave the root directory at the repository root.
-2. Keep the default Next.js build settings for the frontend and keep `vercel.json` so `api/index.py` stays on the `python3.12` runtime.
+2. Keep the default Next.js build settings for the frontend and keep `vercel.json`, whose rewrites route the backend paths to the `api/index.py` Python function. The Python version floor comes from `requires-python` in `pyproject.toml`.
 3. Add the required environment variables separately for Vercel `Development`, `Preview`, and `Production`.
 4. Set `APP_ENV=development` in Vercel Development, `APP_ENV=preview` in Preview, and `APP_ENV=production` in Production.
 5. Set `APP_BASE_URL` to the matching public origin for each environment.
@@ -169,15 +169,14 @@ Suggested mapping:
 
 Current backend behavior:
 
-- `POST /api/profile` reads the athlete profile from Supabase.
-- `PUT /api/profile` upserts the athlete profile in Supabase.
-- `POST /api/check-ins` persists a check-in row and returns the stored record.
-- `POST /api/plans/generate` reads the athlete profile from Supabase before composing a plan.
+- `POST /api/engine/get-athlete-summary` reads the athlete profile, thresholds, goals, and active plan from Supabase. An athlete with no profile yet gets an onboarding stub, not an error.
+- `POST /api/engine/update-athlete-profile` upserts the athlete profile in Supabase.
+- `POST /api/engine/generate-plan-structure` creates a new training plan and supersedes the previous active one.
+- `GET /api/calendar` returns planned workouts and recorded activities for the calendar view.
 
-If Supabase is not configured, those endpoints return `503`.
-If a profile is missing, profile and plan generation return `404`.
+These are examples, not the full surface. The route decorators in `api/index.py` are the source of
+truth, and [`AGENTS.md`](AGENTS.md) describes the architecture, plan lifecycle, and upload rules.
 
 ## Notes
 
-- The current implementation is still a scaffold in product terms, but profile reads and check-in writes now have a concrete persistence path.
 - OAuth consent now persists durable grants and binds authorization to a browser session; real provider secrets are still required before deployment.

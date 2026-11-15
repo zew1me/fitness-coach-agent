@@ -50,6 +50,8 @@ pre-push:
       run: uv run ty check
     vulture:
       run: uv run vulture
+    reachability:
+      run: uv run reachability-check check
     vitest:
       run: bun run test
     pytest:

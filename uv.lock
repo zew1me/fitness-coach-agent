@@ -7,6 +7,7 @@ members = [
     "exercise-training-plan-gpt",
     "fitness-coach-cli",
     "fitness-coach-garmin-sidecar",
+    "fitness-coach-reachability-check",
     "fitness-coach-self-data-backup",
 ]
 
@@ -350,6 +351,7 @@ dependencies = [
 dev = [
     { name = "fitness-coach-cli" },
     { name = "fitness-coach-garmin-sidecar" },
+    { name = "fitness-coach-reachability-check" },
     { name = "fitness-coach-self-data-backup" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
@@ -382,6 +384,7 @@ requires-dist = [
 dev = [
     { name = "fitness-coach-cli", editable = "tools/coach-cli" },
     { name = "fitness-coach-garmin-sidecar", editable = "tools/garmin-sidecar" },
+    { name = "fitness-coach-reachability-check", editable = "tools/reachability-check" },
     { name = "fitness-coach-self-data-backup", editable = "tools/self-data-backup" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4.0" },
     { name = "pytest", specifier = ">=8.3.5,<9.0.0" },
@@ -434,6 +437,17 @@ requires-dist = [
     { name = "garminconnect", specifier = ">=0.3.6,<0.4.0" },
     { name = "typer", specifier = ">=0.16.0,<1.0.0" },
 ]
+
+[[package]]
+name = "fitness-coach-reachability-check"
+version = "0.1.0"
+source = { editable = "tools/reachability-check" }
+dependencies = [
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "typer", specifier = ">=0.16.0,<1.0.0" }]
 
 [[package]]
 name = "fitness-coach-self-data-backup"

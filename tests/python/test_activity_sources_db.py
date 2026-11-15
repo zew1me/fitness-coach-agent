@@ -344,29 +344,8 @@ def test_trigger_logs_legacy_inserts_and_the_marker_prevents_double_capture(
         assert cursor.fetchone() == (0,)
 
 
-def test_browser_role_direct_insert_is_still_captured_by_the_definer_trigger(
-    athletes: tuple[str, str],
-) -> None:
-    owner, _ = athletes
-    with direct_session(jwt_sub=owner) as session:
-        cursor = session.cursor
-        # Hosted Supabase projects grant browser roles DML on public tables by default, so
-        # this is the exposure the trigger must cover. A fresh local bootstrap does not, so
-        # grant it inside this rolled-back transaction before dropping to the role.
-        cursor.execute("grant select, insert on public.activities to authenticated")
-        cursor.execute("set local role authenticated")
-        cursor.execute(
-            "insert into public.activities (user_id, sport, activity_date)"
-            " values (%s, 'running', '2026-07-04') returning id",
-            (owner,),
-        )
-        row = cursor.fetchone()
-        assert row is not None
-        assert session.notices.count(LEGACY_LOG_LINE) == 1
-        # authenticated has no INSERT on activity_sources, so only the definer trigger
-        # could have written this row; RLS lets the owner read it back.
-        cursor.execute("select id from public.activity_sources where activity_id = %s", (row[0],))
-        assert cursor.fetchall() == [(row[0],)]
+# A browser role can no longer insert into ``activities`` at all (#452), so the capture trigger
+# has no browser path to cover; ``test_rls_matrix_db.py`` asserts that denial for every table.
 
 
 # ── Evidence immutability, composite FKs, identity indexes ──────────────────
