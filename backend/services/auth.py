@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NoReturn
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -15,11 +15,16 @@ import jwt
 from backend.config import settings
 from backend.models.auth import (
     ACCESS_TOKEN_TTL,
+    DEVICE_USER_CODE_ALPHABET,
+    DEVICE_USER_CODE_LENGTH,
     BrowserSessionContext,
     BrowserTokenResponse,
     CliTokenResponse,
     CliVerifyOtpRequest,
+    DeviceAuthorizationRequest,
+    DeviceAuthorizationResponse,
     OAuthAuthorizeRequest,
+    OAuthDeviceCodeRecord,
     OAuthGrantRecord,
     OAuthRevokeRequest,
     OAuthTokenRequest,
@@ -37,6 +42,15 @@ logger = logging.getLogger(__name__)
 CLI_CLIENT_ID = "fitness-coach-cli"
 CLI_REDIRECT_URI = "urn:fitness-coach:cli"
 
+# RFC 8628 device authorization grant. Only first-party clients may start it: the athlete
+# approves on this app's own /device page, so there is no third-party consent screen.
+DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+DEVICE_FLOW_CLIENT_IDS = frozenset({CLI_CLIENT_ID})
+DEVICE_CODE_EXPIRES_IN_SECONDS = 600
+DEVICE_CODE_INTERVAL_SECONDS = 5
+# RFC 8628 §3.5: every ``slow_down`` adds 5 seconds to the polling interval.
+DEVICE_CODE_SLOW_DOWN_SECONDS = 5
+
 
 class OAuthError(ValueError):
     """Base class for OAuth validation errors."""
@@ -52,6 +66,22 @@ class OAuthConsentRequiredError(OAuthError):
 
 class OAuthInvalidGrantError(OAuthError):
     """Raised when a code or refresh token is invalid."""
+
+
+class OAuthDeviceFlowError(OAuthError):
+    """An RFC 8628 / RFC 6749 §5.2 error, reported as ``{"error", "error_description"}``.
+
+    Messages never contain device codes, user codes or tokens, so they are safe to log.
+    """
+
+    def __init__(self, error: str, description: str) -> None:
+        super().__init__(description)
+        self.error = error
+        self.description = description
+
+
+class OAuthInvalidUserCodeError(OAuthError):
+    """Raised when a user code is malformed, unknown, expired, or no longer pending."""
 
 
 class OAuthInvalidOtpError(OAuthError):
@@ -108,8 +138,13 @@ class AuthService:
             "token_endpoint": f"{issuer}/api/oauth/token",
             "registration_endpoint": f"{issuer}/api/oauth/register",
             "revocation_endpoint": f"{issuer}/api/oauth/revoke",
+            "device_authorization_endpoint": f"{issuer}/api/oauth/device/code",
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "grant_types_supported": [
+                "authorization_code",
+                "refresh_token",
+                DEVICE_CODE_GRANT_TYPE,
+            ],
             "code_challenge_methods_supported": ["S256"],
             "scopes_supported": sorted(self._supported_scopes),
         }
@@ -215,6 +250,8 @@ class AuthService:
             return await self.exchange_code(request)
         if request.grant_type == "refresh_token":
             return await self.refresh_access_token(request)
+        if request.grant_type == DEVICE_CODE_GRANT_TYPE:
+            return await self.exchange_device_code(request)
         raise OAuthError("Unsupported grant type.")
 
     async def exchange_code(self, request: OAuthTokenRequest) -> TokenBundle:
@@ -320,6 +357,184 @@ class AuthService:
         bundle = await self._issue_token_bundle(grant=grant, scopes=scopes)
         logger.info("cli otp verified user_id=%s client_id=%s", user_id, CLI_CLIENT_ID)
         return CliTokenResponse(**bundle.model_dump(), user_id=user_id)
+
+    # ── RFC 8628 device authorization grant ───────────────────
+
+    async def start_device_authorization(
+        self, request: DeviceAuthorizationRequest
+    ) -> DeviceAuthorizationResponse:
+        """Create a pending device authorization for a first-party client (RFC 8628 §3.1)."""
+        if request.client_id not in DEVICE_FLOW_CLIENT_IDS:
+            raise OAuthDeviceFlowError(
+                "invalid_client", "This client may not use the device authorization grant."
+            )
+        scopes = self._parse_scope_string(request.scope or "")
+        if not scopes:
+            scopes = sorted(self._supported_scopes)
+        elif not set(scopes).issubset(self._supported_scopes):
+            raise OAuthDeviceFlowError(
+                "invalid_scope", "One or more requested scopes are unsupported."
+            )
+        else:
+            scopes = sorted(set(scopes))
+        expires_at = datetime.now(UTC) + timedelta(seconds=DEVICE_CODE_EXPIRES_IN_SECONDS)
+        device_code, record = await self._oauth_repo.create_device_code(
+            client_id=request.client_id,
+            scopes=scopes,
+            expires_at=expires_at,
+            interval_seconds=DEVICE_CODE_INTERVAL_SECONDS,
+        )
+        logger.info(
+            "oauth device authorization started client_id=%s scopes=%s",
+            request.client_id,
+            scopes,
+        )
+        base = settings.base_url
+        return DeviceAuthorizationResponse(
+            device_code=device_code,
+            user_code=self.format_user_code(record.user_code),
+            verification_uri=f"{base}/device",
+            verification_uri_complete=(
+                f"{base}/api/oauth/device?{urlencode({'user_code': record.user_code})}"
+            ),
+            expires_in=DEVICE_CODE_EXPIRES_IN_SECONDS,
+            interval=DEVICE_CODE_INTERVAL_SECONDS,
+        )
+
+    @staticmethod
+    def build_device_page_redirect(params: dict[str, str] | None = None) -> str:
+        """URL of the /device page, carrying the query-param state it renders."""
+        query = f"?{urlencode(params)}" if params else ""
+        return f"{settings.base_url}/device{query}"
+
+    def build_device_login_redirect(self, user_code: str) -> str:
+        """Send the browser to log in, then back to the device entry point for ``user_code``."""
+        return self.build_login_redirect("/api/oauth/device?" + urlencode({"user_code": user_code}))
+
+    @staticmethod
+    def normalize_user_code(raw: str | None) -> str | None:
+        """Uppercase and drop whitespace and dashes; ``None`` unless a well-formed code remains.
+
+        Only well-formed codes reach the database, and a malformed one is reported exactly
+        like an unknown one.
+        """
+        if raw is None:
+            return None
+        normalized = "".join(ch for ch in raw.upper() if ch != "-" and not ch.isspace())
+        if len(normalized) != DEVICE_USER_CODE_LENGTH or any(
+            ch not in DEVICE_USER_CODE_ALPHABET for ch in normalized
+        ):
+            return None
+        return normalized
+
+    @staticmethod
+    def format_user_code(user_code: str) -> str:
+        """Render a normalised user code for display as ``XXXX-XXXX``."""
+        half = DEVICE_USER_CODE_LENGTH // 2
+        return f"{user_code[:half]}-{user_code[half:]}"
+
+    async def get_pending_device_code(self, user_code: str) -> OAuthDeviceCodeRecord:
+        """Return the live pending authorization for a normalised user code.
+
+        Unknown, expired and already-decided codes all raise the same error.
+        """
+        record = await self._oauth_repo.find_pending_device_code(user_code)
+        if record is None or record.expires_at <= datetime.now(UTC):
+            raise OAuthInvalidUserCodeError("The user code is invalid or has expired.")
+        return record
+
+    async def approve_device_code(
+        self, *, user_code: str, browser_session: BrowserSessionContext
+    ) -> None:
+        """Approve a pending device authorization on the athlete's durable CLI grant."""
+        record = await self.get_pending_device_code(user_code)
+        grant = await self._oauth_repo.upsert_grant(
+            user_id=browser_session.user_id,
+            client_id=CLI_CLIENT_ID,
+            redirect_uri=CLI_REDIRECT_URI,
+            scopes=record.scopes,
+        )
+        approved = await self._oauth_repo.approve_device_code(
+            record.id, user_id=browser_session.user_id, grant_id=grant.id
+        )
+        if approved is None:
+            raise OAuthInvalidUserCodeError("The user code is invalid or has expired.")
+        logger.info(
+            "oauth device authorization approved user_id=%s client_id=%s",
+            browser_session.user_id,
+            record.client_id,
+        )
+
+    async def deny_device_code(
+        self, *, user_code: str, browser_session: BrowserSessionContext
+    ) -> None:
+        """Deny a pending device authorization so the polling client stops."""
+        record = await self.get_pending_device_code(user_code)
+        if not await self._oauth_repo.deny_device_code(record.id):
+            raise OAuthInvalidUserCodeError("The user code is invalid or has expired.")
+        logger.info(
+            "oauth device authorization denied user_id=%s client_id=%s",
+            browser_session.user_id,
+            record.client_id,
+        )
+
+    async def exchange_device_code(self, request: OAuthTokenRequest) -> CliTokenResponse:
+        """Answer a device-code token poll (RFC 8628 §3.4/§3.5).
+
+        Unknown, expired, consumed and wrong-client codes all yield ``expired_token`` so a
+        caller cannot tell whether a device code ever existed.
+        """
+        if not request.device_code:
+            raise OAuthDeviceFlowError("invalid_request", "device_code is required.")
+        record = await self._oauth_repo.get_device_code(request.device_code)
+        now = datetime.now(UTC)
+        if (
+            record is None
+            or record.client_id != request.client_id
+            or record.expires_at <= now
+            or record.status == "consumed"
+        ):
+            raise self._expired_device_code_error()
+        if record.status == "denied":
+            raise OAuthDeviceFlowError("access_denied", "The athlete denied the request.")
+        if record.status == "pending":
+            await self._reject_pending_device_poll(record, now=now)
+        consumed = await self._oauth_repo.consume_device_code(record.id)
+        if consumed is None or consumed.grant_id is None:
+            raise self._expired_device_code_error()
+        grant = await self._oauth_repo.get_grant_by_id(consumed.grant_id)
+        if grant is None or grant.revoked_at is not None:
+            raise self._expired_device_code_error()
+        bundle = await self._issue_token_bundle(grant=grant, scopes=consumed.scopes)
+        logger.info(
+            "oauth device code exchanged user_id=%s client_id=%s", grant.user_id, grant.client_id
+        )
+        return CliTokenResponse(**bundle.model_dump(), user_id=grant.user_id)
+
+    async def _reject_pending_device_poll(
+        self, record: OAuthDeviceCodeRecord, *, now: datetime
+    ) -> NoReturn:
+        """Record a poll on a pending code and raise ``authorization_pending`` or ``slow_down``."""
+        too_fast = record.last_polled_at is not None and now - record.last_polled_at < timedelta(
+            seconds=record.interval_seconds
+        )
+        interval = record.interval_seconds + (DEVICE_CODE_SLOW_DOWN_SECONDS if too_fast else 0)
+        await self._oauth_repo.record_device_code_poll(
+            record.id, polled_at=now, interval_seconds=interval
+        )
+        if too_fast:
+            raise OAuthDeviceFlowError(
+                "slow_down", f"Polling too fast; wait at least {interval} seconds between polls."
+            )
+        raise OAuthDeviceFlowError(
+            "authorization_pending", "The athlete has not approved the request yet."
+        )
+
+    @staticmethod
+    def _expired_device_code_error() -> OAuthDeviceFlowError:
+        return OAuthDeviceFlowError(
+            "expired_token", "The device code is invalid or has expired. Start a new login."
+        )
 
     async def create_browser_session(self, supabase_access_token: str) -> BrowserSessionContext:
         user = await self._fetch_supabase_user(supabase_access_token)

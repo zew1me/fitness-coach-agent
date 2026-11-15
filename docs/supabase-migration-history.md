@@ -31,6 +31,8 @@
 - `20261028090000_plan_workout_link_one_to_one.sql` — makes the plan workout/activity link one-to-one: the link RPCs refuse an already-claimed activity, and partial unique indexes back it up (#467)
 - `20261101120000_recovery_logs_source_free_form.sql` — replaces the vendor list in `recovery_logs_source_check` with a snake_case slug format check so wellness provenance is open-ended (#428)
 - `20261104061335_activity_sources_backfill.sql` — restart-safe historical activity-source capture, with a service-role-only progress record and operator RPCs (#533 PR B)
+- `20261106120000_drop_legacy_chat_content_and_attachments.sql` — drops the legacy `chat_messages.content` mirror and the `chat_attachments` table (#303)
+- `20261115120000_oauth_device_codes.sql` — server-only `oauth_device_codes` table for the coach CLI's RFC 8628 device authorization grant (#568)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -809,3 +811,29 @@ where not exists (
 the application deploy. Preview and production are separate Supabase projects and must
 each be linked and applied independently. The drop is irreversible; take a backup first
 if you want the legacy rows retained.
+
+## 20261115120000 — OAuth device codes for the coach CLI (2026-11-15)
+
+**File:** `supabase/migrations/20261115120000_oauth_device_codes.sql`
+
+**Change:** Adds `public.oauth_device_codes`, one row per RFC 8628 device authorization
+started by `POST /api/oauth/device/code`. Only the SHA-256 hex of the device code is
+stored (`device_code_hash`, unique). `status` is checked to `pending`, `approved`,
+`denied` or `consumed`; approved and consumed rows must carry `user_id` and `grant_id`
+(`grant_id` references `oauth_grants` with `on delete cascade`). A partial unique index
+keeps `user_code` unique among pending rows only, and `expires_at` is indexed for the
+backend's opportunistic purge of rows that expired more than a day ago.
+
+**Access:** Server-only, like `oauth_authorization_codes` and `oauth_refresh_tokens`:
+RLS is enabled with no client policies. Table privileges are also revoked from
+`public`, `anon` and `authenticated` and granted to `service_role`, so the table stays
+closed even where a hosted project grants browser roles DML by default. The RLS role
+matrix lists it under `SERVER_ONLY_TABLES`.
+
+**Why:** `coach login` must work from a remote or headless agent harness: the CLI shows
+a short code, the athlete approves it on `/device` in any signed-in browser, and the CLI
+polls `/api/oauth/token` with the device-code grant (#568).
+
+**All environments:** Apply via `supabase db push` (or `bun run db:reset` locally). The
+migration only adds a table; deploy it before the application change that writes to it.
+Preview and production are separate Supabase projects and must each be applied.

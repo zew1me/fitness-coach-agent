@@ -61,6 +61,7 @@ from backend.models.auth import (
     BrowserTokenResponse,
     CliTokenResponse,
     CliVerifyOtpRequest,
+    DeviceAuthorizationRequest,
     OAuthAuthorizeRequest,
     OAuthRevokeRequest,
     OAuthTokenRequest,
@@ -87,9 +88,11 @@ from backend.repos.supabase_repo import (
 from backend.services.auth import (
     AuthService,
     OAuthConsentRequiredError,
+    OAuthDeviceFlowError,
     OAuthError,
     OAuthInvalidGrantError,
     OAuthInvalidOtpError,
+    OAuthInvalidUserCodeError,
     OAuthLoginRequiredError,
     SupabaseAuthRateLimitedError,
     SupabaseAuthUnavailableError,
@@ -408,6 +411,13 @@ async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
         bundle = await auth_service.exchange_token_request(payload)
     except OAuthRepositoryNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthDeviceFlowError as exc:
+        # Polling answers authorization_pending every few seconds; keep that out of info logs.
+        level = logging.DEBUG if exc.error in _DEVICE_POLL_WAIT_ERRORS else logging.INFO
+        logger.log(
+            level, "oauth device token poll client_id=%s error=%s", payload.client_id, exc.error
+        )
+        return _oauth_error_response(exc)
     except OAuthInvalidGrantError as exc:
         logger.warning("oauth token exchange failed: invalid grant client_id=%s", payload.client_id)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -528,6 +538,130 @@ async def whoami(user_context: UserContext = Depends(require_user_context)) -> W
         client_id=user_context.client_id,
         scopes=user_context.scopes,
     )
+
+
+# ── RFC 8628 device authorization (coach CLI) ─────────────────
+
+_DEVICE_POLL_WAIT_ERRORS = frozenset({"authorization_pending", "slow_down"})
+
+
+def _oauth_error_response(exc: OAuthDeviceFlowError) -> JSONResponse:
+    """RFC 6749 §5.2 error body. Only the device flow uses it; other grants keep ``detail``."""
+    return JSONResponse(
+        status_code=400,
+        content={"error": exc.error, "error_description": exc.description},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/oauth/device/code")
+async def oauth_device_code(payload: DeviceAuthorizationRequest) -> JSONResponse:
+    """Start a device authorization for a first-party client (RFC 8628 §3.1-3.2)."""
+    try:
+        authorization = await auth_service.start_device_authorization(payload)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthDeviceFlowError as exc:
+        logger.info(
+            "oauth device authorization rejected client_id=%s error=%s",
+            payload.client_id,
+            exc.error,
+        )
+        return _oauth_error_response(exc)
+    # The body carries the device code, a bearer secret until it is consumed or expires.
+    return JSONResponse(authorization.model_dump(), headers={"Cache-Control": "no-store"})
+
+
+def _device_page(params: dict[str, str] | None = None) -> RedirectResponse:
+    return RedirectResponse(auth_service.build_device_page_redirect(params), status_code=302)
+
+
+def _invalid_device_code_page() -> RedirectResponse:
+    return _device_page({"error": "invalid_code"})
+
+
+@app.get("/api/oauth/device")
+async def oauth_device_verification(
+    user_code: str | None = None,
+    coach_browser_session: str | None = Cookie(default=None),
+) -> RedirectResponse:
+    """Browser entry point for a user code: log in if needed, then show the confirm step.
+
+    Only redirects; nothing changes state on GET. A malformed code is rejected before the
+    session check because it never touches the database, while lookups of well-formed codes
+    require a signed-in athlete so anonymous browsers cannot probe for pending codes.
+    """
+    if not user_code:
+        return _device_page()
+    normalized = auth_service.normalize_user_code(user_code)
+    if normalized is None:
+        return _invalid_device_code_page()
+    try:
+        browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
+    except OAuthLoginRequiredError:
+        logger.info("oauth device verification login required")
+        return RedirectResponse(
+            auth_service.build_device_login_redirect(normalized), status_code=302
+        )
+    try:
+        record = await auth_service.get_pending_device_code(normalized)
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthInvalidUserCodeError:
+        logger.info("oauth device verification invalid code user_id=%s", browser_session.user_id)
+        return _invalid_device_code_page()
+    logger.info(
+        "oauth device verification confirm user_id=%s client_id=%s",
+        browser_session.user_id,
+        record.client_id,
+    )
+    return _device_page(
+        {
+            "step": "confirm",
+            "user_code": auth_service.format_user_code(normalized),
+            "client_id": record.client_id,
+            "scope": " ".join(record.scopes),
+        }
+    )
+
+
+@app.post("/api/oauth/device/decision")
+async def oauth_device_decision(
+    user_code: str = Form(default=""),
+    decision: str = Form(default=""),
+    coach_browser_session: str | None = Cookie(default=None),
+) -> RedirectResponse:
+    """Approve or deny a pending device authorization.
+
+    CSRF posture matches /api/oauth/authorize/decision: the session cookie is SameSite=Lax,
+    so a cross-site form POST arrives without it and is bounced to login.
+    """
+    normalized = auth_service.normalize_user_code(user_code)
+    if normalized is None:
+        return _invalid_device_code_page()
+    try:
+        browser_session = auth_service.get_browser_session_from_cookie(coach_browser_session)
+    except OAuthLoginRequiredError:
+        logger.info("oauth device decision login required")
+        return RedirectResponse(
+            auth_service.build_device_login_redirect(normalized), status_code=302
+        )
+    approve = decision == "approve"
+    try:
+        if approve:
+            await auth_service.approve_device_code(
+                user_code=normalized, browser_session=browser_session
+            )
+        else:
+            await auth_service.deny_device_code(
+                user_code=normalized, browser_session=browser_session
+            )
+    except OAuthRepositoryNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OAuthInvalidUserCodeError:
+        logger.info("oauth device decision invalid code user_id=%s", browser_session.user_id)
+        return _invalid_device_code_page()
+    return _device_page({"status": "approved" if approve else "denied"})
 
 
 # ── Intervals.icu OAuth ───────────────────────────────────────

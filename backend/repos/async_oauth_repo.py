@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 
+import httpx
 from postgrest.exceptions import APIError as PostgRESTAPIError
 
 from backend.config import settings
 from backend.models.auth import (
     OAuthAuthorizationCodeRecord,
+    OAuthDeviceCodeRecord,
     OAuthGrantRecord,
     OAuthRefreshTokenRecord,
 )
 from backend.repos.oauth_repo_base import _OAuthRepositoryBase
 from supabase import AsyncClient as SupabaseAsyncClient
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncOAuthRepository(_OAuthRepositoryBase):
@@ -218,6 +223,140 @@ class AsyncOAuthRepository(_OAuthRepositoryBase):
         )
         await refresh_query.execute()
         return bool(grant_response.data or [])
+
+    # ── RFC 8628 device authorization ──────────────────────────
+    # Status transitions are conditional updates (``status=eq.<expected>``) returning the row,
+    # so concurrent approvals, denials and polls cannot both win: an empty response means the
+    # row had already moved on (or expired), and callers treat that as an invalid code.
+
+    async def create_device_code(
+        self, *, client_id: str, scopes: list[str], expires_at: datetime, interval_seconds: int
+    ) -> tuple[str, OAuthDeviceCodeRecord]:
+        """Insert a pending device authorization; return the raw device code and the row."""
+        client = self._require_client()
+        for attempt in range(self._DEVICE_CODE_INSERT_ATTEMPTS):
+            raw_device_code = self._issue_device_code()
+            payload = self._device_code_payload(
+                raw_device_code=raw_device_code,
+                client_id=client_id,
+                scopes=scopes,
+                expires_at=expires_at,
+                interval_seconds=interval_seconds,
+            )
+            try:
+                response = await client.table(self._device_codes_table).insert(payload).execute()
+            except PostgRESTAPIError as exc:
+                if not self._should_retry_device_code_insert(exc, attempt):
+                    raise
+                continue
+            record = self._parse_device_code(self._require_device_code_row(response.data or []))
+            await self._purge_expired_device_codes()
+            return raw_device_code, record
+        raise AssertionError("unreachable: device code insert loop exited without returning")
+
+    async def find_pending_device_code(self, user_code: str) -> OAuthDeviceCodeRecord | None:
+        """Look up a pending device authorization by its normalised user code."""
+        client = self._require_client()
+        query = (
+            client.table(self._device_codes_table)
+            .select("*")
+            .eq("user_code", user_code)
+            .eq("status", "pending")
+            .limit(1)
+        )
+        response = await query.execute()
+        return self._parse_optional_device_code(response.data or [])
+
+    async def get_device_code(self, raw_device_code: str) -> OAuthDeviceCodeRecord | None:
+        """Look up a device authorization by the raw device code the client presents."""
+        client = self._require_client()
+        query = (
+            client.table(self._device_codes_table)
+            .select("*")
+            .eq("device_code_hash", self._hash_secret(raw_device_code))
+            .limit(1)
+        )
+        response = await query.execute()
+        return self._parse_optional_device_code(response.data or [])
+
+    async def record_device_code_poll(
+        self, record_id: str, *, polled_at: datetime, interval_seconds: int
+    ) -> None:
+        """Stamp a token poll on a pending row, raising its interval after ``slow_down``."""
+        client = self._require_client()
+        query = (
+            client.table(self._device_codes_table)
+            .update({"last_polled_at": polled_at.isoformat(), "interval_seconds": interval_seconds})
+            .eq("id", record_id)
+            .eq("status", "pending")
+        )
+        await query.execute()
+
+    async def approve_device_code(
+        self, record_id: str, *, user_id: str, grant_id: str
+    ) -> OAuthDeviceCodeRecord | None:
+        """Move an unexpired pending row to ``approved``; ``None`` if it was not pending."""
+        client = self._require_client()
+        now = datetime.now(UTC).isoformat()
+        query = (
+            client.table(self._device_codes_table)
+            .update(
+                {"status": "approved", "user_id": user_id, "grant_id": grant_id, "approved_at": now}
+            )
+            .eq("id", record_id)
+            .eq("status", "pending")
+            .gt("expires_at", now)
+        )
+        response = await query.execute()
+        return self._parse_optional_device_code(response.data or [])
+
+    async def deny_device_code(self, record_id: str) -> bool:
+        """Move an unexpired pending row to ``denied``; ``False`` if it was not pending."""
+        client = self._require_client()
+        query = (
+            client.table(self._device_codes_table)
+            .update({"status": "denied"})
+            .eq("id", record_id)
+            .eq("status", "pending")
+            .gt("expires_at", datetime.now(UTC).isoformat())
+        )
+        response = await query.execute()
+        return bool(response.data or [])
+
+    async def consume_device_code(self, record_id: str) -> OAuthDeviceCodeRecord | None:
+        """Atomically move an unexpired approved row to ``consumed``.
+
+        The ``status=eq.approved`` filter makes this the single winner among concurrent
+        polls, so the token bundle is issued at most once per device code.
+        """
+        client = self._require_client()
+        query = (
+            client.table(self._device_codes_table)
+            .update({"status": "consumed"})
+            .eq("id", record_id)
+            .eq("status", "approved")
+            .gt("expires_at", datetime.now(UTC).isoformat())
+        )
+        response = await query.execute()
+        return self._parse_optional_device_code(response.data or [])
+
+    async def _purge_expired_device_codes(self) -> None:
+        """Best-effort delete of rows that expired more than the retention window ago.
+
+        Housekeeping must never fail the athlete's login, so database and transport errors
+        are logged and swallowed here; the next successful purge removes the same rows.
+        """
+        client = self._require_client()
+        cutoff = datetime.now(UTC) - self._DEVICE_CODE_RETENTION
+        try:
+            await (
+                client.table(self._device_codes_table)
+                .delete()
+                .lt("expires_at", cutoff.isoformat())
+                .execute()
+            )
+        except (PostgRESTAPIError, httpx.HTTPError) as exc:
+            logger.warning("oauth device code purge failed error_type=%s", type(exc).__name__)
 
     async def _find_authorization_code_by_hash(
         self, raw_code: str
