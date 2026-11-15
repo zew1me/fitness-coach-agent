@@ -733,12 +733,29 @@ async def test_a_stale_concurrent_poll_cannot_lower_the_backoff(harness: DeviceH
     # A fast poll raises the interval to 10s.
     _assert_oauth_error(await _poll(harness, started["device_code"]), "slow_down")
     assert harness.device_row()["interval_seconds"] == 10
-    raised_row = dict(harness.device_row())
 
-    # The stale poll now tries to write interval 5 based on its old read: the
-    # compare-and-set misses, it answers slow_down, and the larger backoff survives.
+    # The stale poll computed its write from the old row. Its compare-and-set misses, it
+    # re-reads, and against the fresh stamp it is too fast, so the backoff grows instead
+    # of falling back to 5s.
     record = OAuthDeviceCodeRecord.model_validate(stale_view)
     with pytest.raises(OAuthDeviceFlowError) as excinfo:
-        await harness.service._reject_pending_device_poll(record, now=datetime.now(UTC))
+        await harness.service._reject_pending_device_poll(
+            record, device_code=str(started["device_code"]), now=datetime.now(UTC)
+        )
     assert excinfo.value.error == "slow_down"
-    assert harness.device_row() == raised_row
+    assert harness.device_row()["interval_seconds"] == 15
+
+
+async def test_simultaneous_first_polls_still_raise_the_backoff(harness: DeviceHarness) -> None:
+    started = await _start(harness)
+    unpolled = OAuthDeviceCodeRecord.model_validate(dict(harness.device_row()))
+
+    # Poll A stamps first; poll B read the same never-polled row.
+    _assert_oauth_error(await _poll(harness, started["device_code"]), "authorization_pending")
+    with pytest.raises(OAuthDeviceFlowError) as excinfo:
+        await harness.service._reject_pending_device_poll(
+            unpolled, device_code=str(started["device_code"]), now=datetime.now(UTC)
+        )
+
+    assert excinfo.value.error == "slow_down"
+    assert harness.device_row()["interval_seconds"] == 10

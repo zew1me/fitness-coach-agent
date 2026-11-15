@@ -50,6 +50,8 @@ DEVICE_CODE_EXPIRES_IN_SECONDS = 600
 DEVICE_CODE_INTERVAL_SECONDS = 5
 # RFC 8628 §3.5: every ``slow_down`` adds 5 seconds to the polling interval.
 DEVICE_CODE_SLOW_DOWN_SECONDS = 5
+# Compare-and-set retries for a poll stamp before conceding to concurrent polls.
+DEVICE_POLL_STAMP_ATTEMPTS = 3
 
 
 class OAuthError(ValueError):
@@ -527,7 +529,7 @@ class AuthService:
         if record.status == "denied":
             raise OAuthDeviceFlowError("access_denied", "The athlete denied the request.")
         if record.status == "pending":
-            await self._reject_pending_device_poll(record, now=now)
+            await self._reject_pending_device_poll(record, device_code=request.device_code, now=now)
         consumed = await self._oauth_repo.consume_device_code(record.id)
         if consumed is None or consumed.grant_id is None:
             raise self._expired_device_code_error()
@@ -541,29 +543,45 @@ class AuthService:
         return CliTokenResponse(**bundle.model_dump(), user_id=grant.user_id)
 
     async def _reject_pending_device_poll(
-        self, record: OAuthDeviceCodeRecord, *, now: datetime
+        self, record: OAuthDeviceCodeRecord, *, device_code: str, now: datetime
     ) -> NoReturn:
-        """Record a poll on a pending code and raise ``authorization_pending`` or ``slow_down``."""
+        """Record a poll on a pending code and raise ``authorization_pending`` or ``slow_down``.
+
+        The stamp is a compare-and-set on the ``last_polled_at`` this poll read. When a
+        concurrent poll wins, re-read and retry against the fresh row: measured against the
+        stamp that just landed, this poll is too fast, so the retry raises the stored interval
+        rather than leaving the backoff unchanged (RFC 8628 §3.5).
+        """
+        for _ in range(DEVICE_POLL_STAMP_ATTEMPTS):
+            too_fast, interval = self._device_poll_backoff(record, now=now)
+            if await self._oauth_repo.record_device_code_poll(
+                record.id,
+                observed_polled_at=record.last_polled_at,
+                polled_at=now,
+                interval_seconds=interval,
+            ):
+                if too_fast:
+                    raise OAuthDeviceFlowError(
+                        "slow_down",
+                        f"Polling too fast; wait at least {interval} seconds between polls.",
+                    )
+                raise OAuthDeviceFlowError(
+                    "authorization_pending", "The athlete has not approved the request yet."
+                )
+            fresh = await self._oauth_repo.get_device_code(device_code)
+            if fresh is None or fresh.status != "pending":
+                break  # decided or gone meanwhile; the next poll sees the new state
+            record = fresh
+        raise OAuthDeviceFlowError("slow_down", "Polling too fast; wait before polling again.")
+
+    @staticmethod
+    def _device_poll_backoff(record: OAuthDeviceCodeRecord, *, now: datetime) -> tuple[bool, int]:
+        """Whether this poll is too fast for ``record``, and the interval to store."""
         too_fast = record.last_polled_at is not None and now - record.last_polled_at < timedelta(
             seconds=record.interval_seconds
         )
-        interval = record.interval_seconds + (DEVICE_CODE_SLOW_DOWN_SECONDS if too_fast else 0)
-        stamped = await self._oauth_repo.record_device_code_poll(
-            record.id,
-            observed_polled_at=record.last_polled_at,
-            polled_at=now,
-            interval_seconds=interval,
-        )
-        if not stamped:
-            # A concurrent poll stamped the row after this one read it, so this poll is
-            # too fast by definition; answer slow_down without writing over its backoff.
-            raise OAuthDeviceFlowError("slow_down", "Polling too fast; wait before polling again.")
-        if too_fast:
-            raise OAuthDeviceFlowError(
-                "slow_down", f"Polling too fast; wait at least {interval} seconds between polls."
-            )
-        raise OAuthDeviceFlowError(
-            "authorization_pending", "The athlete has not approved the request yet."
+        return too_fast, record.interval_seconds + (
+            DEVICE_CODE_SLOW_DOWN_SECONDS if too_fast else 0
         )
 
     @staticmethod
