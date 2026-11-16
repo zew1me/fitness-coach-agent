@@ -33,17 +33,17 @@ supabase link --project-ref <project-ref>
 
 ## Step 1 — Get your admin tokens
 
-| Token                   | Where to get it                                                                                                                                                                             |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens; only needed for auto-creating projects                                                                                                              |
-| `SUPABASE_ORG_ID`       | Your org slug from the Supabase dashboard URL; only needed for auto-creating projects                                                                                                       |
-| `CF_API_TOKEN`          | dash.cloudflare.com → My Profile → API Tokens → create with **Workers R2 Storage:Edit** _and_ **API Tokens:Edit** (the second permission lets the script auto-mint the R2 S3 runtime token) |
-| `CF_ACCOUNT_ID`         | Cloudflare dashboard right sidebar (any page)                                                                                                                                               |
-| `OPENAI_API_KEY`        | platform.openai.com                                                                                                                                                                         |
-| `TAVILY_API_KEY`        | tavily.com                                                                                                                                                                                  |
-| `SENTRY_DSN`            | Sentry → Settings → Projects → `javascript-nextjs` → Client Keys (DSN); server-side key, optional                                                                                           |
-| `SENTRY_PUBLIC_DSN`     | A second Sentry Client Key for the browser (public); optional                                                                                                                               |
-| `SENTRY_AUTH_TOKEN`     | Sentry → Settings → Auth Tokens (scope `project:releases`); optional, build-time source-map upload                                                                                          |
+| Token                   | Where to get it                                                                                                                                                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SUPABASE_ACCESS_TOKEN` | supabase.com → Account → Access Tokens; only needed for auto-creating projects                                                                                                                                             |
+| `SUPABASE_ORG_ID`       | Your org slug from the Supabase dashboard URL; only needed for auto-creating projects                                                                                                                                      |
+| `CF_API_TOKEN`          | dash.cloudflare.com → My Profile → API Tokens → create with **Workers R2 Storage:Edit**, plus **API Tokens:Edit** if bootstrap should mint the R2 S3 runtime token (see [R2 runtime credentials](#r2-runtime-credentials)) |
+| `CF_ACCOUNT_ID`         | Cloudflare dashboard right sidebar (any page)                                                                                                                                                                              |
+| `OPENAI_API_KEY`        | platform.openai.com                                                                                                                                                                                                        |
+| `TAVILY_API_KEY`        | tavily.com                                                                                                                                                                                                                 |
+| `SENTRY_DSN`            | Sentry → Settings → Projects → `javascript-nextjs` → Client Keys (DSN); server-side key, optional                                                                                                                          |
+| `SENTRY_PUBLIC_DSN`     | A second Sentry Client Key for the browser (public); optional                                                                                                                                                              |
+| `SENTRY_AUTH_TOKEN`     | Sentry → Settings → Auth Tokens (scope `project:releases`); optional, build-time source-map upload                                                                                                                         |
 
 Vercel authentication uses the local `vercel` CLI (`vercel login`); no token is needed in `.env.bootstrap`.
 
@@ -63,7 +63,7 @@ Automated migrations also need the database password for existing projects. Set 
 
 Set `PRODUCTION_DOMAIN` if you have a custom domain (e.g. `app.example.com`). Leave blank to auto-detect from your Vercel project aliases.
 
-Bootstrap intentionally leaves R2 bucket CORS unconfigured. Browser clients should upload files to the backend proxy, and the backend writes to R2 with bucket-scoped S3 credentials from `.env.bootstrap`. If browser-direct presigned uploads are reintroduced, track and configure exact R2 CORS origins separately; wildcard origins like `https://*.vercel.app` are not accepted by the Cloudflare R2 CORS API.
+Bootstrap intentionally leaves R2 bucket CORS unconfigured. Browser clients should upload files to the backend proxy, and the backend writes to R2 with bucket-scoped S3 credentials (see [R2 runtime credentials](#r2-runtime-credentials)). If browser-direct presigned uploads are reintroduced, track and configure exact R2 CORS origins separately; wildcard origins like `https://*.vercel.app` are not accepted by the Cloudflare R2 CORS API.
 
 ### Supabase auth redirect URLs
 
@@ -124,9 +124,17 @@ If an immediate mitigation is needed before deployment, temporarily remove the l
 both hosted email templates and keep `{{ .Token }}`. Re-enable the new hash link only after
 the callback is deployed. Do not re-enable `{{ .ConfirmationURL }}`.
 
-R2 runtime credentials have a two-pass setup:
+### R2 runtime credentials
 
-1. Run bootstrap once so it creates or verifies the bucket.
+The backend needs bucket-scoped R2 S3 credentials. Each run resolves them from the first source that has them:
+
+1. **`.env.bootstrap`** — `R2_ACCESS_KEY_ID_PREVIEW` / `R2_SECRET_ACCESS_KEY_PREVIEW` (or the matching `_PROD` values). Set both or neither; one without the other aborts the run.
+2. **The state file** — credentials saved by an earlier run (see [State files](#state-files)).
+3. **Minted through the Cloudflare API** — bootstrap creates a token named `fitness-coach-agent-{env}` scoped to the bucket and saves it to the state file. A token with that name that already exists is deleted first, because Cloudflare shows a token's secret only at creation; anything else using the old token loses R2 access, and stays without it if the replacement fails. This is the only path that needs **API Tokens:Edit** on `CF_API_TOKEN`.
+
+So leave the `R2_*` values blank to have bootstrap mint the credentials. To keep `CF_API_TOKEN` limited to **Workers R2 Storage:Edit**, supply them yourself in two passes:
+
+1. Run bootstrap once so it creates or verifies the bucket. Without **API Tokens:Edit** this run fails at the minting step, after the bucket exists.
 2. In the Cloudflare dashboard, go to R2 -> Manage API tokens and create an account-level token scoped to that bucket with Object Read & Write.
 3. Copy the generated Access Key ID and Secret Access Key into `R2_ACCESS_KEY_ID_PREVIEW` / `R2_SECRET_ACCESS_KEY_PREVIEW` or the matching `_PROD` values.
 4. Rerun bootstrap so it writes those runtime credentials to Vercel.
@@ -157,7 +165,7 @@ Each run:
 
 1. Creates (or verifies) the Supabase project and applies all pending migrations via `supabase db push`
 2. Creates (or verifies) the R2 bucket
-3. Reads bucket-scoped R2 S3 credentials from `.env.bootstrap` for backend-proxy uploads
+3. Resolves bucket-scoped R2 S3 credentials for backend-proxy uploads (see [R2 runtime credentials](#r2-runtime-credentials))
 4. Generates a stable `APP_JWT_SECRET` (kept consistent across re-runs)
 5. Upserts all environment variables into the correct Vercel target scope
 
@@ -165,7 +173,7 @@ After it completes, run `vercel env ls` to confirm the vars are set, then redepl
 
 ## State files
 
-Generated secrets that are only available at creation time (Supabase DB password, R2 token secret, JWT secret) are persisted to `scripts/bootstrap/.state.{env}.json`. These files are gitignored. Keep them safe. If an R2 token secret is lost, re-run the script with the relevant token deleted in the Cloudflare dashboard so a new one is created and captured.
+Generated secrets that are only available at creation time (Supabase DB password, R2 token secret, JWT secret) are persisted to `scripts/bootstrap/.state.{env}.json`. These files are gitignored. Keep them safe. If the state file's R2 secret is lost, re-run the script with the `R2_*` values blank: it replaces the token and captures the new secret. While the state file still holds `r2_access_key_id` and `r2_secret_access_key`, a re-run reuses that pair without checking it against Cloudflare, so to rotate the token, or after deleting it in the Cloudflare dashboard, remove those two keys from the state file first. A pair set in `.env.bootstrap` takes precedence over both and is written back to the state file, so replace it with the new credentials, or blank it if bootstrap should mint the replacement.
 
 If a bootstrap run created a Supabase project but failed before writing the state file, reset that project's database password in the Supabase dashboard, then set `SUPABASE_PROJECT_REF_PREVIEW`/`SUPABASE_PROJECT_REF_PROD` and the matching `SUPABASE_DB_PASSWORD_PREVIEW`/`SUPABASE_DB_PASSWORD_PROD` in `.env.bootstrap` before rerunning. If Supabase API key lookup also fails with `401`, set the matching `SUPABASE_URL_*`, `SUPABASE_ANON_KEY_*`, and `SUPABASE_SERVICE_ROLE_KEY_*` values from the dashboard.
 
@@ -175,7 +183,7 @@ The script is safe to re-run at any time:
 
 - Existing Supabase projects are detected by name and reused
 - Migrations already applied are skipped by the Supabase CLI
-- Existing R2 buckets and tokens are detected and reused (secret read from state file)
+- Existing R2 buckets are detected and reused; R2 credentials come from `.env.bootstrap` or the state file before a new token is minted
 - Vercel env vars are updated in place (no duplicates)
 
 If Supabase reports `Remote migration versions not found in local migrations directory`,
