@@ -35,7 +35,6 @@ function CodeEntryForm({ invalid }: { invalid: boolean }): ReactNode {
           name="user_code"
           className="input"
           type="text"
-          autoFocus
           autoComplete="off"
           autoCapitalize="characters"
           spellCheck={false}
