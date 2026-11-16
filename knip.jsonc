@@ -3,7 +3,6 @@
   "ignoreExportsUsedInFile": true,
   "ignoreDependencies": [
     "@next/eslint-plugin-next",
-    "@testing-library/jest-dom",
     "eslint-config-next",
     // CodeGraph is invoked through documented bunx commands, which static import analysis cannot see.
     "@colbymchenry/codegraph",
