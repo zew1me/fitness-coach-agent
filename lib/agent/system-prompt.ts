@@ -157,6 +157,9 @@ function browserTimeContext(timeZone?: string): {
     }
   }
 
+  // The timezone comes from each request, so the formatter cannot be a module
+  // constant. It is built once per coach turn, which is not a hot path.
+  // react-doctor-disable-next-line react-doctor/js-hoist-intl
   const dateParts = new Intl.DateTimeFormat("en-US", {
     day: "2-digit",
     month: "2-digit",

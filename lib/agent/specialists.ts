@@ -181,8 +181,11 @@ export async function runSpecialists({
       const delegation = delegations?.find(
         (candidate) => candidate.role === role,
       );
+      const relevantMemoryIds = new Set(
+        delegation?.relevantCoachingMemoryIds ?? [],
+      );
       const relevantMemory = coachingMemory.filter((record) =>
-        delegation?.relevantCoachingMemoryIds.includes(String(record["id"])),
+        relevantMemoryIds.has(String(record["id"])),
       );
       return runSingleSpecialist({
         delegation,

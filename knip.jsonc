@@ -23,7 +23,10 @@
     ".uv-cache/**",
     ".venv/**",
     ".vercel/**",
-    ".next/**"
+    ".next/**",
+    // React Doctor's CLI loads doctor.config.ts by name; nothing imports it, so
+    // knip would otherwise report it as an unused file.
+    "doctor.config.ts"
   ],
   // Both are run as CLIs from package.json scripts and lefthook, never imported, so
   // knip cannot tie the binary back to the package that provides it.

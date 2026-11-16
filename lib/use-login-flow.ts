@@ -22,6 +22,9 @@ async function requestOtp(body: {
   inviteCode: string | null;
   returnTo: string;
 }): Promise<{ ok: boolean; payload: RequestOtpPayload }> {
+  // The status is checked: an unparseable 2xx throws below, and `ok` is
+  // returned with the payload so callers branch on it before trusting it.
+  // react-doctor-disable-next-line react-doctor/no-fetch-response-used-without-status-check
   const response = await fetch("/api/auth/request-otp", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

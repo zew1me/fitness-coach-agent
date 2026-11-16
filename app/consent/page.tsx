@@ -18,6 +18,12 @@ function readConsentParams(searchParams: ReturnType<typeof useSearchParams>): {
 } {
   return {
     clientId: searchParams.get("client_id") ?? "",
+    // These are the OAuth authorize parameters, and the consent page exists to
+    // show them. The athlete must press Approve, and the decision endpoint
+    // re-validates them (PKCE S256, supported scopes, redirect scheme) before
+    // issuing a code. Binding redirect URIs to known clients is a separate
+    // server-side decision, raised in the PR for #444.
+    // react-doctor-disable-next-line react-doctor/url-prefilled-privileged-action
     redirectUri: searchParams.get("redirect_uri") ?? "",
     scope:
       searchParams.get("scope") ?? "profile:read plans:write metrics:write",

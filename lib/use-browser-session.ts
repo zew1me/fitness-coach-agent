@@ -81,7 +81,6 @@ export function useBrowserSession(): BrowserSessionState {
           });
           establishedRef.current = true;
         }
-        Sentry.setUser({ id: token.user_id });
         setState({
           authenticationRequired: false,
           token,
@@ -97,7 +96,6 @@ export function useBrowserSession(): BrowserSessionState {
           reason: errorMessage(error, "unknown"),
         });
         if (authenticationRequired) {
-          Sentry.setUser(null);
           setState({
             authenticationRequired: true,
             token: null,
@@ -109,11 +107,6 @@ export function useBrowserSession(): BrowserSessionState {
           });
           return;
         }
-        // React may replay a state updater, so the Sentry reset is recorded
-        // inside and applied after the dispatch to keep the updater pure. The
-        // flag lives on an object because TypeScript's control-flow analysis
-        // does not track assignments made inside a callback to a plain `let`.
-        const outcome = { bootstrapFailed: false };
         setState((current) => {
           // A transient background failure should not throw an athlete out of
           // an otherwise valid session. Schedule a bounded retry series; focus
@@ -132,7 +125,6 @@ export function useBrowserSession(): BrowserSessionState {
               renewalRetryAttempt: current.renewalRetryAttempt + 1,
             };
           }
-          outcome.bootstrapFailed = true;
           return {
             authenticationRequired: false,
             token: null,
@@ -144,9 +136,6 @@ export function useBrowserSession(): BrowserSessionState {
             renewalRetryAttempt: 0,
           };
         });
-        if (outcome.bootstrapFailed) {
-          Sentry.setUser(null);
-        }
       }
     })();
 
@@ -167,6 +156,18 @@ export function useBrowserSession(): BrowserSessionState {
       mountedRef.current = false;
     };
   }, [refresh]);
+
+  // Sentry's user follows the committed session rather than being set inside
+  // refresh. The failure path decides between "keep the session" and "no
+  // session" in a state updater, and React may run that updater later (or more
+  // than once), so a side effect keyed on its result could be skipped or
+  // repeated. Deriving it from committed state keeps it exact: renewal failures
+  // keep the athlete identified, while auth and bootstrap failures clear it.
+  const sentryUserId = state.token?.user_id ?? null;
+  useEffect(() => {
+    if (state.loading) return;
+    Sentry.setUser(sentryUserId === null ? null : { id: sentryUserId });
+  }, [sentryUserId, state.loading]);
 
   useEffect((): (() => void) | void => {
     if (state.token === null) return;
