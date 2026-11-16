@@ -145,11 +145,6 @@ reason = "OAuth protected-resource metadata fetched by external OAuth clients, n
 
 [[tool.reachability-check.allow]]
 kind = "endpoint"
-target = "/api/auth/cli/verify-otp"
-reason = "Called by the Python coach CLI (tools/coach-cli), which client_roots does not scan (#568)."
-
-[[tool.reachability-check.allow]]
-kind = "endpoint"
 target = "/api/auth/whoami"
 reason = "Called by the Python coach CLI (tools/coach-cli), which client_roots does not scan (#568)."
 

@@ -18,7 +18,6 @@ CLIENT_ID = "fitness-coach-cli"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 _SLOW_DOWN_STEP_SECONDS = 5.0
 _DEFAULT_DEVICE_INTERVAL = 5.0
-_HTTP_TOO_MANY_REQUESTS = 429
 REFRESH_SKEW_SECONDS = 60
 _DEFAULT_TTL_SECONDS = 900
 _REQUEST_TIMEOUT = 30.0
@@ -171,25 +170,6 @@ class CoachClient:
         return self._json(response)
 
     # -- login / logout ---------------------------------------------------------------------
-
-    def request_otp(self, email: str, invite_code: str | None = None) -> None:
-        body: dict[str, str] = {"email": email}
-        if invite_code:
-            body["inviteCode"] = invite_code
-        self._json(self._send("POST", "/api/auth/request-otp", json=body))
-
-    def verify_otp(self, email: str, code: str) -> Credentials:
-        response = self._send(
-            "POST", "/api/auth/cli/verify-otp", json={"email": email, "token": code}
-        )
-        if response.status_code == _HTTP_TOO_MANY_REQUESTS:
-            raise CoachError(
-                "rate_limited", _error_from_response(response).detail, status=response.status_code
-            )
-        bundle = self._json(response)
-        creds = credentials_from_bundle(bundle, now=self._clock())
-        self.store.save(self.base_url, creds)
-        return creds
 
     def start_device_flow(self) -> dict[str, Any]:
         """RFC 8628 step 1: returns the device authorization response."""

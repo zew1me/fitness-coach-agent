@@ -38,10 +38,7 @@ describe("vercel routing", () => {
     return path === prefix.slice(0, -1) || path.startsWith(prefix);
   }
 
-  it("routes CLI auth endpoints to FastAPI but leaves request-otp on Next", () => {
-    expect(rewrittenDestination("/api/auth/cli/verify-otp")).toBe(
-      "/api/index.py",
-    );
+  it("routes the CLI whoami endpoint to FastAPI but leaves request-otp on Next", () => {
     expect(rewrittenDestination("/api/auth/whoami")).toBe("/api/index.py");
     expect(rewrittenDestination("/api/auth/request-otp")).toBeUndefined();
   });

@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shlex
 import sys
 import time
 import webbrowser
@@ -76,8 +75,6 @@ def _fail(opts: Options, error: CoachError) -> NoReturn:
         status = f" (HTTP {error.status})" if error.status else ""
         detail = f": {error.detail}" if error.detail else ""
         typer.echo(f"error: {error.error}{status}{detail}", err=True)
-        if error.error == "invite_required":
-            typer.echo("hint: re-run `coach login` with --invite-code.", err=True)
     raise typer.Exit(1)
 
 
@@ -118,42 +115,6 @@ def root(
     ctx.obj = Options(base_url, credentials_file, json_output)
 
 
-def _continue_command(opts: Options, client: CoachClient, email: str) -> str:
-    """The step-2 command, keeping the target the user selected.
-
-    Root options (--base-url, --credentials-file, --json) must precede the subcommand or Typer
-    rejects them.
-    """
-    parts = ["coach", "--base-url", client.base_url]
-    if opts.credentials_file is not None:
-        parts += ["--credentials-file", str(opts.credentials_file)]
-    if opts.json_output:
-        parts.append("--json")
-    parts += ["login", "--email", email, "--code", "<code>"]
-    if requires_confirmation(client.base_url):
-        parts.append("--yes")
-    return " ".join(p if p == "<code>" else shlex.quote(p) for p in parts)
-
-
-def _login_step_one(opts: Options, client: CoachClient, email: str, invite: str | None) -> None:
-    client.request_otp(email, invite)
-    command = _continue_command(opts, client, email)
-    _emit(
-        opts,
-        {"status": "otp_sent", "email": email},
-        f"A login code was emailed to {email}. Then run: {command}",
-    )
-
-
-def _login_step_two(opts: Options, client: CoachClient, email: str, code: str) -> None:
-    creds = client.verify_otp(email, code.strip())
-    _emit(
-        opts,
-        {"status": "logged_in", "user_id": creds.user_id, "base_url": client.base_url},
-        f"Logged in to {client.base_url} as user {creds.user_id}.",
-    )
-
-
 def _confirm_target(base_url: str, *, yes: bool) -> None:
     if requires_confirmation(base_url) and not yes:
         raise CoachError(
@@ -175,11 +136,6 @@ def _try_open_browser(url: str) -> None:
     # A missing or broken browser must never fail login, so any opener error is swallowed.
     with contextlib.suppress(Exception):
         _open_url(url)
-
-
-def _require_email_for_otp_options(code: str | None, invite_code: str | None) -> None:
-    if code is not None or invite_code is not None:
-        raise CoachError("invalid_usage", "--code and --invite-code require --email.")
 
 
 def _login_device(opts: Options, client: CoachClient, *, no_browser: bool) -> None:
@@ -213,11 +169,6 @@ def _login_device(opts: Options, client: CoachClient, *, no_browser: bool) -> No
 @app.command()
 def login(
     ctx: typer.Context,
-    email: Annotated[
-        str | None, typer.Option(help="Use the emailed-code login for this account instead.")
-    ] = None,
-    code: Annotated[str | None, typer.Option(help="6-digit code from the email (step 2).")] = None,
-    invite_code: Annotated[str | None, typer.Option(help="Invite code for new accounts.")] = None,
     no_browser: Annotated[
         bool, typer.Option("--no-browser", help="Device login: do not try to open a browser.")
     ] = False,
@@ -225,22 +176,12 @@ def login(
         bool, typer.Option("--yes", help="Confirm a non-local target (preview or production).")
     ] = False,
 ) -> None:
-    """Log in. Default: device flow (approve a code in any browser). --email: emailed code."""
+    """Log in with the device flow: approve a code in any browser."""
     opts = _options(ctx)
     try:
         _confirm_target(_base_url(opts), yes=yes)
         client = _client(opts)
-        if email is None:
-            _require_email_for_otp_options(code, invite_code)
-            _login_device(opts, client, no_browser=no_browser)
-            return
-        email = email.strip().lower()
-        if code is None:
-            _login_step_one(opts, client, email, invite_code)
-            if sys.stdin.isatty() and not opts.json_output:
-                code = typer.prompt("Code")
-        if code is not None:
-            _login_step_two(opts, client, email, code)
+        _login_device(opts, client, no_browser=no_browser)
     except CoachError as exc:
         _fail(opts, exc)
 

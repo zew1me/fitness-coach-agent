@@ -194,29 +194,6 @@ def test_production_requires_yes_before_any_request(
     assert run("login", "--yes", "--no-browser", base="https://coach.example.com").exit_code == 0
 
 
-def test_code_without_email_is_rejected(api: Any, run: Run) -> None:
-    result = run("login", "--code", "123456")
-    assert result.exit_code == 1
-    assert not api.requests
-
-
-def test_otp_verify_rate_limited(api: Any, run: Run, creds_path: Path) -> None:
-    api.on(
-        "POST",
-        "/api/auth/cli/verify-otp",
-        status=429,
-        json={"detail": "Too many verification attempts. Try again later."},
-    )
-    result = run("--json", "login", "--email", "a@b.c", "--code", "123456")
-    assert result.exit_code == 1
-    assert json.loads(result.stderr) == {
-        "error": "rate_limited",
-        "status": 429,
-        "detail": "Too many verification attempts. Try again later.",
-    }
-    assert not creds_path.exists()
-
-
 def test_device_code_failure_surfaces(api: Any, run: Run, fake_time: FakeTime) -> None:
     api.on("POST", CODE_PATH, status=400, json={"error": "invalid_client"})
     result = run("--json", "login")

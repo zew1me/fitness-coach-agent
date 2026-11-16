@@ -5,7 +5,6 @@ import hashlib
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from http import HTTPStatus
 from typing import Any, ClassVar, NoReturn
 from urllib.parse import urlencode, urlparse
 
@@ -20,7 +19,6 @@ from backend.models.auth import (
     BrowserSessionContext,
     BrowserTokenResponse,
     CliTokenResponse,
-    CliVerifyOtpRequest,
     DeviceAuthorizationRequest,
     DeviceAuthorizationResponse,
     OAuthAuthorizeRequest,
@@ -96,18 +94,6 @@ class OAuthDeviceConfirmationMismatchError(OAuthError):
     def __init__(self, record: OAuthDeviceCodeRecord) -> None:
         super().__init__("The confirmation does not match the pending request.")
         self.record = record
-
-
-class OAuthInvalidOtpError(OAuthError):
-    """Raised when Supabase rejects an email OTP (wrong, expired, or unknown email)."""
-
-
-class SupabaseAuthRateLimitedError(RuntimeError):
-    """Raised when Supabase Auth rate-limits a server-side OTP verification."""
-
-
-class SupabaseAuthUnavailableError(RuntimeError):
-    """Raised when Supabase Auth answers a server-side request with an unusable response."""
 
 
 class AuthService:
@@ -352,25 +338,6 @@ class AuthService:
             logger.info("oauth grant revoked grant_id=%s revoked=%s", grant_id, revoked)
             return revoked
         return await self._oauth_repo.revoke_refresh_token(request.token)
-
-    async def verify_cli_otp(self, request: CliVerifyOtpRequest) -> CliTokenResponse:
-        """Verify an email OTP with Supabase Auth and mint first-party CLI tokens.
-
-        The CLI never talks to Supabase: the server verifies the code, discards the
-        Supabase session, and issues this app's own access/refresh tokens on a durable
-        grant for ``CLI_CLIENT_ID``.
-        """
-        user_id = await self._verify_supabase_email_otp(email=request.email, token=request.token)
-        scopes = sorted(self._supported_scopes)
-        grant = await self._oauth_repo.upsert_grant(
-            user_id=user_id,
-            client_id=CLI_CLIENT_ID,
-            redirect_uri=CLI_REDIRECT_URI,
-            scopes=scopes,
-        )
-        bundle = await self._issue_token_bundle(grant=grant, scopes=scopes)
-        logger.info("cli otp verified user_id=%s client_id=%s", user_id, CLI_CLIENT_ID)
-        return CliTokenResponse(**bundle.model_dump(), user_id=user_id)
 
     # ── RFC 8628 device authorization grant ───────────────────
 
@@ -682,46 +649,6 @@ class AuthService:
         except jwt.PyJWTError:
             return None
         return str(claims.get("jti", "")) or None
-
-    async def _verify_supabase_email_otp(self, *, email: str, token: str) -> str:
-        """Return the Supabase user id for a valid email OTP.
-
-        Every client-attributable rejection maps to one error so the response never
-        reveals whether the email has an account. Transport failures propagate as
-        ``httpx.HTTPError`` for the route to report as 503.
-        """
-        supabase_url, service_role_key = self._require_supabase_auth_config()
-        logger.debug("supabase otp verify start")
-        async with self._http_client_factory() as client:
-            response = await client.post(
-                f"{supabase_url}/auth/v1/verify",
-                headers={"apikey": service_role_key},
-                json={"type": "email", "email": email, "token": token},
-            )
-        status = response.status_code
-        logger.debug("supabase otp verify status=%d", status)
-        if status == HTTPStatus.TOO_MANY_REQUESTS:
-            raise SupabaseAuthRateLimitedError("Supabase Auth rate-limited OTP verification.")
-        if HTTPStatus.BAD_REQUEST <= status < HTTPStatus.INTERNAL_SERVER_ERROR:
-            logger.info("cli otp verification rejected status=%d", status)
-            raise OAuthInvalidOtpError("Invalid or expired code.")
-        response.raise_for_status()
-        user_id = self._user_id_from_verify_payload(response)
-        if user_id is None:
-            raise SupabaseAuthUnavailableError("Supabase Auth returned an unexpected payload.")
-        return user_id
-
-    @staticmethod
-    def _user_id_from_verify_payload(response: httpx.Response) -> str | None:
-        if response.status_code != HTTPStatus.OK:
-            return None
-        try:
-            payload = response.json()
-        except ValueError:
-            return None
-        user = payload.get("user") if isinstance(payload, dict) else None
-        user_id = user.get("id") if isinstance(user, dict) else None
-        return user_id if isinstance(user_id, str) and user_id else None
 
     @staticmethod
     def _require_supabase_auth_config() -> tuple[str, str]:

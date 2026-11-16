@@ -14,57 +14,16 @@ from fitness_coach_cli.credentials import Credentials, CredentialStore
 from fitness_coach_cli.errors import CoachError
 
 
-def test_request_otp_sends_invite_code(api: Any, client: CoachClient, h: Any) -> None:
-    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
-    client.request_otp("a@b.c", "inv")
-    assert h.body(api.requests[0]) == {"email": "a@b.c", "inviteCode": "inv"}
-    assert "authorization" not in api.requests[0].headers
-
-
-def test_invite_required_is_surfaced(api: Any, client: CoachClient, h: Any) -> None:
-    api.on(
-        "POST",
-        "/api/auth/request-otp",
-        status=409,
-        json={"error": "invite_required", "message": "Invite code required."},
-    )
-    with pytest.raises(CoachError) as info:
-        client.request_otp("a@b.c")
-    assert (info.value.error, info.value.status) == ("invite_required", 409)
-    assert info.value.detail == "Invite code required."
-
-
-def test_verify_otp_stores_credentials(
-    api: Any, client: CoachClient, store: CredentialStore, h: Any
-) -> None:
-    api.on("POST", "/api/auth/cli/verify-otp", json=h.bundle())
-    client.verify_otp("a@b.c", "123456")
-    assert h.body(api.requests[0]) == {"email": "a@b.c", "token": "123456"}
-    saved = store.load(h.BASE)
-    assert saved is not None
-    assert saved.expires_at == h.NOW + 3600
-    assert saved.refresh_token == "ref-1"
-
-
-def test_verify_otp_bad_code(api: Any, client: CoachClient, store: CredentialStore, h: Any) -> None:
-    api.on(
-        "POST", "/api/auth/cli/verify-otp", status=401, json={"detail": "Invalid or expired code."}
-    )
-    with pytest.raises(CoachError) as info:
-        client.verify_otp("a@b.c", "000000")
-    assert info.value.status == 401
-    assert info.value.detail == "Invalid or expired code."
-    assert store.load(h.BASE) is None
-
-
 def test_bundle_with_expires_at_iso(
     api: Any, client: CoachClient, store: CredentialStore, h: Any
 ) -> None:
     payload = h.bundle()
     del payload["expires_in"]
     payload["expires_at"] = "2027-01-15T08:00:00Z"
-    api.on("POST", "/api/auth/cli/verify-otp", json=payload)
-    client.verify_otp("a@b.c", "1")
+    api.on("POST", "/api/oauth/token", json=payload)
+    client.poll_device_flow(
+        {"device_code": "dev", "expires_in": 600, "interval": 1}, sleep=lambda _s: None
+    )
     saved = store.load(h.BASE)
     assert saved is not None
     assert saved.expires_at == 1_800_000_000.0

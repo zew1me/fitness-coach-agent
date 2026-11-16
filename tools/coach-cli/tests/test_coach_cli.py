@@ -1,77 +1,28 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fitness_coach_cli import cli
+from fitness_coach_cli.credentials import Credentials, CredentialStore
 from typer.testing import Result
 
 Run = Callable[..., Result]
 
 
-def _login(api: Any, run: Run, h: Any) -> None:
-    api.on("POST", "/api/auth/cli/verify-otp", json=h.bundle())
-    assert run("login", "--email", "A@B.c", "--code", "123456").exit_code == 0
+def _login(api: Any, run: Run, h: Any, creds_path: Path) -> None:
+    """Seed stored credentials (far-future expiry so the real clock never triggers a refresh)."""
+    del api, run
+    CredentialStore(creds_path).save(
+        h.BASE, Credentials("acc-1", "ref-1", time.time() + 10 * 365 * 86400, "user-1")
+    )
 
 
 # -- login ---------------------------------------------------------------------------------
-
-
-def test_login_step_one_requests_otp_only(api: Any, run: Run, creds_path: Path, h: Any) -> None:
-    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
-    result = run("login", "--email", "A@B.c", "--invite-code", "inv")
-    assert result.exit_code == 0
-    assert "emailed" in result.output
-    assert h.body(api.requests[0]) == {"email": "a@b.c", "inviteCode": "inv"}
-    assert len(api.requests) == 1
-    assert not creds_path.exists()
-
-
-def test_login_step_two_stores_credentials_without_printing_tokens(
-    api: Any, run: Run, creds_path: Path, h: Any
-) -> None:
-    api.on("POST", "/api/auth/cli/verify-otp", json=h.bundle())
-    result = run("login", "--email", "a@b.c", "--code", "123456")
-    assert result.exit_code == 0
-    assert "acc-1" not in result.output
-    assert "ref-1" not in result.output
-    assert oct(creds_path.stat().st_mode & 0o777) == "0o600"
-    assert h.BASE in json.loads(creds_path.read_text())["servers"]
-
-
-def test_login_invite_required(api: Any, run: Run) -> None:
-    api.on(
-        "POST",
-        "/api/auth/request-otp",
-        status=409,
-        json={"error": "invite_required", "message": "Invite code required."},
-    )
-    result = run("--json", "login", "--email", "a@b.c")
-    assert result.exit_code == 1
-    assert json.loads(result.stderr) == {
-        "error": "invite_required",
-        "status": 409,
-        "detail": "Invite code required.",
-    }
-
-
-def test_login_invite_required_human_hint(api: Any, run: Run) -> None:
-    api.on("POST", "/api/auth/request-otp", status=409, json={"error": "invite_required"})
-    result = run("login", "--email", "a@b.c")
-    assert result.exit_code == 1
-    assert "--invite-code" in result.stderr
-
-
-def test_login_bad_code(api: Any, run: Run, creds_path: Path) -> None:
-    api.on(
-        "POST", "/api/auth/cli/verify-otp", status=401, json={"detail": "Invalid or expired code."}
-    )
-    result = run("login", "--email", "a@b.c", "--code", "000000")
-    assert result.exit_code == 1
-    assert "Invalid or expired code." in result.stderr
-    assert not creds_path.exists()
 
 
 def test_base_url_is_required(run: Run) -> None:
@@ -80,45 +31,47 @@ def test_base_url_is_required(run: Run) -> None:
     assert "COACH_BASE_URL" in result.stderr
 
 
-def test_production_login_requires_yes(api: Any, run: Run, h: Any) -> None:
-    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
-    refused = run("login", "--email", "a@b.c", base="https://coach.example.com")
+def _queue_device_login(api: Any, h: Any) -> None:
+    api.on(
+        "POST",
+        "/api/oauth/device/code",
+        json={
+            "device_code": "dev",
+            "user_code": "BCDF-GHJK",
+            "verification_uri": f"{h.BASE}/device",
+            "verification_uri_complete": f"{h.BASE}/device?c=1",
+            "expires_in": 600,
+            "interval": 1,
+        },
+    )
+    api.on("POST", "/api/oauth/token", json=h.bundle())
+
+
+def test_production_login_requires_yes(
+    api: Any, run: Run, h: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_sleep", lambda _s: None)
+    _queue_device_login(api, h)
+    refused = run("login", base="https://coach.example.com")
     assert refused.exit_code == 1
     assert "--yes" in refused.stderr
     assert not api.requests
-    allowed = run("login", "--email", "a@b.c", "--yes", base="https://coach.example.com")
+    allowed = run("login", "--yes", "--no-browser", base="https://coach.example.com")
     assert allowed.exit_code == 0
 
 
 def test_preview_login_requires_yes(api: Any, run: Run) -> None:
-    refused = run("login", "--email", "a@b.c", auto_yes=False)
+    refused = run("login", auto_yes=False)
     assert refused.exit_code == 1
     assert "--yes" in refused.stderr
     assert not api.requests
 
 
-def test_otp_continuation_hint_keeps_root_options_before_login(
-    api: Any, run: Run, creds_path: Path, h: Any
-) -> None:
-    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
-    result = run("login", "--email", "a@b.c")
-    assert result.exit_code == 0
-    expected = (
-        f"coach --base-url {h.BASE} --credentials-file {creds_path} "
-        "login --email a@b.c --code <code> --yes"
-    )
-    assert expected in result.output
-
-
-def test_otp_continuation_hint_json_flag_and_local_target(api: Any, run: Run) -> None:
-    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
-    result = run("--json", "login", "--email", "a@b.c", base="http://localhost:3000")
-    assert result.exit_code == 0
-    assert "otp_sent" in result.output
-    human = run("login", "--email", "a@b.c", base="http://localhost:3000")
-    assert "--base-url http://localhost:3000" in human.output
-    assert "--json" not in human.output
-    assert "--yes" not in human.output
+def test_login_has_no_email_code_options(api: Any, run: Run) -> None:
+    for flag in ("--email", "--code", "--invite-code"):
+        result = run("login", flag, "x")
+        assert result.exit_code != 0
+        assert not api.requests
 
 
 def test_malformed_base_url_yields_structured_json_error(run: Run) -> None:
@@ -127,9 +80,12 @@ def test_malformed_base_url_yields_structured_json_error(run: Run) -> None:
     assert '"error":"invalid_base_url"' in result.stderr
 
 
-def test_localhost_login_needs_no_yes(api: Any, run: Run) -> None:
-    api.on("POST", "/api/auth/request-otp", json={"status": "otp_sent"})
-    assert run("login", "--email", "a@b.c", base="http://localhost:3000").exit_code == 0
+def test_localhost_login_needs_no_yes(
+    api: Any, run: Run, h: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_sleep", lambda _s: None)
+    _queue_device_login(api, h)
+    assert run("login", "--no-browser", base="http://localhost:3000").exit_code == 0
 
 
 def test_remote_http_is_refused(api: Any, run: Run) -> None:
@@ -142,8 +98,8 @@ def test_remote_http_is_refused(api: Any, run: Run) -> None:
 # -- whoami / logout / tools ---------------------------------------------------------------
 
 
-def test_whoami_human_and_json(api: Any, run: Run, h: Any) -> None:
-    _login(api, run, h)
+def test_whoami_human_and_json(api: Any, run: Run, h: Any, creds_path: Path) -> None:
+    _login(api, run, h, creds_path)
     api.on(
         "GET",
         "/api/auth/whoami",
@@ -160,7 +116,7 @@ def test_whoami_without_login_fails(run: Run) -> None:
 
 
 def test_logout_revokes_and_deletes(api: Any, run: Run, creds_path: Path, h: Any) -> None:
-    _login(api, run, h)
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/oauth/revoke", json={"revoked": True})
     result = run("logout")
     assert result.exit_code == 0
@@ -179,8 +135,8 @@ def test_tools_list(run: Run) -> None:
 # -- call ----------------------------------------------------------------------------------
 
 
-def test_call_default_body_is_empty_object(api: Any, run: Run, h: Any) -> None:
-    _login(api, run, h)
+def test_call_default_body_is_empty_object(api: Any, run: Run, h: Any, creds_path: Path) -> None:
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/engine/get-athlete-summary", json={"ok": True})
     result = run("--json", "call", "get-athlete-summary")
     assert result.exit_code == 0
@@ -190,8 +146,10 @@ def test_call_default_body_is_empty_object(api: Any, run: Run, h: Any) -> None:
     assert request.headers["authorization"] == "Bearer acc-1"
 
 
-def test_call_inline_file_and_stdin_data(api: Any, run: Run, tmp_path: Path, h: Any) -> None:
-    _login(api, run, h)
+def test_call_inline_file_and_stdin_data(
+    api: Any, run: Run, tmp_path: Path, h: Any, creds_path: Path
+) -> None:
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/engine/get-recent-activities", json={"activities": []})
     (tmp_path / "body.json").write_text('{"limit": 5}')
     assert run("call", "get-recent-activities", "--data", '{"limit": 3}').exit_code == 0
@@ -204,15 +162,15 @@ def test_call_inline_file_and_stdin_data(api: Any, run: Run, tmp_path: Path, h: 
 
 
 @pytest.mark.parametrize("data", ["{nope", "[1]", "@/does/not/exist.json"])
-def test_call_bad_data(api: Any, run: Run, h: Any, data: str) -> None:
-    _login(api, run, h)
+def test_call_bad_data(api: Any, run: Run, h: Any, data: str, creds_path: Path) -> None:
+    _login(api, run, h, creds_path)
     result = run("--json", "call", "x-op", "--data", data)
     assert result.exit_code == 1
     assert json.loads(result.stderr)["error"] == "invalid_data"
 
 
-def test_call_server_error_json(api: Any, run: Run, h: Any) -> None:
-    _login(api, run, h)
+def test_call_server_error_json(api: Any, run: Run, h: Any, creds_path: Path) -> None:
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/engine/adjust-plan", status=422, json={"detail": [{"msg": "bad"}]})
     result = run("--json", "call", "adjust-plan")
     assert result.exit_code == 1
@@ -231,8 +189,8 @@ SIDECAR = [
 ]
 
 
-def test_wellness_push_from_stdin(api: Any, run: Run, h: Any) -> None:
-    _login(api, run, h)
+def test_wellness_push_from_stdin(api: Any, run: Run, h: Any, creds_path: Path) -> None:
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/engine/save-recovery-data", json={"saved": [], "count": 2})
     result = run("wellness", "push", "-", input=json.dumps(SIDECAR))
     assert result.exit_code == 0
@@ -243,9 +201,9 @@ def test_wellness_push_from_stdin(api: Any, run: Run, h: Any) -> None:
 
 
 def test_wellness_push_from_file_and_default_stdin(
-    api: Any, run: Run, tmp_path: Path, h: Any
+    api: Any, run: Run, tmp_path: Path, h: Any, creds_path: Path
 ) -> None:
-    _login(api, run, h)
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/engine/save-recovery-data", json={"count": 2})
     export = tmp_path / "w.json"
     export.write_text(json.dumps(SIDECAR))
@@ -253,16 +211,18 @@ def test_wellness_push_from_file_and_default_stdin(
     assert run("wellness", "push", input=json.dumps(SIDECAR)).exit_code == 0
 
 
-def test_wellness_push_nothing_to_push(api: Any, run: Run, h: Any) -> None:
-    _login(api, run, h)
+def test_wellness_push_nothing_to_push(api: Any, run: Run, h: Any, creds_path: Path) -> None:
+    _login(api, run, h, creds_path)
     result = run("--json", "wellness", "push", "-", input='[{"log_date": "2026-08-15"}]')
     assert result.exit_code == 1
     assert json.loads(result.stderr)["error"] == "nothing_to_push"
     assert not api.to("/api/engine/save-recovery-data")
 
 
-def test_wellness_push_warns_about_dropped_fields(api: Any, run: Run, h: Any) -> None:
-    _login(api, run, h)
+def test_wellness_push_warns_about_dropped_fields(
+    api: Any, run: Run, h: Any, creds_path: Path
+) -> None:
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/engine/save-recovery-data", json={"count": 1})
     payload = json.dumps([{"log_date": "2026-08-15", "hrv_ms": 44, "respiration": 14}])
     result = run("wellness", "push", "-", input=payload)
@@ -287,8 +247,10 @@ def _upload_routes(api: Any, user: str = "user-1") -> None:
     api.on("POST", "/api/chat/attachments/upload", json={"object_key": "k"})
 
 
-def test_upload_three_call_sequence(api: Any, run: Run, tmp_path: Path, h: Any) -> None:
-    _login(api, run, h)
+def test_upload_three_call_sequence(
+    api: Any, run: Run, tmp_path: Path, h: Any, creds_path: Path
+) -> None:
+    _login(api, run, h, creds_path)
     _upload_routes(api)
     api.on("POST", "/api/engine/process-uploaded-file", json={"kind": "activity", "id": "a1"})
     ride = tmp_path / "ride.fit"
@@ -296,12 +258,12 @@ def test_upload_three_call_sequence(api: Any, run: Run, tmp_path: Path, h: Any) 
     result = run("activities", "upload", str(ride))
     assert result.exit_code == 0
     assert "saved activity" in result.output
-    assert [r.url.path for r in api.requests[1:]] == [
+    assert [r.url.path for r in api.requests] == [
         "/api/chat/attachments/presign",
         "/api/chat/attachments/upload",
         "/api/engine/process-uploaded-file",
     ]
-    presign, upload, process = api.requests[1:]
+    presign, upload, process = api.requests
     assert h.body(presign) == {
         "content_length": 7,
         "content_type": "application/vnd.garmin.fit",
@@ -320,9 +282,9 @@ def test_upload_three_call_sequence(api: Any, run: Run, tmp_path: Path, h: Any) 
 
 
 def test_upload_partial_failure_continues_and_exits_nonzero(
-    api: Any, run: Run, tmp_path: Path, h: Any
+    api: Any, run: Run, tmp_path: Path, h: Any, creds_path: Path
 ) -> None:
-    _login(api, run, h)
+    _login(api, run, h, creds_path)
     _upload_routes(api)
     api.on("POST", "/api/engine/process-uploaded-file", json={"kind": "course"})
     course = tmp_path / "route.gpx"
@@ -338,8 +300,10 @@ def test_upload_partial_failure_continues_and_exits_nonzero(
     assert outcomes[1]["error"] == "file_unreadable"
 
 
-def test_upload_server_failure_is_per_file(api: Any, run: Run, tmp_path: Path, h: Any) -> None:
-    _login(api, run, h)
+def test_upload_server_failure_is_per_file(
+    api: Any, run: Run, tmp_path: Path, h: Any, creds_path: Path
+) -> None:
+    _login(api, run, h, creds_path)
     api.on("POST", "/api/chat/attachments/presign", status=400, json={"detail": "not supported"})
     ride = tmp_path / "ride.fit"
     ride.write_bytes(b"x")

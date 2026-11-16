@@ -30,11 +30,11 @@ Remote base URLs must be `https`. Failures exit non-zero; with `--json` stderr i
 
 ## Login
 
-### Device login (default)
+### Device login
 
-`coach login` with no `--email` runs the OAuth device flow (RFC 8628). It works from a remote or
+`coach login` runs the OAuth device flow (RFC 8628), the only way to log in. It works from a remote or
 headless shell: the CLI prints a short code and a URL, you approve it in any browser where you are
-(or become, via the normal emailed-code web login) signed in, and the CLI stores the credentials.
+(or become, via the normal web login) signed in, and the CLI stores the credentials.
 
 ```bash
 export COACH_BASE_URL=https://my-preview.vercel.app
@@ -64,22 +64,10 @@ Relay `user_code` and `verification_uri` (or the complete URL) to the human, the
 command to finish. Run it in the background or with a long timeout, since it blocks for up to
 `expires_in` seconds. Do not read the credentials file.
 
-### Emailed-code login (`--email`, two steps)
+Login is browser-approved device flow only, so the CLI inherits the web login's per-person
+protections (the 6-digit code is only ever typed in the browser).
 
-The alternative for when a browser approval is not possible. It is split so a non-interactive agent
-can run step 1, ask the human for the emailed code, then run step 2.
-
-```bash
-coach login --email me@example.com [--invite-code CODE]   # step 1: emails a 6-digit code
-coach login --email me@example.com --code 123456          # step 2: verifies, stores credentials
-```
-
-- New accounts need an invite code; without one step 1 fails with `invite_required`.
-- If `--code` is omitted and stdin is a terminal, the CLI prompts for the code after sending.
-- Too many wrong codes fail with `rate_limited` (HTTP 429); wait and retry.
-- `--code` and `--invite-code` are only valid together with `--email`.
-
-### Both paths
+### Login rules
 
 - **Production guard:** unless the base URL is `localhost`, `127.0.0.1`, or `::1`, login requires
   `--yes`, checked before any request is sent. This includes `*.vercel.app` preview deployments,
@@ -157,4 +145,4 @@ deduplicated yet (issue #390).
 - The CLI holds no Supabase or R2 keys and needs none. Do not give them to an agent.
 - Wellness and activity data is sensitive: avoid shell redirection into committed files.
 - Agents should run `coach` with `--json`, never log the credentials file, and relay the device code to the
-  human (or ask for the emailed code with `--email`) rather than reading mail themselves.
+  human rather than reading mail themselves.

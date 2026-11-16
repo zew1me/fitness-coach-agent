@@ -1,8 +1,7 @@
-import re
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 ACCESS_TOKEN_TTL = timedelta(minutes=15)
 
@@ -10,11 +9,6 @@ ACCESS_TOKEN_TTL = timedelta(minutes=15)
 # 0/O and 1/I cannot be confused), about 34 bits of entropy. Displayed as ``XXXX-XXXX``.
 DEVICE_USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"
 DEVICE_USER_CODE_LENGTH = 8
-
-# GoTrue's email OTP length is configurable from 6 to 10 digits.
-_CLI_OTP_PATTERN = re.compile(r"[0-9]{6,10}")  # ASCII only: ``\d`` matches any Unicode digit
-# Commonly cited upper bound for an email address (64-octet local part + 255-octet domain).
-_MAX_EMAIL_LENGTH = 320
 
 
 class BrowserSessionRequest(BaseModel):
@@ -132,30 +126,6 @@ class TokenBundle(BaseModel):
     refresh_token: str
     scope: str = ""
     token_type: str = "Bearer"
-
-
-class CliVerifyOtpRequest(BaseModel):
-    """Email OTP submitted by the first-party CLI for server-side verification."""
-
-    email: str = Field(max_length=_MAX_EMAIL_LENGTH)
-    token: str
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        # Mirror app/api/auth/request-otp: the code was issued to the trimmed, lowercased address.
-        normalized = value.strip().lower()
-        if not normalized:
-            raise ValueError("email must not be empty")
-        return normalized
-
-    @field_validator("token")
-    @classmethod
-    def validate_token(cls, value: str) -> str:
-        stripped = value.strip()
-        if not _CLI_OTP_PATTERN.fullmatch(stripped):
-            raise ValueError("token must be a 6-10 digit code")
-        return stripped
 
 
 class CliTokenResponse(TokenBundle):
