@@ -148,10 +148,10 @@ Rotation has two halves, and bootstrap only does the first:
 
 For the environment you are rotating (`preview` and `prod` hold separate tokens; do one at a time):
 
-1. Create the replacement token, or let bootstrap mint it. To supply it yourself, follow the two-pass steps above and put the new pair in the matching `R2_*_PREVIEW` / `R2_*_PROD` values in `.env.bootstrap`. To have bootstrap mint it, blank those values and remove `r2_access_key_id` and `r2_secret_access_key` from `scripts/bootstrap/.state.{env}.json` (see [State files](#state-files)).
+1. Create the replacement token, or let bootstrap mint it. To supply it yourself, follow the two-pass steps above and put the new pair in the matching `R2_*_PREVIEW` / `R2_*_PROD` values in `.env.bootstrap`. To have bootstrap mint it, blank those values and remove `r2_access_key_id` and `r2_secret_access_key` from `scripts/bootstrap/.state.{env}.json` (see [State files](#state-files)). Minting deletes the active `fitness-coach-agent-{env}` token before the new pair is deployed, so uploads fail until step 2 completes. To keep uploads running, create the replacement yourself under a name other than `fitness-coach-agent-{env}` and put it in `.env.bootstrap`.
 2. Rerun bootstrap with `--env {env}` so the new credentials are written to Vercel, then redeploy that environment.
-3. Verify uploads work in that deployment.
-4. Only then, in the Cloudflare dashboard go to R2 -> Manage API tokens and revoke the old manually created token. Revoking earlier breaks uploads until the new credentials are deployed.
+3. Verify that the access key ID bootstrap reports (the summary shows it masked) matches the replacement token in the Cloudflare R2 token list, because a stale state-file pair can be reused silently. Then verify uploads work in that deployment.
+4. Only then, in the Cloudflare dashboard go to R2 -> Manage API tokens and revoke the old token, whether it was created by hand or by an earlier bootstrap run. Revoking earlier breaks uploads until the new credentials are deployed.
 
 Never paste access key or secret values into docs, issues or PRs.
 
