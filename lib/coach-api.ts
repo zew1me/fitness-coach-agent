@@ -175,10 +175,12 @@ async function readJson<T>(response: Response): Promise<T> {
 
 export async function fetchBrowserToken(
   fetchImpl: FetchLike = fetch,
+  signal?: AbortSignal,
 ): Promise<BrowserTokenResponse> {
   const response = await fetchImpl("/api/oauth/browser-token", {
     method: "POST",
     credentials: "include",
+    signal: signal ?? null,
   });
   const token = await readJson<BrowserTokenResponse>(response);
   Sentry.logger.debug("browser token fetched", { user_id: token.user_id });
@@ -190,7 +192,7 @@ async function authorizedFetch<T>(
   init: RequestInit,
   fetchImpl: FetchLike = fetch,
 ): Promise<T> {
-  const token = await fetchBrowserToken(fetchImpl);
+  const token = await fetchBrowserToken(fetchImpl, init.signal ?? undefined);
   const headers = new Headers(init.headers ?? {});
   headers.set("Authorization", `Bearer ${token.access_token}`);
   if (

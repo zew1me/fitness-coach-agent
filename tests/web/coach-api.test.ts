@@ -7,7 +7,35 @@ import {
   loadIntervalsStatus,
   startIntervalsAuthorization,
   syncIntervals,
+  uploadFile,
 } from "../../lib/coach-api";
+
+it("settles an upload timeout during authentication without starting the upload", async () => {
+  const controller = new AbortController();
+  const fetchImpl = vi.fn<typeof fetch>().mockImplementation(
+    (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        expect(signal).toBe(controller.signal);
+        signal?.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      }),
+  );
+  const pending = uploadFile(
+    "key",
+    new File(["image"], "photo.png"),
+    fetchImpl,
+    controller.signal,
+  );
+  const rejected = expect(pending).rejects.toMatchObject({
+    name: "TimeoutError",
+  });
+  controller.abort(new DOMException("Upload timed out", "TimeoutError"));
+  await rejected;
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  expect(fetchImpl.mock.calls[0]?.[0]).toBe("/api/oauth/browser-token");
+});
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
