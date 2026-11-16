@@ -129,6 +129,8 @@ def load_settings() -> tuple[BootstrapSettings, str, str]:
 
     Returns (settings, vercel_project_id, vercel_team_id).
     """
+    # Required fields are populated from the environment and .env.bootstrap at runtime,
+    # which the type checker cannot see through pydantic-settings' __init__.
     settings = BootstrapSettings()  # type: ignore[call-arg]
     vercel_meta = _read_vercel_project_json()
     project_id = vercel_meta.get("projectId", "")

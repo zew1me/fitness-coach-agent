@@ -177,6 +177,8 @@ def _pick_winner(sport: str, eligible: list[tuple[Activity, str]]) -> tuple[Acti
     )
 
 
+# Private helper whose inputs are all independent facts about one candidate;
+# a wrapper type for its single caller would add indirection, not clarity.
 def _build_candidate(  # noqa: PLR0913
     sport: str,
     activity: Activity,

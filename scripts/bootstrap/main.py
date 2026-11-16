@@ -121,6 +121,8 @@ def _build_smtp_settings(settings: BootstrapSettings) -> dict[str, Any] | None:
     }
 
 
+# One-shot bootstrap step; its inputs are independent CLI flags and state that the
+# single caller passes explicitly.
 def _setup_supabase(  # noqa: PLR0913
     settings: BootstrapSettings,
     env: str,
@@ -322,6 +324,8 @@ def _resolve_app_base_url(settings: BootstrapSettings, env: str, vercel_domain: 
     return url
 
 
+# Assembles env vars from the outputs of each provisioning step; each argument is
+# one step's result, passed explicitly by the single caller.
 def _build_env_vars(  # noqa: PLR0913
     env: str,
     app_base_url: str,
@@ -385,6 +389,8 @@ def _sync_vercel_env_vars(
     vercel.upsert_env_vars(vercel_target, env_vars)
 
 
+# Prints the outputs of each provisioning step; each argument is one step's result,
+# passed explicitly by the single caller.
 def _print_summary(  # noqa: PLR0913
     env: str, supabase: dict, r2: dict, app_base_url: str, vercel_target: list, env_vars: dict
 ) -> None:

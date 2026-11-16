@@ -154,6 +154,8 @@ def test_bootstrap_settings_env_file_overrides_shell_env(monkeypatch, tmp_path) 
     )
     monkeypatch.setenv("SUPABASE_ACCESS_TOKEN", "stale_from_shell")
 
+    # pydantic-settings accepts _env_file and reads required fields from it at
+    # runtime; the type checker sees neither through the generated __init__.
     settings = BootstrapSettings(_env_file=str(env_file))  # type: ignore[call-arg]
 
     assert settings.supabase_access_token == "sbp_from_file"
@@ -1484,6 +1486,8 @@ def test_bootstrap_settings_smtp_fields_loaded_from_env_file(tmp_path) -> None:
         "SMTP_ADMIN_EMAIL=alerts@example.com\n"
         "SMTP_SENDER_NAME=MyApp Notifications\n"
     )
+    # pydantic-settings accepts _env_file and reads required fields from it at
+    # runtime; the type checker sees neither through the generated __init__.
     settings = BootstrapSettings(_env_file=str(env_file))  # type: ignore[call-arg]
     assert settings.smtp_host == "smtp.example.com"
     assert settings.smtp_port == 587

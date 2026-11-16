@@ -94,6 +94,8 @@ def hr_zones(
     ]
 
 
+# Keyword-only optional thresholds, one per sport-specific zone model; callers pass
+# only the thresholds the athlete has and the function dispatches on them.
 def compute_zones(  # noqa: PLR0913
     sport: str,
     *,

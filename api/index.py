@@ -338,6 +338,8 @@ async def oauth_protected_resource() -> Mapping[str, object]:
     return auth_service.protected_resource_metadata()
 
 
+# Each argument is an OAuth/PKCE query parameter (or the session cookie) that FastAPI
+# binds by name; collapsing them would hide the public authorize contract.
 @app.get("/api/oauth/authorize")
 async def oauth_authorize(  # noqa: PLR0913
     client_id: str,
@@ -557,6 +559,8 @@ class IntervalsSyncRequest(BaseModel):
     days: int = Field(default=14, ge=1, le=90)
 
 
+# Kept in one handler so the auth-error -> HTTP status mapping and the sync loop's
+# duplicate/invalid counters read top to bottom; splitting it would scatter that contract.
 @app.post("/api/intervals/sync")
 async def intervals_sync(  # noqa: C901
     payload: IntervalsSyncRequest,
@@ -627,6 +631,8 @@ async def intervals_sync(  # noqa: C901
     }
 
 
+# Each argument is a consent-form field (or the session cookie) that FastAPI binds
+# by name; it mirrors oauth_authorize so both ends of the flow stay symmetrical.
 @app.post("/api/oauth/authorize/decision")
 async def oauth_authorize_decision(  # noqa: PLR0913
     client_id: str = Form(...),
@@ -2797,6 +2803,8 @@ def _select_training_model(
     return "longevity", "auto"
 
 
+# Goal resolution and the explicit-vs-composed workout branches share request-scoped
+# state; splitting them would thread that state through several helpers for no gain.
 @app.post("/api/engine/generate-plan-structure")
 async def generate_plan_structure(  # noqa: C901
     payload: GeneratePlanStructureRequest,

@@ -1018,6 +1018,8 @@ async def test_call_vision_reuses_one_client_across_calls(
     fake_cls = make_fake_openai(captured, response=response)
     constructed = 0
 
+    # fake_cls is built at runtime by make_fake_openai, so the checker cannot
+    # treat it as a static base class.
     class CountingAsyncOpenAI(fake_cls):  # type: ignore[misc, valid-type]
         def __init__(self, **kwargs: Any) -> None:
             nonlocal constructed
