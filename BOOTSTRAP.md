@@ -139,6 +139,22 @@ So leave the `R2_*` values blank to have bootstrap mint the credentials. To keep
 3. Copy the generated Access Key ID and Secret Access Key into `R2_ACCESS_KEY_ID_PREVIEW` / `R2_SECRET_ACCESS_KEY_PREVIEW` or the matching `_PROD` values.
 4. Rerun bootstrap so it writes those runtime credentials to Vercel.
 
+### Rotating R2 credentials and revoking old tokens
+
+Rotation has two halves, and bootstrap only does the first:
+
+1. **Replace the credentials the app uses.** Bootstrap deletes and re-mints only a token named `fitness-coach-agent-{env}`. A token you created by hand in the Cloudflare dashboard has a different name, so bootstrap never removes it, and it keeps granting access to the bucket until you revoke it.
+2. **Revoke the old token yourself.** This is a manual step, done last.
+
+For the environment you are rotating (`preview` and `prod` hold separate tokens; do one at a time):
+
+1. Create the replacement token, or let bootstrap mint it. To supply it yourself, follow the two-pass steps above and put the new pair in the matching `R2_*_PREVIEW` / `R2_*_PROD` values in `.env.bootstrap`. To have bootstrap mint it, blank those values and remove `r2_access_key_id` and `r2_secret_access_key` from `scripts/bootstrap/.state.{env}.json` (see [State files](#state-files)).
+2. Rerun bootstrap with `--env {env}` so the new credentials are written to Vercel, then redeploy that environment.
+3. Verify uploads work in that deployment.
+4. Only then, in the Cloudflare dashboard go to R2 -> Manage API tokens and revoke the old manually created token. Revoking earlier breaks uploads until the new credentials are deployed.
+
+Never paste access key or secret values into docs, issues or PRs.
+
 ### Sentry observability (optional)
 
 Set `SENTRY_DSN`, `SENTRY_PUBLIC_DSN`, and `SENTRY_AUTH_TOKEN` in `.env.bootstrap` to provision Sentry. All are optional — leave any blank to skip that var. Use **two distinct DSNs** (separate Client Keys) so the public browser key can never expose the server one; Sentry separates environments via the `environment` tag. Bootstrap writes:
