@@ -120,16 +120,31 @@ export async function compressImage(
     signal: AbortSignal;
   },
 ): Promise<File> {
+  // The tail may stay pending indefinitely in an uncancellable decoder. Keep
+  // queued inputs in a clearable slot, not captured by the tail callback.
+  let queued: { file: File; onProgress: typeof onProgress } | undefined = {
+    file,
+    onProgress,
+  };
   let onAbort = (): void => {};
   const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = (): void => reject(signal.reason);
+    onAbort = (): void => {
+      queued = undefined;
+      reject(signal.reason);
+    };
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
   });
   try {
-    // Enqueue before import/fetch to preserve invocation order. Canceled queued
-    // work fails the first signal check in compress(), before loading or decoding.
-    const work = compressionTail.then(() => compress(file, onProgress, signal));
+    // Enqueue before import/fetch to preserve invocation order. Abort clears
+    // queued file/progress references immediately, without advancing active work.
+    const work = compressionTail.then(() => {
+      signal.throwIfAborted();
+      const input = queued;
+      if (!input) throw signal.reason;
+      queued = undefined;
+      return compress(input.file, input.onProgress, signal);
+    });
     // Recover failures so one bad file cannot poison subsequent preparations.
     compressionTail = work.then(
       () => {},

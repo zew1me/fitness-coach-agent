@@ -286,6 +286,7 @@ describe("compression", () => {
     );
     await vi.waitFor(() => expect(compress).toHaveBeenCalledTimes(1));
     const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, "removeEventListener");
     const canceled = compressImage(file(4_000_000, "image/png", "cancel.png"), {
       ...options,
       signal: controller.signal,
@@ -296,6 +297,9 @@ describe("compression", () => {
     );
     controller.abort();
     await expect(canceled).rejects.toMatchObject({ name: "AbortError" });
+    // Cancellation detaches its listener while the active decoder is still
+    // pending; its tail placeholder must not retain the queued file/progress.
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
     expect(compress).toHaveBeenCalledTimes(1);
     finish(new Blob(["jpeg"], { type: "image/jpeg" }));
     await Promise.all([first, third]);
