@@ -149,6 +149,7 @@ describe("SupabaseAgentSession", () => {
 
     await expect(session.getItems(0)).resolves.toEqual([]);
     await expect(session.getItems(-1)).resolves.toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("self-heals a row poisoned with duplicate item ids by keeping the first occurrence", async () => {

@@ -25,9 +25,10 @@ bun run lint:css  # Stylelint on CSS
 bun run lint:actions  # actionlint (pinned zew1me fork) on GitHub workflows
 bun run typecheck  # tsc + Next.js typegen
 bun run test     # Vitest unit tests (tests/web/)
-bun run check    # lint + lint:css + lint:actions + typecheck + test + ast-grep:check
+bun run check    # lint + lint:css + lint:actions + typecheck + test + ast-grep:check + react-doctor
 bun run cpd      # jscpd copy-paste detection over app/ components/ lib/ api/ backend/
 bun run knip     # unused files, exports and dependencies
+bun run react-doctor  # React Doctor: React correctness, a11y and security diagnostics
 
 # Python backend and uv workspace tools
 uv run pytest                         # all Python and workspace-tool tests
@@ -379,7 +380,7 @@ actionlint needs no manual install: `scripts/actionlint.sh` downloads the pinned
 
 ### Pre-push (full CI gate)
 
-Runs sequentially and mirrors every check in `.github/workflows/ci.yml` (CI runs `cpd` and `knip` in the `web` job):
+Runs sequentially and mirrors every check in `.github/workflows/ci.yml` (CI runs `cpd`, `knip` and `react-doctor` in the `web` job):
 
 | Step                | Command                                               |
 | ------------------- | ----------------------------------------------------- |
@@ -397,6 +398,7 @@ Runs sequentially and mirrors every check in `.github/workflows/ci.yml` (CI runs
 | `pytest`            | `uv run pytest`                                       |
 | `cpd`               | `bun run cpd` (copy-paste detection, ≤1% duplication) |
 | `knip`              | `bun run knip` (dead-code / unused-export detection)  |
+| `react-doctor`      | `bun run react-doctor` (fails on errors and warnings) |
 | `playwright`        | Full Playwright UI suite                              |
 
 ### Reachability gate

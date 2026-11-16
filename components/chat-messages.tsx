@@ -47,11 +47,17 @@ const COACHING_STARTERS: StarterPrompt[] = [
   },
 ];
 
+const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function readableTime(timestamp: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(timestamp));
+  // Chat bubbles never render on the server: CoachChat shows SessionLoading
+  // until the browser session resolves on the client, so the viewer's local
+  // time cannot cause a hydration mismatch here.
+  // react-doctor-disable-next-line react-doctor/no-locale-format-in-render
+  return MESSAGE_TIME_FORMAT.format(new Date(timestamp));
 }
 
 function friendlyToolStatus(toolName: string): string {
@@ -200,6 +206,10 @@ function MessageBubble({
       >
         {showThinking ? <ThinkingIndicator /> : null}
         {textBlocks.map((text, idx) => (
+          // A message's parts only ever grow at the end while it streams and
+          // never reorder, and text blocks have no id of their own (equal text
+          // can repeat), so the position is the stable key.
+          // react-doctor-disable-next-line react-doctor/no-array-index-as-key
           <p className={styles.messageText} key={`text-${idx}`}>
             {text}
           </p>
@@ -207,6 +217,9 @@ function MessageBubble({
         {fileParts.length > 0 ? (
           <div className={styles.attachmentGrid}>
             {fileParts.map((part, idx) => (
+              // Keyed by URL; the position only separates the same file
+              // attached twice. Parts are append-only, so it never shifts.
+              // react-doctor-disable-next-line react-doctor/no-array-index-as-key
               <AttachmentTile key={`file-${part.url}-${idx}`} part={part} />
             ))}
           </div>

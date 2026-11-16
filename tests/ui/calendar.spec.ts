@@ -211,6 +211,14 @@ test("opens a read-only day detail panel with full session context", async ({
     "Nothing planned or recorded for this day.",
   );
 
+  // The panel is modal: with the close button as its only focusable control,
+  // Tab and Shift+Tab must keep focus on it rather than reach the page behind.
+  await expect(page.getByTestId("calendar-detail-close")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByTestId("calendar-detail-close")).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByTestId("calendar-detail-close")).toBeFocused();
+
   // Escape also closes the dialog, returning focus to the day cell.
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("calendar-day-detail")).not.toBeVisible();

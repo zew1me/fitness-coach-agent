@@ -13,20 +13,18 @@ export type InternalSpecialistRole = z.infer<
   typeof internalSpecialistRoleSchema
 >;
 
-const specialistDelegationSchema = z
-  .object({
-    role: internalSpecialistRoleSchema,
-    objective: z.string().min(1),
-    conversationDetails: z.array(z.string()),
-    constraintsAndPriorDecisions: z.array(z.string()),
-    unresolvedQuestions: z.array(z.string()),
-    relevantCoachingMemoryIds: z.array(z.string()),
-  })
-  .strict();
+const specialistDelegationSchema = z.strictObject({
+  role: internalSpecialistRoleSchema,
+  objective: z.string().min(1),
+  conversationDetails: z.array(z.string()),
+  constraintsAndPriorDecisions: z.array(z.string()),
+  unresolvedQuestions: z.array(z.string()),
+  relevantCoachingMemoryIds: z.array(z.string()),
+});
 
-export const delegationPlanSchema = z
-  .object({ delegations: z.array(specialistDelegationSchema).max(2) })
-  .strict();
+export const delegationPlanSchema = z.strictObject({
+  delegations: z.array(specialistDelegationSchema).max(2),
+});
 
 export type SpecialistDelegation = z.infer<typeof specialistDelegationSchema>;
 export type DelegationPlan = z.infer<typeof delegationPlanSchema>;
@@ -237,13 +235,11 @@ const proposedUpdateInputSchema = z.preprocess(
 // ever sees the raw data. proposedUpdateWireSchema is the structural-only
 // schema safe to use as `outputType`; proposedUpdateSchema below layers the
 // semantic refinements on top, applied by us afterward.
-const proposedUpdateWireSchema = z
-  .object({
-    input: proposedUpdateInputSchema,
-    rationale: z.string().min(1),
-    toolName: proposedWriteToolNameSchema,
-  })
-  .strict();
+const proposedUpdateWireSchema = z.strictObject({
+  input: proposedUpdateInputSchema,
+  rationale: z.string().min(1),
+  toolName: proposedWriteToolNameSchema,
+});
 
 const proposedUpdateSchema = proposedUpdateWireSchema.superRefine(
   (update, context) => {
@@ -297,25 +293,21 @@ const proposedUpdateSchema = proposedUpdateWireSchema.superRefine(
 // Structural-only schema — safe to pass as an Agent's `outputType`. See the
 // comment on proposedUpdateWireSchema above for why the semantic refinements
 // must not be included here.
-export const specialistReportWireSchema = z
-  .object({
-    confidence: z.enum(["low", "medium", "high"]),
-    proposedUpdates: z.array(proposedUpdateWireSchema),
-    risks: z.array(z.string()),
-    role: internalSpecialistRoleSchema,
-    summary: z.string().min(1),
-  })
-  .strict();
+export const specialistReportWireSchema = z.strictObject({
+  confidence: z.enum(["low", "medium", "high"]),
+  proposedUpdates: z.array(proposedUpdateWireSchema),
+  risks: z.array(z.string()),
+  role: internalSpecialistRoleSchema,
+  summary: z.string().min(1),
+});
 
-export const specialistReportSchema = z
-  .object({
-    confidence: z.enum(["low", "medium", "high"]),
-    proposedUpdates: z.array(proposedUpdateSchema),
-    risks: z.array(z.string()),
-    role: internalSpecialistRoleSchema,
-    summary: z.string().min(1),
-  })
-  .strict();
+export const specialistReportSchema = z.strictObject({
+  confidence: z.enum(["low", "medium", "high"]),
+  proposedUpdates: z.array(proposedUpdateSchema),
+  risks: z.array(z.string()),
+  role: internalSpecialistRoleSchema,
+  summary: z.string().min(1),
+});
 
 export type SpecialistReport = z.infer<typeof specialistReportSchema>;
 

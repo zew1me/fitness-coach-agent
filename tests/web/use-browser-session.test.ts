@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import * as Sentry from "@sentry/nextjs";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -11,7 +12,13 @@ vi.mock("../../lib/coach-api", async (importOriginal) => {
   return { ...actual, fetchBrowserToken: vi.fn() };
 });
 
+vi.mock("@sentry/nextjs", () => ({
+  setUser: vi.fn(),
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
 const fetchBrowserTokenMock = vi.mocked(fetchBrowserToken);
+const setUserMock = vi.mocked(Sentry.setUser);
 
 function browserToken(
   accessToken = "token-abc",
@@ -29,6 +36,7 @@ function browserToken(
 afterEach(() => {
   cleanup();
   fetchBrowserTokenMock.mockReset();
+  setUserMock.mockReset();
   vi.useRealTimers();
 });
 
@@ -295,5 +303,71 @@ describe("useBrowserSession", () => {
     expect(reactWarnings).toHaveLength(0);
     expect(result.current).toBe(lastSnapshot);
     errorSpy.mockRestore();
+  });
+});
+
+describe("useBrowserSession Sentry user", () => {
+  it("identifies the athlete once the session is established", async () => {
+    fetchBrowserTokenMock.mockResolvedValueOnce(browserToken());
+
+    renderHook(() => useBrowserSession());
+
+    await waitFor(() => {
+      expect(setUserMock).toHaveBeenLastCalledWith({ id: "user-1" });
+    });
+  });
+
+  it("clears the user when the session bootstrap fails", async () => {
+    fetchBrowserTokenMock.mockRejectedValueOnce(new TypeError("Load failed"));
+
+    const { result } = renderHook(() => useBrowserSession());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    expect(setUserMock).toHaveBeenCalledWith(null);
+    expect(setUserMock).not.toHaveBeenCalledWith({ id: "user-1" });
+  });
+
+  it("keeps the athlete identified through a transient renewal failure", async () => {
+    fetchBrowserTokenMock
+      .mockResolvedValueOnce(browserToken("token-1"))
+      .mockRejectedValueOnce(new TypeError("Load failed"));
+
+    renderHook(() => useBrowserSession());
+    await waitFor(() => {
+      expect(setUserMock).toHaveBeenLastCalledWith({ id: "user-1" });
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => {
+      expect(fetchBrowserTokenMock).toHaveBeenCalledTimes(2);
+    });
+
+    expect(setUserMock).not.toHaveBeenCalledWith(null);
+  });
+
+  it("clears the user when a renewal finds the session expired", async () => {
+    fetchBrowserTokenMock
+      .mockResolvedValueOnce(browserToken("token-1"))
+      .mockRejectedValueOnce(
+        new ApiError(401, "No browser session cookie is present."),
+      );
+
+    const { result } = renderHook(() => useBrowserSession());
+    await waitFor(() => {
+      expect(setUserMock).toHaveBeenLastCalledWith({ id: "user-1" });
+    });
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    await waitFor(() => {
+      expect(result.current.authenticationRequired).toBe(true);
+    });
+    expect(setUserMock).toHaveBeenLastCalledWith(null);
   });
 });

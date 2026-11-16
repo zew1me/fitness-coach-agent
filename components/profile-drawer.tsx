@@ -7,35 +7,7 @@ import type { AthleteProfile } from "../lib/types";
 
 // Shared chat CSS keeps the drawer styling identical on chat and calendar.
 import styles from "./coach-chat.module.css";
-
-const DRAWER_FOCUSABLE_SELECTOR = [
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[href]",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
-
-function trapDrawerFocus(
-  event: KeyboardEvent,
-  drawer: HTMLElement | null,
-): void {
-  const focusableElements = Array.from(
-    drawer?.querySelectorAll<HTMLElement>(DRAWER_FOCUSABLE_SELECTOR) ?? [],
-  );
-  const firstElement = focusableElements[0];
-  const lastElement = focusableElements.at(-1);
-  if (firstElement === undefined || lastElement === undefined) return;
-
-  if (event.shiftKey && document.activeElement === firstElement) {
-    event.preventDefault();
-    lastElement.focus();
-  } else if (!event.shiftKey && document.activeElement === lastElement) {
-    event.preventDefault();
-    firstElement.focus();
-  }
-}
+import { trapDrawerFocus } from "./drawer-focus-trap";
 
 function ProfileDrawerFields({
   profile,
@@ -182,6 +154,10 @@ export function ProfileDrawer({
         className={styles.drawer}
         onClick={(event) => event.stopPropagation()}
         ref={drawerRef}
+        // Focus moves in on open, Tab is trapped by trapDrawerFocus, Escape
+        // closes and focus returns to the opener, so this already behaves as a
+        // modal. A native <dialog> rewrite is out of scope for #444.
+        // react-doctor-disable-next-line react-doctor/prefer-html-dialog
         role="dialog"
       >
         <div className={styles.drawerHeader}>

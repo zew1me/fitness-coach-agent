@@ -136,8 +136,9 @@ export class SupabaseAgentSession implements SessionHistoryRewriteAwareSession {
   }
 
   async getItems(limit?: number): Promise<AgentInputItem[]> {
-    const items = dedupeItemsById((await this.load()).items);
+    // A non-positive limit asks for nothing, so answer before loading state.
     if (limit !== undefined && limit <= 0) return [];
+    const items = dedupeItemsById((await this.load()).items);
     return limit === undefined ? items : items.slice(-limit);
   }
 
