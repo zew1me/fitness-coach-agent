@@ -175,6 +175,61 @@ it("queues large images from separate additions instead of failing the second on
   expect(error).not.toHaveBeenCalled();
 });
 
+it("queues a whole selection before later additions without waiting for uploads", async () => {
+  const releases: Array<(_blob: Blob) => void> = [];
+  mocks.compress.mockImplementation(
+    () => new Promise<Blob>((resolve) => releases.push(resolve)),
+  );
+  let finishUpload!: () => void;
+  mocks.upload.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finishUpload = (): void =>
+          resolve({
+            object_key: "key",
+            public_url: "https://example.com/image.jpg",
+          });
+      }),
+  );
+  const timeout = vi.spyOn(AbortSignal, "timeout");
+  const { result } = renderHook(() => useChatDraft(vi.fn()));
+  const image = (name: string): File =>
+    new File([new Uint8Array(4_000_000)], name, { type: "image/png" });
+  let batch!: Promise<void>;
+  let later!: Promise<void>;
+  await act(async () => {
+    batch = result.current.handleFilesAdded([image("A.png"), image("B.png")]);
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalledTimes(1));
+  });
+  expect(timeout.mock.calls.filter(([ms]) => ms === 60_000)).toHaveLength(2);
+  await act(async () => {
+    later = result.current.handleFilesAdded([image("C.png")]);
+    releases[0]!(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalledTimes(2));
+  });
+  // B starts even though A's network upload has not completed.
+  expect(mocks.compress.mock.calls.map(([file]) => file.name)).toEqual([
+    "A.png",
+    "B.png",
+  ]);
+  mocks.upload.mockResolvedValue({
+    object_key: "key",
+    public_url: "https://example.com/image.jpg",
+  });
+  await act(async () => {
+    releases[1]!(new Blob(["jpeg"], { type: "image/jpeg" }));
+    await vi.waitFor(() => expect(mocks.compress).toHaveBeenCalledTimes(3));
+    releases[2]!(new Blob(["jpeg"], { type: "image/jpeg" }));
+    finishUpload();
+    await Promise.all([batch, later]);
+  });
+  expect(mocks.compress.mock.calls.map(([file]) => file.name)).toEqual([
+    "A.png",
+    "B.png",
+    "C.png",
+  ]);
+});
+
 it.each(["too-large", "throw", "still-large"])(
   "never presigns or uploads a %s failure",
   async (failure) => {

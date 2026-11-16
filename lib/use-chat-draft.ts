@@ -329,13 +329,17 @@ export function useChatDraft(
     }
     setAttachments((current) => [...current, ...nextLocalAttachments]);
 
-    for (const { attachmentId, file } of uploadQueue) {
-      await uploadOneAttachment(attachmentId, file, {
-        signal,
-        setThreadError,
-        updateAttachment,
-      });
-    }
+    // Start every preparation now, in selection order. Waiting for each upload
+    // would let later selections jump the FIFO and delay these timeout budgets.
+    await Promise.all(
+      uploadQueue.map(({ attachmentId, file }) =>
+        uploadOneAttachment(attachmentId, file, {
+          signal,
+          setThreadError,
+          updateAttachment,
+        }),
+      ),
+    );
   }
 
   return {
