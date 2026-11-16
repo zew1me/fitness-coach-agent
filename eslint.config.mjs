@@ -22,6 +22,9 @@ const compat = new FlatCompat({
 
 export default defineConfig([
   ...compat.extends("next/core-web-vitals"),
+  // Generated output, dependency and tool caches, and local agent/worktree state are not source we
+  // own. Playwright specs (tests/ui) follow Playwright's async fixture style rather than this
+  // app ruleset, and are still type-checked by `tsc` through tsconfig.json.
   globalIgnores([
     ".cache/**",
     ".claude/**",
@@ -82,10 +85,12 @@ export default defineConfig([
       "@typescript-eslint/no-floating-promises": "error",
       "@typescript-eslint/no-misused-promises": "error",
       "@typescript-eslint/no-unnecessary-condition": "error",
+      // The core rule below (args: "none") owns unused variables. The TS variant would report each
+      // unused local twice and also flag parameters that fakes and callbacks must declare to match
+      // a signature.
       "@typescript-eslint/no-unused-vars": "off",
       "no-unused-vars": ["error", { args: "none" }],
       "@typescript-eslint/require-await": "error",
-      "@next/next/no-html-link-for-pages": "off",
       "unused-imports/no-unused-imports": "error",
     },
   },
@@ -96,12 +101,14 @@ export default defineConfig([
     },
   },
   {
+    // Next.js App Router loads pages, layouts and other route segment files by their default export.
     files: ["app/**/*.tsx", "app/**/layout.tsx", "app/**/page.tsx"],
     rules: {
       "import/no-default-export": "off",
     },
   },
   {
+    // Each tool loads its config file by its default export.
     files: [
       "doctor.config.ts",
       "next.config.ts",
@@ -114,9 +121,18 @@ export default defineConfig([
     },
   },
   {
+    // CSS module declarations mirror `import styles from "./x.module.css"`, which is a default import.
+    files: ["**/*.module.css.d.ts"],
+    rules: {
+      "import/no-default-export": "off",
+    },
+  },
+  {
     files: testFiles,
     rules: {
       complexity: ["error", 12],
+      // Tests build partial fakes of SDK and Supabase objects and assert on values a preceding
+      // `expect` has already proved present; neither rule protects production behaviour there.
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-non-null-assertion": "off",
     },

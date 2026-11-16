@@ -2,6 +2,8 @@
   "$schema": "https://unpkg.com/knip/schema.json",
   "ignoreExportsUsedInFile": true,
   "ignoreDependencies": [
+    // eslint.config.mjs loads both by name through FlatCompat's `extends("next/core-web-vitals")`
+    // string, which static import analysis cannot follow.
     "@next/eslint-plugin-next",
     "eslint-config-next",
     // CodeGraph is invoked through documented bunx commands, which static import analysis cannot see.
@@ -10,6 +12,7 @@
     // cannot tie the `ast-grep` binary back to the package that provides it.
     "@ast-grep/cli"
   ],
+  // Local tool, agent and build-output directories, not project source.
   "ignore": [
     ".worktrees/**",
     ".codex/**",

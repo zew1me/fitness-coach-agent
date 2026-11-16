@@ -1,4 +1,3 @@
-/* eslint-disable import/no-default-export */
 declare const styles: {
   readonly body: string;
   readonly card: string;
