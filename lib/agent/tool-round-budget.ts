@@ -1,5 +1,5 @@
 import {
-  mcpToFunctionTool,
+  getAllMcpTools,
   type Agent,
   type MCPServer,
   type RunContext,
@@ -101,17 +101,25 @@ export function trackToolRounds<TContext extends ToolRoundBudgetContext>(
  *
  * Passing the server through `Agent.mcpServers` instead would bypass the budget:
  * the SDK's `getAllTools` consults `isEnabled` only for function tools and always
- * includes MCP tools. Its own callable `toolFilter` is no substitute either — with
- * `cacheToolsList` the *filtered* list is cached module-wide per server and agent
- * name, so the first evaluation would be reused by later turns and athletes.
+ * includes MCP tools. Converting them to context-aware function tools lets the
+ * same per-model-call budget predicate gate both coach and MCP tools.
  */
 export async function listBudgetedMcpTools<
   TContext extends ToolRoundBudgetContext,
 >(server: MCPServer): Promise<Tool<TContext>[]> {
-  const mcpTools = await server.listTools();
-  return mcpTools.map((mcpTool) => ({
-    ...mcpToFunctionTool(mcpTool, server, false),
-    isEnabled: (runContext: RunContext<TContext>) =>
-      Promise.resolve(runContext.context.toolRounds.hasRoundsLeft()),
-  }));
+  // Use the context-aware SDK conversion so custom-data callbacks retain the
+  // same context type as the budget gate (mcpToFunctionTool uses unknown).
+  const mcpTools = await getAllMcpTools<TContext>({
+    mcpServers: [server],
+    convertSchemasToStrict: false,
+  });
+  return mcpTools.map((mcpTool) =>
+    mcpTool.type === "function"
+      ? {
+          ...mcpTool,
+          isEnabled: (runContext: RunContext<TContext>) =>
+            Promise.resolve(runContext.context.toolRounds.hasRoundsLeft()),
+        }
+      : mcpTool,
+  );
 }

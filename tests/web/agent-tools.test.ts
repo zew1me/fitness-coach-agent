@@ -1,5 +1,5 @@
 import { RunContext, type FunctionTool } from "@openai/agents";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -1351,6 +1351,13 @@ describe("createAgentCoachTools input validation errors", () => {
 
   beforeEach(() => {
     sentryMocks.captureException.mockClear();
+    // Exercise detailed error handling only when the SDK is explicitly allowed
+    // to retain parser details; production keeps its default redaction.
+    vi.stubEnv("OPENAI_AGENTS_DONT_LOG_TOOL_DATA", "false");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   function agentTool(
@@ -1385,6 +1392,27 @@ describe("createAgentCoachTools input validation errors", () => {
       rawArgs,
     );
   }
+
+  it("respects SDK parser redaction without misreporting malformed JSON", async () => {
+    vi.stubEnv("OPENAI_AGENTS_DONT_LOG_TOOL_DATA", "true");
+    const { fetchImpl, requests } = createRecordingFetch({});
+    const tool = agentTool("generate_training_plan", fetchImpl);
+
+    const output = await invoke(
+      tool,
+      JSON.stringify({
+        title: "Private athlete note",
+        workouts: [{ ...restDay, target_duration_minutes: -5 }],
+      }),
+    );
+
+    expect(requests).toEqual([]);
+    expect(output).toContain("arguments did not match the tool input schema");
+    expect(output).not.toContain("not valid JSON");
+    expect(
+      JSON.stringify(sentryMocks.captureException.mock.calls),
+    ).not.toContain("Private athlete note");
+  });
 
   it("names the failing fields to the model and reports them to Sentry at error level", async () => {
     const { fetchImpl, requests } = createRecordingFetch({});

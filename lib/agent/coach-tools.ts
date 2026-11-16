@@ -412,6 +412,10 @@ function invalidToolInputIssues(error: unknown): string[] | null {
       return path ? `${path}: ${issue.message}` : issue.message;
     });
   }
+  // The SDK now redacts parser details by default. Respect that boundary and
+  // do not mislabel a schema rejection as malformed JSON when its cause is gone.
+  if (cause === undefined)
+    return ["arguments did not match the tool input schema"];
   // Never echo the parser message: JSON.parse errors can quote the raw input,
   // which would carry athlete text into Sentry.
   return ["arguments are not valid JSON"];
