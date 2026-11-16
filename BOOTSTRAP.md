@@ -150,7 +150,12 @@ For the environment you are rotating (`preview` and `prod` hold separate tokens;
 
 1. Create the replacement token, or let bootstrap mint it. To supply it yourself, follow the two-pass steps above and put the new pair in the matching `R2_*_PREVIEW` / `R2_*_PROD` values in `.env.bootstrap`. To have bootstrap mint it, blank those values and remove `r2_access_key_id` and `r2_secret_access_key` from `scripts/bootstrap/.state.{env}.json` (see [State files](#state-files)). Minting deletes the active `fitness-coach-agent-{env}` token before the new pair is deployed, so uploads fail until step 2 completes. To keep uploads running, create the replacement yourself under a name other than `fitness-coach-agent-{env}` and put it in `.env.bootstrap`.
 2. Rerun bootstrap with `--env {env}` so the new credentials are written to Vercel, then redeploy that environment.
-3. Verify that the replacement pair is the one in use, because a stale state-file pair can be reused silently. Compare `r2_access_key_id` in `scripts/bootstrap/.state.{env}.json` with the replacement access key ID you saved when creating the token, locally and without sharing either value. The bootstrap summary shows only the last four characters, so a matching suffix alone is not confirmation. Then verify uploads work in that deployment.
+3. Verify that the replacement pair is the one in use, because a stale state-file pair can be reused silently. Read the credential line bootstrap printed in its `[2/4] Cloudflare R2` step:
+   - `Minting R2 S3 token via Cloudflare API…` means it created the token and deleted the old `fitness-coach-agent-{env}` token, so a passing upload can only be using the new one.
+   - `Using R2 S3 credentials from .env.bootstrap.` means it used the pair you supplied. Compare `r2_access_key_id` in `scripts/bootstrap/.state.{env}.json` with the replacement access key ID you saved when creating the token, locally and without sharing either value. The bootstrap summary shows only the last four characters, so a matching suffix alone is not confirmation.
+   - `Using R2 S3 credentials from state file.` means the old pair was reused. Stop, and clear the state keys or set the new pair before rerunning.
+
+   Then verify uploads work in that deployment.
 4. Only then, in the Cloudflare dashboard go to R2 -> Manage API tokens and revoke the old token, whether it was created by hand or by an earlier bootstrap run. Revoking earlier breaks uploads until the new credentials are deployed.
 
 Never paste access key or secret values into docs, issues or PRs.
