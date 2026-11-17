@@ -20,16 +20,15 @@ export function recordStageUsage(
     request_count: usage.requests,
     input_tokens: usage.inputTokens,
     request_size_tokens: requestSizeTokens,
-    cached_tokens: entries.reduce(
-      (sum, entry) => sum + (entry.inputTokensDetails["cached_tokens"] ?? 0),
-      0,
-    ),
+    cached_tokens: entries.reduce((sum, entry) => {
+      const cached = entry.inputTokensDetails["cached_tokens"];
+      return sum + (typeof cached === "number" ? cached : 0);
+    }, 0),
     output_tokens: usage.outputTokens,
-    reasoning_tokens: entries.reduce(
-      (sum, entry) =>
-        sum + (entry.outputTokensDetails["reasoning_tokens"] ?? 0),
-      0,
-    ),
+    reasoning_tokens: entries.reduce((sum, entry) => {
+      const reasoning = entry.outputTokensDetails["reasoning_tokens"];
+      return sum + (typeof reasoning === "number" ? reasoning : 0);
+    }, 0),
     total_tokens: usage.totalTokens,
     max_request_input: maxRequestInput,
   });
