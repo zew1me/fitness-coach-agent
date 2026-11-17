@@ -587,6 +587,9 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
       instructions:
         "You are an endurance coach. Use the echo_note tool once to record a one-word note, then reply in one short sentence.",
       model: MODEL,
+      // This fixture needs a real reasoning item. Default/medium effort can
+      // complete this trivial task with zero reasoning tokens on current models.
+      modelSettings: { reasoning: { effort: "high" } },
       tools: [echo],
     });
     // Whether a turn this simple emits a reasoning item is not deterministic —

@@ -29,7 +29,9 @@ export type CoachingMemoryRecord = z.infer<typeof coachingMemoryRecordSchema>;
 
 const newRecordSchema = coachingMemoryRecordSchema
   .omit({ lifecycle: true })
-  .partial({ followUpAt: true });
+  // Tool JSON Schema describes input; normalization stays in activeRecord via
+  // coachingMemoryRecordSchema because Zod transforms are not JSON Schema.
+  .extend({ followUpAt: z.iso.datetime({ offset: true }).optional() });
 
 const coachingMemoryOperationSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("upsert"), record: newRecordSchema }),

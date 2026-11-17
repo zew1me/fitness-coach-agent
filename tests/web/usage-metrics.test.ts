@@ -51,6 +51,42 @@ describe("recordStageUsage", () => {
     );
   });
 
+  it.each([null, "20", true, { tokens: 20 }, [20]])(
+    "ignores nonnumeric counters %j without losing other request usage",
+    (detail) => {
+      const usage = new Usage({
+        requests: 3,
+        inputTokens: 30,
+        outputTokens: 6,
+        totalTokens: 36,
+        requestUsageEntries: [
+          {
+            inputTokens: 10,
+            outputTokens: 2,
+            totalTokens: 12,
+            inputTokensDetails: { cached_tokens: detail },
+            outputTokensDetails: { reasoning_tokens: detail },
+          },
+          { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+          {
+            inputTokens: 10,
+            outputTokens: 2,
+            totalTokens: 12,
+            inputTokensDetails: { cached_tokens: 5 },
+            outputTokensDetails: { reasoning_tokens: 1 },
+          },
+        ],
+      });
+
+      recordStageUsage("lead", usage);
+
+      expect(sentryMocks.logger.info).toHaveBeenCalledWith(
+        "coach model stage usage",
+        expect.objectContaining({ cached_tokens: 5, reasoning_tokens: 1 }),
+      );
+    },
+  );
+
   it("falls back to aggregate input when per-request usage is unavailable", () => {
     const usage = new Usage({
       requests: 1,

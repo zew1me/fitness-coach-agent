@@ -412,14 +412,17 @@ function invalidToolInputIssues(error: unknown): string[] | null {
       return path ? `${path}: ${issue.message}` : issue.message;
     });
   }
+  // The SDK redacts parser details by default. Do not mislabel a schema
+  // rejection as malformed JSON when its cause is gone.
+  if (cause === undefined)
+    return ["arguments did not match the tool input schema"];
   // Never echo the parser message: JSON.parse errors can quote the raw input,
   // which would carry athlete text into Sentry.
   return ["arguments are not valid JSON"];
 }
 
 // Replaces the SDK default, which answers every schema rejection with a generic
-// "Invalid JSON input for tool": the model could not tell which field failed
-// (it retried with smaller payloads, blaming size) and nothing reached Sentry.
+// "Invalid JSON input for tool".
 function coachToolErrorFunction(name: string) {
   return (_runContext: unknown, error: unknown): string => {
     const issues = invalidToolInputIssues(error);
@@ -448,7 +451,7 @@ function coachToolErrorFunction(name: string) {
 // Activity writes have no dedup yet (docs/ACTIVITY_MATERIALIZATION_DESIGN.md), so
 // re-running one of these in a later tool round would store the same workout
 // twice and inflate training load for weeks. One round of them per reply is all a
-// legitimate upload needs; later rounds keep every other tool.
+// legitimate upload needs.
 const FIRST_ROUND_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "process_uploaded_file",
   "save_activity_from_text",

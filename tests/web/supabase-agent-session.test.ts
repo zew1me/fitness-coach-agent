@@ -435,7 +435,7 @@ describe("SupabaseAgentSession model replay preparation", () => {
         type: "function_call_output",
         id: undefined,
         call_id: "call-1",
-        created_by: "model",
+        // The SDK now allowlists wire fields instead of spreading providerData.
         output: [
           { type: "input_text", text: "18C, clear skies." },
           {
