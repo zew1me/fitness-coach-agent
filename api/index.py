@@ -422,7 +422,11 @@ async def oauth_token(payload: OAuthTokenRequest) -> JSONResponse:
         logger.warning("oauth token exchange failed client_id=%s error=%s", payload.client_id, exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info("oauth token issued client_id=%s", payload.client_id)
-    return JSONResponse(bundle.model_dump(mode="json"))
+    # RFC 6749 §5.1: responses carrying tokens must not be cached by any intermediary.
+    return JSONResponse(
+        bundle.model_dump(mode="json"),
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 @app.post("/api/oauth/revoke")

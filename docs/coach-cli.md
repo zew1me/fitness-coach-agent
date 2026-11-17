@@ -52,7 +52,7 @@ coach login [--no-browser] --yes
   answers `slow_down`, and gives up after `expires_in` (10 minutes). Outcomes: logged in, `access_denied`
   (you clicked Deny), or `expired` (code expired, unknown, or already used; run `coach login` again).
 
-**Agent harnesses (Claude Code, Codex, pi):** run `coach --json login`. Before polling it prints one
+**Agent harnesses (Claude Code, Codex, pi):** run `coach --json login --yes` (`--yes` is required for any non-local base URL). Before polling it prints one
 JSON line on stdout, then blocks until the human approves and prints the result line:
 
 ```json

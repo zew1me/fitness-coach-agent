@@ -759,3 +759,16 @@ async def test_simultaneous_first_polls_still_raise_the_backoff(harness: DeviceH
 
     assert excinfo.value.error == "slow_down"
     assert harness.device_row()["interval_seconds"] == 10
+
+
+async def test_issued_device_tokens_are_uncacheable(harness: DeviceHarness) -> None:
+    started = await _start(harness)
+    harness.sign_in()
+    await _decide(harness, str(started["user_code"]), "approve")
+
+    response = await _poll(harness, started["device_code"])
+
+    assert response.status_code == 200
+    # RFC 6749 §5.1: a response carrying live tokens must never be cached.
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"

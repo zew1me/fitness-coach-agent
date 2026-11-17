@@ -85,6 +85,9 @@ async def test_cli_refresh_token_rotates_through_the_oauth_token_endpoint(
 
     rotated = await harness.client.post("/api/oauth/token", json=refresh)
     assert rotated.status_code == 200
+    # Token responses must never be cached (RFC 6749 §5.1).
+    assert rotated.headers["cache-control"] == "no-store"
+    assert rotated.headers["pragma"] == "no-cache"
     body = rotated.json()
     assert body["refresh_token"] != tokens["refresh_token"]
     assert body["expires_in"] == 900
