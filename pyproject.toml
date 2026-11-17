@@ -23,6 +23,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "fitness-coach-cli",
   "fitness-coach-garmin-sidecar",
   "fitness-coach-reachability-check",
   "fitness-coach-self-data-backup",
@@ -35,6 +36,7 @@ dev = [
 ]
 
 [tool.uv.sources]
+fitness-coach-cli = { workspace = true }
 fitness-coach-garmin-sidecar = { workspace = true }
 fitness-coach-reachability-check = { workspace = true }
 fitness-coach-self-data-backup = { workspace = true }
@@ -80,6 +82,8 @@ max-complexity = 8
 # Each parameter is a user-facing Typer argument or option, so keeping the command signature flat
 # is clearer than wrapping its six CLI inputs in an internal configuration object.
 "tools/garmin-sidecar/src/fitness_coach_garmin_sidecar/cli.py" = ["PLR0913"]
+# Same for the coach CLI: each Typer parameter is a user-facing option, not an internal argument.
+"tools/coach-cli/src/fitness_coach_cli/cli.py" = ["PLR0913"]
 # Vercel requires this bracketed route filename and its sole import exists to export the ASGI app.
 "api/[...route].py" = ["F401", "N999"]
 # Pytest assertions, literal expected values, and explicit fixture/helper inputs are clearest in tests.
@@ -138,6 +142,11 @@ reason = "OAuth discovery document fetched by external OAuth clients (ChatGPT), 
 kind = "endpoint"
 target = "/.well-known/oauth-protected-resource"
 reason = "OAuth protected-resource metadata fetched by external OAuth clients, not by our UI."
+
+[[tool.reachability-check.allow]]
+kind = "endpoint"
+target = "/api/auth/whoami"
+reason = "Called by the Python coach CLI (tools/coach-cli), which client_roots does not scan (#568)."
 
 [[tool.reachability-check.allow]]
 kind = "endpoint"

@@ -16,6 +16,16 @@ from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError
 GRANTS_TABLE = "oauth_grants"
 CODES_TABLE = "oauth_authorization_codes"
 TOKENS_TABLE = "oauth_refresh_tokens"
+DEVICE_CODES_TABLE = "oauth_device_codes"
+
+
+def _compare(op: str, left: object, right: object) -> bool:
+    """PostgREST ``lt``/``gt`` on the ISO timestamps the repositories send."""
+    if left is None:
+        return False  # SQL: a comparison with NULL is never true
+    lhs = datetime.fromisoformat(str(left))
+    rhs = datetime.fromisoformat(str(right))
+    return lhs < rhs if op == "lt" else lhs > rhs
 
 
 class FakeResponse:
@@ -29,8 +39,10 @@ class AsyncFakeTableQuery:
         self._table_name = table_name
         self._filters: dict[str, object] = {}
         self._is_null: set[str] = set()
+        self._comparisons: list[tuple[str, str, object]] = []
         self._insert_payload: dict[str, object] | None = None
         self._update_payload: dict[str, object] | None = None
+        self._delete = False
         self._limit: int | None = None
 
     def select(self, *_columns: str) -> "AsyncFakeTableQuery":
@@ -42,6 +54,18 @@ class AsyncFakeTableQuery:
 
     def update(self, payload: dict[str, object]) -> "AsyncFakeTableQuery":
         self._update_payload = payload
+        return self
+
+    def delete(self) -> "AsyncFakeTableQuery":
+        self._delete = True
+        return self
+
+    def lt(self, column: str, value: object) -> "AsyncFakeTableQuery":
+        self._comparisons.append((column, "lt", value))
+        return self
+
+    def gt(self, column: str, value: object) -> "AsyncFakeTableQuery":
+        self._comparisons.append((column, "gt", value))
         return self
 
     def eq(self, column: str, value: object) -> "AsyncFakeTableQuery":
@@ -75,6 +99,8 @@ class AsyncFakeTableQuery:
             return "insert"
         if self._update_payload is not None:
             return "update"
+        if self._delete:
+            return "delete"
         return "select"
 
     def _perform_operation(self, operation_key: tuple[str, str]) -> FakeResponse:
@@ -90,6 +116,11 @@ class AsyncFakeTableQuery:
                 row.update(self._update_payload)
                 updated.append(row)
             return FakeResponse(updated)
+        if self._delete:
+            removed = self._matching_rows()
+            table = self._client.tables[self._table_name]
+            table[:] = [row for row in table if all(row is not gone for gone in removed)]
+            return FakeResponse(removed)
 
         rows = self._matching_rows()
         if self._limit is not None:
@@ -102,6 +133,7 @@ class AsyncFakeTableQuery:
             for row in self._client.tables[self._table_name]
             if all(row.get(column) == value for column, value in self._filters.items())
             and all(row.get(column) is None for column in self._is_null)
+            and all(_compare(op, row.get(column), value) for column, op, value in self._comparisons)
         ]
 
 
@@ -126,6 +158,7 @@ class AsyncFakeSupabaseClient:
             GRANTS_TABLE: grants or [],
             CODES_TABLE: authorization_codes or [],
             TOKENS_TABLE: refresh_tokens or [],
+            DEVICE_CODES_TABLE: [],
         }
         self.empty_responses = empty_responses or set()
         self.operations: Counter[tuple[str, str]] = Counter()

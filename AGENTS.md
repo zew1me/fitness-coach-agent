@@ -36,6 +36,7 @@ uv run pytest tests/python/test_api.py  # single application test file
 uv run pytest tools/garmin-sidecar/tests/  # Garmin workspace tool
 uv run pytest tools/self-data-backup/tests/  # backup workspace tool
 uv run pytest tools/reachability-check/tests/  # reachability workspace tool
+uv run pytest tools/coach-cli/tests/  # coach CLI workspace tool (docs/coach-cli.md)
 uv run pytest -k "test_name"         # single test
 uv run ruff check .                  # lint
 uv run ruff format .                 # format

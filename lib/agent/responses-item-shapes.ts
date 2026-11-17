@@ -63,8 +63,8 @@ function withCallIdField(
 // conversion 400s with "Missing required parameter: 'input[N].summary'".
 // The API also rejects a non-empty `content` (chain-of-thought text) on
 // replay unless the response that produced it enabled
-// `reasoning.encrypted_content`, which this app never requests, so
-// `rawContent` is dropped rather than forwarded as `content`.
+// `reasoning.encrypted_content`. Compaction only needs the visible summary,
+// so `rawContent` is dropped rather than forwarded as `content`.
 function toResponsesCompactReasoningItem(
   record: Record<string, unknown>,
 ): AgentInputItem {

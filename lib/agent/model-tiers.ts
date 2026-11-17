@@ -334,6 +334,11 @@ export function buildModelSettings(tier: ModelTier): ModelSettings {
   };
 
   return {
+    // Supabase owns replay history. Mixing unstored/compacted reasoning with
+    // OpenAI's stored records can poison later replays with 409 item_conflict.
+    // Ciphertext makes reasoning self-contained when provider storage is off.
+    store: false,
+    providerData: { include: ["reasoning.encrypted_content"] },
     reasoning: { effort: effectiveTier.effort },
     text: { verbosity: tier.verbosity },
     retry: {

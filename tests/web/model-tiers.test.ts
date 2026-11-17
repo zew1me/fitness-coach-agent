@@ -49,6 +49,17 @@ describe("model tier compatibility", () => {
     }
   });
 
+  it("keeps every tier's reasoning replay self-contained without provider storage", () => {
+    for (const tier of MODEL_TIERS) {
+      const settings = buildModelSettings(tier);
+
+      expect(settings.store).toBe(false);
+      expect(settings.providerData?.["include"]).toContain(
+        "reasoning.encrypted_content",
+      );
+    }
+  });
+
   it("clamps every known model and effort to a supported value", () => {
     for (const [model, supported] of Object.entries(MODEL_SUPPORTED_EFFORTS)) {
       for (const effort of REASONING_EFFORT_LADDER) {

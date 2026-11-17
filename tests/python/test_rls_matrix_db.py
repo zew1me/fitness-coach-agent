@@ -78,6 +78,7 @@ OWNER_READ_ONLY_TABLES = ("oauth_grants", "activity_sources", "load_rebuild_pend
 SERVER_ONLY_TABLES = (
     "oauth_authorization_codes",
     "oauth_refresh_tokens",
+    "oauth_device_codes",
     "threshold_recalibration_candidates",
     "chat_model_states",
     "intervals_connections",
@@ -97,6 +98,7 @@ REFERENCE_TABLES = ("activity_ingest_formats",)
 SERVER_ONLY_USER_TABLES = (
     "oauth_authorization_codes",
     "oauth_refresh_tokens",
+    "oauth_device_codes",
     "threshold_recalibration_candidates",
     "chat_model_states",
     "intervals_connections",
@@ -261,6 +263,15 @@ def _seed(cursor: Cursor[Any], athlete: Athlete) -> None:
         " (id, grant_id, user_id, client_id, token_hash, expires_at)"
         " values (gen_random_uuid(), %s, %s, 'chatgpt', %s, now() + interval '30 days')",
         (athlete.grant_id, user, f"refresh-{user}"),
+    )
+    # An approved device authorization: only approved/consumed rows carry a user_id.
+    cursor.execute(
+        "insert into public.oauth_device_codes"
+        " (id, device_code_hash, user_code, client_id, status, user_id, grant_id, expires_at,"
+        " approved_at)"
+        " values (gen_random_uuid(), %s, 'BCDFGHJK', 'fitness-coach-cli', 'approved', %s, %s,"
+        " now() + interval '10 minutes', now())",
+        (f"device-{user}", user, athlete.grant_id),
     )
     cursor.execute(
         "insert into public.threshold_recalibration_candidates"
