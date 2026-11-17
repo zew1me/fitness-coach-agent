@@ -51,6 +51,9 @@ async function verifiedWorkerURL(
       signal: controller.signal,
     });
     if (!response.ok) return undefined;
+    // Ownership passes to compress(), which revokes this URL in its finally block
+    // after the worker settles (also covered by image-compression.test.ts).
+    // react-doctor-disable-next-line react-doctor/no-create-object-url-without-revoke
     return URL.createObjectURL(
       new Blob([await response.arrayBuffer()], { type: "text/javascript" }),
     );
