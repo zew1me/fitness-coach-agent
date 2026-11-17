@@ -294,6 +294,11 @@
   color: var(--text-muted);
 }
 
+/* --text-muted is a grey for neutral surfaces; on the teal user bubble it nearly vanished (issue #584). */
+.userBubble .attachmentName {
+  color: inherit;
+}
+
 /* ── Attachment thumbnails ───────────────────────────────── */
 
 .attachmentGrid {
