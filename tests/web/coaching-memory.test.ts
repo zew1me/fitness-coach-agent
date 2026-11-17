@@ -3,11 +3,32 @@ import { describe, expect, it } from "vitest";
 import {
   applyMemoryOperation,
   coachingMemoryRecordSchema,
+  coachingMemoryToolSchema,
   dueFollowUpAt,
   oldestDueFollowUp,
 } from "../../lib/agent/coaching-memory";
 
 describe("coaching memory lifecycle", () => {
+  it("normalizes tool-input follow-up offsets when materializing a record", () => {
+    const input = coachingMemoryToolSchema.parse({
+      operation: {
+        action: "upsert",
+        record: {
+          id: "follow-up",
+          category: "follow_up",
+          statement: "Check recovery",
+          confidence: 1,
+          sourceMessageIds: ["m1"],
+          followUpAt: "2026-06-20T14:00:00+02:00",
+        },
+      },
+    });
+
+    expect(applyMemoryOperation([], input.operation)[0]?.followUpAt).toBe(
+      "2026-06-20T12:00:00.000Z",
+    );
+  });
+
   it("rejects malformed plan and follow-up dates", () => {
     const base = {
       id: "invalid-date",

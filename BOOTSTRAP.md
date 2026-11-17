@@ -139,6 +139,28 @@ So leave the `R2_*` values blank to have bootstrap mint the credentials. To keep
 3. Copy the generated Access Key ID and Secret Access Key into `R2_ACCESS_KEY_ID_PREVIEW` / `R2_SECRET_ACCESS_KEY_PREVIEW` or the matching `_PROD` values.
 4. Rerun bootstrap so it writes those runtime credentials to Vercel.
 
+### Rotating R2 credentials and revoking old tokens
+
+Rotation has two halves, and bootstrap only does the first:
+
+1. **Replace the credentials the app uses.** Bootstrap deletes and re-mints only a token named `fitness-coach-agent-{env}`. A token you created by hand in the Cloudflare dashboard has a different name, so bootstrap never removes it, and it keeps granting access to the bucket until you revoke it.
+2. **Revoke the old token yourself.** This is a manual step, done last.
+
+For the environment you are rotating (`preview` and `prod` hold separate tokens; do one at a time):
+
+1. Create the replacement token, or let bootstrap mint it. To supply it yourself, follow the two-pass steps above and put the new pair in the matching `R2_*_PREVIEW` / `R2_*_PROD` values in `.env.bootstrap`. To have bootstrap mint it, blank those values and remove `r2_access_key_id` and `r2_secret_access_key` from `scripts/bootstrap/.state.{env}.json` (see [State files](#state-files)). Minting deletes the active `fitness-coach-agent-{env}` token before the new pair is deployed, so uploads fail until step 2 completes. To keep uploads running, create the replacement yourself under a name other than `fitness-coach-agent-{env}` and put it in `.env.bootstrap`. The bucket already exists when you rotate, so skip the first bootstrap pass of the two-pass steps: if `CF_API_TOKEN` can edit tokens and no credential pair is set, that pass mints and deletes the active token before your replacement is ready. Create the replacement before running bootstrap at all.
+2. Rerun bootstrap with `--env {env}` so the new credentials are written to Vercel, then redeploy that environment.
+3. Verify that the replacement pair is the one in use, because a stale state-file pair can be reused silently. Confirm the bootstrap run completed successfully (not a `--dry-run`, and not an error after the R2 step), then read the credential line it printed in its `[2/4] Cloudflare R2` step. That line is printed before the token is created, so it only counts once the run has finished:
+   - `Minting R2 S3 token via Cloudflare API…` means it created the token and deleted the old `fitness-coach-agent-{env}` token, so a passing upload can only be using the new one.
+   - `Using R2 S3 credentials from .env.bootstrap.` means it used the pair you supplied. Compare `r2_access_key_id` in `scripts/bootstrap/.state.{env}.json` with the replacement access key ID you saved when creating the token, locally and without sharing either value. The bootstrap summary shows only the last four characters, so a matching suffix alone is not confirmation.
+   - `Using R2 S3 credentials from state file.` means bootstrap reused the pair saved in the state file. If that pair is the old one, stop, and clear the state keys or set the new pair before rerunning. If an earlier run minted the replacement and failed after saving it (so this retry deployed it), keep it and do not clear the state keys: clearing them makes the next run delete the newly deployed token and interrupts uploads.
+
+   Then verify uploads work in that deployment.
+
+4. Only then, in the Cloudflare dashboard go to R2 -> Manage API tokens and revoke the old token, whether it was created by hand or by an earlier bootstrap run. Revoking earlier breaks uploads until the new credentials are deployed.
+
+Never paste access key or secret values into docs, issues or PRs.
+
 ### Sentry observability (optional)
 
 Set `SENTRY_DSN`, `SENTRY_PUBLIC_DSN`, and `SENTRY_AUTH_TOKEN` in `.env.bootstrap` to provision Sentry. All are optional — leave any blank to skip that var. Use **two distinct DSNs** (separate Client Keys) so the public browser key can never expose the server one; Sentry separates environments via the `environment` tag. Bootstrap writes:
