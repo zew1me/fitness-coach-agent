@@ -1,4 +1,3 @@
-/* eslint-disable import/no-default-export */
 declare const styles: {
   readonly brand: string;
   readonly brandBlock: string;

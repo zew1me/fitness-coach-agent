@@ -119,6 +119,8 @@ function AttachmentTile({ part }: Readonly<{ part: FileUIPart }>): ReactNode {
   return (
     <div className={styles.attachmentThumb}>
       {isImage ? (
+        // Attachment previews are blob: object URLs or R2 upload URLs that next.config.ts does not
+        // allow-list for next/image, and a small thumbnail gains nothing from its optimiser.
         // eslint-disable-next-line @next/next/no-img-element
         <img alt={filename} src={part.url} />
       ) : (

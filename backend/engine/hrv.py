@@ -76,6 +76,8 @@ def _rmssd(intervals: list[int]) -> float | None:
     return round(math.sqrt(mean(squared_diffs)), 1)
 
 
+# Detrended fluctuation analysis is one numeric algorithm; its loops and guard
+# clauses read more clearly together than split across helpers.
 def _dfa_alpha1(intervals: list[int]) -> float | None:  # noqa: C901
     centered = [value - mean(intervals) for value in intervals]
     walk = []

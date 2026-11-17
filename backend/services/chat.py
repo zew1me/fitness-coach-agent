@@ -97,6 +97,8 @@ class ChatService:
             thread=thread,
         )
 
+    # Keyword-only message fields forwarded one-to-one to create_chat_message, whose
+    # signature mirrors the chat_messages columns.
     async def persist_message(  # noqa: PLR0913
         self,
         user_id: str,

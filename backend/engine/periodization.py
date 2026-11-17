@@ -114,6 +114,8 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+# Keyword-only, mostly defaulted planning inputs; each is an independent knob the
+# callers set explicitly, so grouping them would only add a wrapper type.
 def build_plan_skeleton(  # noqa: PLR0913
     *,
     current_ctl: float,

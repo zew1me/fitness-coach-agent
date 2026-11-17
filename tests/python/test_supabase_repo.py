@@ -128,6 +128,8 @@ class FakeTableQuery:
         self._update_payload = payload
         return self
 
+    # This fake emulates the PostgREST query builder's filter, insert, update and
+    # ordering semantics in one place; splitting it would obscure the emulation.
     def execute(self) -> FakeResponse:  # noqa: C901, PLR0912
         if self._inserted_payload is not None:
             self._rows.append(self._inserted_payload)
@@ -378,6 +380,8 @@ class FakeRpcQuery:
         self._data = data
 
     def execute(self) -> FakeResponse:
+        # RPC fakes return a single row object or None as well as row lists, which is wider than
+        # FakeResponse's row-list annotation.
         return FakeResponse(self._data)  # type: ignore[arg-type]
 
 
@@ -2226,6 +2230,8 @@ class _FailOnceClient:
                 raise owner._error
             return original_execute()
 
+        # Deliberately monkeypatches this query instance's execute to inject a
+        # transient failure; the checker forbids assigning to a method.
         query.execute = execute  # type: ignore[method-assign]
         return query
 
@@ -2600,6 +2606,8 @@ class _EventLoopProbeClient:
             owner.loop_was_free.append(owner.loop_ticked.wait(timeout=1.0))
             return original_execute()
 
+        # Deliberately monkeypatches this query instance's execute to observe the event
+        # loop; the checker forbids assigning to a method.
         query.execute = execute  # type: ignore[method-assign]
         return query
 

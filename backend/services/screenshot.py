@@ -523,6 +523,8 @@ def _is_reasoning_model_mismatch(error: OpenAIError) -> bool:
     could still reach here. We detect it explicitly so Sentry captures it with operator-
     actionable context rather than surfacing as a generic 400.
     """
+    # 400 is the literal HTTP status this check is about; a named constant would not
+    # make it clearer.
     if getattr(error, "status_code", None) != 400:  # noqa: PLR2004
         return False
     msg = str(error).lower()

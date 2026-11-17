@@ -156,6 +156,7 @@ For the environment you are rotating (`preview` and `prod` hold separate tokens;
    - `Using R2 S3 credentials from state file.` means bootstrap reused the pair saved in the state file. If that pair is the old one, stop, and clear the state keys or set the new pair before rerunning. If an earlier run minted the replacement and failed after saving it (so this retry deployed it), keep it and do not clear the state keys: clearing them makes the next run delete the newly deployed token and interrupts uploads.
 
    Then verify uploads work in that deployment.
+
 4. Only then, in the Cloudflare dashboard go to R2 -> Manage API tokens and revoke the old token, whether it was created by hand or by an earlier bootstrap run. Revoking earlier breaks uploads until the new credentials are deployed.
 
 Never paste access key or secret values into docs, issues or PRs.

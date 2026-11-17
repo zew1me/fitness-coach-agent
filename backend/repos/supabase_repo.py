@@ -1206,6 +1206,8 @@ class SupabaseRepository:
         rows = response.data or []
         return list(reversed([self._parse_chat_message(row) for row in rows]))
 
+    # Keyword-only arguments mirror the chat_messages columns one-to-one, the same
+    # persistence-contract reasoning as the OAuth repo payload builders.
     async def create_chat_message(  # noqa: PLR0913
         self,
         *,

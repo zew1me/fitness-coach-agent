@@ -267,6 +267,8 @@ def _plan_week(
     return sessions
 
 
+# Keyword-only composition inputs (identity, schedule, policy, start date) that
+# generate and adjust each pass a different subset of; a bundle would hide that.
 def compose_plan_workouts(  # noqa: PLR0913
     skeleton: PlanSkeleton,
     *,

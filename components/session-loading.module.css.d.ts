@@ -1,4 +1,3 @@
-/* eslint-disable import/no-default-export */
 declare const styles: {
   readonly athlete: string;
   readonly brand: string;

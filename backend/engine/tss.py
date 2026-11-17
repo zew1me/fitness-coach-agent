@@ -77,6 +77,8 @@ def rpe_tss(duration_seconds: int, rpe: int) -> float:
     return hours * (rpe / 10) ** 2 * 100
 
 
+# Keyword-only optional inputs, one per TSS method (power, pace, HR, RPE); callers
+# pass whichever the activity has and the function picks the best available method.
 def compute_tss(  # noqa: PLR0913
     duration_seconds: int,
     *,
