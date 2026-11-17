@@ -16,6 +16,7 @@ function attachment(id: string): LocalAttachment {
     filename: `${id}.gpx`,
     object_key: `uploads/${id}.gpx`,
     preview_url: null,
+    progress: null,
     public_url: null,
     status: "uploaded",
   };

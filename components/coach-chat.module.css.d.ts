@@ -80,6 +80,7 @@ declare const styles: {
   readonly uploadChip: string;
   readonly uploadRow: string;
   readonly uploadStatus: string;
+  readonly uploadSpinner: string;
   readonly waitingStatus: string;
   readonly userBubble: string;
 };
