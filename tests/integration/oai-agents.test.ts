@@ -423,6 +423,45 @@ describe("OpenAI Agents SDK — Responses API integration", () => {
     expect(eventTypes.has("response.output_text.delta")).toBe(false);
   }, 60_000);
 
+  it("replays unstored encrypted reasoning across three turns", async () => {
+    // The second stored replay of reasoning from an unstored response can fail
+    // with 409 item_conflict. Exercise three calls: one continuation misses it.
+    const tier = MODEL_TIERS[0]!;
+    const agent = new Agent({
+      name: "Encrypted reasoning replay probe",
+      instructions: "Calculate carefully, then answer briefly.",
+      model: tier.model,
+      modelSettings: buildModelSettings(tier),
+    });
+    const runner = new Runner({ tracingDisabled: true });
+    let result = await runner.run(
+      agent,
+      "Calculate (67431*81937 - 13721*9317) modulo 100003. Return only the integer.",
+      { maxTurns: 1 },
+    );
+    expect(
+      result.history.some(
+        (item) =>
+          "type" in item &&
+          item.type === "reasoning" &&
+          typeof item.providerData?.["encrypted_content"] === "string",
+      ),
+    ).toBe(true);
+
+    for (let turn = 0; turn < 2; turn += 1) {
+      result = await runner.run(
+        agent,
+        [
+          ...result.history,
+          { role: "user", content: "Confirm the result; reply briefly." },
+        ],
+        { maxTurns: 1 },
+      );
+      expect(result.finalOutput).toEqual(expect.any(String));
+      expect(String(result.finalOutput).length).toBeGreaterThan(0);
+    }
+  }, 120_000);
+
   it("compacts in input mode despite an Agents responseId and continues from the canonical output", async () => {
     const client = new OpenAI();
     const previous = await client.responses.create({

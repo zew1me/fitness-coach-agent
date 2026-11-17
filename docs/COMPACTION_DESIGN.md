@@ -203,6 +203,24 @@ a per-environment data migration.
 
 ---
 
+## Provider storage and encrypted reasoning replay
+
+All coach model stages use `buildModelSettings()` with `store: false` and
+`include: ["reasoning.encrypted_content"]`. Supabase, not OpenAI's response
+store, owns the replay log. Explicitly requesting ciphertext keeps reasoning
+self-contained across unstored turns, including tool follow-ups.
+
+Do not mix unstored/compacted reasoning into stored model calls. A synthetic
+three-call reproduction (unstored → stored → stored) fails on the last call
+with `409 item_conflict: An input item conflicts with an existing record.`
+The same history succeeds again with `store: false`, without clearing the
+session, stripping reasoning, or changing its item IDs. This is distinct from
+duplicate IDs inside one request; `dedupeItemsById` cannot fix it.
+
+This setting also lets existing affected sessions recover on replay without
+rewriting `chat_model_states` or the athlete-visible transcript. It does not
+change the separate `responses.compact` request contract described above.
+
 ## Compaction flow (one turn)
 
 ```text
