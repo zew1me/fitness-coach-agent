@@ -2333,6 +2333,7 @@ async def get_athlete_summary(
     recovery = await repo.list_recovery_logs(user_id, limit=7)
     schedule = await repo.get_schedule(user_id)
     active_plan = await repo.get_active_plan(user_id)
+    data_changes = await repo.get_coach_data_changes(user_id)
 
     age = profile.age
     ctl_ceiling = estimate_ctl_ceiling(age, profile.biological_sex or "not_specified")
@@ -2353,6 +2354,7 @@ async def get_athlete_summary(
         "goals": [g.model_dump(mode="json") for g in goals],
         "current_load": latest_load.model_dump(mode="json") if latest_load else None,
         "recent_recovery": [r.model_dump(mode="json") for r in recovery],
+        "data_changes": data_changes,
         "schedule": schedule.model_dump(mode="json") if schedule else None,
         "active_plan": active_plan.model_dump(mode="json") if active_plan else None,
         "ctl_ceiling_guidance": {

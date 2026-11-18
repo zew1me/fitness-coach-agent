@@ -243,7 +243,7 @@ function hasRenderableContent(parts: UIMessage["parts"]): boolean {
 async function persistAssistantMessage(
   options: Pick<
     StreamCoachTurnOptions,
-    "accessToken" | "baseUrl" | "extraHeaders"
+    "accessToken" | "baseUrl" | "extraHeaders" | "context"
   > & { logger: Logger },
   responseMessage: UIMessage,
   finishReason: string | undefined,
@@ -265,6 +265,12 @@ async function persistAssistantMessage(
           message_kind: "assistant_reply",
           finish_reason: finishReason,
           client_message_id: responseMessage.id,
+          // Persist the exact pre-turn snapshot only on success. Events committed while
+          // streaming are absent here and remain pending for the next turn.
+          ...(finishReason === "stop" &&
+          options.context.data_changes?.event_ids.length
+            ? { data_change_event_ids: options.context.data_changes.event_ids }
+            : {}),
         },
       }),
     });
@@ -1016,6 +1022,7 @@ export function streamCoachTurn({
           accessToken,
           baseUrl,
           ...(extraHeaders ? { extraHeaders } : {}),
+          context,
           logger,
         },
         responseMessage,

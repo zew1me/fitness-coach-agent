@@ -195,6 +195,24 @@ function buildContextualLines(context: AthleteContextBundle): string[] {
   return lines;
 }
 
+function dataChangeSection(context: AthleteContextBundle): string {
+  const changes = context.data_changes;
+  if (!changes) return "";
+  if (changes.event_ids.length === 0) {
+    return "Application data-change snapshot: no unacknowledged notices for this conversation. Older notices in replay history are not new imports; do not announce them again.";
+  }
+  return [
+    "Application event: committed training data changed outside this conversation (or since the last acknowledged snapshot). This is server-generated context, not an athlete message or a request to import again.",
+    `Changed-record summaries (not a complete import-batch outcome): ${promptSafeJson(changes.summaries)}`,
+    changes.has_more
+      ? "Additional changes are pending beyond this bounded snapshot. Do not claim this is the complete import history."
+      : "These are the committed changes not yet acknowledged in this conversation.",
+    "For changed activities, call get_recent_activities before describing recent training or claiming that earlier uploads remain unprocessed. For wellness, use the fresh recent_recovery context below; get_athlete_summary refreshes it if needed. Missing historical values are not evidence an import failed.",
+    "Do not request another upload based on old attachment-processing status. Do not infer failures, a completed whole batch, or values absent from these notices. Briefly acknowledge relevant changes without derailing the athlete's current request.",
+    `Fresh recent recovery: ${promptSafeJson(context.recent_recovery)}`,
+  ].join("\n");
+}
+
 function specialistReportSection(reports: SpecialistReport[]): string {
   if (reports.length === 0) {
     return "Specialist reports: none for this turn.";
@@ -295,6 +313,8 @@ export function buildLeadCoachPrompt(
     `Athlete: ${context.profile.display_name ?? context.profile.user_id}. Age: ${age}. Sports: ${sports}.`,
     `Goals: ${goals}.`,
     `Current load: ${load}.`,
+    "Persisted training records and fresh application context take precedence over stale upload status in chat history. Before claiming activities are missing or asking for re-upload, verify with get_recent_activities. Previously acknowledged import notices are not evidence that records are still current; refresh records when discussing training.",
+    dataChangeSection(context),
     `CTL ceiling guidance: ${ceiling.age_bracket}; committed amateur CTL ${ceiling.committed_amateur_ctl}; ${ceiling.notes}`,
     ...buildContextualLines(context),
     stateInstructions(context.profile.coaching_state),

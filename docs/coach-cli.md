@@ -135,6 +135,23 @@ failed         notes.txt: unsupported_file: ...
 It continues past failures and exits 1 if any file failed. Uploading the same file twice is not
 deduplicated yet (issue #390).
 
+## Coach awareness of imports
+
+Successful activity/recovery writes generate server-side, transactionally captured change events
+(#591). On the next chat turn, the coach receives one compact context section grouped by data type
+and source, with dates and created/updated counts. No chat message is sent on your behalf and no
+unsolicited model turn runs. No extra CLI call or OAuth scope is needed; device login alone does not
+create a data-change notice. Future sync writers get the same behavior through the canonical tables.
+
+Only committed records are counted. A partial batch may produce notices for its successful members,
+not a claim that all files succeeded. Identical wellness re-pushes do not create fresh notices;
+changed values are recorded as updates. This does not deduplicate activity uploads.
+
+Notices are acknowledged with a successfully persisted coach reply, so a failed/aborted turn can
+retry. Changes arriving while the coach responds remain pending for the following turn. This works
+with durable/compacted history too. The log starts at migration deployment, not retroactively for
+older imports. The coach must still verify current records before asking for a re-upload.
+
 ## Security notes
 
 - Credentials live in `credentials.json`: directory mode `0700`, file mode `0600`, written atomically,

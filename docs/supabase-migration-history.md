@@ -34,6 +34,7 @@
 - `20261106120000_drop_legacy_chat_content_and_attachments.sql` — drops `chat_messages.content` and `chat_attachments`; **deploy the application change first**, because earlier application code still sends `content` on every chat-message insert (#303)
 - `20261110213928_revoke_client_table_writes.sql` — browser roles lose all direct table writes: `anon` loses every table privilege, `authenticated` loses INSERT/UPDATE/DELETE/TRUNCATE, the owner `for all` policies become `for select`, and default privileges stop granting browser roles access to future tables (#452)
 - `20261115120000_oauth_device_codes.sql` — server-only `oauth_device_codes` table for the coach CLI's RFC 8628 device authorization grant (#568)
+- `20261118061831_coach_data_changes.sql` — transactional, server-only activity/recovery change notices and per-conversation successful-reply receipts (#591)
 
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
@@ -894,3 +895,32 @@ polls `/api/oauth/token` with the device-code grant (#568).
 **All environments:** Apply via `supabase db push` (or `bun run db:reset` locally). The
 migration only adds a table; deploy it before the application change that writes to it.
 Preview and production are separate Supabase projects and must each be applied.
+
+## 20261118061831 — Committed data-change context (2026-11-18)
+
+**File:** `supabase/migrations/20261118061831_coach_data_changes.sql`
+
+**Change:** Adds `coach_data_changes`, insert/update capture triggers on `activities` and
+`recovery_logs`, the bounded `get_coach_data_changes(text, uuid)` reader, and a GIN index on
+successful assistant-reply event receipts. Capture happens in the record transaction, including
+existing activity/source RPCs, so a rollback cannot leave a success notice. No write path or activity
+materialization behavior changes. Timestamp/plan-matching/summary bookkeeping and identical wellness
+upserts (including legacy ID churn) do not generate extra events.
+
+**Why (issue #591):** CLI/sync writes otherwise leave conversation history unaware of new training
+data. The next coach turn receives coalesced created/updated counts and dates, not a fabricated
+athlete message. Exact event IDs in a successfully persisted assistant reply acknowledge only that
+turn's snapshot; failures, concurrent new writes, and events beyond the 256-event page remain pending.
+Receipts are scoped to the owning conversation and independent of compactable model items.
+
+**Security note:** The log has RLS and no browser policies or privileges; the reader is service-role
+only and the API derives athlete/thread IDs on the server. Events contain identifiers, dates, closed
+source/type labels, and operation only—no measurements, notes, filenames, tokens, or raw files.
+Account deletion cascades the log. Events and transcript receipts otherwise remain until account
+or conversation deletion; no opportunistic pruning can erase undelivered notices.
+
+**All environments:** Additive migration; apply before deploying the summary/prompt reader. There is
+no historical backfill or remote apply in this PR. Existing records remain authoritative, but only
+post-migration writes generate notices. Preview and production must be migrated independently. Local
+transactional tests can exercise the migration on the existing local stack and roll back on exit,
+without resetting personal local data.

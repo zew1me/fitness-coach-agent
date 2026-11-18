@@ -84,6 +84,7 @@ SERVER_ONLY_TABLES = (
     "intervals_connections",
     "agent_emails",
     "activity_sources_backfill_progress",
+    "coach_data_changes",
 )
 
 # Tables that deliberately accept direct browser writes. None do today: the browser and SSR
@@ -102,6 +103,7 @@ SERVER_ONLY_USER_TABLES = (
     "threshold_recalibration_candidates",
     "chat_model_states",
     "intervals_connections",
+    "coach_data_changes",
 )
 
 

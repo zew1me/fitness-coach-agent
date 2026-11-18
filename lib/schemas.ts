@@ -13,6 +13,35 @@ export const athleteProfileSchema = z.object({
   weekly_available_hours: z.number().positive().nullable().optional(),
 });
 
+export const coachDataChangesSchema = z.strictObject({
+  event_ids: z.array(z.uuid()).max(256),
+  summaries: z
+    .array(
+      z.strictObject({
+        data_type: z.enum(["activity", "recovery"]),
+        source: z.enum([
+          "fit_upload",
+          "gpx_upload",
+          "tcx_upload",
+          "intervals_sync",
+          "manual",
+          "text_extract",
+          "screenshot_extract",
+          "garmin",
+          "other",
+        ]),
+        start_date: z.iso.date(),
+        end_date: z.iso.date(),
+        created_records: z.number().int().nonnegative(),
+        updated_records: z.number().int().nonnegative(),
+      }),
+    )
+    .max(18),
+  has_more: z.boolean(),
+});
+
+export type CoachDataChanges = z.infer<typeof coachDataChangesSchema>;
+
 const chatMessagePartSchema = z.looseObject({
   type: z.string().trim().min(1),
 });

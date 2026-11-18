@@ -82,6 +82,9 @@ class RefreshTokenRecord(TypedDict):
 
 
 class EngineRepository:
+    async def get_coach_data_changes(self, user_id: str) -> dict[str, object]:
+        return {"event_ids": [], "summaries": [], "has_more": False}
+
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         return AthleteProfile(
             user_id=user_id,

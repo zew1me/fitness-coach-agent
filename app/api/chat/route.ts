@@ -19,6 +19,7 @@ import type { AthleteContextBundle } from "../../../lib/agent/types";
 import { createLogger, type Logger } from "../../../lib/logger";
 import {
   chatRequestBodySchema,
+  coachDataChangesSchema,
   type ChatRequestBody,
 } from "../../../lib/schemas";
 import { buildTavilyMcpUrl } from "../../../lib/site";
@@ -127,7 +128,12 @@ async function loadAthleteContext(
     throw new Error("Unable to load athlete context.");
   }
 
-  return (await response.json()) as AthleteContextBundle;
+  const context = (await response.json()) as AthleteContextBundle;
+  // Validate the application event boundary before using it in model instructions or receipts.
+  if (context.data_changes !== undefined) {
+    context.data_changes = coachDataChangesSchema.parse(context.data_changes);
+  }
+  return context;
 }
 
 function summarizeLatestUserTurn(messages: UIMessage[]): LatestUserTurn | null {
