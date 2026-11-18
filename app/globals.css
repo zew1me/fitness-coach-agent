@@ -17,7 +17,10 @@
   --action-soft: rgba(249, 115, 22, 0.14);
   --danger: #b91c1c;
   --coach-bubble: #e6f4f1;
-  --user-bubble: #ffffff;
+
+  /* User-bubble gradient behind white text; both stops stay at or above 4.5:1 (issue #590). */
+  --user-bubble-start: #1f7f74;
+  --user-bubble-end: #1a6e65;
   --hero: linear-gradient(
     135deg,
     rgba(42, 157, 143, 0.18),
@@ -53,7 +56,10 @@
   --action-soft: rgba(249, 115, 22, 0.16);
   --danger: #fca5a5;
   --coach-bubble: #123b36;
-  --user-bubble: #0f172a;
+
+  /* The shared accent stops are 2.4:1 to 3.3:1 with white; these are 5.4:1 and 7.3:1. */
+  --user-bubble-start: #1d766c;
+  --user-bubble-end: #176158;
   --hero: linear-gradient(
     135deg,
     rgba(42, 157, 143, 0.2),

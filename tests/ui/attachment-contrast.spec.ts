@@ -1,5 +1,5 @@
 /**
- * Attachment filename contrast in chat bubbles (issue #584).
+ * Text contrast in chat bubbles (issues #584 and #590).
  *
  * The filename under an attachment tile, and the timestamp below it, used
  * `--text-muted`. Inside the user bubble that grey sat on the teal accent
@@ -7,8 +7,15 @@
  * the filename was effectively invisible. In the user bubble they now follow
  * the bubble's own text colour, so they read exactly as well as the message.
  *
+ * White text on the old `--accent`→`--accent-strong` gradient was itself only
+ * ~2.4:1 in dark mode and ~3.3:1 in light mode (issue #590), so the user bubble
+ * now has its own darker gradient and both the message text and the filename
+ * must reach WCAG AA (4.5:1).
+ *
  * The bubble background is a gradient, so the check computes the WCAG
- * contrast ratio against every colour stop and takes the worst one.
+ * contrast ratio against every colour stop and takes the worst one. In sRGB
+ * luminance is convex along a straight line between two stops, so the stops
+ * bound every colour in between.
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -71,7 +78,7 @@ async function worstContrastAgainstBubble(
   );
   const label = bubble.getByText(text, { exact: true });
   await expect(label).toBeVisible();
-  return label.evaluate((el) => {
+  return label.evaluate((el, requireGradient) => {
     const parse = (value: string): number[] =>
       (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
     const luminance = ([r = 0, g = 0, b = 0]: number[]): number => {
@@ -91,8 +98,20 @@ async function worstContrastAgainstBubble(
     const stops = [
       ...bubbleStyle.backgroundImage.matchAll(/rgba?\([^)]*\)/g),
     ].map((m) => m[0]);
+    // The user bubble's colour comes only from its gradient. Without one its
+    // computed background is transparent, and parsing that as rgb(0, 0, 0)
+    // would report white text as 21:1 against a surface it never sits on.
+    if (requireGradient && stops.length === 0) {
+      throw new Error("user bubble has no gradient colour stops");
+    }
     const backgrounds =
       stops.length > 0 ? stops : [bubbleStyle.backgroundColor];
+    for (const bg of backgrounds) {
+      const alpha = (bg.match(/[\d.]+/g) ?? [])[3];
+      if (alpha !== undefined && Number(alpha) < 1) {
+        throw new Error(`bubble background ${bg} is not opaque`);
+      }
+    }
     const fg = parse(getComputedStyle(el).color);
     const messageText = bubbleEl.querySelector("p");
     return {
@@ -100,11 +119,11 @@ async function worstContrastAgainstBubble(
       color: getComputedStyle(el).color,
       messageColor: messageText ? getComputedStyle(messageText).color : "",
     };
-  });
+  }, role === "user");
 }
 
 for (const colorScheme of ["dark", "light"] as const) {
-  test.describe(`attachment filename contrast (${colorScheme} mode)`, () => {
+  test.describe(`chat bubble text contrast (${colorScheme} mode)`, () => {
     test.beforeEach(async ({ page }) => {
       await page.emulateMedia({ colorScheme });
       await mockAuthenticatedSession(page);
@@ -116,6 +135,16 @@ for (const colorScheme of ["dark", "light"] as const) {
       );
     });
 
+    test("user-bubble message text meets WCAG AA", async ({ page }) => {
+      const result = await worstContrastAgainstBubble(
+        page,
+        "user",
+        "user message",
+      );
+      // Before issue #590 this was ~2.4:1 in dark mode and ~3.3:1 in light.
+      expect(result.ratio).toBeGreaterThanOrEqual(4.5);
+    });
+
     test("user-bubble filename reads like the message text", async ({
       page,
     }) => {
@@ -123,8 +152,8 @@ for (const colorScheme of ["dark", "light"] as const) {
       // Same colour as the message body, so the filename is never harder to
       // read than the message it was sent with.
       expect(result.color).toBe(result.messageColor);
-      // Before the fix this was ~1.1:1 in dark mode and ~2.3:1 in light mode.
-      expect(result.ratio).toBeGreaterThanOrEqual(2.4);
+      // Before issue #584 this was ~1.1:1 in dark mode and ~2.3:1 in light.
+      expect(result.ratio).toBeGreaterThanOrEqual(4.5);
     });
 
     test("assistant-bubble filename meets WCAG AA", async ({ page }) => {
