@@ -1,5 +1,5 @@
 /**
- * Attachment filename contrast in chat bubbles (issue #584).
+ * Text contrast in chat bubbles (issues #584 and #590).
  *
  * The filename under an attachment tile, and the timestamp below it, used
  * `--text-muted`. Inside the user bubble that grey sat on the teal accent
@@ -7,8 +7,15 @@
  * the filename was effectively invisible. In the user bubble they now follow
  * the bubble's own text colour, so they read exactly as well as the message.
  *
+ * White text on the old `--accent`→`--accent-strong` gradient was itself only
+ * ~2.4:1 in dark mode and ~3.3:1 in light mode (issue #590), so the user bubble
+ * now has its own darker gradient and both the message text and the filename
+ * must reach WCAG AA (4.5:1).
+ *
  * The bubble background is a gradient, so the check computes the WCAG
- * contrast ratio against every colour stop and takes the worst one.
+ * contrast ratio against every colour stop and takes the worst one. In sRGB
+ * luminance is convex along a straight line between two stops, so the stops
+ * bound every colour in between.
  */
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -104,7 +111,7 @@ async function worstContrastAgainstBubble(
 }
 
 for (const colorScheme of ["dark", "light"] as const) {
-  test.describe(`attachment filename contrast (${colorScheme} mode)`, () => {
+  test.describe(`chat bubble text contrast (${colorScheme} mode)`, () => {
     test.beforeEach(async ({ page }) => {
       await page.emulateMedia({ colorScheme });
       await mockAuthenticatedSession(page);
@@ -116,6 +123,16 @@ for (const colorScheme of ["dark", "light"] as const) {
       );
     });
 
+    test("user-bubble message text meets WCAG AA", async ({ page }) => {
+      const result = await worstContrastAgainstBubble(
+        page,
+        "user",
+        "user message",
+      );
+      // Before issue #590 this was ~2.4:1 in dark mode and ~3.3:1 in light.
+      expect(result.ratio).toBeGreaterThanOrEqual(4.5);
+    });
+
     test("user-bubble filename reads like the message text", async ({
       page,
     }) => {
@@ -123,8 +140,8 @@ for (const colorScheme of ["dark", "light"] as const) {
       // Same colour as the message body, so the filename is never harder to
       // read than the message it was sent with.
       expect(result.color).toBe(result.messageColor);
-      // Before the fix this was ~1.1:1 in dark mode and ~2.3:1 in light mode.
-      expect(result.ratio).toBeGreaterThanOrEqual(2.4);
+      // Before issue #584 this was ~1.1:1 in dark mode and ~2.3:1 in light.
+      expect(result.ratio).toBeGreaterThanOrEqual(4.5);
     });
 
     test("assistant-bubble filename meets WCAG AA", async ({ page }) => {
