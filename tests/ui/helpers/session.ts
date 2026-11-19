@@ -7,8 +7,8 @@
  *   - GET  /api/chat/thread                → an empty thread (override per-spec)
  *   - GET  /api/chat/model-state/lease     → no active turn lease
  *   - GET  /api/engine/get-athlete-summary → a minimal onboarding profile
- *   - POST /api/chat/attachments/presign   → a presign that points at example.com
- *   - PUT  https://example.com/upload      → 200 (hermetic upload sink)
+ *   - POST /api/chat/attachments/presign   → an upload intent (object key only)
+ *   - POST /api/chat/attachments/upload    → 200 (hermetic proxy-upload sink)
  *
  * Specs that need a populated thread or a streaming turn should layer
  * additional `page.route(...)` calls AFTER calling this helper — later routes
@@ -80,18 +80,29 @@ export async function mockAuthenticatedSession(page: Page): Promise<void> {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        upload_url: "https://example.com/upload",
+        // Browsers upload through the backend proxy; no storage URL is issued (#98).
+        upload_url: "",
         object_key: "test-file-key",
         public_url: "https://example.com/test-image.png",
-        method: "PUT",
+        method: "POST",
         headers: {},
       }),
     }),
   );
 
-  // Intercept the actual file upload so tests are hermetic.
-  await page.route("https://example.com/upload", (route) =>
-    route.fulfill({ status: 200 }),
+  // Intercept the proxied file upload so tests are hermetic.
+  await page.route("**/api/chat/attachments/upload", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        upload_url: "",
+        object_key: "test-file-key",
+        public_url: "https://example.com/test-image.png",
+        method: "POST",
+        headers: {},
+      }),
+    }),
   );
 }
 
