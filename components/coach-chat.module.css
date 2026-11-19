@@ -275,7 +275,11 @@
 }
 
 .userBubble {
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: linear-gradient(
+    135deg,
+    var(--user-bubble-start),
+    var(--user-bubble-end)
+  );
   color: #ffffff;
 }
 
