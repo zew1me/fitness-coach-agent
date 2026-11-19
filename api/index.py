@@ -2330,10 +2330,11 @@ async def get_athlete_summary(
     thresholds = await repo.get_active_thresholds(user_id)
     goals = await repo.list_active_goals(user_id)
     latest_load = await repo.get_latest_load(user_id)
+    # Recovery values for captured events must be read after the event snapshot.
+    data_changes = await repo.get_coach_data_changes(user_id)
     recovery = await repo.list_recovery_logs(user_id, limit=7)
     schedule = await repo.get_schedule(user_id)
     active_plan = await repo.get_active_plan(user_id)
-    data_changes = await repo.get_coach_data_changes(user_id)
 
     age = profile.age
     ctl_ceiling = estimate_ctl_ceiling(age, profile.biological_sex or "not_specified")
