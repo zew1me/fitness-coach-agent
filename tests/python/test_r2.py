@@ -231,3 +231,51 @@ async def test_download_file_logs_key_ref_not_storage_path(monkeypatch, caplog) 
     assert object_key not in caplog.text
     assert "private-race-file" not in caplog.text
     assert f"key_ref={service._object_key_log_ref(object_key)}" in caplog.text
+
+
+def test_create_upload_intent_issues_no_storage_signed_url(monkeypatch) -> None:
+    # Issue #98: browsers upload through the backend proxy, so the intent must not
+    # touch the S3 client at all — any client call (e.g. generate_presigned_url)
+    # would mean a browser-usable R2 URL is being minted again.
+    class ForbiddenClient:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"upload intent must not call the R2 client ({name})")
+
+    service = R2Service(client=cast(BaseClient, ForbiddenClient()))
+    monkeypatch.setattr("backend.services.r2.settings.r2_access_key_id", "access-key")
+    monkeypatch.setattr("backend.services.r2.settings.r2_secret_access_key", "secret-key")
+    monkeypatch.setattr("backend.services.r2.settings.r2_bucket", "bucket")
+    monkeypatch.setattr(
+        "backend.services.r2.settings.r2_public_base_url", "https://cdn.example.com"
+    )
+    request = PresignUploadRequest(
+        filename="morning-run.gpx",
+        content_type="application/gpx+xml",
+        content_length=2048,
+        purpose="chat-attachment",
+    )
+
+    intent = service.create_upload_intent(user_id="user-123", request=request)
+
+    assert intent.upload_url == ""
+    assert intent.method == "POST"
+    assert intent.object_key.startswith("users/user-123/chat-attachment/")
+    assert intent.object_key.endswith(".gpx")
+    assert intent.public_url == f"https://cdn.example.com/{intent.object_key}"
+    assert intent.headers == {"Content-Type": "application/gpx+xml"}
+
+
+def test_create_upload_intent_requires_configuration(monkeypatch) -> None:
+    service = R2Service()
+    monkeypatch.setattr("backend.services.r2.settings.r2_access_key_id", None)
+    request = PresignUploadRequest(
+        filename="run.fit",
+        content_type="application/vnd.garmin.fit",
+        content_length=10,
+        purpose="chat-attachment",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.create_upload_intent(user_id="user-123", request=request)
+
+    assert exc_info.value.status_code == 500

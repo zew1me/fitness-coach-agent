@@ -2449,6 +2449,12 @@ describe("CoachChat image attachments", () => {
       ([url]) => String(url) === "/api/chat/attachments/presign",
     );
     expect(presignCall).toBeDefined();
+    // The bytes always go through the backend proxy (#98). The presign fixture above
+    // still carries a non-empty upload_url, as an older server returned, to prove the
+    // client never uploads directly to a storage URL even when one is offered.
+    const requestedUrls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(requestedUrls).toContain("/api/chat/attachments/upload");
+    expect(requestedUrls).not.toContain("https://upload.example/activity.png");
 
     const input = screen.getByPlaceholderText(/Ask your coach/i);
     fireEvent.change(input, {
