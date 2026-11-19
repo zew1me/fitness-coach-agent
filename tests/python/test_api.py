@@ -641,17 +641,14 @@ async def _post_process_zip(zip_bytes: bytes, monkeypatch) -> dict[str, Any]:
 async def test_chat_attachments_presign_accepts_zip(content_type: str, monkeypatch) -> None:
     from backend.models.storage import PresignUploadResponse
 
-    def mock_create_presigned_upload(*, user_id: str, request) -> PresignUploadResponse:
+    def mock_create_upload_intent(*, user_id: str, request) -> PresignUploadResponse:
         return PresignUploadResponse(
-            upload_url="https://r2.example.com/upload",
             object_key="users/athlete-1/chat-attachment/2024/01/01/export.zip",
             public_url="https://cdn.example.com/export.zip",
             headers={"Content-Type": content_type},
         )
 
-    monkeypatch.setattr(
-        "api.index.r2_service.create_presigned_upload", mock_create_presigned_upload
-    )
+    monkeypatch.setattr("api.index.r2_service.create_upload_intent", mock_create_upload_intent)
     restore_override = _override_require_user_context(_ZIP_TEST_USER)
     try:
         transport = ASGITransport(app=api_index.app)
@@ -670,6 +667,71 @@ async def test_chat_attachments_presign_accepts_zip(content_type: str, monkeypat
 
     assert response.status_code == 200
     assert response.json()["object_key"].endswith("export.zip")
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_presign_returns_proxy_intent_without_storage_url(
+    monkeypatch,
+) -> None:
+    # Issue #98: the response carries only the reserved object key; the browser then
+    # posts the bytes to /api/chat/attachments/upload. No R2-signed URL is exposed.
+    from botocore.client import BaseClient
+
+    from backend.services.r2 import R2Service
+
+    class ForbiddenClient:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"presign must not call the R2 client ({name})")
+
+    monkeypatch.setattr(
+        "api.index.r2_service", R2Service(client=cast(BaseClient, ForbiddenClient()))
+    )
+    monkeypatch.setattr("backend.services.r2.settings.r2_access_key_id", "access-key")
+    monkeypatch.setattr("backend.services.r2.settings.r2_secret_access_key", "secret-key")
+    monkeypatch.setattr("backend.services.r2.settings.r2_bucket", "bucket")
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/chat/attachments/presign",
+                json={
+                    "filename": "morning-run.gpx",
+                    "content_type": "application/gpx+xml",
+                    "content_length": 2048,
+                    "purpose": "chat-attachment",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["upload_url"] == ""
+    assert body["method"] == "POST"
+    assert body["object_key"].startswith(f"users/{_ZIP_TEST_USER.user_id}/chat-attachment/")
+
+
+@pytest.mark.asyncio
+async def test_generic_presign_upload_endpoint_is_removed() -> None:
+    # Issue #98: the browser-direct presigned upload endpoint had no caller and is gone.
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        transport = ASGITransport(app=api_index.app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/files/presign-upload",
+                json={
+                    "filename": "run.gpx",
+                    "content_type": "application/gpx+xml",
+                    "content_length": 10,
+                    "purpose": "chat-attachment",
+                },
+            )
+    finally:
+        restore_override()
+
+    assert response.status_code in {404, 405}
 
 
 @pytest.mark.asyncio

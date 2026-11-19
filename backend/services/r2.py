@@ -17,36 +17,33 @@ from backend.models.storage import PresignUploadRequest, PresignUploadResponse
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EXPIRATION_SECONDS = 900
-
 
 class R2Service:
-    """Issue presigned upload URLs for user-scoped R2 object keys."""
+    """Read and write user-scoped R2 objects with server-side credentials.
+
+    Browsers never receive a storage-signed URL (issue #98): they ask for an upload
+    intent, then send the bytes to the backend proxy (``POST /api/chat/attachments/upload``),
+    which writes to R2. R2 bucket CORS therefore stays unconfigured.
+    """
 
     def __init__(self, *, client: BaseClient | None = None) -> None:
         self._client = client
 
-    def create_presigned_upload(
+    def create_upload_intent(
         self, *, user_id: str, request: PresignUploadRequest
     ) -> PresignUploadResponse:
+        """Reserve a user-scoped object key for a proxied upload.
+
+        No presigned storage URL is minted: ``upload_url`` stays empty and ``method`` is
+        ``POST`` because the bytes go to the backend proxy, not to R2 directly.
+        """
         self._ensure_configured()
         object_key = self._build_object_key(user_id=user_id, request=request)
-        client = self._get_client()
-        upload_url = client.generate_presigned_url(
-            ClientMethod="put_object",
-            Params={
-                "Bucket": settings.r2_bucket,
-                "Key": object_key,
-                "ContentType": request.content_type,
-            },
-            ExpiresIn=DEFAULT_EXPIRATION_SECONDS,
-            HttpMethod="PUT",
-        )
         return PresignUploadResponse(
-            upload_url=upload_url,
             object_key=object_key,
             public_url=self._build_public_url(object_key),
             headers={"Content-Type": request.content_type},
+            method="POST",
         )
 
     async def upload_file(
@@ -134,7 +131,7 @@ class R2Service:
     def build_object_key(self, *, user_id: str, filename: str, purpose: str) -> str:
         """Build a fresh user-scoped object key.
 
-        Shared by the presigned-upload flow and direct server-side uploads (e.g. zip
+        Shared by the proxied upload-intent flow and direct server-side uploads (e.g. zip
         image members re-uploaded via ``upload_file``).
         """
         purpose_segment = self._sanitize_segment(purpose)

@@ -155,11 +155,6 @@ reason = "OAuth redirect URI: intervals.icu sends the browser here; no in-repo c
 
 [[tool.reachability-check.allow]]
 kind = "endpoint"
-target = "/api/files/presign-upload"
-reason = "Known gap: documented upload contract in AGENTS.md with no in-repo caller; keep or remove."
-
-[[tool.reachability-check.allow]]
-kind = "endpoint"
 target = "/api/engine/compute-tss"
 reason = "Known gap: covered by tests but no client or coach tool routes to it; keep or remove."
 

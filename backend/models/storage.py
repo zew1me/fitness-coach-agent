@@ -10,9 +10,12 @@ class PresignUploadRequest(BaseModel):
 
 class PresignUploadResponse(BaseModel):
     headers: dict[str, str]
-    method: str = "PUT"
+    method: str = "POST"
     object_key: str
     public_url: str | None = None
-    upload_url: str = ""  # Empty for direct uploads
+    # Always empty: browsers upload through the backend proxy and never receive a
+    # storage-signed URL (#98). Kept on the wire so existing clients that read the
+    # field keep parsing the response.
+    upload_url: str = ""
 
     model_config = ConfigDict(frozen=True)

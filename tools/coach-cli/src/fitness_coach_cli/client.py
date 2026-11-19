@@ -281,8 +281,8 @@ class CoachClient:
                 "purpose": _UPLOAD_PURPOSE,
             },
         )
-        # Only the object_key is used: the presigned storage URL is intentionally ignored so
-        # the CLI never talks to R2 directly; the app proxies the bytes.
+        # Only the object_key is used: the CLI never talks to R2 directly; the app proxies
+        # the bytes. (The server no longer issues a storage URL at all, see #98.)
         object_key = presign.get("object_key") if isinstance(presign, dict) else None
         if not isinstance(object_key, str):
             raise CoachError("invalid_response", "Presign response had no object_key.")
