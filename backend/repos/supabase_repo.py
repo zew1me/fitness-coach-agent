@@ -1161,6 +1161,17 @@ class SupabaseRepository:
         messages = await self.list_chat_messages(thread.id)
         return thread.model_copy(update={"messages": messages})
 
+    async def get_coach_data_changes(self, user_id: str) -> dict[str, Any]:
+        """Bounded committed-change snapshot, acknowledged by this thread's successful replies."""
+        thread = await self.get_chat_thread(user_id)
+        response = await _execute(
+            self._require_client().rpc(
+                "get_coach_data_changes",
+                {"p_user_id": user_id, "p_thread_id": thread.id if thread else None},
+            )
+        )
+        return response.data
+
     async def get_chat_thread(self, user_id: str) -> ChatThread | None:
         client = self._require_client()
         response = await _execute(client.table("chat_threads").select("*").eq("user_id", user_id))

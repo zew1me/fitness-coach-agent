@@ -23,7 +23,7 @@ import {
 } from "../../lib/agent/message-context";
 import { streamCoachTurn } from "../../lib/agent/orchestrator";
 
-import { athleteContextFixture } from "./agent-fixtures";
+import { athleteContextFixture, dataChangesFixture } from "./agent-fixtures";
 
 vi.mock("../../lib/agent/orchestrator", () => ({
   streamCoachTurn: vi.fn(() =>
@@ -140,6 +140,42 @@ describe("app/api/chat route", () => {
       }),
     );
   });
+
+  it.each([false, true])(
+    "validates change context before model execution (malformed=%s)",
+    async (malformed) => {
+      const context = {
+        ...athleteContextFixture,
+        data_changes: malformed
+          ? { ...dataChangesFixture, event_ids: ["invalid"] }
+          : dataChangesFixture,
+      };
+      globalThis.fetch = vi.fn((url: RequestInfo | URL) =>
+        Promise.resolve(
+          Response.json(
+            String(url).endsWith("/api/oauth/browser-token")
+              ? { access_token: "token-1", user_id: "athlete-1" }
+              : context,
+          ),
+        ),
+      ) as unknown as typeof fetch;
+      const response = await POST(
+        new Request("http://localhost/api/chat", {
+          method: "POST",
+          headers: { cookie: "coach_browser_session=session-token" },
+          body: JSON.stringify({ messages: [] }),
+        }),
+      );
+      expect(response.status).toBe(malformed ? 503 : 200);
+      if (malformed) {
+        expect(streamCoachTurn).not.toHaveBeenCalled();
+      } else {
+        expect(streamCoachTurn).toHaveBeenCalledWith(
+          expect.objectContaining({ context }),
+        );
+      }
+    },
+  );
 
   it("acquires the durable lease before loading athlete context", async () => {
     const requestedUrls: string[] = [];

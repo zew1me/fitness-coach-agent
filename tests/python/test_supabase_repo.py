@@ -5,6 +5,7 @@ from collections.abc import Awaitable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -16,7 +17,7 @@ from backend.models.athlete import (
     SportThreshold,
     ThresholdRecalibrationCandidate,
 )
-from backend.models.chat import ChatModelStateReplaceRequest
+from backend.models.chat import ChatModelStateReplaceRequest, ChatThread
 from backend.models.training import Activity, ActivitySource, Goal, PlanWorkout, TrainingPlan
 from backend.repos import supabase_repo
 from backend.repos.supabase_repo import (
@@ -393,6 +394,33 @@ class FakeRpcClient:
     def rpc(self, function_name: str, params: dict[str, object]) -> FakeRpcQuery:
         self.calls.append((function_name, params))
         return FakeRpcQuery(self.data)
+
+
+@pytest.mark.parametrize("thread_id", [None, "00000000-0000-0000-0000-000000000041"])
+async def test_coach_data_changes_reader_uses_authenticated_owner_and_current_thread(
+    monkeypatch,
+    thread_id: str | None,
+) -> None:
+    snapshot = {"event_ids": [], "summaries": [], "has_more": False}
+    client = FakeRpcClient(snapshot)
+    repo = SupabaseRepository()
+    monkeypatch.setattr(repo, "_require_client", lambda: client)
+    lookup = AsyncMock(
+        return_value=(
+            ChatThread(id=thread_id, user_id="athlete-1", created_at=datetime.now(UTC))
+            if thread_id
+            else None
+        )
+    )
+    monkeypatch.setattr(repo, "get_chat_thread", lookup)
+    assert await repo.get_coach_data_changes("athlete-1") == snapshot
+    lookup.assert_awaited_once_with("athlete-1")
+    assert client.calls == [
+        (
+            "get_coach_data_changes",
+            {"p_user_id": "athlete-1", "p_thread_id": thread_id},
+        )
+    ]
 
 
 def _plan_workout_row(**overrides: object) -> dict[str, object]:

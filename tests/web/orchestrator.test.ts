@@ -18,7 +18,7 @@ import {
   ToolRoundBudget,
 } from "../../lib/agent/tool-round-budget";
 
-import { athleteContextFixture } from "./agent-fixtures";
+import { athleteContextFixture, dataChangesFixture } from "./agent-fixtures";
 
 type AgentEvent = {
   data?: Record<string, unknown>;
@@ -529,6 +529,61 @@ describe("streamCoachTurn streaming and persistence", () => {
         body: expect.stringContaining("Keep tomorrow easy."),
         method: "POST",
       }),
+    );
+  });
+
+  it.each([false, true])(
+    "acknowledges only the turn's snapshot (durable=%s)",
+    async (durable) => {
+      const fetchMock = vi.fn(() => Promise.resolve(Response.json({})));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const context = {
+        ...athleteContextFixture,
+        data_changes: dataChangesFixture,
+      };
+      const response = streamCoachTurn({
+        accessToken: "token-1",
+        baseUrl: "http://localhost",
+        context,
+        messages: messages(),
+        // A failed durable setup must still deliver/acknowledge notices via fresh instructions.
+        useDurableSession: durable,
+      });
+      await response.text();
+      const call = (
+        fetchMock.mock.calls as unknown as [string, RequestInit][]
+      ).find(([url]) => url.endsWith("/api/chat/messages"));
+      const body = JSON.parse(String(call?.[1].body));
+      expect(body.metadata.data_change_event_ids).toEqual(
+        dataChangesFixture.event_ids,
+      );
+      expect(body.metadata.finish_reason).toBe("stop");
+      expect(
+        vi
+          .mocked(buildLeadCoachPrompt)
+          .mock.calls.some(([received]) => received === context),
+      ).toBe(true);
+    },
+  );
+
+  it("does not acknowledge imports on a failed model turn", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(Response.json({})));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(
+      new Error("model failure"),
+    );
+    const response = streamCoachTurn({
+      accessToken: "token-1",
+      baseUrl: "http://localhost",
+      context: { ...athleteContextFixture, data_changes: dataChangesFixture },
+      messages: messages(),
+    });
+    await response.text();
+    const call = (
+      fetchMock.mock.calls as unknown as [string, RequestInit][]
+    ).find(([url]) => url.endsWith("/api/chat/messages"));
+    expect(JSON.parse(String(call?.[1].body)).metadata).not.toHaveProperty(
+      "data_change_event_ids",
     );
   });
 

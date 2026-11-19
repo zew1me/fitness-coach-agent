@@ -295,6 +295,35 @@ all. See issue #408.
 
 ---
 
+## Fresh data-change context (#591)
+
+Activity/recovery writes capture payload-free `coach_data_changes` events in the same database
+transaction as the saved record. `get-athlete-summary` includes a bounded snapshot of pending events
+for the authenticated athlete's current thread. The lead coach instructions are rebuilt with that
+snapshot on every turn, outside `chat_model_states.items`, in session, full-history, and degraded
+stateless modes. These application events are not athlete messages and never start model turns.
+They coalesce committed records by source/type/date range, distinguish created from updated records,
+and direct the coach to fetch current activities rather than trust stale attachment status. They do
+not claim a whole batch succeeded or describe failed attempts. Recovery notices use the fresh
+`recent_recovery` bundle; an omitted historical day is not evidence that a write failed.
+
+Delivery is at-least-once until a successful reply is persisted. `persistAssistantMessage` includes
+only the exact pre-turn `event_ids` in `metadata.data_change_event_ids` when `finish_reason` is
+`stop`. Failed/aborted turns and failed transcript writes cannot acknowledge events. The SQL reader
+excludes an event only when it finds that event ID on a successful assistant reply in the same
+owning thread. Imports committed during streaming or outside the 256-event page remain pending.
+Concurrent/retried successful receipts are harmless; no global timestamp/sequence watermark can
+skip a late-committing transaction. Compaction never touches receipts in `chat_messages` or notices
+in `coach_data_changes`. No acknowledgement is written into compactable items.
+
+The schema currently permits one thread per athlete. If that thread is recreated, its old receipts
+do not apply and the new thread sees pending historical events (with a bounded page and explicit
+`has_more` flag). With no thread, events remain pending without creating one. A permanent fresh-read
+instruction also survives after acknowledgement/compaction: never infer missing training solely
+from old chat upload status. This is application-context delivery, not a visible timeline alert or
+an exactly-once guarantee of what the model chooses to say. Activity-file deduplication and import
+batch failure tracking remain separate concerns.
+
 ## Coaching memory
 
 `coaching_memory` lives in `chat_model_states` but is intentionally **separate**

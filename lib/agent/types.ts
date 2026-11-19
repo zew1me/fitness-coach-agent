@@ -1,3 +1,5 @@
+import type { CoachDataChanges } from "../schemas";
+
 export type AthleteProfileContext = {
   biological_sex?: string | null;
   coaching_state: "active" | "calibrating" | "onboarding" | "paused" | string;
@@ -76,6 +78,7 @@ export type CTLCeilingGuidance = {
 };
 
 export type AthleteContextBundle = {
+  data_changes?: CoachDataChanges;
   active_plan: TrainingPlanContext | null;
   computed_age: number | null;
   ctl_ceiling_guidance: CTLCeilingGuidance;

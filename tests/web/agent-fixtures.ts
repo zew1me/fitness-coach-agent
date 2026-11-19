@@ -1,4 +1,20 @@
 import type { AthleteContextBundle } from "../../lib/agent/types";
+import type { CoachDataChanges } from "../../lib/schemas";
+
+export const dataChangesFixture: CoachDataChanges = {
+  event_ids: ["579ec08e-b3b0-4f01-85cb-8bd67772060b"],
+  summaries: [
+    {
+      data_type: "activity",
+      source: "fit_upload",
+      start_date: "2026-11-09",
+      end_date: "2026-11-15",
+      created_records: 9,
+      updated_records: 0,
+    },
+  ],
+  has_more: false,
+};
 
 export const athleteContextFixture: AthleteContextBundle = {
   active_plan: {

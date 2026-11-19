@@ -82,6 +82,9 @@ class RefreshTokenRecord(TypedDict):
 
 
 class EngineRepository:
+    async def get_coach_data_changes(self, user_id: str) -> dict[str, object]:
+        return {"event_ids": [], "summaries": [], "has_more": False}
+
     async def get_athlete_profile(self, user_id: str) -> AthleteProfile:
         return AthleteProfile(
             user_id=user_id,
@@ -2698,6 +2701,38 @@ async def test_get_athlete_summary_returns_context_bundle(monkeypatch) -> None:
     assert body["current_load"]["ctl"] == 42
     assert body["goals"][0]["course_distance_meters"] == 14_000
     assert body["ctl_ceiling_guidance"]["committed_amateur_ctl"] > 0
+
+
+@pytest.mark.asyncio
+async def test_get_athlete_summary_reads_recovery_after_change_snapshot(monkeypatch) -> None:
+    event_id = "579ec08e-b3b0-4f01-85cb-8bd67772060b"
+
+    class RecoveryChangeRepository(EngineRepository):
+        sleep_score = 82
+
+        async def get_coach_data_changes(self, user_id: str) -> dict[str, object]:
+            # A recovery update commits just before the event snapshot is read.
+            self.sleep_score = 91
+            return {"event_ids": [event_id], "summaries": [], "has_more": False}
+
+        async def list_recovery_logs(self, user_id: str, *, limit: int = 14) -> list[RecoveryLog]:
+            logs = await super().list_recovery_logs(user_id, limit=limit)
+            return [log.model_copy(update={"sleep_score": self.sleep_score}) for log in logs]
+
+    monkeypatch.setattr(api_index, "repo", RecoveryChangeRepository())
+    monkeypatch.setitem(
+        api_index.app.dependency_overrides,
+        api_index.require_user_context,
+        lambda: UserContext(user_id="athlete-1", scopes=["profile:read"]),
+    )
+    transport = ASGITransport(app=api_index.app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/engine/get-athlete-summary")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_changes"]["event_ids"] == [event_id]
+    assert body["recent_recovery"][0]["sleep_score"] == 91
 
 
 @pytest.mark.asyncio
