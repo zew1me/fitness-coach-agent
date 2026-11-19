@@ -92,6 +92,12 @@ test.describe("attachment button interaction", () => {
       label.click(),
     ]);
 
+    // The bytes go to the backend proxy, never to a storage URL (#98).
+    const proxyUpload = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/chat/attachments/upload",
+    );
     await fileChooser.setFiles({
       name: "workout.png",
       mimeType: "image/png",
@@ -104,5 +110,6 @@ test.describe("attachment button interaction", () => {
 
     // The upload chip with the filename should appear
     await expect(page.locator("text=workout.png")).toBeVisible();
+    await proxyUpload;
   });
 });

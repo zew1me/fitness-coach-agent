@@ -251,7 +251,7 @@ See [docs/COMPACTION_DESIGN.md](docs/COMPACTION_DESIGN.md).
 
 ### Storage
 
-Cloudflare R2 via S3-compatible API. `POST /api/files/presign-upload` and `POST /api/chat/attachments/presign` mint presigned upload URLs; the client uploads directly (or via the `POST /api/chat/attachments/upload` proxy). The returned `public_url` should be the canonical reference used everywhere downstream.
+Cloudflare R2 via S3-compatible API, kept behind the backend (#98). `POST /api/chat/attachments/presign` validates the content type and reserves a user-scoped object key; it mints no storage-signed URL (`upload_url` is always empty, kept only for wire compatibility). The client then sends the bytes to the `POST /api/chat/attachments/upload` proxy, which writes to R2 with server-side credentials, so R2 bucket CORS stays unconfigured. Do not reintroduce a browser-direct presigned upload without configuring exact R2 CORS origins (see `BOOTSTRAP.md`). The returned `public_url` should be the canonical reference used everywhere downstream.
 
 Chat uploads still use the Vercel multipart proxy (not direct-to-R2). The browser lazily
 compresses JPEG/PNG/WebP files ≥4.0 MB to JPEG (2560 px, quality 0.8, ~3.8 MB target),
@@ -340,7 +340,7 @@ description of how the code works today.
 
 OpenAI's Responses API ingests images natively and can also accept PDFs via `input_file`. Athletes primarily attach activity files — `.fit` (`application/vnd.garmin.fit`) and `.gpx` (`application/gpx+xml`) — which it **cannot** ingest, and it rejects a `filename` sent alongside a `file_url`/`file_id` reference (`400 Mutually exclusive parameters … 'file_id' or 'filename'`). A single rejected content part aborts the stream, surfacing as an **empty assistant bubble**.
 
-**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards both `/api/chat/attachments/presign` and `/api/files/presign-upload` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`, `application/zip`, `application/x-zip-compressed` (zip archives are unpacked by `/api/engine/process-uploaded-zip`). Everything else (including PDFs) returns 400 with a message listing the supported types.
+**Unsupported file types are rejected at the presign step (400).** `_check_upload_content_type` in `api/index.py` guards `/api/chat/attachments/presign` with an allowlist (`_ALLOWED_UPLOAD_TYPES`). Allowed types: `image/gif`, `image/jpeg`, `image/png`, `image/webp`, `application/gpx+xml`, `application/vnd.garmin.fit`, `application/vnd.garmin.tcx+xml`, `application/zip`, `application/x-zip-compressed` (zip archives are unpacked by `/api/engine/process-uploaded-zip`). Everything else (including PDFs) returns 400 with a message listing the supported types.
 
 Contract: every non-image, non-rejected file part (i.e. `.fit` / `.gpx` activity files) is converted to an `input_text` description that **preserves the link** (`public_url` / `object_key`) so the coach can still resolve it — files are never dropped silently. This is centralized at the `toAgentInputItems` chokepoint (`lib/agent/agent-input.ts`), reusing `convertUnsupportedFilePartsToText` (`lib/agent/message-context.ts`). Never reintroduce a path that emits `input_file` for these types.
 

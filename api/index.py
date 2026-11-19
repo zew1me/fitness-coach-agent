@@ -1037,38 +1037,18 @@ async def presign_chat_upload(
 ) -> Mapping[str, object]:
     _check_upload_content_type(payload.content_type)
     try:
-        presigned_upload = r2_service.create_presigned_upload(
+        upload_intent = r2_service.create_upload_intent(
             user_id=user_context.user_id, request=payload
         )
     except Exception as exc:
         logger.exception("chat presign failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Storage service unavailable") from exc
     logger.info(
-        "chat attachment presign issued user_id=%s content_type=%s",
+        "chat attachment upload intent issued user_id=%s content_type=%s",
         user_context.user_id,
         payload.content_type,
     )
-    return presigned_upload.model_dump(mode="json")
-
-
-@app.post("/api/files/presign-upload")
-async def presign_upload(
-    payload: PresignUploadRequest, user_context: UserContext = Depends(require_user_context)
-) -> Mapping[str, object]:
-    _check_upload_content_type(payload.content_type)
-    try:
-        presigned_upload = r2_service.create_presigned_upload(
-            user_id=user_context.user_id, request=payload
-        )
-    except Exception as exc:
-        logger.exception("file presign failed error_type=%s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail="Storage service unavailable") from exc
-    logger.info(
-        "file presign issued user_id=%s content_type=%s",
-        user_context.user_id,
-        payload.content_type,
-    )
-    return presigned_upload.model_dump(mode="json")
+    return upload_intent.model_dump(mode="json")
 
 
 @app.post("/api/chat/attachments/upload")
