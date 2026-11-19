@@ -74,8 +74,11 @@ rclone setup, configuration, dry-run, and backup commands.
 
 ## R2 Uploads
 
-`POST /api/files/presign-upload` now returns a presigned `PUT` URL plus the final object key and
-public URL. Configure:
+Uploads go through the backend proxy; browsers never receive a storage-signed URL, so R2 bucket
+CORS stays unconfigured. `POST /api/chat/attachments/presign` validates the content type and
+reserves a user-scoped object key (its `upload_url` is always empty), then
+`POST /api/chat/attachments/upload` sends the bytes to the backend, which writes them to R2 with
+server-side credentials. Configure:
 
 - `R2_ACCOUNT_ID`
 - `R2_ACCESS_KEY_ID`
