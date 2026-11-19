@@ -916,8 +916,9 @@ Receipts are scoped to the owning conversation and independent of compactable mo
 **Security note:** The log has RLS and no browser policies or privileges; the reader is service-role
 only and the API derives athlete/thread IDs on the server. Events contain identifiers, dates, closed
 source/type labels, and operation only—no measurements, notes, filenames, tokens, or raw files.
-Account deletion cascades the log. Events and transcript receipts otherwise remain until account
-or conversation deletion; no opportunistic pruning can erase undelivered notices.
+Events remain until account deletion. Transcript receipts remain until conversation or account
+deletion. A new conversation can therefore receive older events that the deleted conversation
+already acknowledged.
 
 **All environments:** Additive migration; apply before deploying the summary/prompt reader. There is
 no historical backfill or remote apply in this PR. Existing records remain authoritative, but only
