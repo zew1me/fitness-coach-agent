@@ -50,7 +50,7 @@ export function isAuthenticationError(error: unknown): boolean {
 // before the user ever sees the Coach Unavailable card.
 const TRANSIENT_FETCH_RETRY_DELAYS_MS = [300, 900];
 
-function isTransientFetchError(error: unknown): boolean {
+function isTransientFetchError(error: unknown): error is TypeError {
   // Heuristic: WebKit emits `TypeError: Load failed` and other engines emit
   // `TypeError: Failed to fetch` for a network-level abort, so we retry on the
   // TypeError *type* rather than brittle message matching. The tradeoff is that
@@ -92,11 +92,19 @@ async function withRetry<T>(
       return await operation();
     } catch (error) {
       const backoffMs = TRANSIENT_FETCH_RETRY_DELAYS_MS[attempt];
-      if (
-        backoffMs === undefined ||
-        signal?.aborted ||
-        !isTransientFetchError(error)
-      ) {
+      if (signal?.aborted || !isTransientFetchError(error)) {
+        throw error;
+      }
+      if (backoffMs === undefined) {
+        // Every retry dropped at the network layer, so the request never
+        // reached the server and leaves no server-side trace: this is the
+        // only signal that a real user hit the Coach Unavailable card (#196).
+        // HTTP failures are already reported by readJson, and an abort is the
+        // caller giving up, not a failure, so neither is logged here.
+        Sentry.logger.warn("api request network failure", {
+          attempts: attempt + 1,
+          error_message: error.message,
+        });
         throw error;
       }
       // Recovery is silent for the user, so leave a breadcrumb — otherwise a

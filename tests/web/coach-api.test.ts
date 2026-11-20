@@ -10,6 +10,14 @@ import {
   uploadFile,
 } from "../../lib/coach-api";
 
+const sentryLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+}));
+
+vi.mock("@sentry/nextjs", () => ({ logger: sentryLogger }));
+
 it("settles an upload timeout during authentication without starting the upload", async () => {
   const controller = new AbortController();
   const fetchImpl = vi.fn<typeof fetch>().mockImplementation(
@@ -268,7 +276,14 @@ describe("loadChatThread", () => {
 describe("loadChatThread transient retry", () => {
   afterEach(() => {
     vi.useRealTimers();
+    sentryLogger.warn.mockClear();
   });
+
+  function networkFailureWarnings(): unknown[][] {
+    return sentryLogger.warn.mock.calls.filter(
+      ([message]) => message === "api request network failure",
+    );
+  }
 
   it('retries after a WebKit "Load failed" TypeError and resolves', async () => {
     vi.useFakeTimers();
@@ -286,6 +301,8 @@ describe("loadChatThread transient retry", () => {
 
     await expect(promise).resolves.toEqual(VALID_THREAD);
     expect(fetchMock).toHaveBeenCalledTimes(4);
+    // A recovered drop is invisible to the user, so it is not a warning.
+    expect(networkFailureWarnings()).toEqual([]);
   });
 
   it("retries on a generic TypeError fetch drop", async () => {
@@ -324,6 +341,14 @@ describe("loadChatThread transient retry", () => {
     await assertion;
     // 3 attempts (initial + 2 retries) × 2 fetches each = 6 calls.
     expect(fetchMock).toHaveBeenCalledTimes(6);
+    // The request never reached the server, so this warning is the only
+    // monitoring signal that the user was shown Coach Unavailable (#196).
+    expect(networkFailureWarnings()).toEqual([
+      [
+        "api request network failure",
+        { attempts: 3, error_message: "Load failed" },
+      ],
+    ]);
   });
 
   it("does not retry when the signal is already aborted", async () => {
@@ -339,6 +364,8 @@ describe("loadChatThread transient retry", () => {
     ).rejects.toThrow();
     // Initial token + thread only — no retry once aborted.
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // An abort is the caller giving up, not a network failure.
+    expect(networkFailureWarnings()).toEqual([]);
   });
 
   it("stops retrying when the signal aborts mid-backoff", async () => {
@@ -363,6 +390,7 @@ describe("loadChatThread transient retry", () => {
     await assertion;
     // Only the initial token + thread fired; no retry token/thread.
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(networkFailureWarnings()).toEqual([]);
   });
 
   it("does not retry a non-transient HTTP error", async () => {
@@ -373,5 +401,7 @@ describe("loadChatThread transient retry", () => {
 
     await expect(loadChatThread(fetchMock)).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // HTTP errors are reported by readJson as "api request failed" instead.
+    expect(networkFailureWarnings()).toEqual([]);
   });
 });
