@@ -3,7 +3,10 @@ import * as Sentry from "@sentry/nextjs";
 import { type ToolSet } from "ai";
 import { z } from "zod";
 
-import { coachingMemoryToolSchema } from "./coaching-memory";
+import {
+  coachingMemoryToolParameters,
+  coachingMemoryToolSchema,
+} from "./coaching-memory";
 import type { SupabaseAgentSession } from "./supabase-agent-session";
 import type { ToolRoundBudgetContext } from "./tool-round-budget";
 import { coachToolDefinitions } from "./tools";
@@ -438,14 +441,17 @@ function coachToolErrorFunction(name: string) {
       tags: { subsystem: "coach-tools", tool: name },
       extra: { issues },
     });
-    // No retry promise: a corrected call needs a tool round left this turn
-    // (ToolRoundBudget), which the model cannot see from here.
-    return (
-      `Invalid input for ${name}: ${issues.join("; ")}. Nothing was saved. ` +
-      `Fix those fields before calling ${name} again; if you cannot call it ` +
-      "again this turn, tell the athlete this save did not go through."
-    );
+    return invalidToolInputResult(name, issues);
   };
+}
+
+function invalidToolInputResult(name: string, issues: string[]): string {
+  // A corrected call requires a tool round left this turn (ToolRoundBudget).
+  return (
+    `Invalid input for ${name}: ${issues.join("; ")}. Nothing was saved. ` +
+    `Fix those fields before calling ${name} again; if you cannot call it ` +
+    "again this turn, tell the athlete this save did not go through."
+  );
 }
 
 // Activity writes have no dedup yet (docs/ACTIVITY_MATERIALIZATION_DESIGN.md), so
@@ -486,18 +492,49 @@ export function createAgentCoachTools(
       errorFunction: coachToolErrorFunction(name),
     }),
   );
-  if (context.modelSession) {
+  const { modelSession } = context;
+  if (modelSession) {
+    const name = "update_coaching_memory";
     tools.push(
-      tool<typeof coachingMemoryToolSchema, CoachAgentRunContext>({
-        name: "update_coaching_memory",
+      tool<typeof coachingMemoryToolParameters, CoachAgentRunContext>({
+        name,
         description:
           "Maintain non-authoritative coaching commitments, preferences, follow-ups, insights, and outcomes. Never duplicate profile, goal, schedule, plan, threshold, load, or recovery data.",
-        parameters: coachingMemoryToolSchema,
+        parameters: coachingMemoryToolParameters,
         isEnabled: ({ runContext }) =>
           runContext.context.toolRounds.hasRoundsLeft(),
-        errorFunction: coachToolErrorFunction("update_coaching_memory"),
+        errorFunction: coachToolErrorFunction(name),
         execute: async (input) => {
-          await context.modelSession?.updateCoachingMemory(input.operation);
+          // Plain JSON Schema preserves the provider contract. Validate again
+          // before writing so even non-conforming model calls fail closed.
+          const parsed = coachingMemoryToolSchema.safeParse(input);
+          if (!parsed.success) {
+            const issues = parsed.error.issues.map((issue) => ({
+              path: formatIssuePath(issue.path),
+              code: issue.code,
+              message: issue.message,
+            }));
+            // Unlike the SDK's redacted error, this identifies the field while
+            // never sending the arguments or the original ZodError to Sentry.
+            Sentry.captureException(
+              new Error("Invalid coaching memory input"),
+              {
+                level: "error",
+                fingerprint: ["coach-tool-input-invalid", name],
+                tags: { subsystem: "coach-tools", tool: name },
+                extra: {
+                  issues: issues.map(({ path, code }) => ({ path, code })),
+                },
+              },
+            );
+            return invalidToolInputResult(
+              name,
+              issues.map(({ path, message }) =>
+                path ? `${path}: ${message}` : message,
+              ),
+            );
+          }
+          await modelSession.updateCoachingMemory(parsed.data.operation);
           return { status: "updated" };
         },
       }),
