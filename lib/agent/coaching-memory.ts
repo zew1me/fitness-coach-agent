@@ -27,11 +27,32 @@ export const coachingMemoryRecordSchema = z.object({
 
 export type CoachingMemoryRecord = z.infer<typeof coachingMemoryRecordSchema>;
 
+// Strict function calls send null for unused fields. Also accept omission so
+// non-strict/parallel model calls can use the same validator.
+function unusedAsUndefined<T extends z.ZodType<string>>(
+  schema: T,
+): z.ZodOptional<
+  z.ZodPipe<
+    z.ZodNullable<T>,
+    z.ZodTransform<string | undefined, z.output<T> | null>
+  >
+> {
+  return schema
+    .nullable()
+    .transform((value): string | undefined => value ?? undefined)
+    .optional();
+}
+
 const newRecordSchema = coachingMemoryRecordSchema
   .omit({ lifecycle: true })
-  // Tool JSON Schema describes input; normalization stays in activeRecord via
-  // coachingMemoryRecordSchema because Zod transforms are not JSON Schema.
-  .extend({ followUpAt: z.iso.datetime({ offset: true }).optional() });
+  .extend({
+    effectiveFrom: unusedAsUndefined(z.string()),
+    effectiveUntil: unusedAsUndefined(z.string()),
+    supersededBy: unusedAsUndefined(z.string()),
+    plannedDate: unusedAsUndefined(z.iso.date()),
+    followUpAt: unusedAsUndefined(z.iso.datetime({ offset: true })),
+    outcome: unusedAsUndefined(z.string()),
+  });
 
 const coachingMemoryOperationSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("upsert"), record: newRecordSchema }),
@@ -43,13 +64,34 @@ const coachingMemoryOperationSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("resolve"),
     id: z.string(),
-    outcome: z.string().optional(),
+    outcome: newRecordSchema.shape.outcome,
   }),
   z.object({ action: z.literal("dismiss"), id: z.string() }),
 ]);
+
 export const coachingMemoryToolSchema = z.object({
   operation: coachingMemoryOperationSchema,
 });
+
+// Export the constraints directly: the Agents SDK's Zod conversion strips
+// bounds such as minItems and the confidence range. All strict-mode keys are
+// required on the wire; the unused ones already include null in their schema.
+export const coachingMemoryToolParameters = {
+  ...z.toJSONSchema(coachingMemoryToolSchema, {
+    io: "input",
+    target: "draft-7",
+    override: ({ jsonSchema }) => {
+      if (jsonSchema.oneOf) {
+        jsonSchema.anyOf = jsonSchema.oneOf;
+        delete jsonSchema.oneOf;
+      }
+      if (jsonSchema.properties) {
+        jsonSchema.required = Object.keys(jsonSchema.properties);
+        jsonSchema.additionalProperties = false;
+      }
+    },
+  }),
+};
 export type CoachingMemoryOperation = z.infer<
   typeof coachingMemoryOperationSchema
 >;

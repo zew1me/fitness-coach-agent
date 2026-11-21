@@ -334,6 +334,13 @@ Operations on `coaching_memory` go through
 `SupabaseAgentSession.updateCoachingMemory()` which merges updates via
 `applyMemoryOperation()` in the same CAS write.
 
+`update_coaching_memory` exports a strict provider schema from the same Zod
+validator it runs before writing. This preserves constraints the Agents SDK’s
+Zod conversion omits (for example, at least one source message ID). Unused
+fields can be null or omitted and are not persisted as null. Validation
+failures report field paths and codes to Sentry without arguments; the SDK’s
+tool-data redaction remains enabled.
+
 ---
 
 ## Tests

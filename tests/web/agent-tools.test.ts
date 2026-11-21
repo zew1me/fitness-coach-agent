@@ -1363,9 +1363,10 @@ describe("createAgentCoachTools input validation errors", () => {
   function agentTool(
     name: string,
     fetchImpl: typeof fetch,
+    updateCoachingMemory = vi.fn(),
   ): FunctionTool<CoachAgentRunContext> {
     const modelSession = {
-      updateCoachingMemory: vi.fn(),
+      updateCoachingMemory,
     } as unknown as SupabaseAgentSession;
     const found = createAgentCoachTools({
       accessToken: "token",
@@ -1481,6 +1482,134 @@ describe("createAgentCoachTools input validation errors", () => {
         level: "error",
       }),
     );
+  });
+
+  const memoryRecord = {
+    id: "memory-1",
+    category: "follow_up",
+    statement: "Private athlete note",
+    confidence: 0.8,
+    sourceMessageIds: ["message-1"],
+  };
+
+  it("advertises the actual coaching-memory constraints in strict mode", () => {
+    const tool = agentTool(
+      "update_coaching_memory",
+      createRecordingFetch({}).fetchImpl,
+    );
+
+    expect(tool.strict).toBe(true);
+    expect(tool.parameters).toMatchObject({
+      properties: {
+        operation: {
+          anyOf: [
+            {
+              properties: {
+                record: {
+                  required: expect.arrayContaining([
+                    "sourceMessageIds",
+                    "plannedDate",
+                  ]),
+                  properties: {
+                    id: { minLength: 1 },
+                    sourceMessageIds: { minItems: 1, items: { minLength: 1 } },
+                    confidence: { minimum: 0, maximum: 1 },
+                    plannedDate: {
+                      anyOf: [{ format: "date" }, { type: "null" }],
+                    },
+                  },
+                },
+              },
+            },
+            expect.any(Object),
+            expect.any(Object),
+            expect.any(Object),
+          ],
+        },
+      },
+    });
+  });
+
+  it.each([
+    { action: "upsert", record: memoryRecord },
+    { action: "supersede", id: "old-id", replacement: memoryRecord },
+    { action: "resolve", id: "memory-1" },
+    { action: "dismiss", id: "memory-1" },
+  ])(
+    "accepts $action with omitted or null optional fields",
+    async (operation) => {
+      const update = vi.fn();
+      const tool = agentTool(
+        "update_coaching_memory",
+        createRecordingFetch({}).fetchImpl,
+        update,
+      );
+      const strictRecord = {
+        ...memoryRecord,
+        effectiveFrom: null,
+        effectiveUntil: null,
+        supersededBy: null,
+        plannedDate: null,
+        followUpAt: null,
+        outcome: null,
+      };
+      const strictOperation =
+        operation.action === "upsert"
+          ? { ...operation, record: strictRecord }
+          : operation.action === "supersede"
+            ? { ...operation, replacement: strictRecord }
+            : operation.action === "resolve"
+              ? { ...operation, outcome: null }
+              : operation;
+
+      for (const input of [operation, strictOperation]) {
+        expect(
+          await invoke(tool, JSON.stringify({ operation: input })),
+        ).toEqual({ status: "updated" });
+      }
+      expect(update).toHaveBeenCalledTimes(2);
+      for (const [savedOperation] of update.mock.calls) {
+        expect(JSON.parse(JSON.stringify(savedOperation))).toEqual(operation);
+      }
+      expect(sentryMocks.captureException).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an empty memory source list with safe diagnostics under SDK redaction", async () => {
+    vi.stubEnv("OPENAI_AGENTS_DONT_LOG_TOOL_DATA", "true");
+    const update = vi.fn();
+    const tool = agentTool(
+      "update_coaching_memory",
+      createRecordingFetch({}).fetchImpl,
+      update,
+    );
+    const output = await invoke(
+      tool,
+      JSON.stringify({
+        operation: {
+          action: "upsert",
+          record: { ...memoryRecord, sourceMessageIds: [] },
+        },
+      }),
+    );
+
+    expect(output).toContain("operation.record.sourceMessageIds:");
+    expect(output).toContain("Nothing was saved.");
+    expect(update).not.toHaveBeenCalled();
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      new Error("Invalid coaching memory input"),
+      expect.objectContaining({
+        fingerprint: ["coach-tool-input-invalid", "update_coaching_memory"],
+        extra: {
+          issues: [
+            { path: "operation.record.sourceMessageIds", code: "too_small" },
+          ],
+        },
+      }),
+    );
+    expect(
+      JSON.stringify(sentryMocks.captureException.mock.calls),
+    ).not.toContain(memoryRecord.statement);
   });
 
   it("covers update_coaching_memory and malformed JSON arguments", async () => {
