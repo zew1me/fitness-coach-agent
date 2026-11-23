@@ -598,3 +598,31 @@ it("rejects an oversized activity file that zipping cannot shrink enough", async
   expect(mocks.presign).not.toHaveBeenCalled();
   expect(result.current.attachments[0]?.status).toBe("error");
 });
+
+it("fails a stalled activity-file pack at the timeout instead of compressing forever", async () => {
+  const controller = new AbortController();
+  const reason = new DOMException("Operation timed out", "TimeoutError");
+  vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+  const error = vi.fn();
+  const { result } = renderHook(() => useChatDraft(error));
+  const gpx = new File([new Uint8Array(4_400_001)], "ride.gpx", {
+    type: "application/gpx+xml",
+  });
+  let reads = 0;
+  gpx.arrayBuffer = (): Promise<ArrayBuffer> => {
+    reads += 1;
+    return new Promise(() => {});
+  };
+  await act(async () => {
+    const pending = result.current.handleFilesAdded([gpx]);
+    await vi.waitFor(() => expect(reads).toBe(1));
+    controller.abort(reason);
+    await pending;
+  });
+
+  expect(result.current.attachments[0]?.status).toBe("error");
+  expect(error).toHaveBeenCalledWith(
+    expect.stringContaining("Compressing that file took too long"),
+  );
+  expect(mocks.presign).not.toHaveBeenCalled();
+});

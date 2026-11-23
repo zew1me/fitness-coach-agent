@@ -101,4 +101,14 @@ describe("packActivityFile", () => {
       packActivityFile(new File(["x"], "ride.gpx"), controller.signal),
     ).rejects.toThrow();
   });
+
+  it("rejects with the abort reason while the file read is still pending", async () => {
+    const controller = new AbortController();
+    const stalled = new File(["x"], "ride.gpx");
+    stalled.arrayBuffer = (): Promise<ArrayBuffer> => new Promise(() => {});
+    const packing = packActivityFile(stalled, controller.signal);
+    const reason = new DOMException("timed out", "TimeoutError");
+    controller.abort(reason);
+    await expect(packing).rejects.toBe(reason);
+  });
 });

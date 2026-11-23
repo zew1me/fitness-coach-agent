@@ -62,12 +62,25 @@ async function deflateRaw(
   // missing from some test DOMs.
   const source = new Response(bytes).body;
   if (source === null) throw new Error("Could not read the activity file");
+  // Passing the signal to the pipe cancels deflate on abort instead of letting it run.
   const compressed = await new Response(
-    source.pipeThrough(new CompressionStream("deflate-raw")),
+    source.pipeThrough(new CompressionStream("deflate-raw"), { signal }),
   ).arrayBuffer();
-  // CompressionStream cannot observe the signal, so discard an aborted result here.
   signal.throwIfAborted();
   return new Uint8Array(compressed);
+}
+
+/** Settle with the abort reason as soon as `signal` fires, even if `work` never does. */
+function rejectOnAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort = (): void => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = (): void => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([work, aborted]).finally(() =>
+    signal.removeEventListener("abort", onAbort),
+  );
 }
 
 /**
@@ -81,6 +94,11 @@ export async function packActivityFile(
   signal: AbortSignal,
 ): Promise<File> {
   signal.throwIfAborted();
+  // A file read cannot be cancelled, so the attachment timeout must not wait on it.
+  return rejectOnAbort(pack(file, signal), signal);
+}
+
+async function pack(file: File, signal: AbortSignal): Promise<File> {
   const data = new Uint8Array(await file.arrayBuffer());
   signal.throwIfAborted();
   const compressed = await deflateRaw(data, signal);
