@@ -1,6 +1,6 @@
 import { inflateRawSync, crc32 as nodeCrc32 } from "node:zlib";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { crc32, packActivityFile } from "../../lib/activity-zip";
 
@@ -105,10 +105,58 @@ describe("packActivityFile", () => {
   it("rejects with the abort reason while the file read is still pending", async () => {
     const controller = new AbortController();
     const stalled = new File(["x"], "ride.gpx");
-    stalled.arrayBuffer = (): Promise<ArrayBuffer> => new Promise(() => {});
+    let reading = false;
+    stalled.arrayBuffer = (): Promise<ArrayBuffer> => {
+      reading = true;
+      return new Promise(() => {});
+    };
     const packing = packActivityFile(stalled, controller.signal);
+    await vi.waitFor(() => expect(reading).toBe(true));
     const reason = new DOMException("timed out", "TimeoutError");
     controller.abort(reason);
     await expect(packing).rejects.toBe(reason);
+    // The never-settling read must not wedge later packs.
+    await expect(
+      packActivityFile(
+        new File(["y"], "next.gpx"),
+        new AbortController().signal,
+      ),
+    ).resolves.toHaveProperty("name", "next.gpx.zip");
+  });
+
+  it("packs one file at a time and skips queued work cancelled before its turn", async () => {
+    let release!: () => void;
+    const first = new File(["first"], "a.gpx");
+    const realRead = first.arrayBuffer.bind(first);
+    first.arrayBuffer = (): Promise<ArrayBuffer> =>
+      new Promise((resolve) => {
+        release = (): void => resolve(realRead());
+      });
+    const second = new File(["second"], "b.gpx");
+    let secondReads = 0;
+    second.arrayBuffer = (): Promise<ArrayBuffer> => {
+      secondReads += 1;
+      return Promise.resolve(new ArrayBuffer(0));
+    };
+    const third = new File(["third"], "c.gpx");
+    const thirdRead = vi.spyOn(third, "arrayBuffer");
+
+    const cancelled = new AbortController();
+    const packingFirst = packActivityFile(first, new AbortController().signal);
+    const packingSecond = packActivityFile(
+      second,
+      new AbortController().signal,
+    );
+    const packingThird = packActivityFile(third, cancelled.signal);
+    cancelled.abort();
+    await expect(packingThird).rejects.toBeDefined();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(secondReads).toBe(0);
+
+    release();
+    await expect(packingFirst).resolves.toHaveProperty("name", "a.gpx.zip");
+    await expect(packingSecond).resolves.toHaveProperty("name", "b.gpx.zip");
+    expect(secondReads).toBe(1);
+    expect(thirdRead).not.toHaveBeenCalled();
   });
 });

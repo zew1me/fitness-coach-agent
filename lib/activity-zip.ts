@@ -70,6 +70,8 @@ async function deflateRaw(
   return new Uint8Array(compressed);
 }
 
+let packTail: Promise<void> = Promise.resolve();
+
 /** Settle with the abort reason as soon as `signal` fires, even if `work` never does. */
 function rejectOnAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   let onAbort = (): void => {};
@@ -94,8 +96,23 @@ export async function packActivityFile(
   signal: AbortSignal,
 ): Promise<File> {
   signal.throwIfAborted();
+  // One pack at a time across picks, drops and pastes: each holds the whole input
+  // (up to 25 MiB) plus its output, so parallel packs would multiply peak memory.
+  // Queued work that is cancelled before its turn never reads the file.
+  const work = packTail.then(() => {
+    signal.throwIfAborted();
+    return pack(file, signal);
+  });
   // A file read cannot be cancelled, so the attachment timeout must not wait on it.
-  return rejectOnAbort(pack(file, signal), signal);
+  const settled = rejectOnAbort(work, signal);
+  // Advance on settle *or* abort: an aborted deflate is cancelled through the pipe,
+  // and a stalled read of a local file must not wedge every later upload. The worst
+  // case is one abandoned read overlapping the next pack, which is still bounded.
+  packTail = settled.then(
+    () => {},
+    () => {},
+  );
+  return settled;
 }
 
 async function pack(file: File, signal: AbortSignal): Promise<File> {
