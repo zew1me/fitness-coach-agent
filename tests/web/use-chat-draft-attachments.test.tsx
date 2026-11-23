@@ -25,6 +25,21 @@ vi.mock("@sentry/nextjs", () => ({
   logger: { info: vi.fn(), error: mocks.logError },
 }));
 
+// jsdom's Blob predates Blob.arrayBuffer(), which every supported browser ships;
+// read through its FileReader so activity packing runs against real bytes.
+if (typeof Blob.prototype.arrayBuffer !== "function") {
+  Blob.prototype.arrayBuffer = function arrayBuffer(
+    this: Blob,
+  ): Promise<ArrayBuffer> {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (): void => resolve(reader.result as ArrayBuffer);
+      reader.onerror = (): void => reject(reader.error);
+      reader.readAsArrayBuffer(this);
+    });
+  };
+}
+
 beforeEach(() => {
   mocks.compress.mockReset();
   mocks.logError.mockReset();
@@ -530,4 +545,56 @@ it("keeps GIFs and activity files that already fit unchanged", async () => {
     );
   }
   expect(mocks.compress).not.toHaveBeenCalled();
+});
+
+it("zips an oversized GPX losslessly and uploads the archive", async () => {
+  const error = vi.fn();
+  const { result } = renderHook(() => useChatDraft(error));
+  const row =
+    '<trkpt lat="47.6" lon="-122.3"><ele>50</ele><time>2026-11-01T08:00:00Z</time></trkpt>';
+  const gpx = new File(
+    [row.repeat(Math.ceil(4_500_000 / row.length))],
+    "ride.gpx",
+    {
+      type: "application/gpx+xml",
+    },
+  );
+  await act(() => result.current.handleFilesAdded([gpx]));
+
+  expect(error).not.toHaveBeenCalled();
+  expect(mocks.compress).not.toHaveBeenCalled();
+  const uploaded = mocks.upload.mock.calls[0]?.[1] as File;
+  expect(uploaded.name).toBe("ride.gpx.zip");
+  expect(uploaded.type).toBe("application/zip");
+  expect(uploaded.size).toBeLessThan(gpx.size / 4);
+  expect(mocks.presign).toHaveBeenCalledWith({
+    content_length: uploaded.size,
+    content_type: "application/zip",
+    filename: "ride.gpx.zip",
+    purpose: "chat-attachment",
+  });
+  expect(result.current.attachments[0]).toMatchObject({
+    filename: "ride.gpx.zip",
+    content_type: "application/zip",
+    status: "uploaded",
+  });
+});
+
+it("rejects an oversized activity file that zipping cannot shrink enough", async () => {
+  const error = vi.fn();
+  const { result } = renderHook(() => useChatDraft(error));
+  // Random bytes do not deflate, standing in for an already-dense FIT file.
+  const dense = new Uint8Array(4_500_000);
+  for (let offset = 0; offset < dense.length; offset += 65_536) {
+    crypto.getRandomValues(dense.subarray(offset, offset + 65_536));
+  }
+  await act(() =>
+    result.current.handleFilesAdded([new File([dense], "ride.fit")]),
+  );
+
+  expect(error).toHaveBeenCalledWith(
+    expect.stringContaining("cannot reduce below 4.5 MB"),
+  );
+  expect(mocks.presign).not.toHaveBeenCalled();
+  expect(result.current.attachments[0]?.status).toBe("error");
 });

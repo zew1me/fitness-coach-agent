@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { ZodError } from "zod";
 
+import { packActivityFile } from "./activity-zip";
 import {
   activityContentType,
   isSupportedAttachment,
@@ -12,6 +13,7 @@ import {
 import { createChatUploadIntent, uploadFile } from "./coach-api";
 import { errorMessage } from "./errors";
 import {
+  ATTACHMENT_HARD_LIMIT,
   attachmentSizeError,
   AttachmentSizeError,
   compressImage,
@@ -80,7 +82,7 @@ function localAttachmentFor(attachmentId: string, file: File): LocalAttachment {
     status:
       plan === "too-large"
         ? "error"
-        : plan === "compress"
+        : plan === "compress" || plan === "zip"
           ? "compressing"
           : "uploading",
     progress: null,
@@ -120,6 +122,16 @@ async function prepareAttachment(
   const plan = planAttachmentUpload(file);
   if (plan === "too-large") throw attachmentSizeError();
   if (plan === "as-is") return file;
+  if (plan === "zip") {
+    const packed = await withAttachmentTimeout(
+      draftSignal,
+      ATTACHMENT_COMPRESSION_TIMEOUT_MS,
+      (signal) => packActivityFile(file, signal),
+    );
+    // Lossless packing is the only reduction for now; lossy shrinking is #182.
+    if (packed.size > ATTACHMENT_HARD_LIMIT) throw attachmentSizeError();
+    return packed;
+  }
   return withAttachmentTimeout(
     draftSignal,
     ATTACHMENT_COMPRESSION_TIMEOUT_MS,
@@ -136,9 +148,24 @@ async function prepareAttachment(
 
 type AttachmentUploadStage = "preparation" | "presign" | "upload";
 
+function preparationFailureMessage(
+  timedOut: boolean,
+  isImage: boolean,
+): string {
+  if (!isImage) {
+    return timedOut
+      ? "Compressing that file took too long and was cancelled. Try again or choose a smaller file."
+      : "We couldn't compress that file. Try exporting it again.";
+  }
+  return timedOut
+    ? "Optimizing that image took too long and was cancelled. Try again or choose a smaller image."
+    : "We couldn't decode or optimize that image. Try another image or export it again.";
+}
+
 function attachmentFailureMessage(
   error: unknown,
   stage: AttachmentUploadStage,
+  isImage: boolean,
 ): string {
   if (error instanceof AttachmentSizeError) {
     return error.message;
@@ -149,9 +176,7 @@ function attachmentFailureMessage(
   const timedOut =
     error instanceof DOMException && error.name === "TimeoutError";
   if (stage === "preparation") {
-    return timedOut
-      ? "Optimizing that image took too long and was cancelled. Try again or choose a smaller image."
-      : "We couldn't decode or optimize that image. Try another image or export it again.";
+    return preparationFailureMessage(timedOut, isImage);
   }
   return timedOut
     ? "That upload took too long and was cancelled. Check your connection and try again."
@@ -164,6 +189,7 @@ async function uploadOneAttachment(
   { updateAttachment, setThreadError, signal }: AttachmentUploadCallbacks,
 ): Promise<void> {
   const originalSize = file.size;
+  const originalType = activityContentType(file);
   let contentType = activityContentType(file);
   let stage: AttachmentUploadStage = "preparation";
   try {
@@ -241,7 +267,9 @@ async function uploadOneAttachment(
     });
     updateAttachment(attachmentId, { status: "error", progress: null });
     console.error("Chat attachment upload failed", error);
-    setThreadError(attachmentFailureMessage(error, stage));
+    setThreadError(
+      attachmentFailureMessage(error, stage, originalType.startsWith("image/")),
+    );
   }
 }
 
