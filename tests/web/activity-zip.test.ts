@@ -159,4 +159,40 @@ describe("packActivityFile", () => {
     expect(secondReads).toBe(1);
     expect(thirdRead).not.toHaveBeenCalled();
   });
+
+  it("keeps a running pack's slot when a pack queued behind it is cancelled", async () => {
+    let release!: () => void;
+    const running = new File(["a"], "a.gpx");
+    const realRead = running.arrayBuffer.bind(running);
+    running.arrayBuffer = (): Promise<ArrayBuffer> =>
+      new Promise((resolve) => {
+        release = (): void => resolve(realRead());
+      });
+    const later = new File(["c"], "c.gpx");
+    let laterReads = 0;
+    const laterRead = later.arrayBuffer.bind(later);
+    later.arrayBuffer = (): Promise<ArrayBuffer> => {
+      laterReads += 1;
+      return laterRead();
+    };
+
+    const packingA = packActivityFile(running, new AbortController().signal);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const cancelled = new AbortController();
+    const packingB = packActivityFile(
+      new File(["b"], "b.gpx"),
+      cancelled.signal,
+    );
+    cancelled.abort();
+    await expect(packingB).rejects.toBeDefined();
+    const packingC = packActivityFile(later, new AbortController().signal);
+    // Give C every chance to overtake A before A finishes.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(laterReads).toBe(0);
+
+    release();
+    await expect(packingA).resolves.toHaveProperty("name", "a.gpx.zip");
+    await expect(packingC).resolves.toHaveProperty("name", "c.gpx.zip");
+    expect(laterReads).toBe(1);
+  });
 });

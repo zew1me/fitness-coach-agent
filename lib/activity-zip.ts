@@ -99,19 +99,24 @@ export async function packActivityFile(
   // One pack at a time across picks, drops and pastes: each holds the whole input
   // (up to 25 MiB) plus its output, so parallel packs would multiply peak memory.
   // Queued work that is cancelled before its turn never reads the file.
-  const work = packTail.then(() => {
+  const previous = packTail;
+  const work = previous.then(() => {
     signal.throwIfAborted();
     return pack(file, signal);
   });
   // A file read cannot be cancelled, so the attachment timeout must not wait on it.
   const settled = rejectOnAbort(work, signal);
-  // Advance on settle *or* abort: an aborted deflate is cancelled through the pipe,
-  // and a stalled read of a local file must not wedge every later upload. The worst
-  // case is one abandoned read overlapping the next pack, which is still bounded.
-  packTail = settled.then(
-    () => {},
-    () => {},
-  );
+  // This pack's slot opens only after the previous slot, so cancelling a queued pack
+  // never lets a later one overtake a pack still running ahead of it. Within its own
+  // turn the slot frees on settle *or* abort: an aborted deflate is cancelled through
+  // the pipe, and a stalled read of a local file must not wedge every later upload
+  // (worst case, one abandoned read overlaps the next pack).
+  packTail = previous
+    .then(() => settled)
+    .then(
+      () => {},
+      () => {},
+    );
   return settled;
 }
 
