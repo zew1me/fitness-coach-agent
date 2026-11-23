@@ -111,10 +111,11 @@ export async function packActivityFile(
   // turn the slot frees on settle *or* abort: an aborted deflate is cancelled through
   // the pipe, and a stalled read of a local file must not wedge every later upload.
   // Each read that stalls past its timeout stays pending (reads cannot be cancelled),
-  // so successive stalls can leave several outstanding, one per timed-out file. A
-  // pending read holds no bytes in JS until it resolves, and `pack` then drops the
-  // result at its post-read abort check, so each costs at most one file (<= 25 MiB)
-  // transiently. Local reads stalling for 60 s is rare enough that we accept this.
+  // so successive stalls can leave several outstanding, one per timed-out file. Their
+  // memory is up to the browser: the File API does not promise that a pending read
+  // holds nothing or that a dropped result is reclaimed promptly. We only drop the
+  // result at `pack`'s post-read abort check. Inputs are capped at 25 MiB each, and
+  // local reads stalling for 60 s are rare enough that we accept this.
   packTail = previous
     .then(() => settled)
     .then(
