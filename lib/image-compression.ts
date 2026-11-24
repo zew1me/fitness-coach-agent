@@ -1,3 +1,6 @@
+import { canPackActivityFile, ZIP_MEMBER_MAX_BYTES } from "./activity-zip";
+import { activityContentType } from "./chat-attachments";
+
 // Decimal MB deliberately leave room for multipart framing below Vercel's 4.5 MB cap.
 export const IMAGE_COMPRESSION_THRESHOLD = 4_000_000;
 export const ATTACHMENT_HARD_LIMIT = 4_400_000;
@@ -10,14 +13,35 @@ export const IMAGE_COMPRESSION_WORKER_URL =
 export const IMAGE_COMPRESSION_WORKER_INTEGRITY =
   "sha384-dHP9fwqd9BAiDh9uJ0p10khgbbcFMh34bVEiCnJ1Ah/AT2T2k4t572VEo3WXzxXp";
 
-type UploadPlan = "as-is" | "compress" | "too-large";
+type UploadPlan = "as-is" | "compress" | "zip" | "too-large";
+
+const ACTIVITY_CONTENT_TYPES = new Set([
+  "application/gpx+xml",
+  "application/vnd.garmin.fit",
+  "application/vnd.garmin.tcx+xml",
+]);
+
+function isActivityFile(file: File): boolean {
+  return (
+    ACTIVITY_CONTENT_TYPES.has(activityContentType(file)) ||
+    /\.(gpx|fit|tcx)$/i.test(file.name)
+  );
+}
 
 export function planAttachmentUpload(file: File): UploadPlan {
   if (file.size < IMAGE_COMPRESSION_THRESHOLD) return "as-is";
   if (["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
     return "compress";
   }
-  return file.size > ATTACHMENT_HARD_LIMIT ? "too-large" : "as-is";
+  if (file.size <= ATTACHMENT_HARD_LIMIT) return "as-is";
+  // Oversized activity files are zipped losslessly (#262); the server would skip a
+  // member above its per-member cap, and browsers without CompressionStream cannot
+  // pack at all, so both stay too large rather than uploading a useless archive.
+  return isActivityFile(file) &&
+    file.size <= ZIP_MEMBER_MAX_BYTES &&
+    canPackActivityFile()
+    ? "zip"
+    : "too-large";
 }
 
 export class AttachmentSizeError extends Error {

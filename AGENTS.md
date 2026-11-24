@@ -255,7 +255,12 @@ Cloudflare R2 via S3-compatible API, kept behind the backend (#98). `POST /api/c
 
 Chat uploads still use the Vercel multipart proxy (not direct-to-R2). The browser lazily
 compresses JPEG/PNG/WebP files ≥4.0 MB to JPEG (2560 px, quality 0.8, ~3.8 MB target),
-stripping EXIF; GIFs and activity/ZIP files are never compressed. All prepared uploads
+stripping EXIF; GIFs and ZIP files are never compressed. A GPX/FIT/TCX file over 4.4 MB
+(and at most 25 MB, the server's per-member cap) is packed losslessly into a single-entry
+deflate zip (`lib/activity-zip.ts`, native `CompressionStream`, no dependency) and uploaded
+as `application/zip`, so the existing bounded `process-uploaded-zip` path parses it; if
+the zip is still over the cap the upload is rejected (lossy shrinking is #598). Packs run one
+at a time per tab (FIFO, sharing the 60 s preparation timeout) and reject promptly on abort. All prepared uploads
 are capped at 4.4 MB to leave framing room under Vercel's 4.5 MB request limit. Compression
 has a separate 60 s timeout and a progress chip. Compression is limited to one in-flight
 library call per tab, including after timeout until the decoder settles, because main-thread

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ZIP_MEMBER_MAX_BYTES } from "../../lib/activity-zip";
 import {
   ATTACHMENT_HARD_LIMIT,
   compressImage,
@@ -47,20 +48,51 @@ describe("upload planning", () => {
     },
   );
 
+  it.each(["image/gif", "application/zip"])(
+    "preserves %s through 4.4 MB and rejects larger files",
+    (type) => {
+      expect(planAttachmentUpload(file(4_000_000, type))).toBe("as-is");
+      expect(planAttachmentUpload(file(ATTACHMENT_HARD_LIMIT, type))).toBe(
+        "as-is",
+      );
+      expect(planAttachmentUpload(file(ATTACHMENT_HARD_LIMIT + 1, type))).toBe(
+        "too-large",
+      );
+    },
+  );
+
   it.each([
-    "image/gif",
-    "application/zip",
     "application/gpx+xml",
     "application/vnd.garmin.fit",
     "application/vnd.garmin.tcx+xml",
-  ])("preserves %s through 4.4 MB and rejects larger files", (type) => {
-    expect(planAttachmentUpload(file(4_000_000, type))).toBe("as-is");
+  ])("zips %s above 4.4 MB up to the server's per-member cap", (type) => {
     expect(planAttachmentUpload(file(ATTACHMENT_HARD_LIMIT, type))).toBe(
       "as-is",
     );
     expect(planAttachmentUpload(file(ATTACHMENT_HARD_LIMIT + 1, type))).toBe(
+      "zip",
+    );
+    expect(planAttachmentUpload(file(ZIP_MEMBER_MAX_BYTES, type))).toBe("zip");
+    expect(planAttachmentUpload(file(ZIP_MEMBER_MAX_BYTES + 1, type))).toBe(
       "too-large",
     );
+  });
+
+  it("recognises untyped activity files by suffix", () => {
+    const fit = new File(
+      [new Uint8Array(ATTACHMENT_HARD_LIMIT + 1)],
+      "RIDE.FIT",
+    );
+    expect(planAttachmentUpload(fit)).toBe("zip");
+  });
+
+  it("keeps oversized activity files too large without CompressionStream", () => {
+    vi.stubGlobal("CompressionStream", undefined);
+    expect(
+      planAttachmentUpload(
+        file(ATTACHMENT_HARD_LIMIT + 1, "application/gpx+xml"),
+      ),
+    ).toBe("too-large");
   });
 });
 
