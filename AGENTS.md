@@ -259,7 +259,7 @@ stripping EXIF; GIFs and ZIP files are never compressed. A GPX/FIT/TCX file over
 (and at most 25 MB, the server's per-member cap) is packed losslessly into a single-entry
 deflate zip (`lib/activity-zip.ts`, native `CompressionStream`, no dependency) and uploaded
 as `application/zip`, so the existing bounded `process-uploaded-zip` path parses it; if
-the zip is still over the cap the upload is rejected (lossy shrinking is #182). Packs run one
+the zip is still over the cap the upload is rejected (lossy shrinking is #598). Packs run one
 at a time per tab (FIFO, sharing the 60 s preparation timeout) and reject promptly on abort. All prepared uploads
 are capped at 4.4 MB to leave framing room under Vercel's 4.5 MB request limit. Compression
 has a separate 60 s timeout and a progress chip. Compression is limited to one in-flight

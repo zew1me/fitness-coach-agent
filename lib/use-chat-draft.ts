@@ -128,7 +128,7 @@ async function prepareAttachment(
       ATTACHMENT_COMPRESSION_TIMEOUT_MS,
       (signal) => packActivityFile(file, signal),
     );
-    // Lossless packing is the only reduction for now; lossy shrinking is #182.
+    // Lossless packing is the only reduction for now; lossy shrinking is #598.
     if (packed.size > ATTACHMENT_HARD_LIMIT) throw attachmentSizeError();
     return packed;
   }

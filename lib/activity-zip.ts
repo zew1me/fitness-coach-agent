@@ -4,7 +4,7 @@
 // the request limit is first wrapped in a single-entry zip and uploaded as
 // `application/zip`. The backend already unpacks zips with bounded, budgeted reads
 // (`process-uploaded-zip`) and parses the member by its own suffix, so no new server
-// decompressor is needed. Lossy shrinking stays a later fallback (#182 step 2).
+// decompressor is needed. Lossy shrinking stays a later fallback (#598).
 
 // Mirrors `_ZIP_MEMBER_MAX_BYTES` in api/index.py: the server skips any member whose
 // uncompressed size exceeds it, so packing a larger file would upload a zip that
