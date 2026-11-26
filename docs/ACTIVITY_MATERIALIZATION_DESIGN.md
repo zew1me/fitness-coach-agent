@@ -1,9 +1,31 @@
 # Activity Materialization & Deduplication
 
-**Status: proposed, not implemented.** Every reference to existing code is real and
-current. Every reference to new tables, columns, RPCs, and services is a plan.
-
 Issue: #397. Prerequisite bug fixes: #447, #462. Related follow-ups: #463, #464, #467.
+
+**Status: shadow capture exists; activities are not yet recomposed.** #533 PR A
+(#534) shipped the evidence schema, shadow writer, and legacy insert trigger. The PR B
+backfill SQL is in migration history (`20261104061335`); its installation is not proof
+of completed backfill or of zero legacy inserts in any environment. The contract
+migration remains gated on both. Code references below describe the original baseline
+or the target architecture unless noted here.
+
+The pure measurement composer in `backend/engine/activity_projection.py` resolves one
+activity's live source set and records the winning source ID for each resolved field.
+It takes the fidelity ranks as input so it does not duplicate the reference table.
+Missing fields remain unresolved: the result is not an activity update payload, and
+nothing calls it from a live read or write path yet.
+
+**Next slices, in dependency order:**
+
+1. Finish #533's backfill tooling and verification; gate contract on independent
+   evidence from preview and production.
+2. Move authoritative input identity to `activity_sources` (Phase 2), including the
+   Intervals cutover. Do not use measurement similarity as an identity constraint.
+3. Complete the reconciler (derived values, override semantics, and legacy provenance)
+   and the version-checked persistence RPC. Convert and verify legacy edit writers
+   before enabling recomposition or revoking direct updates (Phase 3).
+4. Add candidate scoring, automatic grouping, pending load rebuilds and canonical
+   reads (Phase 4). Leave historical bridging and plan-link consolidation to Phase 5.
 
 ## Context
 

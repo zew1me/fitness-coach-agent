@@ -178,6 +178,11 @@ kind = "module"
 target = "backend/engine/screenshot_analyzer.py"
 reason = "Known gap: backward-compatible re-export shim that nothing in the repo imports any more."
 
+[[tool.reachability-check.allow]]
+kind = "module"
+target = "backend/engine/activity_projection.py"
+reason = "Pure projection policy tested independently; remove this entry when the Phase 3 recompose service imports it. Do not wire it to live writes before the ownership gate."
+
 [tool.pytest.ini_options]
 testpaths = ["tests/python", "tools/*/tests"]
 asyncio_mode = "auto"
