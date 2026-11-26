@@ -84,6 +84,79 @@ operator logs as private. Exit codes: **0** successful command/completed run; **
 incomplete verification, conflict, or batch-budget exhaustion; **2** invalid configuration/options.
 A standalone first clean `verify` can return 1 because completion needs a second clean pass.
 
+## Read-only status check (completed environments)
+
+The CLI has no read-only command. To collect gate evidence without mutating anything, run
+this query in a `begin read only` transaction (Supabase SQL editor or the reviewed project's
+MCP `execute_sql`). It mirrors `activity_sources_backfill_verify()`'s checks without
+touching the progress row, and adds `rerun_conflicts`: rows a re-run of `run` would abort on.
+
+```sql
+begin read only;
+select
+  clock_timestamp() as observed_at,
+  (select jsonb_build_object('drained_at', drained_at, 'clean_passes', clean_passes,
+     'completed_at', completed_at, 'processed_rows', processed_rows)
+     from public.activity_sources_backfill_progress) as progress,
+  (select count(*) from public.activities) as activities,
+  (select count(*) from public.activities a, public.activity_sources_backfill_progress p
+     where (a.created_at, a.id) > (p.last_created_at, p.last_id)) as rows_after_checkpoint,
+  (select count(*) from public.activities a left join public.activity_sources s on s.id = a.id
+     where s.id is null) as holes,
+  (select count(*) from (select a.id from public.activities a
+     left join public.activity_sources s on s.activity_id = a.id and s.retired_at is null
+     group by a.id having count(s.id) <> 1) x) as live_source_errors,
+  (select count(*) from public.activities a join public.activity_sources s on s.id = a.id
+     cross join lateral public.activity_legacy_source_mapping(a.source) m
+     cross join lateral jsonb_populate_record(null::public.activities, s.fields) captured
+     where s.user_id is distinct from a.user_id
+       or s.activity_id is distinct from a.id or s.origin_activity_id is distinct from a.id
+       or s.retired_at is not null or s.content_hash is not null
+       or s.provider is distinct from m.provider or s.ingest_format is distinct from m.ingest_format
+       or s.object_key is distinct from a.source_file_key
+       or s.external_id is distinct from case when a.source = 'intervals_sync'
+            then public.activity_intervals_external_id(a.source_file_key) end
+       or s.fields is distinct from public.activity_projection_fields(captured)
+       or s.recorded_at is distinct from captured.started_at
+       or s.payload_fingerprint is distinct from public.activity_payload_fingerprint(
+            captured.sport, captured.started_at, captured.duration_seconds,
+            captured.distance_meters)) as capture_errors,
+  (select count(*) from public.activities a join public.activity_sources s on s.id = a.id
+     where (to_jsonb(s) - 'created_at' - 'updated_at') is distinct from
+           (to_jsonb(public.activity_bootstrap_source(a)) - 'created_at' - 'updated_at'))
+     as rerun_conflicts,
+  (select max(version) from supabase_migrations.schema_migrations) as latest_migration;
+rollback;
+```
+
+`rows_after_checkpoint` is expected to be non-zero in a completed environment: rows created
+after the backfill drained were captured by the shadow writer (or the legacy trigger), not
+by a batch. `processed_rows + rows_after_checkpoint` should equal `activities` when no rows
+were deleted. `holes` and `live_source_errors` must be zero regardless.
+
+For legacy-capture telemetry, query the project's `postgres_logs` with an **explicit**
+`iso_timestamp_start`/`iso_timestamp_end` (each query covers at most 24 hours; repeat per day
+of the observation window), and include a positive control — the total `postgres_logs` row
+count — so an empty result is distinguishable from a missing log stream:
+
+```sql
+select count(*) as all_postgres_logs,
+  countIf(positionCaseInsensitive(toString(event_message),
+    'legacy activities insert captured by bootstrap trigger') > 0) as legacy_captures
+from logs where source = 'postgres_logs'
+```
+
+### Do not re-run `run` in a completed environment
+
+Once `completed_at` is set, use the read-only check above instead of `run` or `verify`. A
+re-run re-scans every row created after the old checkpoint. Those rows were shadow-captured
+at insert time, so any later projection edit (RPE, notes, TSS) makes the batch's
+deterministic-source comparison fail closed with `Backfill source conflict`. The abort is
+atomic (the progress row, including `completed_at`, is unchanged — covered by
+`test_rerun_after_completion_aborts_atomically_on_edited_shadow_row`), but it is noise, and a
+batch that _does_ process rows clears `completed_at` until two new clean passes. Re-run only
+if the read-only check reports holes, which indicates a capture path the trigger missed.
+
 ## Interruption and recovery
 
 Ctrl-C, process termination, or a request timeout does not invalidate the database checkpoint.

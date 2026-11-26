@@ -779,16 +779,34 @@ RPCs are `security definer`, use an empty search path, and grant execution only 
 `service_role`. The CLI requires an operator credential from the environment; it does not
 accept keys on argv or echo raw row/error payloads.
 
-**Rollout status (remaining evidence):**
+**Rollout status (read-only snapshot, 2026-11-26 07:56 UTC):** collected with the
+[runbook's read-only status check](activity-sources-backfill.md#read-only-status-check-completed-environments)
+inside `begin read only … rollback`. No CLI command, RPC, or write was executed against either
+hosted project. Both projects' latest applied migration was `20261118061831`, and
+`20261104061335` is recorded in `supabase_migrations.schema_migrations`.
 
-| Environment | Migration installation     | Backfill completion / clean verification                                                             | Legacy-capture telemetry / PR C      |
-| ----------- | -------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| Preview     | Applied, as recorded above | Not freshly verified by the operator-tool implementation; must record actual results before contract | Not collected here; contract blocked |
-| Production  | Applied, as recorded above | Not freshly verified by the operator-tool implementation; must record actual results before contract | Not collected here; contract blocked |
+| Check                                                     | Preview (`psbteexygkspyotkyflc`) | Production (`ejogxwyxmjbnnlvxzmji`) |
+| --------------------------------------------------------- | -------------------------------- | ----------------------------------- |
+| Backfill `completed_at`                                   | 2026-11-04 06:21:50 UTC          | 2026-11-04 06:22:44 UTC             |
+| `clean_passes` / `drained_at` set                         | 2 / yes                          | 2 / yes                             |
+| `processed_rows` + `rows_after_checkpoint` = `activities` | 54 + 7 = 61                      | 180 + 32 = 212                      |
+| Holes / live-source errors / capture errors               | 0 / 0 / 0                        | 0 / 0 / 0                           |
+| `rerun_conflicts` (rows a re-run of `run` would abort on) | 0                                | 0                                   |
+| Legacy-insert trigger present                             | yes (expected until PR C)        | yes (expected until PR C)           |
+| Legacy-capture log lines, 2026-11-25 04:00 → 11-26 04:00Z | 0 (of 9 `postgres_logs` rows)    | 0 (of 41 `postgres_logs` rows)      |
 
-Neither environment was mutated by implementing/testing the operator tool. Do not remove the
-legacy trigger or progress table based on migration presence alone. PR C remains a separate,
-explicitly gated change; local test results do not satisfy either hosted environment's gate.
+The rows after the checkpoint were created after the 2026-11-04 drain and carry sources from
+the shadow writer, so the arithmetic above accounts for every activity. Production received a
+new activity at 2026-11-25 05:05 UTC; its source exists and no trigger capture was logged.
+
+**Gate status: PR C is still blocked.** The telemetry covers one 24-hour window, not a reviewed
+observation window, and the log stream has never been shown to contain a positive capture
+example, so absence of the line is weak evidence on its own. Before PR C, record a multi-day
+window (one explicit 24-hour query per day, with the positive-control row count) for each
+environment, and confirm every deployed ingestion writer uses `create_activity_with_source`.
+Do not remove the legacy trigger or progress table based on migration presence alone, and do
+not re-run `run` in a completed environment (see the runbook). Local test results do not
+satisfy either hosted environment's gate.
 
 ## 20261106120000 — drop legacy chat `content` column and `chat_attachments` (2026-11-06)
 
