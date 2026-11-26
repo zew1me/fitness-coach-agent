@@ -89,7 +89,7 @@ A standalone first clean `verify` can return 1 because completion needs a second
 The CLI has no read-only command. To collect gate evidence without mutating anything, run
 this query in a `begin read only` transaction (Supabase SQL editor or the reviewed project's
 MCP `execute_sql`). It mirrors `activity_sources_backfill_verify()`'s checks without
-touching the progress row, and adds `rerun_conflicts`: rows a re-run of `run` would abort on.
+touching the progress row, and adds `rerun_conflicts`: rows after the saved checkpoint that a re-run of `run` would abort on.
 
 ```sql
 begin read only;
@@ -121,8 +121,12 @@ select
        or s.payload_fingerprint is distinct from public.activity_payload_fingerprint(
             captured.sport, captured.started_at, captured.duration_seconds,
             captured.distance_meters)) as capture_errors,
-  (select count(*) from public.activities a join public.activity_sources s on s.id = a.id
-     where (to_jsonb(s) - 'created_at' - 'updated_at') is distinct from
+  (select count(*) from public.activities a
+     join public.activity_sources s on s.id = a.id
+     cross join public.activity_sources_backfill_progress p
+     -- Same cursor predicate as the batch RPC: a rerun only re-scans rows after the checkpoint.
+     where (p.last_created_at is null or (a.created_at, a.id) > (p.last_created_at, p.last_id))
+       and (to_jsonb(s) - 'created_at' - 'updated_at') is distinct from
            (to_jsonb(public.activity_bootstrap_source(a)) - 'created_at' - 'updated_at'))
      as rerun_conflicts,
   (select max(version) from supabase_migrations.schema_migrations) as latest_migration;
