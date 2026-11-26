@@ -14,7 +14,7 @@ dependencies = [
   "openai>=2.0.0,<3.0.0",
   "pydantic>=2.10.6,<3.0.0",
   "pydantic-settings>=2.8.1,<3.0.0",
-  "pyjwt>=2.10.1,<3.0.0",
+  "pyjwt>=2.11.0,<3.0.0",  # 2.11.0 adds jwt.warnings.InsecureKeyLengthWarning, named in filterwarnings
   "python-multipart>=0.0.20,<0.0.21",
   "sentry-sdk>=2.63.0",
   "supabase>=2.33.0,<2.34.0",
@@ -189,9 +189,14 @@ asyncio_mode = "auto"
 # Workspace tools intentionally reuse tests/test_cli.py; importlib mode avoids module-name clashes.
 # Live OpenAI and DB integration tests are opt-in, excluded from the default run.
 addopts = "--import-mode=importlib -m 'not db and not oai'"
+# A short HMAC key in tests means a test is signing JWTs with a placeholder secret
+# (issue #261); fail loudly instead of printing a warning nobody reads.
 # httpx deprecates per-request cookies=; tests send an explicit Cookie header instead (issue
 # #260). Escalating just this warning keeps the deprecated form from creeping back.
-filterwarnings = ["error:Setting per-request cookies:DeprecationWarning"]
+filterwarnings = [
+  "error::jwt.warnings.InsecureKeyLengthWarning",
+  "error:Setting per-request cookies:DeprecationWarning",
+]
 markers = [
   "db: integration tests that require a live Supabase connection (run with: uv run pytest -m db)",
   "oai: live OpenAI API calls; excluded by default, run with `uv run pytest -m oai`",
