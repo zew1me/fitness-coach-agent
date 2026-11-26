@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, LiteralString, cast
+from typing import Any, Literal, LiteralString, cast
 
 import psycopg
 import pytest
@@ -720,7 +720,10 @@ def _run_batch_with_insert_gate(
     trigger_name: str,
     state: dict[str, Any],
     pid_ready: threading.Event,
+    timing: Literal["before", "after"] = "before",
 ) -> None:
+    # "before" parks the batch after its row lock but before the source row is written;
+    # "after" parks it once the source row exists but before the checkpoint update.
     try:
         with psycopg.connect(local_db_url(), autocommit=False) as conn:
             cursor = conn.cursor()
@@ -749,7 +752,7 @@ def _run_batch_with_insert_gate(
                 LiteralString,
                 f"""
                 create trigger {trigger_name}
-                before insert on public.activity_sources
+                {timing} insert on public.activity_sources
                 for each row
                 when (new.id = '{activity_id}'::uuid)
                 execute function public.{function_name}()
@@ -1105,6 +1108,7 @@ def test_backend_killed_after_insert_before_checkpoint_rolls_back_and_resumes() 
                     "trigger_name": trigger_name,
                     "state": batch_state,
                     "pid_ready": batch_pid_ready,
+                    "timing": "after",
                 },
                 daemon=True,
             )
@@ -1114,6 +1118,15 @@ def test_backend_killed_after_insert_before_checkpoint_rolls_back_and_resumes() 
 
             batch_pid = batch_state.get("pid")
             assert isinstance(batch_pid, int)
+            with coordinator.cursor() as cursor:
+                cursor.execute("select pg_backend_pid()")
+                coordinator_pid = int(_fetchone_required(cursor)[0])
+            # The row-lock probe alone does not prove the gate was reached: require the batch
+            # to be parked on the coordinator's advisory lock inside the AFTER INSERT trigger,
+            # i.e. with its source row written and the checkpoint not yet updated.
+            assert _wait_for_blocker(blocked_pid=batch_pid, blocker_pid=coordinator_pid), (
+                "batch never reached the post-insert gate"
+            )
             with coordinator.cursor() as cursor:
                 cursor.execute("select pg_terminate_backend(%s)", (batch_pid,))
                 assert _fetchone_required(cursor)[0] is True
