@@ -171,7 +171,16 @@ A rolled-back turn leaves history unchanged, and compacting it would re-send the
 whole window to save less than the minimum per request.
 
 This mirrors pi's `prepareCompaction`, which declines to compact when there is
-nothing to summarize. It does not lower the retained-user-message floor itself.
+nothing to summarize.
+
+Neither a skipped nor a successful compaction guarantees that the lead request
+fits, because retained user messages never shrink. If the lead request is
+rejected for exceeding the context window before anything streamed or any tool
+ran, the ladder rolls durable state back to the turn's baseline and retries the
+same tier once without stored history. This is the same stateless mode that
+durable-session setup degrades to (`retryStatelessly` in
+`lib/agent/lead-model-ladder.ts`, modelled on pi's one-shot
+`_overflowRecoveryAttempted`). A second overflow is not retried. It does not lower the retained-user-message floor itself.
 That needs compaction that can summarize user turns (head+tail, #563).
 
 The token threshold is intentionally well below the model context window. A

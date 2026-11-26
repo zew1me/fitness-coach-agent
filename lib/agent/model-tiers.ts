@@ -385,6 +385,21 @@ function rateLimitCode(code: unknown): boolean {
   );
 }
 
+// OpenAI rejects an oversized request with `context_length_exceeded`; the
+// message patterns match its Responses and Completions wording (the same ones
+// pi uses in packages/ai/src/utils/overflow.ts).
+const CONTEXT_OVERFLOW_MESSAGE =
+  /exceeds the context window|maximum context length/i;
+
+export function isContextOverflowError(error: unknown): boolean {
+  return errorChain(error).some(
+    (candidate) =>
+      candidate.code === "context_length_exceeded" ||
+      (typeof candidate.message === "string" &&
+        CONTEXT_OVERFLOW_MESSAGE.test(candidate.message)),
+  );
+}
+
 export function isRateLimitError(error: unknown): boolean {
   return errorChain(error).some(
     (candidate) =>

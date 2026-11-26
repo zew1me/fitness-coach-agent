@@ -31,6 +31,7 @@ import {
   buildModelSettings,
   captureRateLimit,
   getRetryAfterMs,
+  isContextOverflowError,
   isRateLimitError,
   MODEL_TIERS,
   type ModelTier,
@@ -526,6 +527,47 @@ function annotateActiveSpanWithTier(tier: ModelTier): void {
   }
 }
 
+// A durable turn's history can be too large for the model even when compaction
+// ran or was skipped: responses.compact keeps every user message, so it cannot
+// shrink a user-heavy window. Retry once without stored history, the same
+// stateless mode durable-session setup degrades to, before anything streamed.
+function canRetryStatelessly(
+  turn: LeadTurn,
+  progress: AttemptProgress,
+  error: unknown,
+): boolean {
+  return (
+    turn.durableSession !== undefined &&
+    isContextOverflowError(error) &&
+    !progress.eventStarted &&
+    !turn.lifecycle.textState.textStarted &&
+    !ranTool(turn) &&
+    !turn.lifecycle.isTurnAborted()
+  );
+}
+
+async function retryStatelessly(
+  turn: LeadTurn,
+  admission: ModelAdmission,
+  error: unknown,
+): Promise<ModelAdmission> {
+  // The SDK saves the turn's input before the request, so roll that back.
+  if (turn.durableFallbackBaseline && turn.underlyingSession) {
+    await turn.underlyingSession.replaceAll(turn.durableFallbackBaseline, {
+      trigger: "context-overflow-rollback",
+    });
+  }
+  turn.durableSession = undefined;
+  Sentry.captureException(error, {
+    tags: { subsystem: "lead-context-overflow", degrading: "true" },
+  });
+  turn.logger.warn(
+    "coach: lead request exceeded the context window; retrying without stored history",
+    { model: admission.tier.model },
+  );
+  return admission;
+}
+
 async function fallBackToNextTier(
   turn: LeadTurn,
   admission: ModelAdmission,
@@ -569,6 +611,9 @@ async function recoverFromTierFailure(
   progress: AttemptProgress,
   error: unknown,
 ): Promise<ModelAdmission | undefined> {
+  if (canRetryStatelessly(turn, progress, error)) {
+    return retryStatelessly(turn, admission, error);
+  }
   if (!isRateLimitError(error)) {
     modelCircuitBreaker.releaseProbe(admission);
     throw error;
