@@ -371,7 +371,9 @@ export const coachToolDefinitions = {
       "Check the 'kind' field on every result: 'activity' is a workout the athlete " +
       "completed and it has been saved, while 'course' is a route they plan to do — " +
       "it carries terrain and pacing analysis, nothing was written, and treating it as " +
-      "completed would credit them with a workout they have not done.",
+      "completed would credit them with a workout they have not done. " +
+      "A 'duplicate_activity' (status 'duplicate') was already imported: show the existing " +
+      "activity, do not retry or claim that another workout was saved.",
     uploadedFileInputSchema,
   ),
   save_recovery_data: defineTool(

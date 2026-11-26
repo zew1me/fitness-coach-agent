@@ -5,6 +5,7 @@ role and grant assertions additionally open a direct, rolled-back Postgres conne
 refuse any non-loopback host (see ``tests/python/local_db.py``).
 """
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -17,7 +18,7 @@ from psycopg import errors as pg_errors
 
 from backend.models.athlete import AthleteProfile
 from backend.models.training import Activity
-from backend.repos.supabase_repo import SupabaseRepository
+from backend.repos.supabase_repo import DuplicateActivityUploadError, SupabaseRepository
 from tests.python.local_db import direct_session
 
 _RUN_DB_TESTS = os.environ.get("RUN_DB_TESTS") == "1"
@@ -88,6 +89,53 @@ def _error_code(error: pytest.ExceptionInfo[PostgRESTAPIError]) -> str | None:
 
 
 # ── Shadow writer ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_upload_hash_is_athlete_scoped_not_archive_key_or_fingerprint(
+    repo: SupabaseRepository, athletes: tuple[str, str]
+) -> None:
+    owner, other = athletes
+    digest = "a" * 64
+    archive = f"uploads/{owner}/rides.zip"
+    first = await repo.create_activity(_ride(owner, source_file_key=archive), content_hash=digest)
+    with pytest.raises(DuplicateActivityUploadError) as duplicate:
+        await repo.create_activity(_ride(owner), content_hash=digest)
+    assert duplicate.value.activity_id == first.id
+
+    # Same archive and same extracted metrics, but different bytes: keep both.
+    sibling = await repo.create_activity(
+        _ride(owner, source_file_key=archive), content_hash="b" * 64
+    )
+    foreign = await repo.create_activity(_ride(other), content_hash=digest)
+    assert first.id and sibling.id and foreign.id
+    assert len({first.id, sibling.id, foreign.id}) == 3
+    [first_source] = await repo.list_live_activity_sources(owner, first.id)
+    [sibling_source] = await repo.list_live_activity_sources(owner, sibling.id)
+    assert first_source.content_hash == digest
+    assert first_source.payload_fingerprint == sibling_source.payload_fingerprint
+    assert {activity.id for activity in await repo.list_activities(owner)} == {first.id, sibling.id}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_hash_conflict_rolls_back_losing_activity(
+    repo: SupabaseRepository, athletes: tuple[str, str]
+) -> None:
+    owner, _ = athletes
+    digest = "c" * 64
+    # Send both directly to the writer to force the database conflict instead of
+    # allowing the repository's preflight lookup to detect an already-committed row.
+    results = await asyncio.gather(
+        *(repo._create_activity_with_source(_ride(owner), content_hash=digest) for _ in range(2)),
+        return_exceptions=True,
+    )
+    [created] = [result for result in results if isinstance(result, Activity)]
+    [conflict] = [result for result in results if isinstance(result, PostgRESTAPIError)]
+    assert conflict.code == "23505"
+    assert '"activity_sources_content_hash_idx"' in (conflict.message or "")
+    assert [activity.id for activity in await repo.list_activities(owner)] == [created.id]
+    changes = repo._require_client().table("coach_data_changes").select("id").eq("user_id", owner)
+    assert len(changes.execute().data) == 1
 
 
 @pytest.mark.asyncio
@@ -205,7 +253,15 @@ async def test_rpc_rejects_disagreeing_unknown_or_foreign_input_atomically(
     bad_calls = [
         {"p_user_id": owner, "p_activity": payload, "p_source": {"external_id": "wrong"}},
         {"p_user_id": owner, "p_activity": payload, "p_source": {"object_key": "x"}},
-        {"p_user_id": owner, "p_activity": payload, "p_source": {"content_hash": "abc"}},
+        {"p_user_id": owner, "p_activity": payload, "p_source": {"content_hash": "a" * 64}},
+        *[
+            {
+                "p_user_id": owner,
+                "p_activity": {**payload, "source": "fit_upload"},
+                "p_source": {"content_hash": digest},
+            }
+            for digest in ("abc", "A" * 64, None)
+        ],
         {"p_user_id": other, "p_activity": payload, "p_source": {}},
         {
             "p_user_id": owner,

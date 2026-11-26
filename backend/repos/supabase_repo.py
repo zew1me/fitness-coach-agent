@@ -41,6 +41,14 @@ class RepositoryNotConfiguredError(RuntimeError):
     """Raised when database-backed operations are requested without Supabase config."""
 
 
+class DuplicateActivityUploadError(Exception):
+    """An athlete has already imported these exact activity bytes."""
+
+    def __init__(self, activity_id: str) -> None:
+        super().__init__("This activity file was already imported.")
+        self.activity_id = activity_id
+
+
 class RecordNotFoundError(LookupError):
     """Raised when a requested record is absent in persistence."""
 
@@ -497,19 +505,43 @@ class SupabaseRepository:
 
     # ── Activities ────────────────────────────────────────────
 
-    async def create_activity(self, activity: Activity) -> Activity:
-        """Insert an activity; an Intervals activity that is already synced is returned as-is.
-
-        Overlapping syncs, or a re-pull after lost state, legitimately offer the same Intervals
-        activity twice, so that case is idempotent rather than an error.
-        """
-        created = await self._create_activity_with_source(activity)
+    async def create_activity(
+        self, activity: Activity, *, content_hash: str | None = None
+    ) -> Activity:
+        """Insert an activity or report an exact upload replay; Intervals still returns its row."""
+        if content_hash is not None:
+            await self._reject_duplicate_upload(activity.user_id, content_hash)
+        try:
+            created = await self._create_activity_with_source(activity, content_hash=content_hash)
+        except PostgRESTAPIError as exc:
+            # Only the hash index's race is translated into a named duplicate. All other DB
+            # failures (including unrelated uniqueness errors) retain the central API contract.
+            if (
+                content_hash is not None
+                and exc.code == "23505"
+                and (exc.message or "").endswith('"activity_sources_content_hash_idx"')
+            ):
+                await self._reject_duplicate_upload(activity.user_id, content_hash)
+            raise
         if created is not None:
             return created
         existing = await self._get_synced_intervals_activity(activity)
         if existing is None:
             raise RuntimeError("Supabase did not return the inserted activity row.")
         return existing
+
+    async def _reject_duplicate_upload(self, user_id: str, content_hash: str) -> None:
+        response = await _execute(
+            self._require_client()
+            .table("activity_sources")
+            .select("activity_id")
+            .eq("user_id", user_id)
+            .eq("content_hash", content_hash)
+            .is_("retired_at", "null")
+            .limit(1)
+        )
+        if response.data:
+            raise DuplicateActivityUploadError(response.data[0]["activity_id"])
 
     async def _get_synced_intervals_activity(self, activity: Activity) -> Activity | None:
         if activity.source != "intervals_sync" or not activity.source_file_key:
@@ -530,7 +562,9 @@ class SupabaseRepository:
         """Insert an Intervals activity, returning ``None`` when it was already synced."""
         return await self._create_activity_with_source(activity)
 
-    async def _create_activity_with_source(self, activity: Activity) -> Activity | None:
+    async def _create_activity_with_source(
+        self, activity: Activity, *, content_hash: str | None = None
+    ) -> Activity | None:
         """Insert an activity and its bootstrap source atomically via the shadow-writer RPC.
 
         The RPC returns NULL, not an error, when an Intervals activity with the same
@@ -540,13 +574,16 @@ class SupabaseRepository:
         payload = _activity_payload(activity)
         if not payload.get("id"):
             payload["id"] = str(uuid4())
+        source = _activity_source_payload(activity)
+        if content_hash is not None:
+            source["content_hash"] = content_hash
         response = await _execute(
             client.rpc(
                 "create_activity_with_source",
                 {
                     "p_user_id": activity.user_id,
                     "p_activity": payload,
-                    "p_source": _activity_source_payload(activity),
+                    "p_source": source,
                 },
             )
         )

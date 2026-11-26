@@ -21,6 +21,7 @@ from backend.models.chat import ChatModelStateReplaceRequest, ChatThread
 from backend.models.training import Activity, ActivitySource, Goal, PlanWorkout, TrainingPlan
 from backend.repos import supabase_repo
 from backend.repos.supabase_repo import (
+    DuplicateActivityUploadError,
     RecordNotFoundError,
     RepositoryNotConfiguredError,
     SupabaseRepository,
@@ -1222,6 +1223,50 @@ async def test_create_activity_uses_shadow_writer_rpc(
     assert payload["source_file_key"] == activity.source_file_key
     assert payload["summary_schema_version"] == 1
     assert payload["activity_summary"]["schema"] == "activity_summary_v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("constraint", ["activity_sources_content_hash_idx", "activities_pkey"])
+async def test_create_activity_recovers_only_from_upload_hash_race(
+    monkeypatch, constraint: str
+) -> None:
+    digest = "a" * 64
+    rows: list[dict[str, object]] = []
+    client = FakeSupabaseClient()
+    monkeypatch.setattr(client, "table", lambda name: FakeTableQuery(rows))
+    repo = SupabaseRepository(client=client)
+    error = PostgRESTAPIError(
+        {
+            "code": "23505",
+            "message": f'duplicate key value violates unique constraint "{constraint}"',
+        }
+    )
+
+    def lose_race(name: str, params: dict[str, Any]) -> None:
+        assert name == "create_activity_with_source"
+        assert params["p_source"]["content_hash"] == digest
+        rows.append(
+            {
+                "user_id": "athlete-1",
+                "activity_id": "winner",
+                "content_hash": digest,
+                "retired_at": None,
+            }
+        )
+        raise error
+
+    monkeypatch.setattr(client, "rpc", lose_race)
+    activity = Activity(
+        user_id="athlete-1", sport="running", activity_date=date(2026, 4, 1), source="fit_upload"
+    )
+    if constraint == "activity_sources_content_hash_idx":
+        with pytest.raises(DuplicateActivityUploadError) as duplicate:
+            await repo.create_activity(activity, content_hash=digest)
+        assert duplicate.value.activity_id == "winner"
+    else:
+        with pytest.raises(PostgRESTAPIError) as unchanged:
+            await repo.create_activity(activity, content_hash=digest)
+        assert unchanged.value is error
 
 
 @pytest.mark.asyncio

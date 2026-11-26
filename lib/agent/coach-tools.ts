@@ -3,6 +3,8 @@ import * as Sentry from "@sentry/nextjs";
 import { type ToolSet } from "ai";
 import { z } from "zod";
 
+import { activityUploadConflictSchema } from "../schemas";
+
 import {
   coachingMemoryToolParameters,
   coachingMemoryToolSchema,
@@ -21,6 +23,16 @@ export type CoachToolContext = {
 };
 
 const ENGINE_TIMEOUT_MS = 65_000;
+
+class EngineResponseError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body: string,
+  ) {
+    super(message);
+  }
+}
 
 async function postEngine<TInput extends object>(
   context: CoachToolContext,
@@ -47,8 +59,10 @@ async function postEngine<TInput extends object>(
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      throw new Error(
+      throw new EngineResponseError(
         `Engine request failed for ${path}: HTTP ${response.status} ${response.statusText}${body ? `. ${body}` : ""}`,
+        response.status,
+        body,
       );
     }
 
@@ -65,7 +79,16 @@ async function safePostEngine<TInput extends object>(
 ): Promise<unknown> {
   try {
     return await postEngine(context, path, input);
-  } catch {
+  } catch (error) {
+    if (error instanceof EngineResponseError && error.status === 409) {
+      const duplicate = parseActivityUploadConflict(error.body);
+      if (duplicate)
+        return {
+          kind: "duplicate_activity",
+          status: "duplicate",
+          ...duplicate,
+        };
+    }
     // Deliberately cause-neutral: this catch also covers timeouts and auth
     // failures, so it must not assert why the upload failed. It must also not
     // instruct a retry: a turn has only a small tool-round budget (see
@@ -77,6 +100,17 @@ async function safePostEngine<TInput extends object>(
         "This upload could not be processed. Do not retry it in this turn; " +
         "tell the athlete which file did not load.",
     };
+  }
+}
+
+function parseActivityUploadConflict(
+  body: string,
+): z.infer<typeof activityUploadConflictSchema>["detail"] | null {
+  try {
+    const result = activityUploadConflictSchema.safeParse(JSON.parse(body));
+    return result.success ? result.data.detail : null;
+  } catch {
+    return null;
   }
 }
 

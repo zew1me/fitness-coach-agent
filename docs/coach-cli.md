@@ -132,8 +132,10 @@ course         route.gpx        # a route you plan to do: analysed, nothing save
 failed         notes.txt: unsupported_file: ...
 ```
 
-It continues past failures and exits 1 if any file failed. Uploading the same file twice is not
-deduplicated yet (issue #390).
+It continues past failures and exits 1 if any file failed. Replaying a file already imported with
+byte identity returns HTTP 409 with `detail.code: "duplicate_activity"` and the existing
+`detail.activity_id`; the CLI currently reports that conflict as a failed file. Older uploads are
+not retroactively hashed, and similarity across different file bytes does not block an upload.
 
 ## Coach awareness of imports
 
@@ -145,7 +147,7 @@ create a data-change notice. Future sync writers get the same behavior through t
 
 Only committed records are counted. A partial batch may produce notices for its successful members,
 not a claim that all files succeeded. Identical wellness re-pushes do not create fresh notices;
-changed values are recorded as updates. This does not deduplicate activity uploads.
+changed values are recorded as updates. A rejected activity replay also creates no notice.
 
 Notices are acknowledged with a successfully persisted coach reply, so a failed/aborted turn can
 retry. Changes arriving while the coach responds remain pending for the following turn. This works
