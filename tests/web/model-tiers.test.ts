@@ -10,6 +10,7 @@ import {
   captureRateLimit,
   clampEffort,
   getRetryAfterMs,
+  isContextOverflowError,
   isRateLimitError,
   MODEL_SUPPORTED_EFFORTS,
   MODEL_TIERS,
@@ -374,5 +375,33 @@ describe("model tier compatibility", () => {
     expect(parseEffort("medim", "medium")).toBe("medium");
     expect(parseEffort(undefined, "high")).toBe("high");
     expect(sentryMocks.captureMessage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("isContextOverflowError", () => {
+  it("recognizes OpenAI context-window rejections, including wrapped ones", () => {
+    const byCode = Object.assign(new Error("Bad request"), {
+      status: 400,
+      code: "context_length_exceeded",
+    });
+    const byMessage = new Error(
+      "Your input exceeds the context window of this model.",
+    );
+    const wrapped = new Error("model call failed", { cause: byCode });
+    expect(isContextOverflowError(byCode)).toBe(true);
+    expect(isContextOverflowError(byMessage)).toBe(true);
+    expect(isContextOverflowError(wrapped)).toBe(true);
+  });
+
+  it("does not treat rate limits or other bad requests as overflow", () => {
+    const rateLimited = Object.assign(new Error("Rate limit reached"), {
+      status: 429,
+    });
+    const invalid = Object.assign(new Error("Invalid tool schema"), {
+      status: 400,
+      code: "invalid_request_error",
+    });
+    expect(isContextOverflowError(rateLimited)).toBe(false);
+    expect(isContextOverflowError(invalid)).toBe(false);
   });
 });

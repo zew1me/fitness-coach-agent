@@ -128,14 +128,60 @@ implements `OpenAIResponsesCompactionAwareSession`. Also home to
 only matters for compaction's trigger conditions. The key method:
 
 ```text
-runCompaction(args?) → OpenAIResponsesCompactionResult | null
+runCompaction(args?)              → OpenAIResponsesCompactionResult | null   (SDK post-turn, explicit callers)
+runPreTurnCompaction(projected)   → OpenAIResponsesCompactionResult | null   (orchestrator, before each turn)
 ```
 
 Trigger conditions (any one is sufficient):
 
-- `args.force === true` (explicit forced compaction)
-- `estimatedTokens >= autoCompactTokens` (default 60 000)
+- `args.force === true` (explicit forced compaction; bypasses every check below)
+- `estimatedTokens >= autoCompactTokens` (default 60 000), measured on stored
+  history after a turn and on the projected request before one
 - `nonUserItemCount >= autoCompactNonUserItems` (default 40)
+
+### Progress guard: compact only when it can shrink history
+
+`responses.compact` returns "a list of all user messages, followed by a single
+compaction item" (`CompactedResponse.output` in the `openai` SDK). It folds
+only assistant, tool call/result, and reasoning items. Every athlete message
+survives verbatim, so on a long-lived thread retained user messages alone can
+exceed the token threshold. Before this guard, a window that was already "user
+messages + one compaction item" kept tripping the threshold. Each turn then sent
+the whole window to compaction twice: a pre-turn no-op (in production 68 of 68
+forced compactions returned the same item count, averaging 8.9 s before the
+first token) and a post-turn pass that folded only the newest turn.
+
+`estimateFoldableContext` counts stored items that are neither user messages
+nor compaction items. A triggered compaction is skipped, and logged as
+`coach compaction skipped`, when:
+
+- `nothing_to_fold`: there are no foldable items. This applies to every
+  non-forced trigger.
+- `below_min_gain`: the trigger was the token threshold alone, and foldable
+  items are below a quarter of it (15 000 estimated tokens by default). Each
+  compaction re-sends the whole window, so folding a few thousand tokens every
+  turn costs more TPM and latency than carrying them for a few turns. The
+  non-user-item trigger is exempt; it still bounds how many items accumulate.
+
+Skip logs carry `check: pre_turn | sdk` and byte/item attributes. Keys
+containing `tokens` are not queryable in Sentry Logs, so the skip log avoids them.
+The minimum gain also applies before a turn. A failed turn that ran tools keeps
+its items, so foldable history keeps growing toward the gain and item triggers.
+A rolled-back turn leaves history unchanged, and compacting it would re-send the
+whole window to save less than the minimum per request.
+
+This mirrors pi's `prepareCompaction`, which declines to compact when there is
+nothing to summarize.
+
+Neither a skipped nor a successful compaction guarantees that the lead request
+fits, because retained user messages never shrink. If the lead request is
+rejected for exceeding the context window before anything streamed or any tool
+ran, the ladder rolls durable state back to the turn's baseline and retries the
+same tier once without stored history. This is the same stateless mode that
+durable-session setup degrades to (`retryStatelessly` in
+`lib/agent/lead-model-ladder.ts`, modelled on pi's one-shot
+`_overflowRecoveryAttempted`). A second overflow is not retried. It does not lower the retained-user-message floor itself.
+That needs compaction that can summarize user turns (head+tail, #563).
 
 The token threshold is intentionally well below the model context window. A
 single coach turn can replay durable history through the delegation planner,
@@ -229,8 +275,11 @@ change the separate `responses.compact` request contract described above.
 3. On a cold session, seed only the newest transcript suffix that fits the
    60 000-token compaction threshold, then project stored items + incoming messages
 4. Run the pre-turn compaction check on every turn
-      ├─ force compaction if the projection is ≥ 60 000 estimated tokens
-      ├─ otherwise compact when stored history has ≥ 40 non-user items
+      ├─ triggered when stored history has ≥ 40 non-user items, or the
+      │  projection is ≥ 60 000 estimated tokens
+      ├─ skip (and log why) when stored history has nothing to fold
+      ├─ when the projection alone triggered, also skip until stored history
+      │  has ≥ 15 000 foldable estimated tokens
       └─ if required compaction fails, degrade to stateless (turn still answers),
          except a 409 conflict or aborted signal still ends the turn
 5. Agent runs     →  SDK appends items via addItems() during the turn
@@ -240,7 +289,8 @@ change the separate `responses.compact` request contract described above.
          replaceAll (runLeadModelLadder in lib/agent/lead-model-ladder.ts)
       └─ longer provider delays skip the in-request retry; if every tier is exhausted,
          the athlete-visible error reports the longest provider wait seen across the ladder
-6. After a successful turn, auto-compaction runs if the same thresholds are hit
+6. After a successful turn, auto-compaction runs if the same thresholds and
+   progress guard allow it
 7. Release lease  →  DELETE /api/chat/model-state/lease  (always in finally)
 
 The pre-turn check is required even though the SDK also compacts after a
@@ -256,8 +306,11 @@ continuing without ownership would be unsafe.
 
 Thresholds are declared by `DurableCompactionSession` and reused by the
 orchestrator for its projected pre-turn check. Compaction runs at the token
-threshold or the non-user-item threshold; the orchestrator forces it when the
-projection (stored history plus the incoming turn) reaches the token threshold.
+threshold or the non-user-item threshold. Before a turn, the token threshold is
+measured on the projection (stored history plus the incoming turn), while the
+progress guard is measured on stored history, the only part compaction
+rewrites. Size-triggered pre-turn compactions keep their historical `forced`
+telemetry label.
 
 ### Setup is best-effort — only a 409 or an abort ends the turn
 
@@ -345,16 +398,16 @@ tool-data redaction remains enabled.
 
 ## Tests
 
-| File                                           | What it covers                                                                                                                                                                                                                        |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, exact `replaceAll`, coaching-memory isolation, and deterministic replay conversion for optionally retained raw tool pairs                                                                                          |
-| `tests/web/durable-compaction-session.test.ts` | Unit: canonical output replacement, trigger thresholds, provider-metadata stripping, compact API shape conversion, and `estimateStoredContext`                                                                                        |
-| `tests/web/orchestrator.test.ts`               | Turn-level: durable setup degrades to stateless on unreadable model state, unfetchable transcript, and failed required pre-turn compaction; wrapped post-tool 429s produce a deterministic acknowledgement; still aborts on 409/abort |
-| `tests/integration/oai-agents.test.ts`         | Live OpenAI: compaction API compatibility and continuation from the canonical compacted window; never assumes retention of a particular input item                                                                                    |
-| `tests/web/real-durable-session.test.ts`       | Optional live continuity probe with delegation and prior-detail recall                                                                                                                                                                |
-| `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                                                                                                                                |
-| `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                                                                                                                    |
-| `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                                                                                                                                |
+| File                                           | What it covers                                                                                                                                                                                                                                                         |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/web/supabase-agent-session.test.ts`     | Unit: CAS retries, exact `replaceAll`, coaching-memory isolation, and deterministic replay conversion for optionally retained raw tool pairs                                                                                                                           |
+| `tests/web/durable-compaction-session.test.ts` | Unit: canonical output replacement, trigger thresholds, the progress guard, provider-metadata stripping, compact API shape conversion, and context estimates                                                                                                           |
+| `tests/web/orchestrator.test.ts`               | Turn-level: durable setup degrades to stateless on unreadable model state, unfetchable transcript, and failed required pre-turn compaction; skips no-op pre-turn compaction; wrapped post-tool 429s produce a deterministic acknowledgement; still aborts on 409/abort |
+| `tests/integration/oai-agents.test.ts`         | Live OpenAI: compaction API compatibility and continuation from the canonical compacted window; never assumes retention of a particular input item                                                                                                                     |
+| `tests/web/real-durable-session.test.ts`       | Optional live continuity probe with delegation and prior-detail recall                                                                                                                                                                                                 |
+| `tests/web/coaching-memory.test.ts`            | Memory operation types and merge logic                                                                                                                                                                                                                                 |
+| `tests/python/test_supabase_repo.py`           | Repo CAS, stale-version rejection, lease acquisition/release, transcript isolation                                                                                                                                                                                     |
+| `tests/python/test_chat_service.py`            | Service layer: model state CRUD, lease service methods                                                                                                                                                                                                                 |
 
 The `@pytest.mark.db` tests (live DB) are excluded from the default `pytest`
 run (`addopts = "-m 'not db'"` in `pyproject.toml`). Run them explicitly with

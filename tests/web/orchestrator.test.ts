@@ -1680,7 +1680,7 @@ describe("streamCoachTurn durable rollback, max turns and cold seeding", () => {
     expect(body.items.length).toBeLessThan(historyMessages.length);
     // The seed is stored history only. The lead-coach system prompt plus tool
     // definitions measure ~10.4k tokens and land on top of it before the athlete's
-    // message, while shouldTriggerCompaction fires at >= DEFAULT_AUTO_COMPACT_TOKENS.
+    // message, while planCompaction's size trigger fires at >= DEFAULT_AUTO_COMPACT_TOKENS.
     // So "at or under the threshold" is not enough — the seed has to leave at least
     // that overhead as headroom, or a fresh session compacts on its very first turn.
     const PER_TURN_OVERHEAD_TOKENS = 10_400;
@@ -1899,14 +1899,14 @@ describe("streamCoachTurn durable-session setup degradation", () => {
   });
 
   it("degrades to a stateless turn when oversized pre-run compaction fails", async () => {
-    // estimateStoredContext is ceil(bytes / 4), so ~1.1 MB of text is far above
-    // the pre-run threshold and must force a compaction attempt.
+    // estimateStoredContext is ceil(bytes / 4), so ~1.1 MB of foldable text is
+    // far above the pre-run threshold and must force a compaction attempt.
     const body = await runDurableTurn(
       degradingDurableFetch({
         storedItems: [
           {
-            role: "user",
-            content: [{ type: "input_text", text: "x".repeat(1_100_000) }],
+            role: "assistant",
+            content: [{ type: "output_text", text: "x".repeat(1_100_000) }],
           },
         ],
       }),
@@ -1915,6 +1915,95 @@ describe("streamCoachTurn durable-session setup degradation", () => {
     expect(orchestratorMocks.compact).toHaveBeenCalled();
     expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
     expect(body).not.toContain("Coach is unavailable");
+  });
+
+  it("skips pre-run compaction that cannot shrink an oversized window", async () => {
+    // responses.compact keeps every user message verbatim, so a window of only
+    // user messages and a compaction item cannot get smaller. Before the
+    // progress guard, every turn re-sent it to compaction as a no-op.
+    const body = await runDurableTurn(
+      degradingDurableFetch({
+        storedItems: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "x".repeat(1_100_000) }],
+          },
+          { type: "compaction", encrypted_content: "opaque" },
+        ],
+      }),
+    );
+
+    expect(orchestratorMocks.compact).not.toHaveBeenCalled();
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({ session: expect.anything() }),
+    );
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
+    expect(body).not.toContain("Coach is unavailable");
+  });
+
+  function contextOverflowError(): Error {
+    return Object.assign(
+      new Error("Your input exceeds the context window of this model."),
+      { status: 400, code: "context_length_exceeded" },
+    );
+  }
+
+  const oversizedUserWindow = [
+    {
+      role: "user",
+      content: [{ type: "input_text", text: "x".repeat(1_100_000) }],
+    },
+    { type: "compaction", encrypted_content: "opaque" },
+  ];
+
+  it("retries the lead once without stored history when it exceeds the context window", async () => {
+    // A skipped or successful no-op compaction cannot guarantee the window
+    // fits. Before the progress guard, only a failing compact request reached
+    // the stateless fallback; the lead now recovers on its own.
+    orchestratorMocks.agentsRun.mockRejectedValueOnce(contextOverflowError());
+
+    const body = await runDurableTurn(
+      degradingDurableFetch({ storedItems: oversizedUserWindow }),
+    );
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
+    expect(orchestratorMocks.agentsRun).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({ session: expect.anything() }),
+    );
+    expect(orchestratorMocks.agentsRun).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      expect.any(Array),
+      expect.not.objectContaining({ session: expect.anything() }),
+    );
+    const leadModels = orchestratorMocks.agentConfigs
+      .filter((config) => config["name"] === "Lead coach")
+      .map((config) => config["model"]);
+    expect(leadModels).toEqual(["gpt-6-luna", "gpt-6-luna"]);
+    expect(sentryMocks.captureException).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({ subsystem: "lead-context-overflow" }),
+      }),
+    );
+    expect(body).toContain("Keep tomorrow easy.");
+  });
+
+  it("does not retry a context-window failure more than once", async () => {
+    orchestratorMocks.agentsRun
+      .mockRejectedValueOnce(contextOverflowError())
+      .mockRejectedValueOnce(contextOverflowError());
+
+    await runDurableTurn(
+      degradingDurableFetch({ storedItems: oversizedUserWindow }),
+    );
+
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledTimes(2);
   });
 
   it("does not degrade to stateless execution when the turn is aborted during setup", async () => {
