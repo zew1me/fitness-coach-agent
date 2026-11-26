@@ -163,9 +163,11 @@ function toOpenAICompactOptions(
 // check (its historical label); everything else is "auto".
 type CompactionTrigger = "forced" | "auto";
 
-// Which check declined to compact. Skips are new telemetry, so they get a
-// plain label rather than the historical `trigger` values.
-type CompactionCheck = "pre_turn" | "post_turn";
+// Which entry point declined to compact: the orchestrator's pre-turn check,
+// or an SDK call (after a turn's items are saved, or when resuming an
+// approved tool input). Skips are new telemetry, so they get a plain label
+// rather than the historical `trigger` values.
+type CompactionCheck = "pre_turn" | "sdk";
 
 type CompactionSkipReason = "nothing_to_fold" | "below_min_gain";
 
@@ -374,8 +376,7 @@ function logCompactionSkipped(params: {
   projected: StoredContextEstimate | undefined;
 }): void {
   const { logger, reason, before, foldable, projected } = params;
-  const check: CompactionCheck =
-    projected === undefined ? "post_turn" : "pre_turn";
+  const check: CompactionCheck = projected === undefined ? "sdk" : "pre_turn";
   logger.info("coach compaction skipped", {
     check,
     reason,
@@ -441,8 +442,9 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     this.options.underlyingSession.prepareHistoryItemForModelInput?.(item) ??
     item;
 
-  // The SDK calls this after each successful turn; explicit callers pass
-  // `force` to compact regardless of thresholds.
+  // The SDK calls this after a turn's items are saved and when it resumes an
+  // approved tool input; explicit callers pass `force` to compact regardless
+  // of thresholds.
   runCompaction(
     args: OpenAIResponsesCompactionArgs = {},
   ): Promise<OpenAIResponsesCompactionResult | null> {

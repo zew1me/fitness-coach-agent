@@ -163,7 +163,7 @@ nor compaction items. A triggered compaction is skipped, and logged as
   turn costs more TPM and latency than carrying them for a few turns. The
   non-user-item trigger is exempt; it still bounds how many items accumulate.
 
-Skip logs carry `check: pre_turn | post_turn` and byte/item attributes. Keys
+Skip logs carry `check: pre_turn | sdk` and byte/item attributes. Keys
 containing `tokens` are not queryable in Sentry Logs, so the skip log avoids them.
 The minimum gain also applies before a turn. A failed turn that ran tools keeps
 its items, so foldable history keeps growing toward the gain and item triggers.
@@ -266,10 +266,11 @@ change the separate `responses.compact` request contract described above.
 3. On a cold session, seed only the newest transcript suffix that fits the
    60 000-token compaction threshold, then project stored items + incoming messages
 4. Run the pre-turn compaction check on every turn
-      ├─ compact if the projection is ≥ 60 000 estimated tokens and stored
-      │  history has ≥ 15 000 foldable estimated tokens
-      ├─ otherwise compact when stored history has ≥ 40 non-user items
+      ├─ triggered when stored history has ≥ 40 non-user items, or the
+      │  projection is ≥ 60 000 estimated tokens
       ├─ skip (and log why) when stored history has nothing to fold
+      ├─ when the projection alone triggered, also skip until stored history
+      │  has ≥ 15 000 foldable estimated tokens
       └─ if required compaction fails, degrade to stateless (turn still answers),
          except a 409 conflict or aborted signal still ends the turn
 5. Agent runs     →  SDK appends items via addItems() during the turn
