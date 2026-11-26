@@ -338,8 +338,9 @@ projection derived from that set. **Read it before changing any `activities` wri
 the upload handlers, `intervals_sync`, `repo.update_activity`, or
 `backend/services/activity_text.py`.
 
-Nothing in it is built. It describes intent, not current behaviour, so never cite it as a
-description of how the code works today.
+The shadow writer captures source evidence, but `activities` is not yet recomposed from it.
+The backfill SQL exists; that does not establish that it has completed in either hosted
+environment. The design's status section separates shipped groundwork from planned behaviour.
 
 ### Unsupported file attachments → text (do not send to the model as `input_file`)
 
