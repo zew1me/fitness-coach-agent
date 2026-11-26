@@ -165,8 +165,12 @@ if the read-only check reports holes, which indicates a capture path the trigger
 
 Ctrl-C, process termination, or a request timeout does not invalidate the database checkpoint.
 An interrupted transaction rolls back both source inserts and the cursor. A response lost after
-commit leaves the advanced cursor in the database. **Rerun the same command**; the tool does not
-blindly retry an ambiguous RPC within the current process. `--timeout` (global option, default
+commit leaves the advanced cursor in the database. The tool does not blindly retry an
+ambiguous RPC within the current process. **Before resuming, run the
+[read-only status check](#read-only-status-check-completed-environments).** If `completed_at`
+is already set (the final verification committed but its response was lost), stop: the
+environment is complete, and re-running `run` is exactly what the previous section says not to
+do. Otherwise rerun the same command to resume from the database checkpoint. `--timeout` (global option, default
 60 seconds) controls each RPC; reduce `--batch-size` if transactions exceed it. Source inserts
 and checkpointing remain atomic regardless of the client timeout.
 
