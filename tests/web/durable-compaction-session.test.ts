@@ -5,8 +5,10 @@ import {
   DEFAULT_AUTO_COMPACT_TOKENS,
   DurableCompactionSession,
   compareTokenEstimate,
+  estimateFoldableContext,
   estimateStoredContext,
 } from "../../lib/agent/durable-compaction-session";
+import type { Logger } from "../../lib/logger";
 
 const sentryMocks = vi.hoisted(() => ({
   logger: { info: vi.fn() },
@@ -19,24 +21,30 @@ const userItem = (text: string): AgentInputItem => ({
   content: [{ type: "input_text", text }],
 });
 
+const assistantItem = (text: string): AgentInputItem => ({
+  role: "assistant",
+  status: "completed",
+  content: [{ type: "output_text", text }],
+});
+
+const compactionItem = {
+  type: "compaction",
+  encrypted_content: "opaque",
+} as unknown as AgentInputItem;
+
 describe("DurableCompactionSession", () => {
   it("stores compacted output exactly and records before/after metadata", async () => {
+    const history = [userItem("old"), assistantItem("reply")];
     const underlying = {
       addItems: vi.fn(),
       clearSession: vi.fn(),
-      getItems: vi.fn().mockResolvedValue([userItem("old")]),
+      getItems: vi.fn().mockResolvedValue(history),
       getSessionId: vi.fn().mockResolvedValue("thread-1"),
       popItem: vi.fn(),
       replaceAll: vi.fn(),
       applyHistoryMutations: vi.fn(),
     };
-    const output = [
-      userItem("old"),
-      {
-        type: "compaction",
-        encrypted_content: "opaque",
-      } as unknown as AgentInputItem,
-    ];
+    const output = [userItem("old"), compactionItem];
     const client = {
       responses: {
         compact: vi.fn().mockResolvedValue({
@@ -55,7 +63,7 @@ describe("DurableCompactionSession", () => {
 
     expect(client.responses.compact).toHaveBeenCalledWith(
       expect.objectContaining({
-        input: [userItem("old")],
+        input: history,
         model: "gpt-6-luna",
       }),
     );
@@ -63,14 +71,12 @@ describe("DurableCompactionSession", () => {
       output,
       expect.objectContaining({
         trigger: "auto",
-        before_items: 1,
+        before_items: 2,
         after_items: 2,
       }),
     );
     expect(result?.usage.totalTokens).toBe(12);
-    const estimatedInputTokens = estimateStoredContext([
-      userItem("old"),
-    ]).estimatedTokens;
+    const estimatedInputTokens = estimateStoredContext(history).estimatedTokens;
     expect(sentryMocks.logger.info).toHaveBeenCalledWith(
       "coach compaction complete",
       expect.objectContaining({
@@ -349,7 +355,9 @@ describe("DurableCompactionSession", () => {
     const underlying = {
       addItems: vi.fn(),
       clearSession: vi.fn(),
-      getItems: vi.fn().mockResolvedValue([userItem("old")]),
+      getItems: vi
+        .fn()
+        .mockResolvedValue([userItem("old"), assistantItem("reply")]),
       getSessionId: vi.fn().mockResolvedValue("thread-1"),
       popItem: vi.fn(),
       replaceAll: vi.fn().mockRejectedValue(conflict),
@@ -417,9 +425,9 @@ describe("DurableCompactionSession thresholds", () => {
     expect(client.responses.compact).not.toHaveBeenCalled();
   });
 
-  it("uses the TPM-safe default token threshold for user-only history", async () => {
-    const belowThreshold = [userItem("x".repeat(239_000))];
-    const aboveThreshold = [userItem("x".repeat(240_000))];
+  it("uses the TPM-safe default token threshold", async () => {
+    const belowThreshold = [assistantItem("x".repeat(238_900))];
+    const aboveThreshold = [assistantItem("x".repeat(240_000))];
     expect(estimateStoredContext(belowThreshold).estimatedTokens).toBeLessThan(
       DEFAULT_AUTO_COMPACT_TOKENS,
     );
@@ -554,6 +562,167 @@ describe("DurableCompactionSession thresholds", () => {
     expect(request).not.toHaveProperty("compactionMode");
     expect(request).not.toHaveProperty("responseId");
     expect(request).not.toHaveProperty("store");
+  });
+});
+
+describe("DurableCompactionSession progress guard", () => {
+  // About 70k estimated tokens of retained athlete messages: above the 60k
+  // threshold on their own, and never shrunk by responses.compact.
+  const retainedUserMessages = Array.from({ length: 7 }, (_, index) =>
+    userItem(String(index).padEnd(40_000, "x")),
+  );
+  const compactedWindow = [...retainedUserMessages, compactionItem];
+
+  type SpyFn = ReturnType<typeof vi.fn>;
+  type GuardedSession = {
+    client: { responses: { compact: SpyFn } };
+    logger: Logger & Record<keyof Logger, SpyFn>;
+    session: DurableCompactionSession;
+    underlying: { replaceAll: SpyFn };
+  };
+
+  function guardedSession(items: AgentInputItem[]): GuardedSession {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const client = {
+      responses: {
+        compact: vi.fn().mockResolvedValue({
+          output: compactedWindow,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 2,
+            total_tokens: 12,
+            input_tokens_details: {},
+            output_tokens_details: {},
+          },
+        }),
+      },
+    };
+    const underlying = {
+      addItems: vi.fn(),
+      clearSession: vi.fn(),
+      getItems: vi.fn().mockResolvedValue(items),
+      getSessionId: vi.fn().mockResolvedValue("thread-1"),
+      popItem: vi.fn(),
+      replaceAll: vi.fn(),
+      applyHistoryMutations: vi.fn(),
+    };
+    const session = new DurableCompactionSession({
+      underlyingSession: underlying,
+      client: client as never,
+      logger,
+    });
+    return { client, logger, session, underlying };
+  }
+
+  it("skips compaction when stored history is only user messages and a compaction item", async () => {
+    expect(
+      estimateStoredContext(compactedWindow).estimatedTokens,
+    ).toBeGreaterThanOrEqual(DEFAULT_AUTO_COMPACT_TOKENS);
+    const { client, logger, session, underlying } =
+      guardedSession(compactedWindow);
+
+    await expect(session.runCompaction()).resolves.toBeNull();
+
+    expect(client.responses.compact).not.toHaveBeenCalled();
+    expect(underlying.replaceAll).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      "coach compaction skipped",
+      expect.objectContaining({
+        trigger: "auto",
+        reason: "nothing_to_fold",
+        before_items: compactedWindow.length,
+        foldable_items: 0,
+      }),
+    );
+  });
+
+  it("waits until a size-triggered compaction can fold a quarter of the threshold", async () => {
+    const minimumGain = DEFAULT_AUTO_COMPACT_TOKENS / 4;
+    const smallTurn = assistantItem("x".repeat(40_000));
+    const largeTurn = assistantItem("x".repeat(60_000));
+    expect(estimateFoldableContext([smallTurn]).estimatedTokens).toBeLessThan(
+      minimumGain,
+    );
+    expect(
+      estimateFoldableContext([largeTurn]).estimatedTokens,
+    ).toBeGreaterThanOrEqual(minimumGain);
+
+    const waiting = guardedSession([...compactedWindow, smallTurn]);
+    await expect(waiting.session.runCompaction()).resolves.toBeNull();
+    expect(waiting.client.responses.compact).not.toHaveBeenCalled();
+    expect(waiting.logger.info).toHaveBeenCalledWith(
+      "coach compaction skipped",
+      expect.objectContaining({ reason: "below_min_gain", foldable_items: 1 }),
+    );
+
+    const ready = guardedSession([...compactedWindow, largeTurn]);
+    await expect(ready.session.runCompaction()).resolves.not.toBeNull();
+    expect(ready.underlying.replaceAll).toHaveBeenCalledWith(
+      compactedWindow,
+      expect.objectContaining({ trigger: "auto" }),
+    );
+  });
+
+  it("still compacts on the non-user item trigger without a minimum gain", async () => {
+    const toolTurns = Array.from({ length: 40 }, (_, index) =>
+      assistantItem(`reply ${String(index)}`),
+    );
+    const { client, session } = guardedSession(toolTurns);
+
+    await expect(session.runCompaction()).resolves.not.toBeNull();
+    expect(client.responses.compact).toHaveBeenCalledTimes(1);
+  });
+
+  it("pre-turn check measures size on the projection and gain on stored history", async () => {
+    const stored = [assistantItem("x".repeat(60_000))];
+    const projected = estimateStoredContext([
+      ...stored,
+      userItem("y".repeat(200_000)),
+    ]);
+    expect(estimateStoredContext(stored).estimatedTokens).toBeLessThan(
+      DEFAULT_AUTO_COMPACT_TOKENS,
+    );
+    expect(projected.estimatedTokens).toBeGreaterThanOrEqual(
+      DEFAULT_AUTO_COMPACT_TOKENS,
+    );
+
+    const postTurn = guardedSession(stored);
+    await expect(postTurn.session.runCompaction()).resolves.toBeNull();
+    expect(postTurn.logger.info).not.toHaveBeenCalled();
+
+    const preTurn = guardedSession(stored);
+    await expect(
+      preTurn.session.runPreTurnCompaction(projected),
+    ).resolves.not.toBeNull();
+    expect(preTurn.underlying.replaceAll).toHaveBeenCalledWith(
+      compactedWindow,
+      expect.objectContaining({ trigger: "forced" }),
+    );
+  });
+
+  it("pre-turn check skips an oversized projection when nothing can fold", async () => {
+    const projected = estimateStoredContext([
+      ...compactedWindow,
+      userItem("next question"),
+    ]);
+    const { client, logger, session } = guardedSession(compactedWindow);
+
+    await expect(session.runPreTurnCompaction(projected)).resolves.toBeNull();
+
+    expect(client.responses.compact).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      "coach compaction skipped",
+      expect.objectContaining({
+        trigger: "forced",
+        reason: "nothing_to_fold",
+        projected_bytes: projected.bytes,
+      }),
+    );
   });
 });
 
@@ -779,7 +948,7 @@ describe("DurableCompactionSession input normalization", () => {
     const underlying = {
       addItems: vi.fn(),
       clearSession: vi.fn(),
-      getItems: vi.fn().mockResolvedValue([userItem("x")]),
+      getItems: vi.fn().mockResolvedValue([userItem("x"), assistantItem("y")]),
       getSessionId: vi.fn().mockResolvedValue("thread-1"),
       popItem: vi.fn(),
       replaceAll: vi.fn(),
@@ -845,6 +1014,20 @@ describe("estimateStoredContext", () => {
     ).toMatchObject({
       itemCount: 2,
       nonUserItemCount: 1,
+    });
+  });
+});
+
+describe("estimateFoldableContext", () => {
+  it("counts only items that compaction can fold", () => {
+    const reply = assistantItem("reply");
+    const replyOnly = estimateStoredContext([reply]);
+    expect(
+      estimateFoldableContext([userItem("hello"), compactionItem, reply]),
+    ).toEqual({
+      bytes: replyOnly.bytes,
+      estimatedTokens: replyOnly.estimatedTokens,
+      itemCount: 1,
     });
   });
 });

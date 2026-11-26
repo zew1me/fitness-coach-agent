@@ -38,6 +38,14 @@ function estimateSerializedTokens(value: unknown): number {
   return Math.ceil(serializedByteLength(value) / 4);
 }
 
+function isUserMessage(item: AgentInputItem): boolean {
+  return "role" in item && item.role === "user";
+}
+
+function isCompactionItem(item: AgentInputItem): boolean {
+  return "type" in item && item.type === "compaction";
+}
+
 export function estimateStoredContext(
   items: AgentInputItem[],
 ): StoredContextEstimate {
@@ -46,9 +54,31 @@ export function estimateStoredContext(
     bytes,
     estimatedTokens: Math.ceil(bytes / 4),
     itemCount: items.length,
-    nonUserItemCount: items.filter(
-      (item) => !("role" in item) || item.role !== "user",
-    ).length,
+    nonUserItemCount: items.filter((item) => !isUserMessage(item)).length,
+  };
+}
+
+export type FoldableContextEstimate = Pick<
+  StoredContextEstimate,
+  "bytes" | "estimatedTokens" | "itemCount"
+>;
+
+// The part of stored history that compaction can actually shrink.
+// `responses.compact` returns "a list of all user messages, followed by a
+// single compaction item" (openai `CompactedResponse.output`), so every user
+// message survives verbatim and an earlier compaction item is only re-wrapped.
+// Only the remaining assistant, tool call/result, and reasoning items fold.
+export function estimateFoldableContext(
+  items: AgentInputItem[],
+): FoldableContextEstimate {
+  const foldable = items.filter(
+    (item) => !isUserMessage(item) && !isCompactionItem(item),
+  );
+  const bytes = serializedByteLength(foldable);
+  return {
+    bytes,
+    estimatedTokens: Math.ceil(bytes / 4),
+    itemCount: foldable.length,
   };
 }
 
@@ -111,9 +141,8 @@ type AgentsCompactionArgs = OpenAIResponsesCompactionArgs &
 // since that conversation is the same one already present in `input`, the two
 // combine into a duplicated (and duplicate-item-id) history. The SDK's
 // post-turn auto-compaction call always supplies a responseId
-// (`runCompactionOnSession` in @openai/agents-core), so this only matters
-// because auto-compaction runs on every turn once thresholds are hit — see
-// docs/COMPACTION_DESIGN.md.
+// (`runCompactionOnSession` in @openai/agents-core), so every SDK-initiated
+// compaction would hit this — see docs/COMPACTION_DESIGN.md.
 function toOpenAICompactOptions(
   args: OpenAIResponsesCompactionArgs,
 ): OpenAICompactOptions {
@@ -130,7 +159,11 @@ function toOpenAICompactOptions(
   return options;
 }
 
+// "forced" labels an explicit `force` and the orchestrator's pre-turn size
+// check (its historical label); everything else is "auto".
 type CompactionTrigger = "forced" | "auto";
+
+type CompactionSkipReason = "nothing_to_fold" | "below_min_gain";
 
 type CompactionThresholds = Pick<
   CompactionSessionOptions,
@@ -143,20 +176,82 @@ type CompactionThresholds = Pick<
 // leave room for the turn's other model calls under the 200k TPM quota.
 export const DEFAULT_AUTO_COMPACT_TOKENS = 60_000;
 const DEFAULT_AUTO_COMPACT_NON_USER_ITEMS = 40;
+// Size-triggered compaction waits until it can fold at least this share of
+// the token threshold (15k by default). Retained user messages alone can sit
+// above the threshold, and each compaction re-sends the whole window, so
+// compacting a few thousand foldable tokens every turn costs far more TPM
+// and latency than carrying them for a few turns.
+const MIN_FOLDABLE_SHARE_OF_THRESHOLD = 0.25;
 
-function shouldTriggerCompaction(
-  args: OpenAIResponsesCompactionArgs,
-  before: StoredContextEstimate,
-  thresholds: CompactionThresholds,
-): boolean {
-  return (
-    args.force === true ||
-    before.estimatedTokens >=
-      (thresholds.autoCompactTokens ?? DEFAULT_AUTO_COMPACT_TOKENS) ||
-    before.nonUserItemCount >=
-      (thresholds.autoCompactNonUserItems ??
-        DEFAULT_AUTO_COMPACT_NON_USER_ITEMS)
+type CompactionRequest = {
+  // Explicit callers: compact regardless of thresholds or expected gain.
+  force: boolean;
+  // Pre-turn size of the next model request (stored history plus the
+  // incoming turn). Absent, the threshold applies to stored history.
+  projected?: StoredContextEstimate;
+};
+
+type CompactionPlan =
+  | { action: "none" }
+  | {
+      action: "skip";
+      trigger: CompactionTrigger;
+      reason: CompactionSkipReason;
+    }
+  | { action: "compact"; trigger: CompactionTrigger };
+
+function resolveThresholds(thresholds: CompactionThresholds): {
+  tokens: number;
+  nonUserItems: number;
+} {
+  return {
+    tokens: thresholds.autoCompactTokens ?? DEFAULT_AUTO_COMPACT_TOKENS,
+    nonUserItems:
+      thresholds.autoCompactNonUserItems ?? DEFAULT_AUTO_COMPACT_NON_USER_ITEMS,
+  };
+}
+
+// The non-user-item trigger already implies foldable items and bounds how
+// many accumulate, so only a size trigger has to clear the minimum gain.
+function skipReason(
+  foldable: FoldableContextEstimate,
+  sizeTriggerOnly: boolean,
+  tokenThreshold: number,
+): CompactionSkipReason | null {
+  if (foldable.itemCount === 0) return "nothing_to_fold";
+  const minFoldableTokens = Math.ceil(
+    tokenThreshold * MIN_FOLDABLE_SHARE_OF_THRESHOLD,
   );
+  if (sizeTriggerOnly && foldable.estimatedTokens < minFoldableTokens) {
+    return "below_min_gain";
+  }
+  return null;
+}
+
+// Compact only when compaction can make progress, as pi does: its
+// `prepareCompaction` returns nothing to compact when there is nothing to
+// summarize. A size trigger that only folds a few tokens would otherwise
+// re-run on every turn once retained user messages exceed the threshold.
+function planCompaction(
+  request: CompactionRequest,
+  before: StoredContextEstimate,
+  foldable: FoldableContextEstimate,
+  thresholds: CompactionThresholds,
+): CompactionPlan {
+  if (request.force) return { action: "compact", trigger: "forced" };
+
+  const limits = resolveThresholds(thresholds);
+  const itemTriggered = before.nonUserItemCount >= limits.nonUserItems;
+  const sizeTriggered =
+    (request.projected ?? before).estimatedTokens >= limits.tokens;
+  if (!itemTriggered && !sizeTriggered) return { action: "none" };
+
+  const trigger: CompactionTrigger =
+    sizeTriggered && request.projected !== undefined ? "forced" : "auto";
+  const reason = skipReason(foldable, !itemTriggered, limits.tokens);
+  return reason === null
+    ? { action: "compact", trigger }
+    : { action: "skip", trigger, reason };
 }
 
 // Strip input_image parts (and any other model-incompatible content) before
@@ -269,6 +364,28 @@ function logCompactionTelemetry(params: {
   });
 }
 
+// Byte and item attributes only: attributes whose key contains "tokens" do not
+// reach Sentry Logs, and estimated tokens are ceil(bytes / 4) anyway.
+function logCompactionSkipped(params: {
+  logger: Logger;
+  trigger: CompactionTrigger;
+  reason: CompactionSkipReason;
+  before: StoredContextEstimate;
+  foldable: FoldableContextEstimate;
+  projected: StoredContextEstimate | undefined;
+}): void {
+  const { logger, trigger, reason, before, foldable, projected } = params;
+  logger.info("coach compaction skipped", {
+    trigger,
+    reason,
+    before_bytes: before.bytes,
+    before_items: before.itemCount,
+    foldable_bytes: foldable.bytes,
+    foldable_items: foldable.itemCount,
+    ...(projected === undefined ? {} : { projected_bytes: projected.bytes }),
+  });
+}
+
 function toRequestUsage(compacted: CompactResponse): RequestUsage {
   return new RequestUsage({
     ...compacted.usage,
@@ -323,21 +440,51 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     this.options.underlyingSession.prepareHistoryItemForModelInput?.(item) ??
     item;
 
-  async runCompaction(
+  // The SDK calls this after each successful turn; explicit callers pass
+  // `force` to compact regardless of thresholds.
+  runCompaction(
     args: OpenAIResponsesCompactionArgs = {},
+  ): Promise<OpenAIResponsesCompactionResult | null> {
+    return this.compactIfUseful(args, { force: args.force === true });
+  }
+
+  /**
+   * Pre-turn check. Post-turn compaction never runs when a model turn fails,
+   * so the orchestrator checks before every turn too. The size threshold is
+   * measured on the projected request; whether compaction can help is
+   * measured on stored history, the only part it rewrites.
+   */
+  runPreTurnCompaction(
+    projected: StoredContextEstimate,
+  ): Promise<OpenAIResponsesCompactionResult | null> {
+    return this.compactIfUseful({}, { force: false, projected });
+  }
+
+  private async compactIfUseful(
+    args: OpenAIResponsesCompactionArgs,
+    request: CompactionRequest,
   ): Promise<OpenAIResponsesCompactionResult | null> {
     const startedAt = performance.now();
     const items = await this.getItems();
-    const before = estimateStoredContext(items);
+    if (items.length === 0) return null;
 
-    if (
-      !shouldTriggerCompaction(args, before, this.options) ||
-      items.length === 0
-    ) {
+    const before = estimateStoredContext(items);
+    const foldable = estimateFoldableContext(items);
+    const plan = planCompaction(request, before, foldable, this.options);
+    if (plan.action === "none") return null;
+    if (plan.action === "skip") {
+      logCompactionSkipped({
+        logger: this.options.logger ?? defaultLogger,
+        trigger: plan.trigger,
+        reason: plan.reason,
+        before,
+        foldable,
+        projected: request.projected,
+      });
       return null;
     }
 
-    const trigger: CompactionTrigger = args.force === true ? "forced" : "auto";
+    const { trigger } = plan;
     const compactionInput = buildCompactionInput(items, (item) =>
       this.prepareHistoryItemForModelInput(item),
     );

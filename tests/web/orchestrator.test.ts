@@ -1899,14 +1899,14 @@ describe("streamCoachTurn durable-session setup degradation", () => {
   });
 
   it("degrades to a stateless turn when oversized pre-run compaction fails", async () => {
-    // estimateStoredContext is ceil(bytes / 4), so ~1.1 MB of text is far above
-    // the pre-run threshold and must force a compaction attempt.
+    // estimateStoredContext is ceil(bytes / 4), so ~1.1 MB of foldable text is
+    // far above the pre-run threshold and must force a compaction attempt.
     const body = await runDurableTurn(
       degradingDurableFetch({
         storedItems: [
           {
-            role: "user",
-            content: [{ type: "input_text", text: "x".repeat(1_100_000) }],
+            role: "assistant",
+            content: [{ type: "output_text", text: "x".repeat(1_100_000) }],
           },
         ],
       }),
@@ -1914,6 +1914,32 @@ describe("streamCoachTurn durable-session setup degradation", () => {
 
     expect(orchestratorMocks.compact).toHaveBeenCalled();
     expect(orchestratorMocks.agentsRun).toHaveBeenCalled();
+    expect(body).not.toContain("Coach is unavailable");
+  });
+
+  it("skips pre-run compaction that cannot shrink an oversized window", async () => {
+    // responses.compact keeps every user message verbatim, so a window of only
+    // user messages and a compaction item cannot get smaller. Before the
+    // progress guard, every turn re-sent it to compaction as a no-op.
+    const body = await runDurableTurn(
+      degradingDurableFetch({
+        storedItems: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "x".repeat(1_100_000) }],
+          },
+          { type: "compaction", encrypted_content: "opaque" },
+        ],
+      }),
+    );
+
+    expect(orchestratorMocks.compact).not.toHaveBeenCalled();
+    expect(orchestratorMocks.agentsRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Array),
+      expect.objectContaining({ session: expect.anything() }),
+    );
+    expect(sentryMocks.captureException).not.toHaveBeenCalled();
     expect(body).not.toContain("Coach is unavailable");
   });
 

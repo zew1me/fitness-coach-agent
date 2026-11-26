@@ -339,15 +339,12 @@ async function compactIfNeeded(
   durableSession: DurableCompactionSession,
   estimate: ReturnType<typeof estimateStoredContext>,
 ): Promise<void> {
-  // Check the session's item-count trigger before every turn. Post-turn
-  // compaction never runs when a model turn fails, so relying on it alone can
-  // strand an overgrown session in a permanent fail/retry loop.
-  await durableSession.runCompaction({
-    ...(estimate.estimatedTokens >= DEFAULT_AUTO_COMPACT_TOKENS
-      ? { force: true }
-      : {}),
-    compactionMode: "input",
-  });
+  // Check the session's triggers before every turn. Post-turn compaction never
+  // runs when a model turn fails, so relying on it alone can strand an
+  // overgrown session in a permanent fail/retry loop. The session skips
+  // compaction that cannot shrink stored history, such as a window that is
+  // already only user messages and a compaction item.
+  await durableSession.runPreTurnCompaction(estimate);
 }
 
 // Which setup step was in flight when a failure degraded the turn. Recorded on
