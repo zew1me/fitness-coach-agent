@@ -163,6 +163,10 @@ function toOpenAICompactOptions(
 // check (its historical label); everything else is "auto".
 type CompactionTrigger = "forced" | "auto";
 
+// Which check declined to compact. Skips are new telemetry, so they get a
+// plain label rather than the historical `trigger` values.
+type CompactionCheck = "pre_turn" | "post_turn";
+
 type CompactionSkipReason = "nothing_to_fold" | "below_min_gain";
 
 type CompactionThresholds = Pick<
@@ -193,11 +197,7 @@ type CompactionRequest = {
 
 type CompactionPlan =
   | { action: "none" }
-  | {
-      action: "skip";
-      trigger: CompactionTrigger;
-      reason: CompactionSkipReason;
-    }
+  | { action: "skip"; reason: CompactionSkipReason }
   | { action: "compact"; trigger: CompactionTrigger };
 
 function resolveThresholds(thresholds: CompactionThresholds): {
@@ -251,7 +251,7 @@ function planCompaction(
   const reason = skipReason(foldable, !itemTriggered, limits.tokens);
   return reason === null
     ? { action: "compact", trigger }
-    : { action: "skip", trigger, reason };
+    : { action: "skip", reason };
 }
 
 // Strip input_image parts (and any other model-incompatible content) before
@@ -368,15 +368,16 @@ function logCompactionTelemetry(params: {
 // reach Sentry Logs, and estimated tokens are ceil(bytes / 4) anyway.
 function logCompactionSkipped(params: {
   logger: Logger;
-  trigger: CompactionTrigger;
   reason: CompactionSkipReason;
   before: StoredContextEstimate;
   foldable: FoldableContextEstimate;
   projected: StoredContextEstimate | undefined;
 }): void {
-  const { logger, trigger, reason, before, foldable, projected } = params;
+  const { logger, reason, before, foldable, projected } = params;
+  const check: CompactionCheck =
+    projected === undefined ? "post_turn" : "pre_turn";
   logger.info("coach compaction skipped", {
-    trigger,
+    check,
     reason,
     before_bytes: before.bytes,
     before_items: before.itemCount,
@@ -453,6 +454,13 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
    * so the orchestrator checks before every turn too. The size threshold is
    * measured on the projected request; whether compaction can help is
    * measured on stored history, the only part it rewrites.
+   *
+   * The minimum gain applies here as well. A failed turn that ran tools keeps
+   * its items, so foldable history still grows toward the gain and item
+   * triggers. A turn rolled back to its baseline leaves history unchanged, and
+   * compacting it would re-send the whole window to save under the minimum per
+   * request. Without the rule, every post-turn skip would turn into a
+   * pre-turn compaction before the first token.
    */
   runPreTurnCompaction(
     projected: StoredContextEstimate,
@@ -475,7 +483,6 @@ export class DurableCompactionSession implements OpenAIResponsesCompactionAwareS
     if (plan.action === "skip") {
       logCompactionSkipped({
         logger: this.options.logger ?? defaultLogger,
-        trigger: plan.trigger,
         reason: plan.reason,
         before,
         foldable,

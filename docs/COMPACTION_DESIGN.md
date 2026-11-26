@@ -163,6 +163,13 @@ nor compaction items. A triggered compaction is skipped, and logged as
   turn costs more TPM and latency than carrying them for a few turns. The
   non-user-item trigger is exempt; it still bounds how many items accumulate.
 
+Skip logs carry `check: pre_turn | post_turn` and byte/item attributes. Keys
+containing `tokens` are not queryable in Sentry Logs, so the skip log avoids them.
+The minimum gain also applies before a turn. A failed turn that ran tools keeps
+its items, so foldable history keeps growing toward the gain and item triggers.
+A rolled-back turn leaves history unchanged, and compacting it would re-send the
+whole window to save less than the minimum per request.
+
 This mirrors pi's `prepareCompaction`, which declines to compact when there is
 nothing to summarize. It does not lower the retained-user-message floor itself.
 That needs compaction that can summarize user turns (head+tail, #563).

@@ -633,7 +633,7 @@ describe("DurableCompactionSession progress guard", () => {
     expect(logger.info).toHaveBeenCalledWith(
       "coach compaction skipped",
       expect.objectContaining({
-        trigger: "auto",
+        check: "post_turn",
         reason: "nothing_to_fold",
         before_items: compactedWindow.length,
         foldable_items: 0,
@@ -718,7 +718,7 @@ describe("DurableCompactionSession progress guard", () => {
     expect(logger.info).toHaveBeenCalledWith(
       "coach compaction skipped",
       expect.objectContaining({
-        trigger: "forced",
+        check: "pre_turn",
         reason: "nothing_to_fold",
         projected_bytes: projected.bytes,
       }),

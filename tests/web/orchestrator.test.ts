@@ -1680,7 +1680,7 @@ describe("streamCoachTurn durable rollback, max turns and cold seeding", () => {
     expect(body.items.length).toBeLessThan(historyMessages.length);
     // The seed is stored history only. The lead-coach system prompt plus tool
     // definitions measure ~10.4k tokens and land on top of it before the athlete's
-    // message, while shouldTriggerCompaction fires at >= DEFAULT_AUTO_COMPACT_TOKENS.
+    // message, while planCompaction's size trigger fires at >= DEFAULT_AUTO_COMPACT_TOKENS.
     // So "at or under the threshold" is not enough — the seed has to leave at least
     // that overhead as headroom, or a fresh session compacts on its very first turn.
     const PER_TURN_OVERHEAD_TOKENS = 10_400;

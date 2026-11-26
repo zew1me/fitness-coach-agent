@@ -103,7 +103,7 @@ export type StreamCoachTurnOptions = StreamCoachTurnBaseOptions &
 
 // Seeding all the way to DEFAULT_AUTO_COMPACT_TOKENS makes a fresh session compact
 // on its very first turn: trimBootstrapToBudget accepts a suffix at exactly the
-// budget, and shouldTriggerCompaction fires at >= that same number. The seed is only
+// budget, and planCompaction's size trigger fires at >= that same number. The seed is only
 // the stored history — the lead-coach system prompt plus tool definitions add ~10.4k
 // tokens on top of it before the athlete's message and any specialist reports, so a
 // 60k seed lands the first request around 70k and trips the threshold immediately.
