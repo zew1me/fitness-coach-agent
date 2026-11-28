@@ -100,7 +100,8 @@ select
      from public.activity_sources_backfill_progress) as progress,
   (select count(*) from public.activities) as activities,
   (select count(*) from public.activities a, public.activity_sources_backfill_progress p
-     where (a.created_at, a.id) > (p.last_created_at, p.last_id)) as rows_after_checkpoint,
+     where p.last_created_at is null or (a.created_at, a.id) > (p.last_created_at, p.last_id))
+     as rows_after_checkpoint,
   (select count(*) from public.activities a left join public.activity_sources s on s.id = a.id
      where s.id is null) as holes,
   (select count(*) from (select a.id from public.activities a
