@@ -13,6 +13,14 @@ export const athleteProfileSchema = z.object({
   weekly_available_hours: z.number().positive().nullable().optional(),
 });
 
+export const activityUploadConflictSchema = z.object({
+  detail: z.object({
+    code: z.literal("duplicate_activity"),
+    activity_id: z.uuid(),
+    message: z.string().min(1),
+  }),
+});
+
 export const coachDataChangesSchema = z.strictObject({
   event_ids: z.array(z.uuid()).max(256),
   summaries: z

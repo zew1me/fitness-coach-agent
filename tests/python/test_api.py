@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from hashlib import sha256
 from typing import Any, Literal, TypedDict, cast
+from unittest.mock import AsyncMock
 
 import botocore.exceptions
 import httpx
@@ -160,7 +161,9 @@ class EngineRepository:
     async def list_activities(self, user_id: str, *, sport=None, limit: int = 50):
         return []
 
-    async def create_activity(self, activity: Activity) -> Activity:
+    async def create_activity(
+        self, activity: Activity, *, content_hash: str | None = None
+    ) -> Activity:
         return activity.model_copy(update={"id": "activity-1"})
 
     async def list_plan_workouts_between(self, user_id: str, *, start, end) -> list[PlanWorkout]:
@@ -778,14 +781,18 @@ async def test_process_uploaded_zip_processes_multiple_activities(monkeypatch) -
 @pytest.mark.asyncio
 async def test_process_uploaded_zip_persists_each_activity(monkeypatch) -> None:
     created: list[Activity] = []
+    hashes: list[str | None] = []
 
     class RecordingRepo(EngineRepository):
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             created.append(activity)
+            hashes.append(content_hash)
             return activity.model_copy(update={"id": f"activity-{len(created)}"})
 
     async def mock_download_file_bytes(*, user_id: str, object_key: str) -> bytes:
-        return _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.gpx": _SAMPLE_GPX})
+        return _make_zip({"run1.gpx": _SAMPLE_GPX, "run2.tcx": _SAMPLE_TCX})
 
     monkeypatch.setattr("api.index.r2_service.download_file_bytes", mock_download_file_bytes)
     monkeypatch.setattr(api_index, "repo", RecordingRepo())
@@ -808,8 +815,66 @@ async def test_process_uploaded_zip_persists_each_activity(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert len(created) == 2
+    assert hashes == [sha256(data).hexdigest() for data in (_SAMPLE_GPX, _SAMPLE_TCX)]
     assert {e["activity"]["id"] for e in body["processed"]} == {"activity-1", "activity-2"}
     assert all(e["status"] == "saved" for e in body["processed"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zip_member", [False, True])
+async def test_activity_file_replay_reports_existing_id(monkeypatch, zip_member: bool) -> None:
+    filename, data, content_type = "renamed.gpx", _SAMPLE_GPX, "application/gpx+xml"
+    if zip_member:
+        filename, data, content_type = (
+            "export.zip",
+            _make_zip({filename: data}),
+            "application/zip",
+        )
+    object_key = f"users/athlete-1/chat-attachment/2024/01/01/{filename}"
+
+    async def download_file(*, user_id: str, object_key: str) -> bytes:
+        return data
+
+    async def reject_replay(activity: Activity, *, content_hash: str | None = None) -> Activity:
+        assert activity.user_id == _ZIP_TEST_USER.user_id
+        assert content_hash == sha256(_SAMPLE_GPX).hexdigest()
+        raise api_index.DuplicateActivityUploadError("existing-activity")
+
+    monkeypatch.setattr("api.index.r2_service.download_file_bytes", download_file)
+    repo = EngineRepository()
+    monkeypatch.setattr(repo, "create_activity", reject_replay)
+    monkeypatch.setattr(api_index, "repo", repo)
+    match = AsyncMock()
+    monkeypatch.setattr(api_index, "_try_match_activity_to_plan", match)
+    restore_override = _override_require_user_context(_ZIP_TEST_USER)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=api_index.app), base_url="http://testserver"
+        ) as client:
+            response = await client.post(
+                "/api/engine/"
+                + ("process-uploaded-zip" if zip_member else "process-uploaded-file"),
+                json={"content_type": content_type, "filename": filename, "object_key": object_key},
+            )
+    finally:
+        restore_override()
+
+    match.assert_not_called()
+    detail = {
+        "code": "duplicate_activity",
+        "activity_id": "existing-activity",
+        "message": "This activity file was already imported.",
+    }
+    if zip_member:
+        assert response.status_code == 200
+        assert response.json() == {
+            "processed": [{"kind": "duplicate_activity", "status": "duplicate", **detail}],
+            "skipped_count": 0,
+            "status": "ok",
+        }
+    else:
+        assert response.status_code == 409
+        assert response.json() == {"detail": detail}
 
 
 @pytest.mark.asyncio
@@ -820,7 +885,9 @@ async def test_process_uploaded_zip_isolates_persist_failure_per_member(monkeypa
         def __init__(self) -> None:
             self.calls = 0
 
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("write conflict")
@@ -864,7 +931,9 @@ async def test_process_uploaded_zip_isolates_postgrest_persist_failure(monkeypat
         def __init__(self) -> None:
             self.calls = 0
 
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             self.calls += 1
             if self.calls == 1:
                 raise PostgRESTAPIError(
@@ -1056,7 +1125,9 @@ async def test_process_uploaded_zip_resolves_mangled_object_key(monkeypatch) -> 
     created: list[Activity] = []
 
     class RecordingRepo(EngineRepository):
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             created.append(activity)
             return activity.model_copy(update={"id": "activity-1"})
 
@@ -1840,7 +1911,9 @@ async def test_process_uploaded_file_persists_activity(auth_service_fixture, mon
         def __init__(self) -> None:
             self.created_activity: Activity | None = None
 
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             self.created_activity = activity
             return activity.model_copy(update={"id": "activity-1"})
 
@@ -3665,7 +3738,9 @@ async def test_save_activity_from_text_persists_summary_and_estimates(monkeypatc
         def __init__(self) -> None:
             self.created_activity: Activity | None = None
 
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             self.created_activity = activity
             return activity.model_copy(update={"id": "activity-1"})
 
@@ -3759,7 +3834,9 @@ async def test_save_activity_from_text_fails_when_openai_extraction_unavailable(
         def __init__(self) -> None:
             self.create_called = False
 
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             self.create_called = True
             return activity
 
@@ -4187,7 +4264,9 @@ async def test_save_activity_from_text_rejects_blank_activity_id(monkeypatch) ->
             self.create_called = False
             self.update_called = False
 
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             self.create_called = True
             return activity
 
@@ -4290,7 +4369,9 @@ async def test_save_activity_from_text_create_maps_repository_failures_to_503(
                 raise HTTPError("thresholds unavailable")
             return await super().get_active_thresholds(user_id)
 
-        async def create_activity(self, activity: Activity) -> Activity:
+        async def create_activity(
+            self, activity: Activity, *, content_hash: str | None = None
+        ) -> Activity:
             if failing_method == "create_activity":
                 raise HTTPError("insert unavailable")
             return activity
@@ -5478,7 +5559,9 @@ class _CourseRepository(EngineRepository):
         profile = await super().get_athlete_profile(user_id)
         return profile.model_copy(update={"weight_kg": 72.0})
 
-    async def create_activity(self, activity: Activity) -> Activity:
+    async def create_activity(
+        self, activity: Activity, *, content_hash: str | None = None
+    ) -> Activity:
         self.created.append(activity)
         return activity.model_copy(update={"id": "activity-1"})
 

@@ -36,6 +36,8 @@
 - `20261115120000_oauth_device_codes.sql` — server-only `oauth_device_codes` table for the coach CLI's RFC 8628 device authorization grant (#568)
 - `20261118061831_coach_data_changes.sql` — transactional, server-only activity/recovery change notices and per-conversation successful-reply receipts (#591)
 
+- `20261126074815_activity_source_content_identity.sql` — accepts exact byte hashes for recorded upload evidence (#397 Phase 2a)
+
 `20261011183239` requires PostgreSQL 15+ (the local configuration uses 17). It retains the
 aggregate snapshot with the newest `created_at`, breaking ties by descending `id`, and removes
 only older duplicate aggregate snapshots. Concrete sport series are preserved. Cleanup and
@@ -925,3 +927,23 @@ no historical backfill or remote apply in this PR. Existing records remain autho
 post-migration writes generate notices. Preview and production must be migrated independently. Local
 transactional tests can exercise the migration on the existing local stack and roll back on exit,
 without resetting personal local data.
+
+## 20261126074815 — Exact activity file identity (2026-11-26)
+
+**File:** `supabase/migrations/20261126074815_activity_source_content_identity.sql`
+
+**Change:** Extends the existing `create_activity_with_source` RPC to persist optional
+`p_source.content_hash`, validated as lowercase SHA-256 for recorded FIT, GPX and TCX uploads.
+The existing partial unique index rejects equal live hashes per athlete. The transaction rolls
+back both the losing activity and any change notice. Existing sources are not modified.
+
+**Why (#397 Phase 2a):** Byte-identical replays should not create duplicate calendar entries or
+inflate load. Archive members have independent identities; similarity is not a rejection key.
+
+**Security note:** The RPC signature and service-role-only grants are unchanged. The app hashes
+bytes read through the athlete-scoped storage proxy, not a digest supplied by a client. No new
+permissions are granted.
+
+**All environments:** Apply the migration before deploying the app writer that passes
+`content_hash`. Older app versions can omit it; a newer app must not write against the old RPC,
+which rejects unknown keys. No hosted backfill, trigger removal, or Intervals migration is needed.

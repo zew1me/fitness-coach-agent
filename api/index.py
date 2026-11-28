@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 from http import HTTPStatus
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -79,6 +80,7 @@ from backend.models.training import Activity, Goal, PlanWorkout, TrainingPlan
 from backend.repos.intervals_repo import IntervalsRepositoryNotConfiguredError
 from backend.repos.oauth_repo_base import OAuthRepositoryNotConfiguredError
 from backend.repos.supabase_repo import (
+    DuplicateActivityUploadError,
     RecordNotFoundError,
     RepositoryNotConfiguredError,
     SupabaseRepository,
@@ -1860,9 +1862,19 @@ async def process_uploaded_file_endpoint(
             object_key=object_key,
             public_url=payload.public_url,
         )
-    return await _persist_extracted_activity(
-        user_context.user_id, parsed, calling_endpoint="process_uploaded_file"
-    )
+    try:
+        return await _persist_extracted_activity(
+            user_context.user_id,
+            parsed,
+            calling_endpoint="process_uploaded_file",
+            content_hash=sha256(file_bytes).hexdigest(),
+        )
+    except DuplicateActivityUploadError as exc:
+        raise HTTPException(status_code=409, detail=_duplicate_upload_detail(exc)) from exc
+
+
+def _duplicate_upload_detail(exc: DuplicateActivityUploadError) -> dict[str, str]:
+    return {"code": "duplicate_activity", "activity_id": exc.activity_id, "message": str(exc)}
 
 
 async def _build_course_response(
@@ -2057,8 +2069,17 @@ async def _zip_activity_entry(
         # Persist like the single-file path so zip activities reach the calendar and
         # compliance instead of being surfaced and dropped.
         persisted = await _persist_extracted_activity(
-            user_id, activity, calling_endpoint="process_uploaded_zip"
+            user_id,
+            activity,
+            calling_endpoint="process_uploaded_zip",
+            content_hash=sha256(member_bytes).hexdigest(),
         )
+    except DuplicateActivityUploadError as exc:
+        return {
+            "kind": "duplicate_activity",
+            "status": "duplicate",
+            **_duplicate_upload_detail(exc),
+        }
     except Exception:  # best-effort per member; a failed save must not abort the whole zip
         # Catch broadly (not just HTTPException): _persist_extracted_activity lets a raw
         # PostgRESTAPIError propagate to the global handler, which would 500 the whole
@@ -2711,10 +2732,11 @@ async def _persist_extracted_activity(
     extracted: Activity,
     *,
     calling_endpoint: ActivityPersistenceEndpoint,
+    content_hash: str | None = None,
 ) -> Mapping[str, object]:
     try:
         activity = await _activity_repo_call(
-            repo.create_activity(extracted),
+            repo.create_activity(extracted, content_hash=content_hash),
             detail="Failed to save activity.",
             log_message=f"create_activity failed for user_id={user_id}",
         )

@@ -15,12 +15,17 @@ It takes the fidelity ranks as input so it does not duplicate the reference tabl
 Missing fields remain unresolved: the result is not an activity update payload, and
 nothing calls it from a live read or write path yet.
 
+Phase 2a adds exact byte identity for new recorded FIT/GPX/TCX uploads, including ZIP
+members. A replay returns the existing activity ID without changing the projection or
+matching a workout. Uploads saved before this phase still have no byte identity; their
+first replay can create a duplicate. Intervals and cross-format matching are unchanged.
+
 **Next slices, in dependency order:**
 
 1. Finish #533's backfill tooling and verification; gate contract on independent
    evidence from preview and production.
-2. Move authoritative input identity to `activity_sources` (Phase 2), including the
-   Intervals cutover. Do not use measurement similarity as an identity constraint.
+2. Finish moving authoritative input identity to `activity_sources` with the Intervals
+   cutover (Phase 2). Do not use measurement similarity as an identity constraint.
 3. Complete the reconciler (derived values, override semantics, and legacy provenance)
    and the version-checked persistence RPC. Convert and verify legacy edit writers
    before enabling recomposition or revoking direct updates (Phase 3).
@@ -580,7 +585,12 @@ compliance, or the coach changes for single-source activities.
 
 ### Exact duplicate
 
-Steps 1–2 identical, then **select-then-insert**. Only authoritative identifiers are
+Steps 1–2 are identical, then **select-then-insert**. Phase 2a implements the byte-key
+path for recorded files only: raw bytes for a standalone upload, uncompressed member
+bytes for ZIP. The standalone result is HTTP 409 with `detail.code = duplicate_activity`
+and `detail.activity_id`; an archive returns per-member `kind: duplicate_activity` /
+`status: duplicate` without rejecting distinct siblings. The provider-key path below
+is the remaining Phase 2 design. Only authoritative identifiers are
 consulted; `payload_fingerprint` is deliberately absent, because this is the one path that
 can refuse to store an athlete's workout.
 

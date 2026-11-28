@@ -621,7 +621,9 @@ class TestWriteTimeMatchHook:
             async def get_active_thresholds(self, user_id: str):
                 return []
 
-            async def create_activity(self, activity: Activity) -> Activity:
+            async def create_activity(
+                self, activity: Activity, *, content_hash: str | None = None
+            ) -> Activity:
                 created = activity.model_copy(update={"id": "activity-1"})
                 self.activities.append(created)
                 return created
@@ -673,7 +675,9 @@ class TestWriteTimeMatchHook:
             async def get_active_thresholds(self, user_id: str):
                 return []
 
-            async def create_activity(self, activity: Activity) -> Activity:
+            async def create_activity(
+                self, activity: Activity, *, content_hash: str | None = None
+            ) -> Activity:
                 return activity.model_copy(update={"id": "activity-1"})
 
             async def list_plan_workouts_between(self, user_id, *, start, end):

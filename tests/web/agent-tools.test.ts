@@ -1239,6 +1239,44 @@ describe("coachToolDefinitions upload handling", () => {
     );
   });
 
+  it.each([
+    {
+      code: "duplicate_activity",
+      activity_id: "c9e7f240-318b-46e2-9e43-0ea10fe24446",
+      message: "Already imported.",
+    },
+    "Conflicts with existing data.",
+  ])(
+    "distinguishes an exact upload replay from a generic conflict: %j",
+    async (detail) => {
+      const tools = createCoachTools({
+        accessToken: "token",
+        baseUrl: "https://coach.test",
+        fetchImpl: () =>
+          Promise.resolve(Response.json({ detail }, { status: 409 })),
+      });
+      const result = await (
+        tools["process_uploaded_file"] as {
+          execute: (input: unknown) => Promise<unknown>;
+        }
+      ).execute({
+        content_type: "application/vnd.garmin.fit",
+        filename: "ride.fit",
+        object_key: "users/athlete-1/chat-attachment/2026/07/06/ride.fit",
+      });
+
+      if (typeof detail === "string") {
+        expect(result).toMatchObject({ status: "error" });
+      } else {
+        expect(result).toEqual({
+          ...detail,
+          kind: "duplicate_activity",
+          status: "duplicate",
+        });
+      }
+    },
+  );
+
   it("returns an error result instead of throwing when the engine rejects a .fit upload", async () => {
     const fetchImpl = (): Promise<Response> =>
       Promise.resolve(
